@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m pip install --upgrade pip setuptools wheel
 
 # Install PyTorch with CUDA 13.0 support
-RUN pip install --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
+RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
 
 # Set working directory
 WORKDIR /workspace/tilegym
@@ -41,28 +41,28 @@ COPY . /workspace/tilegym/
 # Verify the repository structure (fail fast if built from wrong directory)
 RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
 
-# Install CUDA Toolkit 13.1
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin
-RUN mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600
-RUN wget https://developer.download.nvidia.com/compute/cuda/13.1.0/local_installers/cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb
-RUN dpkg -i cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb
-RUN cp /var/cuda-repo-ubuntu2204-13-1-local/cuda-*-keyring.gpg /usr/share/keyrings/
-RUN apt-get update
-RUN apt-get -y install cuda-toolkit-13-1
+# Install CUDA Toolkit 13.1 and clean up in same layer to reduce image size
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin && \
+    mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600 && \
+    wget https://developer.download.nvidia.com/compute/cuda/13.1.0/local_installers/cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
+    dpkg -i cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
+    cp /var/cuda-repo-ubuntu2204-13-1-local/cuda-*-keyring.gpg /usr/share/keyrings/ && \
+    apt-get update && \
+    apt-get -y install cuda-toolkit-13-1 && \
+    rm -f cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
+    rm -rf /var/cuda-repo-ubuntu2204-13-1-local && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set CUDA 13.1 as default
 ENV CUDA_HOME=/usr/local/cuda-13.1
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
-# Install cuda-tile
-RUN pip install cuda-tile
-
-# Install TileGym
-RUN pip install -e .
-
-# Install accelerate used in models
-RUN pip install accelerate --no-deps
+# Install cuda-tile, TileGym, and accelerate
+RUN pip install --no-cache-dir cuda-tile && \
+    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir accelerate --no-deps
 
 # Set up model cache directory
 ENV HF_HOME=/workspace/.cache/huggingface \
