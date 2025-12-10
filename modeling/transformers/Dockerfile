@@ -24,22 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     build-essential \
+    parallel \
+    bc \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN python -m pip install --upgrade pip setuptools wheel
-
-# Install PyTorch with CUDA 13.0 support
-RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
-
-# Set working directory
-WORKDIR /workspace/tilegym
-
-# Copy TileGym source code
-COPY . /workspace/tilegym/
-
-# Verify the repository structure (fail fast if built from wrong directory)
-RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
 
 # Install CUDA Toolkit 13.1 and clean up in same layer to reduce image size
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin && \
@@ -51,6 +41,7 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86
     apt-get -y install cuda-toolkit-13-1 && \
     rm -f cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
     rm -rf /var/cuda-repo-ubuntu2204-13-1-local && \
+    rm -f /etc/apt/sources.list.d/cuda-ubuntu2204-13-1-local.list && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -59,10 +50,24 @@ ENV CUDA_HOME=/usr/local/cuda-13.1
 ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
-# Install cuda-tile, TileGym, and accelerate
-RUN pip install --no-cache-dir cuda-tile && \
-    pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir accelerate --no-deps
+# Install PyTorch with CUDA 13.0 support (after CUDA toolkit)
+RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
+
+# Install cuda-tile and pytest plugins (before copying source code)
+RUN pip install --no-cache-dir cuda-tile pytest-xdist pytest-html && \
+    pip install --no-cache-dir --no-deps accelerate
+
+# Set working directory
+WORKDIR /workspace/tilegym
+
+# Copy TileGym source code (do this LATE so code changes don't invalidate above layers)
+COPY . /workspace/tilegym/
+
+# Verify the repository structure (fail fast if built from wrong directory)
+RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
+
+# Install TileGym (only this layer rebuilds on code changes)
+RUN pip install --no-cache-dir -e .
 
 # Set up model cache directory
 ENV HF_HOME=/workspace/.cache/huggingface \

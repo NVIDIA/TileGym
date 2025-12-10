@@ -140,7 +140,10 @@ jobs:
             ${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
             ${{ steps.vars.outputs.registry_image }}:${{ github.sha }}
           push: true
-          cache-from: type=gha
+          cache-from: |
+            type=gha
+            type=registry,ref=${{ steps.vars.outputs.registry_image }}:latest
+            type=registry,ref=${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
           cache-to: type=gha,mode=max
 
   test-ops:
@@ -152,6 +155,9 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
+      - name: Create test results directory
+        run: mkdir -p ${{ github.workspace }}/test-results
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -167,9 +173,29 @@ jobs:
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
+            -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym \
             ${IMAGE} \
-            pytest -s tests/ops -v -k test_op
+            pytest -s tests/ops -v -k test_op \
+              -n auto \
+              --junitxml=/test-results/ops-results.xml \
+              --html=/test-results/ops-report.html \
+              --self-contained-html
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-test-results
+          path: test-results/ops-*
+          retention-days: 30
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results/ops-results.xml
+          check_name: Ops Test Results
 
   test-benchmark:
     name: test-benchmark
@@ -180,6 +206,9 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
+      - name: Create test results directory
+        run: mkdir -p ${{ github.workspace }}/test-results
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -195,6 +224,22 @@ jobs:
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
+            -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym/tests/benchmark \
             ${IMAGE} \
-            ./run_all.sh --parallel
+            ./run_all.sh --parallel --junit-xml /test-results/benchmark-results.xml
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-test-results
+          path: test-results/benchmark-*
+          retention-days: 30
+
+      - name: Publish benchmark results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results/benchmark-results.xml
+          check_name: Benchmark Test Results
