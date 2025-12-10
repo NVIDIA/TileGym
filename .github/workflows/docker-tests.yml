@@ -30,57 +30,69 @@ jobs:
             let prBody = '';
             let prNumber = '';
             
-            // Try to find PR for this branch
-            try {
-              const branchName = context.ref.replace('refs/heads/', '');
-              core.info(`Looking for PR for branch: ${branchName}`);
+            const branchName = context.ref.replace('refs/heads/', '');
+            core.info(`Looking for PR for branch: ${branchName}`);
+            
+            // Try method 1: Extract PR number from branch name
+            const branchMatch = branchName.match(/^pull-request\/(\d+)/);
+            if (branchMatch) {
+              prNumber = branchMatch[1];
+              core.info(`Extracted PR #${prNumber} from branch name`);
               
-              const { data: prs } = await github.rest.pulls.list({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'open',
-                head: `${context.repo.owner}:${branchName}`,
-              });
-              
-              if (prs.length > 0) {
-                prBody = prs[0].body || '';
-                prNumber = prs[0].number.toString();
-                core.info(`Found PR #${prNumber} for branch ${branchName}`);
-                core.info(`PR body length: ${prBody.length} characters`);
-              } else {
-                core.info(`No open PR found for branch ${branchName}`);
-                core.info(`Searched for: ${context.repo.owner}:${branchName}`);
+              // Fetch PR body by number
+              try {
+                const { data: pr } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: parseInt(prNumber),
+                });
+                prBody = pr.body || '';
+                core.info(`Fetched PR body (${prBody.length} characters)`);
+              } catch (error) {
+                core.warning(`Failed to fetch PR #${prNumber}: ${error.message}`);
               }
-            } catch (error) {
-              core.warning(`Error fetching PR: ${error.message}`);
+            } else {
+              // Try method 2: Search by branch name
+              try {
+                const { data: prs } = await github.rest.pulls.list({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  head: `${context.repo.owner}:${branchName}`,
+                });
+                
+                if (prs.length > 0) {
+                  prBody = prs[0].body || '';
+                  prNumber = prs[0].number.toString();
+                  core.info(`Found PR #${prNumber} via API search`);
+                  core.info(`PR body length: ${prBody.length} characters`);
+                } else {
+                  core.info(`No open PR found for branch ${branchName}`);
+                }
+              } catch (error) {
+                core.warning(`Error searching for PR: ${error.message}`);
+              }
             }
             
             return { prBody, prNumber };
 
-      - name: Parse config
+      - name: Parse config and set image tag
         id: parse
         env:
           PR_BODY: ${{ fromJSON(steps.pr.outputs.result).prBody }}
           PR_NUMBER: ${{ fromJSON(steps.pr.outputs.result).prNumber }}
-          BRANCH_NAME: ${{ github.ref_name }}
         run: |
+          # Parse CI config from PR body
           pip install pyyaml --quiet
           python3 .github/scripts/parse_pr_config.py
           
-          # Set image tag based on context
+          # Set image tag based on PR number
           if [ -n "$PR_NUMBER" ]; then
             echo "image_tag=pr-${PR_NUMBER}" >> $GITHUB_OUTPUT
-            echo "Found PR number: ${PR_NUMBER}"
+            echo "Using image tag: pr-${PR_NUMBER}"
           else
-            # Fallback: try to extract from branch name if it matches pull-request/* pattern
-            if [[ "$BRANCH_NAME" =~ ^pull-request/([0-9]+) ]]; then
-              PR_NUM="${BASH_REMATCH[1]}"
-              echo "image_tag=pr-${PR_NUM}" >> $GITHUB_OUTPUT
-              echo "Extracted PR number from branch name: ${PR_NUM}"
-            else
-              echo "image_tag=latest" >> $GITHUB_OUTPUT
-              echo "No PR number found, using 'latest' tag"
-            fi
+            echo "image_tag=latest" >> $GITHUB_OUTPUT
+            echo "Using image tag: latest"
           fi
 
   build:
