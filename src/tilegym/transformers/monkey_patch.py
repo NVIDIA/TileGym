@@ -16,9 +16,7 @@ from tilegym.ops import get_fused_swiglu_module
 from tilegym.ops import get_rms_norm_module
 from tilegym.ops import get_swiglu_module
 from tilegym.transformers.deepseek2.modeling_deepseek import DeepseekV2MoETileGym
-from tilegym.transformers.deepseek2.modeling_deepseek import (
-    tilegym_deepseek_v2_forward,
-)
+from tilegym.transformers.deepseek2.modeling_deepseek import tilegym_deepseek_v2_forward
 
 logger = get_logger(__name__)
 
@@ -88,9 +86,7 @@ def apply_tilegym_kernel_to_deepseek_v2(
     logger.info("--------------------------------")
     logger.info("apply_tilegym_kernel_to_deepseek_v2")
     logger.info("--------------------------------")
-    from transformers.models.deepseek_v2 import (
-        modeling_deepseek_v2 as modeling_deepseek,
-    )
+    from transformers.models.deepseek_v2 import modeling_deepseek_v2 as modeling_deepseek
 
     if use_cutile:
         set_backend("cutile")
@@ -147,13 +143,9 @@ def _apply_tilegym_kernel(model_type: str, **kwargs) -> None:
     apply_fn_signature = inspect.signature(apply_fn)
 
     # Filter out the keyword arguments that are not supported by the apply function
-    applicable_kwargs = {
-        key: value for key, value in kwargs.items() if key in apply_fn_signature.parameters
-    }
+    applicable_kwargs = {key: value for key, value in kwargs.items() if key in apply_fn_signature.parameters}
 
-    logger.info(
-        f"Applying TileGym kernels for model type: {model_type} with kwargs: {applicable_kwargs}"
-    )
+    logger.info(f"Applying TileGym kernels for model type: {model_type} with kwargs: {applicable_kwargs}")
 
     # Assume this is invoked pre-model initialization, so we only need to patch transformers code
     apply_fn(**applicable_kwargs)

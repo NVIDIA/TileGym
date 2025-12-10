@@ -423,9 +423,7 @@ def matmul(
     Returns:
         torch.Tensor: Matrix multiplication result
     """
-    raise NotImplementedError(
-        f"Matmul is not implemented for this backend: {get_current_backend()}"
-    )
+    raise NotImplementedError(f"Matmul is not implemented for this backend: {get_current_backend()}")
 
 
 @dispatch(
@@ -457,6 +455,4 @@ def group_gemm(
     Returns:
         List[torch.Tensor]: Results of matrix multiplications
     """
-    raise NotImplementedError(
-        f"Group GEMM is not implemented for this backend: {get_current_backend()}"
-    )
+    raise NotImplementedError(f"Group GEMM is not implemented for this backend: {get_current_backend()}")

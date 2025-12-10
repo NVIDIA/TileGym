@@ -146,9 +146,7 @@ class NaiveForwardWrapper:
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark LLM inference")
     parser.add_argument("--use_tilegym", action="store_true", help="Use tilegym kernel")
-    parser.add_argument(
-        "--model_id", type=str, default="meta-llama/Meta-Llama-3.1-8B", help="Model ID to load"
-    )
+    parser.add_argument("--model_id", type=str, default="meta-llama/Meta-Llama-3.1-8B", help="Model ID to load")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for inference")
     parser.add_argument(
         "--input_text",
@@ -156,14 +154,10 @@ def parse_args():
         default="What is the capital of France?",
         help="Input text for generation",
     )
-    parser.add_argument(
-        "--num_runs", type=int, default=5, help="Number of runs for averaging performance"
-    )
+    parser.add_argument("--num_runs", type=int, default=5, help="Number of runs for averaging performance")
     parser.add_argument("--warmup_runs", type=int, default=2, help="Number of warmup runs")
     parser.add_argument("--show_outputs", action="store_true", help="Show full model outputs")
-    parser.add_argument(
-        "--summary_file", type=str, default=None, help="File to append summary lines"
-    )
+    parser.add_argument("--summary_file", type=str, default=None, help="File to append summary lines")
     # use-attn: True or False
     parser.add_argument("--use_attn", action="store_true", help="Use attention")
     # use-cutile: True or False
@@ -211,17 +205,13 @@ def get_messages_list(args):
 def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
     model_name = model_id.lower()
     if "llama" in model_name:
-        apply_tilegym_kernel_to_llama(
-            rope=True, swiglu=True, rms_norm=True, attn=use_attn, use_cutile=use_cutile
-        )
+        apply_tilegym_kernel_to_llama(rope=True, swiglu=True, rms_norm=True, attn=use_attn, use_cutile=use_cutile)
     elif "deepseek" in model_name:
         apply_tilegym_kernel_to_deepseek_v2(
             rope=True, rms_norm=True, swiglu=True, attn=use_attn, moe=True, use_cutile=use_cutile
         )
     else:
-        print(
-            f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied."
-        )
+        print(f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied.")
 
 
 class KernelFilter:

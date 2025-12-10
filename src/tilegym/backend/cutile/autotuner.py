@@ -51,9 +51,7 @@ class Config:
 class SearchSpace:
     def __init__(self, configs: list[Config], predicate_fn: Callable | None = None):
         if len(configs) < 1:
-            raise ValueError(
-                "At least one configurations in the search space are required for autotuning"
-            )
+            raise ValueError("At least one configurations in the search space are required for autotuning")
         self.kwargs_keys = set(configs[0].kwargs.keys())
         for config in configs[1:]:
             if set(config.kwargs.keys()) != self.kwargs_keys:
@@ -297,9 +295,7 @@ class Autotuner:
                     with compiler_timeout(compiler_time_limit_sec):
                         time_ms = _time_ms(
                             run_once,
-                            get_args=lambda: _make_trial_args(args_fn, cfg, kernel, transforms)[
-                                1
-                            ],  # noqa
+                            get_args=lambda: _make_trial_args(args_fn, cfg, kernel, transforms)[1],  # noqa
                             stream=stream,
                         )
                 except TileCompilerTimeoutError as e:
@@ -312,9 +308,7 @@ class Autotuner:
                 if time_ms < best_time_ms:
                     best_time_ms = time_ms
                     best_idx, best_grid, best_kernel = cfg_idx, grid, updated_kernel
-                    logger.debug(
-                        f"Iteration {successes} updated best config to {cfg}: {best_time_ms} ms"
-                    )
+                    logger.debug(f"Iteration {successes} updated best config to {cfg}: {best_time_ms} ms")
                 successes += 1
 
             # Save the best config and kernel.

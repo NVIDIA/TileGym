@@ -6,10 +6,11 @@ Extracts YAML config block from PR description and outputs
 GitHub Actions environment variables.
 """
 
-import sys
-import re
-import yaml
 import os
+import re
+import sys
+
+import yaml
 
 
 def get_default_config():
@@ -43,9 +44,7 @@ def resolve_config(pr_body):
     config = get_default_config()
 
     if not pr_body or not pr_body.strip():
-        print(
-            "Not in PR context or empty PR body, using defaults (run everything)", file=sys.stderr
-        )
+        print("Not in PR context or empty PR body, using defaults (run everything)", file=sys.stderr)
         return config
 
     yaml_text = extract_yaml_from_pr_body(pr_body)

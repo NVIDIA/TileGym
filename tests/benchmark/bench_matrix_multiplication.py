@@ -68,9 +68,7 @@ def create_benchmark_config(datatype):
     )
 
 
-@triton.testing.perf_report(
-    [create_benchmark_config(datatype) for datatype in [torch.float16, torch.float8_e5m2]]
-)
+@triton.testing.perf_report([create_benchmark_config(datatype) for datatype in [torch.float16, torch.float8_e5m2]])
 def benchmark(M, N, K, backend, datatype):
     if datatype == torch.float8_e5m2:
         a = torch.randn((M, K), device=DEVICE, dtype=torch.float16).to(torch.float8_e5m2)

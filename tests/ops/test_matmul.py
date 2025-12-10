@@ -37,16 +37,8 @@ class Test_Matmul(common.PyTestCase):
         a_size = m * k + offset_a
         b_size = k * n + offset_b
         if dtype == torch.float8_e4m3fn:
-            a = (
-                torch.rand(a_size, device=device, dtype=torch.float16, requires_grad=False)
-                .normal_(std=0.3)
-                .to(dtype)
-            )
-            b = (
-                torch.rand(b_size, device=device, dtype=torch.float16, requires_grad=False)
-                .normal_(std=0.3)
-                .to(dtype)
-            )
+            a = torch.rand(a_size, device=device, dtype=torch.float16, requires_grad=False).normal_(std=0.3).to(dtype)
+            b = torch.rand(b_size, device=device, dtype=torch.float16, requires_grad=False).normal_(std=0.3).to(dtype)
         else:
             a = torch.rand(a_size, device=device, dtype=dtype, requires_grad=True)
             b = torch.rand(b_size, device=device, dtype=dtype, requires_grad=True)
@@ -79,9 +71,7 @@ class Test_Matmul(common.PyTestCase):
             (3072, 6144, 2720, 0, 0, torch.bfloat16),
         ],
         ids=lambda x: (
-            str(x)
-            if isinstance(x, list)
-            else f"{x.__module__}.{x.__name__}" if hasattr(x, '__name__') else str(x)
+            str(x) if isinstance(x, list) else f"{x.__module__}.{x.__name__}" if hasattr(x, '__name__') else str(x)
         ),
     )
     @pytest.mark.parametrize(

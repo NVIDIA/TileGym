@@ -105,25 +105,15 @@ def bench_mla(
     device=DEVICE,
 ):
     # Create input tensors
-    q = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(
-        mean=0.0, std=0.3
-    )
+    q = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
 
-    qpe = torch.empty(batch_size, num_heads, seq_len, d_pe, device=device, dtype=dtype).normal_(
-        mean=0.0, std=0.3
-    )
+    qpe = torch.empty(batch_size, num_heads, seq_len, d_pe, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
 
-    k = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(
-        mean=0.0, std=0.3
-    )
+    k = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
 
-    kpe = torch.empty(batch_size, 1, seq_len, d_pe, device=device, dtype=dtype).normal_(
-        mean=0.0, std=0.3
-    )
+    kpe = torch.empty(batch_size, 1, seq_len, d_pe, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
 
-    v = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(
-        mean=0.0, std=0.3
-    )
+    v = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
 
     # Calculate scaling
     scaling = 1.0 / math.sqrt(head_dim + d_pe)

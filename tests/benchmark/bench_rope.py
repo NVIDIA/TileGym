@@ -53,9 +53,7 @@ register_impl("apply_rope_base", "torch")(apply_rope_torch)
 def create_rotary_embeddings(seq_len, head_dim, dtype, device, base=10000.0):
     """Create cos and sin tensors for rotary embeddings."""
     # Create frequency tensor
-    freqs = 1.0 / (
-        base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
-    )
+    freqs = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
 
     # Create position tensor
     t = torch.arange(seq_len, device=device, dtype=torch.float32)

@@ -19,11 +19,7 @@ def get_data(
     normal_std=1.0,
 ):
     if dtype == torch.float8_e5m2:
-        out = (
-            torch.empty(*shape, dtype=torch.float16, device=device)
-            .normal_(mean, normal_std)
-            .to(dtype)
-        )
+        out = torch.empty(*shape, dtype=torch.float16, device=device).normal_(mean, normal_std).to(dtype)
     else:
         out = torch.empty(*shape, dtype=dtype, device=device).normal_(mean, normal_std)
     return out

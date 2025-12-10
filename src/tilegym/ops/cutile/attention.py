@@ -131,12 +131,7 @@ def fmha_kernel(
         acc = acc * alpha  # [TILE_M, TILE_N]
 
         # --- Compute PV product ---
-        v = ct.load(
-            V,
-            index=(batch_idx, off_kv_h, j, 0),
-            shape=(1, 1, TILE_N, TILE_D),
-            latency=4,
-        ).reshape(
+        v = ct.load(V, index=(batch_idx, off_kv_h, j, 0), shape=(1, 1, TILE_N, TILE_D), latency=4,).reshape(
             (TILE_N, TILE_D)
         )  # [TILE_N, TILE_D]
         p = p.astype(Q.dtype)

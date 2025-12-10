@@ -14,13 +14,9 @@ def pytest_configure(config):
     if config.getoption("--run-full"):
         os.environ["RUN_FULL_TEST"] = "1"
 
-    config.addinivalue_line(
-        "markers", "interpreter: indicate whether interpreter supports the test"
-    )
+    config.addinivalue_line("markers", "interpreter: indicate whether interpreter supports the test")
     config.addinivalue_line("markers", "slow: indicate whether the test is in slow CI pipeline")
-    config.addinivalue_line(
-        "markers", "serial: indicate whether the test is in single thread pipeline"
-    )
+    config.addinivalue_line("markers", "serial: indicate whether the test is in single thread pipeline")
     config.addinivalue_line("markers", "fast: indicate whether the test is in fast CI pipeline")
 
 

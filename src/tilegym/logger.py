@@ -127,9 +127,7 @@ class TileGymLogger:
             # Set log level from environment variable or default to INFO
             self.logger.setLevel(_get_log_level_from_env())
 
-    def warn_once(
-        self, message: str, category: Optional[str] = None, _auto_caller_info: bool = True, **kwargs
-    ):
+    def warn_once(self, message: str, category: Optional[str] = None, _auto_caller_info: bool = True, **kwargs):
         """Warning method that only warns once"""
         key = f"{category}:{message}" if category else message
 
@@ -328,9 +326,7 @@ def deprecated(message: str = "", category: str = "DEPRECATED"):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            dep_message = (
-                message or f"{func.__name__} is deprecated and will be removed in a future version"
-            )
+            dep_message = message or f"{func.__name__} is deprecated and will be removed in a future version"
             warn_once(dep_message, category)
             return func(*args, **kwargs)
 

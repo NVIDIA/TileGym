@@ -75,9 +75,7 @@ def moe_align_block_size_torch(topk_ids: torch.Tensor, block_size: int, num_expe
 
     sorted_token_ids = sorted_token_ids.to(torch.int32).to(topk_ids.device)
     sorted_expert_ids = sorted_expert_ids.to(torch.int32).to(topk_ids.device)
-    num_tokens_post_padded = (
-        torch.tensor(sorted_token_ids.numel()).to(torch.int32).to(topk_ids.device)
-    )
+    num_tokens_post_padded = torch.tensor(sorted_token_ids.numel()).to(torch.int32).to(topk_ids.device)
     return sorted_token_ids, sorted_expert_ids, num_tokens_post_padded
 
 

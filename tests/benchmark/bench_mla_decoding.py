@@ -99,29 +99,19 @@ def bench_mla_decoding(
     use_split_kv,
     device=DEVICE,
 ):
-    q = torch.empty(batch_size, num_heads, head_dim, device=device, dtype=dtype).normal_(
-        mean=0.3, std=0.2
-    )
+    q = torch.empty(batch_size, num_heads, head_dim, device=device, dtype=dtype).normal_(mean=0.3, std=0.2)
 
-    qpe = torch.empty(batch_size, num_heads, d_pe, device=device, dtype=dtype).normal_(
-        mean=0.3, std=0.1
-    )
+    qpe = torch.empty(batch_size, num_heads, d_pe, device=device, dtype=dtype).normal_(mean=0.3, std=0.1)
 
-    kv = torch.empty(batch_size, kv_seq_len, head_dim, device=device, dtype=dtype).normal_(
-        mean=0.3, std=0.2
-    )
+    kv = torch.empty(batch_size, kv_seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.3, std=0.2)
 
-    kpe = torch.empty(batch_size, kv_seq_len, d_pe, device=device, dtype=dtype).normal_(
-        mean=0.3, std=0.1
-    )
+    kpe = torch.empty(batch_size, kv_seq_len, d_pe, device=device, dtype=dtype).normal_(mean=0.3, std=0.1)
 
     scaling = 1.0 / math.sqrt(head_dim + d_pe)
 
     # Use unified dispatch system
     if use_split_kv:
-        fn_raw = lambda: tilegym.ops.mla_decoding_split_kv(
-            q, qpe, kv, kpe, scaling, backend=backend
-        )
+        fn_raw = lambda: tilegym.ops.mla_decoding_split_kv(q, qpe, kv, kpe, scaling, backend=backend)
     else:
         fn_raw = lambda: tilegym.ops.mla_decoding(q, qpe, kv, kpe, scaling, backend=backend)
 

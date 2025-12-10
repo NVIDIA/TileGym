@@ -47,9 +47,7 @@ class Test_GroupGemm(common.PyTestCase):
                 torch.float16,
             ]
         ],
-        ids=lambda x: (
-            str(x) if isinstance(x, list) else x.__name__ if hasattr(x, '__name__') else str(x)
-        ),
+        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, '__name__') else str(x)),
     )
     @pytest.mark.parametrize("backend", _backends)
     def test_op(

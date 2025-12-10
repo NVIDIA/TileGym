@@ -107,9 +107,7 @@ def create_benchmark_config(dtype):
     )
 
 
-@triton.testing.perf_report(
-    [create_benchmark_config(dtype) for dtype in [torch.float16, torch.bfloat16]]
-)
+@triton.testing.perf_report([create_benchmark_config(dtype) for dtype in [torch.float16, torch.bfloat16]])
 def bench_mix_triton_cutile(N, backend, dtype, M, device=DEVICE):
     eps = 1e-5
 

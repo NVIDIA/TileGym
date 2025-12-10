@@ -14,12 +14,12 @@ import os
 import pathlib
 import random
 import unittest
+from functools import wraps
 
 import pytest
-
 # import pandas as pd
 import torch
-from functools import wraps
+
 from .config import Config
 
 current_process = multiprocessing.current_process()
@@ -206,9 +206,7 @@ class PyTestCase:
 
         fn_kwargs = {k: v.tensor if isinstance(v, TestParam) else v for k, v in kwargs.items()}
 
-        tensor_args_with_grad = {
-            k: v for k, v in fn_kwargs.items() if isinstance(v, torch.Tensor) and v.requires_grad
-        }
+        tensor_args_with_grad = {k: v for k, v in fn_kwargs.items() if isinstance(v, torch.Tensor) and v.requires_grad}
         for k, v in extra_test_kwargs.items():
             if k in extra_ref_kwargs and isinstance(v, torch.Tensor) and v.requires_grad:
                 assert (
@@ -247,9 +245,7 @@ class PyTestCase:
                 failed_msgs.append(prefix)
                 failed_msgs.extend(msg)
             else:
-                prefix = (
-                    f'*** OUTPUT {ind} MATCHED THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
-                )
+                prefix = f'*** OUTPUT {ind} MATCHED THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
             all_msgs.append(prefix)
             all_msgs.extend(msg)
         if not multiple_outputs and test_out.requires_grad:
@@ -260,18 +256,14 @@ class PyTestCase:
 
             ref_out.backward(gradient)
 
-            ref_grads = {
-                name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()
-            }
+            ref_grads = {name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()}
 
             for arg in tensor_args_with_grad.values():
                 arg.grad = None
 
             test_out.backward(gradient)
 
-            test_grads = {
-                name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()
-            }
+            test_grads = {name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()}
 
             for arg in tensor_args_with_grad.values():
                 arg.grad = None
@@ -415,9 +407,7 @@ class PyTestCase:
             else:
                 out_close = torch.allclose(out, ref_out, rtol, atol, equal_nan)
                 if not out_close:
-                    print(
-                        '*** OUTPUT DID NOT MATCH THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
-                    )
+                    print('*** OUTPUT DID NOT MATCH THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***')
                     passed = False
 
             if out.requires_grad:

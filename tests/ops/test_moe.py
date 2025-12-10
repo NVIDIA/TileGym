@@ -145,9 +145,7 @@ class Test_MOE(common.PyTestCase):
 
         # Create topk_ids and topk_weights
         topk_ids = torch.randint(0, n_experts, (num_tokens, top_k), dtype=torch.long, device=device)
-        topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device=device), dim=-1).to(
-            init_dtype
-        )
+        topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device=device), dim=-1).to(init_dtype)
 
         # Ensure all tensors are contiguous
         hidden_states = hidden_states.contiguous()

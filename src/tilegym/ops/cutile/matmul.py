@@ -88,16 +88,12 @@ def matmul_kernel(
         # Load tile from matrix A.
         # The `index=(bidx, k_tile_idx)` specifies which (M-tile, K-tile) to load
         # from global memory A. `shape=(TILE_SIZE_M, TILE_SIZE_K)` defines the size of this tile.
-        a = ct.load(
-            A, index=(bidx, k), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad
-        ).astype(dtype)
+        a = ct.load(A, index=(bidx, k), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad).astype(dtype)
 
         # Load tile from matrix B.
         # The `index=(k_tile_idx, bidy)` specifies which (K-tile, N-tile) to load
         # from global memory B. `shape=(TILE_SIZE_K, TILE_SIZE_N)` defines the size of this tile.
-        b = ct.load(
-            B, index=(k, bidy), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad
-        ).astype(dtype)
+        b = ct.load(B, index=(k, bidy), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad).astype(dtype)
 
         # Perform Matrix Multiplication for the current tiles.
         # `ct.mma` computes the product of the two loaded tiles and accumulates the result.
@@ -330,15 +326,12 @@ def _static_persistent_matmul_autotune_configs():
 
 
 @autotune(search_space=_static_persistent_matmul_autotune_configs())
-def cutile_autotune_static_persistent_matmul(
-    a, b, c, M, N, K, trans_a, trans_b, autotuner: Autotuner | None = None
-):
+def cutile_autotune_static_persistent_matmul(a, b, c, M, N, K, trans_a, trans_b, autotuner: Autotuner | None = None):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     tuned_result = autotuner(
         torch.cuda.current_stream(),
         grid_fn=lambda named_args, cfg: (
-            min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N))
-            * cfg.occupancy,
+            min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
             1,
             1,
         ),

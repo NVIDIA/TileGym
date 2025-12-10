@@ -85,9 +85,7 @@ def is_backend_available(backend: str) -> bool:
 def assert_backend_available(backend: str) -> None:
     '''assert the backend is available'''
     if not is_backend_available(backend):
-        raise ValueError(
-            f"Backend {backend} is not available, available backends: {_AVAILABLE_BACKENDS}"
-        )
+        raise ValueError(f"Backend {backend} is not available, available backends: {_AVAILABLE_BACKENDS}")
 
 
 _initialize_available_backends()

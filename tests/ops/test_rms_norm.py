@@ -60,11 +60,7 @@ class Test_RMSNorm(common.PyTestCase):
         x_shape = (m, n)
         w_shape = (n,)
 
-        x = (
-            torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False)
-            .mul_(0.5)
-            .add_(-2.3)
-        )
+        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
         x = x.detach().requires_grad_(True)
 
         weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=True)

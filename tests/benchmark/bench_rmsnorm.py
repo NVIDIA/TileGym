@@ -94,9 +94,7 @@ def bench_rmsnorm(N, backend, dtype, static_persistent, M, device=DEVICE):
     x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
     weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=False)
 
-    fn = lambda: tilegym.ops.rms_norm(
-        x, w_shape, weight, eps, static_persistent=static_persistent, backend=backend
-    )
+    fn = lambda: tilegym.ops.rms_norm(x, w_shape, weight, eps, static_persistent=static_persistent, backend=backend)
     ref = lambda: reference_rms_norm(x, w_shape, weight, eps)
     torch.testing.assert_close(fn(), ref(), atol=5e-2, rtol=0.0)
 

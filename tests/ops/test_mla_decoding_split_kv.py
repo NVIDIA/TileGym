@@ -89,6 +89,4 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         def ref_fn():
             return self.reference(q, qpe, kv, kpe, sm_scale)
 
-        self.assertCorrectness(
-            split_kv_fn, ref_fn, {}, atol=1e-2, rtol=1e-2, multiple_outputs=False
-        )
+        self.assertCorrectness(split_kv_fn, ref_fn, {}, atol=1e-2, rtol=1e-2, multiple_outputs=False)

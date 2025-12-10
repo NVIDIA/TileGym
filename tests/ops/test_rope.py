@@ -13,13 +13,13 @@ except ImportError:
     pytest.skip("transformers not installed, skipping test_rope.py", allow_module_level=True)
 
 import torch
+
 import tilegym
 
 if HAS_TRANSFORMERS:
     from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
     from transformers.models.llama.configuration_llama import LlamaConfig
     from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-
 
 from .. import common
 
@@ -36,12 +36,8 @@ class Test_RoPE(common.PyTestCase):
             (1, 128, 32, 8, 64),
             (2, 128, 32, 8, 64),
             # Weird shapes
-            pytest.param(
-                3, 423, 73, 213, 92, marks=pytest.mark.skip(reason="only support atol 1e-1")
-            ),
-            pytest.param(
-                3, 423, 73, 155, 92, marks=pytest.mark.skip(reason="only support atol 1e-1")
-            ),
+            pytest.param(3, 423, 73, 213, 92, marks=pytest.mark.skip(reason="only support atol 1e-1")),
+            pytest.param(3, 423, 73, 155, 92, marks=pytest.mark.skip(reason="only support atol 1e-1")),
         ],
     )
     @pytest.mark.parametrize(

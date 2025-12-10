@@ -81,9 +81,7 @@ def benchmark(M, N, K, backend, datatype, static_persistent):
 
     quantiles = [0.5, 0.2, 0.8]
 
-    fn = lambda: tilegym.ops.matmul(
-        a, b, use_tma=True, static_persistent=static_persistent, backend=backend
-    )
+    fn = lambda: tilegym.ops.matmul(a, b, use_tma=True, static_persistent=static_persistent, backend=backend)
 
     if datatype != torch.float8_e5m2:
         # torch doesn't support FP8 matmul

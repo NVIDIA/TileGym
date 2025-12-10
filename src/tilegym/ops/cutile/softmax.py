@@ -70,9 +70,7 @@ def softmax_kernel_tma(
 
     for row_idx in range(pid, n_rows, num_programs):
         # Load the entire row in one tile (TILE_SIZE >= n_cols by design)
-        row = ct.load(
-            input, index=(row_idx, 0), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.NEG_INF
-        )
+        row = ct.load(input, index=(row_idx, 0), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.NEG_INF)
 
         # Convert to float32 for computation
         row = ct.astype(row, np.float32)

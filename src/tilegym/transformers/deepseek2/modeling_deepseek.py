@@ -12,16 +12,10 @@ from packaging import version
 from torch import nn
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.deepseek_v2.configuration_deepseek_v2 import (
-    DeepseekV2Config,
-)
+from transformers.models.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
-    DeepseekV2MoEGate,
-)
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
-    eager_attention_forward,
-)
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MoEGate
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import eager_attention_forward
 
 REQUIRED_TRANSFORMERS_VERSION = "4.55.2"
 current_version = transformers.__version__
@@ -29,10 +23,10 @@ current_version = transformers.__version__
 if version.parse(current_version) < version.parse(REQUIRED_TRANSFORMERS_VERSION):
     raise ImportError(f"In new transformers version, past_key_value is named to past_key_values")
 
-from tilegym.ops import group_gemm
 from tilegym.logger import get_logger
 from tilegym.ops import fused_moe_kernel_interface
 from tilegym.ops import get_fused_swiglu_module
+from tilegym.ops import group_gemm
 from tilegym.ops import mla_interface
 from tilegym.ops.attn_interface import mla_decoding_interface
 
@@ -70,9 +64,7 @@ def tilegym_deepseek_v2_forward(
     k_nope, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
     k_pe = k_pe.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
     # Dynamically import to get the current (possibly monkey-patched) implementation
-    from transformers.models.deepseek_v2.modeling_deepseek_v2 import (
-        apply_rotary_emb,
-    )
+    from transformers.models.deepseek_v2.modeling_deepseek_v2 import apply_rotary_emb
 
     q_pe, k_pe = apply_rotary_emb(q_pe, k_pe, position_embeddings.to(q_pe.device))
 
@@ -236,16 +228,12 @@ def _forward_absorb(
 
     if batch_size_attn == 1 and seq_len_attn == 1:
         # Fast path for decode - use group_gemm to eliminate aten::matmul
-        group_A_list = [
-            attn_output_expanded[0, h, 0, :].reshape(1, -1) for h in range(num_heads_mla)
-        ]
+        group_A_list = [attn_output_expanded[0, h, 0, :].reshape(1, -1) for h in range(num_heads_mla)]
         # v_up_proj is (heads, v_head_dim, kv_lora_rank), use transpose_b=True to avoid non-contiguous tensors
         group_B_list = [self.v_up_proj[h, :, :] for h in range(num_heads_mla)]
         group_C_list = group_gemm(group_A_list, group_B_list, transpose_b=True)
         attn_output = (
-            torch.stack([c.reshape(seq_len_attn, -1) for c in group_C_list], dim=0)
-            .unsqueeze(0)
-            .transpose(1, 2)
+            torch.stack([c.reshape(seq_len_attn, -1) for c in group_C_list], dim=0).unsqueeze(0).transpose(1, 2)
         )
     else:
         # Use group_gemm for prefill as well

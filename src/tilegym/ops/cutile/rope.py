@@ -38,12 +38,8 @@ def rope_kernel(
     # ####################################################################
     # Load cos and sin values
     # ####################################################################
-    cos_row = ct.load(cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape(
-        (1, TILE_HD)
-    )
-    sin_row = ct.load(sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape(
-        (1, TILE_HD)
-    )
+    cos_row = ct.load(cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    sin_row = ct.load(sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
 
     # ####################################################################
     # Process Q tensor

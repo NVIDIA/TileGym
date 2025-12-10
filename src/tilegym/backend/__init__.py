@@ -6,21 +6,16 @@
 Backend management for TileGym project
 """
 
-from .selector import (
-    get_available_backends,
-    get_current_backend,
-    set_backend,
-    is_backend_available,
-    assert_backend_available,
-)
-
-from .dispatcher import (
-    dispatch,
-    register_impl,
-    get_available_backends_for_op,
-    get_registry_info,
-    print_registry_info,
-)
+from .dispatcher import dispatch
+from .dispatcher import get_available_backends_for_op
+from .dispatcher import get_registry_info
+from .dispatcher import print_registry_info
+from .dispatcher import register_impl
+from .selector import assert_backend_available
+from .selector import get_available_backends
+from .selector import get_current_backend
+from .selector import is_backend_available
+from .selector import set_backend
 
 
 def make_missing_backend_handler(package_name, available_items):
