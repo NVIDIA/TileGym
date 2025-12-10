@@ -29,10 +29,32 @@ jobs:
           script: |
             let prBody = '';
             let prNumber = '';
-            if (context.eventName === 'pull_request') {
-              prBody = context.payload.pull_request.body || '';
-              prNumber = context.payload.pull_request.number.toString();
+            
+            // Try to find PR for this branch
+            try {
+              const branchName = context.ref.replace('refs/heads/', '');
+              core.info(`Looking for PR for branch: ${branchName}`);
+              
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${branchName}`,
+              });
+              
+              if (prs.length > 0) {
+                prBody = prs[0].body || '';
+                prNumber = prs[0].number.toString();
+                core.info(`Found PR #${prNumber} for branch ${branchName}`);
+                core.info(`PR body length: ${prBody.length} characters`);
+              } else {
+                core.info(`No open PR found for branch ${branchName}`);
+                core.info(`Searched for: ${context.repo.owner}:${branchName}`);
+              }
+            } catch (error) {
+              core.warning(`Error fetching PR: ${error.message}`);
             }
+            
             return { prBody, prNumber };
 
       - name: Parse config
@@ -40,6 +62,7 @@ jobs:
         env:
           PR_BODY: ${{ fromJSON(steps.pr.outputs.result).prBody }}
           PR_NUMBER: ${{ fromJSON(steps.pr.outputs.result).prNumber }}
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           pip install pyyaml --quiet
           python3 .github/scripts/parse_pr_config.py
@@ -47,8 +70,17 @@ jobs:
           # Set image tag based on context
           if [ -n "$PR_NUMBER" ]; then
             echo "image_tag=pr-${PR_NUMBER}" >> $GITHUB_OUTPUT
+            echo "Found PR number: ${PR_NUMBER}"
           else
-            echo "image_tag=latest" >> $GITHUB_OUTPUT
+            # Fallback: try to extract from branch name if it matches pull-request/* pattern
+            if [[ "$BRANCH_NAME" =~ ^pull-request/([0-9]+) ]]; then
+              PR_NUM="${BASH_REMATCH[1]}"
+              echo "image_tag=pr-${PR_NUM}" >> $GITHUB_OUTPUT
+              echo "Extracted PR number from branch name: ${PR_NUM}"
+            else
+              echo "image_tag=latest" >> $GITHUB_OUTPUT
+              echo "No PR number found, using 'latest' tag"
+            fi
           fi
 
   build:
