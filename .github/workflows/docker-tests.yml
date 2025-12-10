@@ -3,11 +3,16 @@ name: tilegym-build-and-test
 on:
   push:
     branches:
-      - main
       - "pull-request/[0-9]+"
+  schedule:
+    # Run nightly at 12 PM UTC
+    - cron: '0 12 * * *'
+  workflow_dispatch:  # Allow manual trigger
 
 env:
-  IMAGE_NAME: tilegym-transformers
+  # PR images go to a temp repo, main/nightly go to main repo
+  IMAGE_NAME_PR: tilegym-transformers-pr
+  IMAGE_NAME_MAIN: tilegym-transformers
 
 jobs:
   config:
@@ -18,7 +23,21 @@ jobs:
       run_ops: ${{ steps.parse.outputs.run_ops }}
       run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
       image_tag: ${{ steps.parse.outputs.image_tag }}
+      image_name: ${{ steps.parse.outputs.image_name }}
+      is_pr: ${{ steps.context.outputs.is_pr }}
     steps:
+      - name: Determine context
+        id: context
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "is_pr=false" >> $GITHUB_OUTPUT
+            echo "image_name=${{ env.IMAGE_NAME_MAIN }}" >> $GITHUB_OUTPUT
+            echo "Running in main/nightly context"
+          else
+            echo "is_pr=true" >> $GITHUB_OUTPUT
+            echo "image_name=${{ env.IMAGE_NAME_PR }}" >> $GITHUB_OUTPUT
+            echo "Running in PR context"
+          fi
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -81,19 +100,32 @@ jobs:
         env:
           PR_BODY: ${{ fromJSON(steps.pr.outputs.result).prBody }}
           PR_NUMBER: ${{ fromJSON(steps.pr.outputs.result).prNumber }}
+          IS_PR: ${{ steps.context.outputs.is_pr }}
         run: |
-          # Parse CI config from PR body
-          pip install pyyaml --quiet
-          python3 .github/scripts/parse_pr_config.py
-          
-          # Set image tag based on PR number
-          if [ -n "$PR_NUMBER" ]; then
-            echo "image_tag=pr-${PR_NUMBER}" >> $GITHUB_OUTPUT
-            echo "Using image tag: pr-${PR_NUMBER}"
+          # Parse CI config from PR body (only for PRs)
+          if [[ "$IS_PR" == "true" ]]; then
+            pip install pyyaml --quiet
+            python3 .github/scripts/parse_pr_config.py
+            
+            # Set PR-specific image tag
+            if [ -n "$PR_NUMBER" ]; then
+              echo "image_tag=pr-${PR_NUMBER}" >> $GITHUB_OUTPUT
+              echo "Using image tag: pr-${PR_NUMBER}"
+            else
+              echo "image_tag=latest" >> $GITHUB_OUTPUT
+              echo "Using image tag: latest (PR without number)"
+            fi
           else
+            # Main/nightly: always build and run all tests
+            echo "build=true" >> $GITHUB_OUTPUT
+            echo "run_ops=true" >> $GITHUB_OUTPUT
+            echo "run_benchmark=true" >> $GITHUB_OUTPUT
             echo "image_tag=latest" >> $GITHUB_OUTPUT
-            echo "Using image tag: latest"
+            echo "Main/nightly build: running all tests with tag 'latest'"
           fi
+          
+          # Pass through image name from context
+          echo "image_name=${{ steps.context.outputs.image_name }}" >> $GITHUB_OUTPUT
 
   build:
     name: build-tilegym-transformers-image
@@ -108,7 +140,7 @@ jobs:
         id: vars
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          REGISTRY_IMAGE="ghcr.io/${OWNER_LOWER}/${{ env.IMAGE_NAME }}"
+          REGISTRY_IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}"
           
           echo "registry_image=${REGISTRY_IMAGE}" >> $GITHUB_OUTPUT
 
@@ -168,7 +200,7 @@ jobs:
       - name: Pull and run ops tests
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${OWNER_LOWER}/${{ env.IMAGE_NAME }}:${{ needs.config.outputs.image_tag }}"
+          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
           
           docker pull ${IMAGE}
           docker run --rm \
@@ -219,7 +251,7 @@ jobs:
       - name: Pull and run benchmarks
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${OWNER_LOWER}/${{ env.IMAGE_NAME }}:${{ needs.config.outputs.image_tag }}"
+          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
           
           docker pull ${IMAGE}
           docker run --rm \

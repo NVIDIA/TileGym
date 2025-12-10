@@ -11,6 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: psf/black@25.12.0
         with:
-          options: "--check --verbose -l 100"
+          fetch-depth: 0  # Fetch all history for darker to compare
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      
+      - name: Install formatting tools
+        run: pip install darker black==22.12.0 isort==5.11.4
+      
+      - name: Run darker with isort
+        run: |
+          darker --check --diff \
+            --isort \
+            --revision origin/main... \
+            .

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:  # Allow manual trigger
 
 env:
-  IMAGE_NAME: tilegym-transformers
+  IMAGE_NAME_PR: tilegym-transformers-pr
 
 jobs:
   cleanup:
@@ -18,7 +18,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const packageName = process.env.IMAGE_NAME;
+            const packageName = process.env.IMAGE_NAME_PR;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             
