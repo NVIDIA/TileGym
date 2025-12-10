@@ -45,7 +45,6 @@ def silu_and_mul_kernel_row_wise(
     row_idx = bid
     a_col_idx = offsets  # First half: [0, hidden_size)
     b_col_idx = offsets + hidden_size  # Second half: [hidden_size, 2*hidden_size)
-    out_offsets = bid * hidden_size + offsets
 
     # Load tiles using gather with 2D indices
     # gather broadcasts (scalar, tile) to (tile,)
