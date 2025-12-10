@@ -12,14 +12,20 @@ from .. import common
 
 
 def get_data(
-    *shape, dtype, device, mean=0.0, normal_std=1.0,
+    *shape,
+    dtype,
+    device,
+    mean=0.0,
+    normal_std=1.0,
 ):
     if dtype == torch.float8_e5m2:
-        out = torch.empty(*shape, dtype=torch.float16, device=device).normal_(mean, normal_std).to(dtype)
-    else:
-        out = torch.empty(*shape, dtype=dtype, device=device).normal_(
-            mean, normal_std
+        out = (
+            torch.empty(*shape, dtype=torch.float16, device=device)
+            .normal_(mean, normal_std)
+            .to(dtype)
         )
+    else:
+        out = torch.empty(*shape, dtype=dtype, device=device).normal_(mean, normal_std)
     return out
 
 
@@ -43,7 +49,8 @@ class Test_FMHA(common.PyTestCase):
         )
         return ref
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "batch_size, num_heads, seq_len, head_dim, is_causal, dtype",
         [
@@ -78,14 +85,29 @@ class Test_FMHA(common.PyTestCase):
         self.setUp()
         # Create random input tensors
         q = get_data(
-                batch_size, num_heads, seq_len, head_dim, device="cuda", dtype=dtype,
-            )
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+            device="cuda",
+            dtype=dtype,
+        )
         k = get_data(
-                batch_size, num_heads, seq_len, head_dim, device="cuda", dtype=dtype,
-            )
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+            device="cuda",
+            dtype=dtype,
+        )
         v = get_data(
-                batch_size, num_heads, seq_len, head_dim, device="cuda", dtype=dtype,
-            )
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+            device="cuda",
+            dtype=dtype,
+        )
 
         # Calculate scaling factor
         sm_scale = 1.0 / math.sqrt(head_dim)
@@ -112,4 +134,3 @@ class Test_FMHA(common.PyTestCase):
             )
         except NotImplementedError as e:
             pytest.skip(f"Skip due to not-implemented: {e}")
-

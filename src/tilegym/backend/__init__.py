@@ -19,8 +19,9 @@ from .dispatcher import (
     register_impl,
     get_available_backends_for_op,
     get_registry_info,
-    print_registry_info
+    print_registry_info,
 )
+
 
 def make_missing_backend_handler(package_name, available_items):
     """
@@ -41,9 +42,7 @@ def make_missing_backend_handler(package_name, available_items):
                 f"'{name}' requires cutile backend. Please install cutile using the following command:\n"
                 "pip install --pre --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/nv-shared-pypi-local/simple cuda-tile"
             )
-        raise AttributeError(
-            f"module '{package_name}' has no attribute '{name}'"
-        )
+        raise AttributeError(f"module '{package_name}' has no attribute '{name}'")
 
     return __getattr__
 

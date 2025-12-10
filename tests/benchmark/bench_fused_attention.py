@@ -13,6 +13,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 BATCH, N_HEADS = 4, 32
 
+
 def reference_fmha(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -25,13 +26,12 @@ def reference_fmha(
         q, k, v, attn_mask=None, dropout_p=0.0, is_causal=is_causal, scale=scaling
     )
 
+
 register_impl("fmha", "torch")(reference_fmha)
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("orange", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -42,9 +42,7 @@ def get_supported_backends(datatype):
         return [
             p for p in ALL_BACKENDS if p is not None and p[0] != "torch"
         ]  # Torch cannot support FP8
-    return [
-        p for p in ALL_BACKENDS if p is not None
-    ]  # Filter out None entries
+    return [p for p in ALL_BACKENDS if p is not None]  # Filter out None entries
 
 
 def create_benchmark_config(datatype, HEAD_DIM, mode, causal):

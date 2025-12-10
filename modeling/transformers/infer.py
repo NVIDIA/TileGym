@@ -17,15 +17,15 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 from tilegym.transformers import apply_tilegym_kernel_to_deepseek_v2
 from tilegym.transformers import apply_tilegym_kernel_to_llama
+
+
 def check_and_setup_model_cache(model_id):
     """
     Check if model exists in local cache, set up cache directories if needed.
     Returns the effective cache directory for the model.
     """
     # Get cache directory from environment or use default
-    cache_base = os.environ.get(
-        'TILEGYM_MODEL_CACHE_DIR', os.path.expanduser('~/.cache')
-    )
+    cache_base = os.environ.get('TILEGYM_MODEL_CACHE_DIR', os.path.expanduser('~/.cache'))
 
     # Set up HuggingFace cache directories
     hf_home = os.path.join(cache_base, 'huggingface')
@@ -118,9 +118,7 @@ class NaiveForwardWrapper:
         self.model = model
         self.default_kwargs = default_kwargs
         self.tokenizer = tokenizer
-        self.tokenized_inputs = tokenizer(
-            messages_list, return_tensors="pt"
-        ).to(device)
+        self.tokenized_inputs = tokenizer(messages_list, return_tensors="pt").to(device)
         self.input_seq_len = self.tokenized_inputs.input_ids.shape[1]
 
         self.default_kwargs.update(
@@ -148,41 +146,47 @@ class NaiveForwardWrapper:
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark LLM inference")
     parser.add_argument("--use_tilegym", action="store_true", help="Use tilegym kernel")
-    parser.add_argument("--model_id", type=str, default="meta-llama/Meta-Llama-3.1-8B", help="Model ID to load")
+    parser.add_argument(
+        "--model_id", type=str, default="meta-llama/Meta-Llama-3.1-8B", help="Model ID to load"
+    )
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for inference")
-    parser.add_argument("--input_text", type=str, default="What is the capital of France?", help="Input text for generation")
-    parser.add_argument("--num_runs", type=int, default=5, help="Number of runs for averaging performance")
+    parser.add_argument(
+        "--input_text",
+        type=str,
+        default="What is the capital of France?",
+        help="Input text for generation",
+    )
+    parser.add_argument(
+        "--num_runs", type=int, default=5, help="Number of runs for averaging performance"
+    )
     parser.add_argument("--warmup_runs", type=int, default=2, help="Number of warmup runs")
     parser.add_argument("--show_outputs", action="store_true", help="Show full model outputs")
-    parser.add_argument("--summary_file", type=str, default=None, help="File to append summary lines")
+    parser.add_argument(
+        "--summary_file", type=str, default=None, help="File to append summary lines"
+    )
     # use-attn: True or False
     parser.add_argument("--use_attn", action="store_true", help="Use attention")
     # use-cutile: True or False
     parser.add_argument("--use_cutile", action="store_true", help="Use cutile")
     # profile: True or False
     parser.add_argument("--profile", action="store_true", help="Profile the model")
-    parser.add_argument("--log_dir", type=str, default="/logs", help="Directory to save profiler logs (default: /logs)")
+    parser.add_argument(
+        "--log_dir",
+        type=str,
+        default="/logs",
+        help="Directory to save profiler logs (default: /logs)",
+    )
     # precision: bfloat16 or float32
     parser.add_argument("--precision", type=str, default="bfloat16", help="Precision")
-    parser.add_argument(
-        "--sentence_file",
-        type=str,
-        default=None
-    )
+    parser.add_argument("--sentence_file", type=str, default=None)
     # output length
-    parser.add_argument(
-        "--output_length",
-        type=int,
-        default=100,
-        help="Output length"
-    )
+    parser.add_argument("--output_length", type=int, default=100, help="Output length")
     # Only used in benchmark
     # If mock_input_len > 0, then the input length will be set to mock_input_len, this is used to mock the input length
     # If you use this, you may not get the correct answer of your sentence
-    parser.add_argument(
-        "--mock_input_len", type=int, default=0, help="Mock input length"
-    )
+    parser.add_argument("--mock_input_len", type=int, default=0, help="Mock input length")
     return parser.parse_args()
+
 
 def get_messages_list(args):
     messages_list = []
@@ -203,27 +207,22 @@ def get_messages_list(args):
         print(messages_list)
     return messages_list
 
+
 def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
     model_name = model_id.lower()
     if "llama" in model_name:
         apply_tilegym_kernel_to_llama(
-            rope=True,
-            swiglu=True,
-            rms_norm=True,
-            attn=use_attn,
-            use_cutile=use_cutile
+            rope=True, swiglu=True, rms_norm=True, attn=use_attn, use_cutile=use_cutile
         )
     elif "deepseek" in model_name:
         apply_tilegym_kernel_to_deepseek_v2(
-            rope=True,
-            rms_norm=True,
-            swiglu=True,
-            attn=use_attn,
-            moe=True,
-            use_cutile=use_cutile
+            rope=True, rms_norm=True, swiglu=True, attn=use_attn, moe=True, use_cutile=use_cutile
         )
     else:
-        print(f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied.")
+        print(
+            f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied."
+        )
+
 
 class KernelFilter:
     def __init__(self):
@@ -244,7 +243,7 @@ class KernelFilter:
             "silu_and_mul",
             "_silu_and_mul_kernel",
             "swiglu_forward",
-            # General cutile prefixes  
+            # General cutile prefixes
             "tile_",
             "cutile",
             # RMS norm kernels
@@ -264,13 +263,16 @@ class KernelFilter:
         self.blacklist_kernel_names = [
             "aten::matmul",
         ]
+
     def get_kernel_names(self):
         return self.kernel_names_prefix
+
     def contains(self, key):
         for k in self.kernel_names_prefix:
             if k in key and key not in self.blacklist_kernel_names:
                 return True
         return False
+
 
 def main():
     args = parse_args()
@@ -298,9 +300,7 @@ def main():
     model_kwargs = {
         "trust_remote_code": False,
         "device_map": 'cuda',
-        "torch_dtype": torch.bfloat16
-        if args.precision == "bfloat16"
-        else torch.float32,
+        "torch_dtype": torch.bfloat16 if args.precision == "bfloat16" else torch.float32,
     }
 
     model = load_model_with_cache(args.model_id, **model_kwargs)
@@ -414,7 +414,11 @@ def main():
 
     if args.profile:
         print("Profile the model...")
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=False, record_shapes=False) as prof:
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            with_stack=False,
+            record_shapes=False,
+        ) as prof:
             with record_function("model_inference"):
                 with torch.no_grad():
                     _ = forward_wrapper.forward()
@@ -429,7 +433,14 @@ def main():
         # Create a custom table with just the filtered results
         if filtered_results:
             print("\n===== FILTERED PROFILER RESULTS =====")
-            headers = ["Name", "CPU time total (us)", "CPU time avg (us)", "CUDA time total (us)", "CUDA time avg (us)", "Count"]
+            headers = [
+                "Name",
+                "CPU time total (us)",
+                "CPU time avg (us)",
+                "CUDA time total (us)",
+                "CUDA time avg (us)",
+                "Count",
+            ]
             row_format = "{:<80} {:<20} {:<20} {:<20} {:<20} {:<10}"
 
             print(row_format.format(*headers))
@@ -440,14 +451,16 @@ def main():
                 if kernel_filter.contains(item.key):
                     calculated_key[item.key] = item.device_time_total
                     total_device_time += item.device_time_total
-                print(row_format.format(
-                    item.key[:50],
-                    f"{item.cpu_time_total:.2f}",
-                    f"{item.cpu_time:.2f}",
-                    f"{item.device_time_total:.2f}",
-                    f"{item.device_time:.2f}",
-                    item.count
-                ))
+                print(
+                    row_format.format(
+                        item.key[:50],
+                        f"{item.cpu_time_total:.2f}",
+                        f"{item.cpu_time:.2f}",
+                        f"{item.device_time_total:.2f}",
+                        f"{item.device_time:.2f}",
+                        item.count,
+                    )
+                )
             print(f"Calculated key: {calculated_key}")
         print(prof.key_averages().table(row_limit=1))
 
@@ -455,9 +468,7 @@ def main():
         all_results = prof.key_averages()
 
         # Sort results by device_time_total in descending order
-        all_results = sorted(
-            all_results, key=lambda x: x.device_time_total, reverse=True
-        )
+        all_results = sorted(all_results, key=lambda x: x.device_time_total, reverse=True)
 
         # Generate timestamp for filename
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -474,11 +485,7 @@ def main():
             # Write CSV rows with self-time data and device type (include all operations for inspection)
             for item in all_results:
                 # Get device type string (e.g., "DeviceType.CUDA" or "DeviceType.CPU")
-                device_type_str = (
-                    str(item.device_type)
-                    if hasattr(item, 'device_type')
-                    else ""
-                )
+                device_type_str = str(item.device_type) if hasattr(item, 'device_type') else ""
                 f.write(
                     f"\"{item.key}\",{item.cpu_time_total:.2f},{item.cpu_time:.2f},{item.device_time_total:.2f},{item.device_time:.2f},{item.self_cpu_time_total:.2f},{item.self_device_time_total:.2f},{item.count},{kernel_filter.contains(item.key)},{device_type_str}\n"
                 )
@@ -501,23 +508,14 @@ def main():
             cuda_kernel_time_us = 0.0
             for item in all_results:
                 # Only count DeviceType.CUDA operations (actual kernels), exclude model_inference
-                device_type_str = (
-                    str(item.device_type)
-                    if hasattr(item, 'device_type')
-                    else ""
-                )
-                if (
-                    device_type_str == "DeviceType.CUDA"
-                    and item.key != "model_inference"
-                ):
+                device_type_str = str(item.device_type) if hasattr(item, 'device_type') else ""
+                if device_type_str == "DeviceType.CUDA" and item.key != "model_inference":
                     cuda_kernel_time_us += item.self_device_time_total
 
             cuda_kernel_time_ms = cuda_kernel_time_us / 1000.0
 
             # Update the summary line with CUDA kernel time
-            updated_summary_line = (
-                f"{summary_line} | {cuda_kernel_time_ms:>10.1f}\n"
-            )
+            updated_summary_line = f"{summary_line} | {cuda_kernel_time_ms:>10.1f}\n"
 
             # Read the file, replace the last line, and write back
             with open(args.summary_file, "r") as f:
@@ -530,9 +528,7 @@ def main():
             with open(args.summary_file, "w") as f:
                 f.writelines(lines)
 
-            print(
-                f"Updated summary with CUDA kernel time: {cuda_kernel_time_ms:.1f} ms"
-            )
+            print(f"Updated summary with CUDA kernel time: {cuda_kernel_time_ms:.1f} ms")
 
 
 if __name__ == "__main__":

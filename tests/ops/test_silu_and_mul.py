@@ -9,6 +9,8 @@ import torch
 import tilegym
 
 from .. import common
+
+
 class Test_SiLUAndMul(common.PyTestCase):
     @staticmethod
     # Reference implementation using PyTorch
@@ -18,7 +20,8 @@ class Test_SiLUAndMul(common.PyTestCase):
         x2 = input[..., hidden_size:]
         return torch.nn.functional.silu(x1) * x2
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "batch_size, seq_len, hidden_size, dtype",
         [

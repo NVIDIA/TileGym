@@ -9,6 +9,8 @@ import torch
 import tilegym
 
 from .. import common
+
+
 class Test_FlashDecode(common.PyTestCase):
     @staticmethod
     def reference(q, k, v, sm_scale):
@@ -19,7 +21,8 @@ class Test_FlashDecode(common.PyTestCase):
 
         return ref_output
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize("seq_len", [9, 119, 256, 8192])
     @pytest.mark.parametrize("group_size", [1, 4, 8])
     @pytest.mark.parametrize("dtype", [torch.float16])
@@ -43,9 +46,7 @@ class Test_FlashDecode(common.PyTestCase):
 
         # Create random input tensors
         torch.manual_seed(42)  # For reproducibility
-        q = torch.randn(batch_size, num_heads, 1, head_dim, device="cuda").to(
-            dtype
-        )
+        q = torch.randn(batch_size, num_heads, 1, head_dim, device="cuda").to(dtype)
         k = torch.randn(
             batch_size,
             num_heads // group_size,
@@ -77,4 +78,3 @@ class Test_FlashDecode(common.PyTestCase):
             rtol=1e-2,
             check_stride=False,
         )
-

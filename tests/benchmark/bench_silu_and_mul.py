@@ -13,9 +13,7 @@ from tilegym.backend import is_backend_available, register_impl
 
 # Available backends for benchmarking
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("orange", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -38,6 +36,7 @@ def reference_silu_and_mul(
     x2 = input[..., hidden_size:]  # Second half for multiplication
     # Apply SiLU (Sigmoid Linear Unit) to x1 and multiply by x2
     return torch.nn.functional.silu(x1) * x2
+
 
 register_impl("silu_and_mul", "torch")(reference_silu_and_mul)
 
@@ -94,12 +93,8 @@ def bench_silu_and_mul(
     # Total memory: read input tensor + write output tensor
     bytes_per_element = x.element_size()
 
-    input_bytes = (
-        x.numel() * bytes_per_element
-    )  # Read full input tensor (M, 2*hidden_size)
-    output_bytes = (
-        M * hidden_size * bytes_per_element
-    )  # Write output tensor (M, hidden_size)
+    input_bytes = x.numel() * bytes_per_element  # Read full input tensor (M, 2*hidden_size)
+    output_bytes = M * hidden_size * bytes_per_element  # Write output tensor (M, hidden_size)
 
     total_bytes = input_bytes + output_bytes
 

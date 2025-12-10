@@ -23,9 +23,7 @@ def silu(x):
 
 
 @ct.kernel
-def swiglu_forward_kernel(
-    a, b, c, TILE_SIZE: ct.Constant[int]
-):
+def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
     col = ct.bid(1)
 
@@ -70,6 +68,7 @@ def swiglu_forward(a, b):
     )
     return c.view(*ori_shape)
 
+
 class SiLUMulFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b):
@@ -86,37 +85,24 @@ class SwiGLUMLP(nn.Module):
     def __init__(self, config, hidden_size=None, intermediate_size=None):
         super().__init__()
         self.config = config
-        self.hidden_size = (
-            config.hidden_size if hidden_size is None else hidden_size
-        )
+        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
         self.intermediate_size = (
-            config.intermediate_size
-            if intermediate_size is None
-            else intermediate_size
+            config.intermediate_size if intermediate_size is None else intermediate_size
         )
-        self.gate_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False
-        )
-        self.up_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False
-        )
-        self.down_proj = nn.Linear(
-            self.intermediate_size, self.hidden_size, bias=False
-        )
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         if config.hidden_act not in ["silu", "swish"]:
-            raise ValueError(
-                f"Activation function {config.hidden_act} not supported."
-            )
+            raise ValueError(f"Activation function {config.hidden_act} not supported.")
 
     def forward(self, x):
-        return self.down_proj(
-            SiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x))
-        )
+        return self.down_proj(SiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x)))
 
 
 @register_impl("get_swiglu_module", backend="cutile")
 def get_swiglu_module():
     return SwiGLUMLP
+
 
 @register_impl("get_swiglu", backend="cutile")
 def get_swiglu():

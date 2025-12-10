@@ -29,13 +29,16 @@ class Test_RMSNorm(common.PyTestCase):
 
         return weight * input
 
-    _backends = ["cutile"]  
-    @pytest.mark.parametrize("m, n, dtype",
-        [(256, 256, torch.float16),
-         (4096, 2**8, torch.bfloat16),
-         (31072, 4096, torch.bfloat16),
-         (256, 256, torch.float32)
-        ]
+    _backends = ["cutile"]
+
+    @pytest.mark.parametrize(
+        "m, n, dtype",
+        [
+            (256, 256, torch.float16),
+            (4096, 2**8, torch.bfloat16),
+            (31072, 4096, torch.bfloat16),
+            (256, 256, torch.float32),
+        ],
     )
     @pytest.mark.parametrize("static_persistent", [True, False])
     @pytest.mark.parametrize("backend", _backends)
@@ -43,9 +46,7 @@ class Test_RMSNorm(common.PyTestCase):
         lambda arch, m, n: arch in ["sm120", "sm121"] and m == 31072 and n == 4096,
         mark=pytest.mark.slow,
     )
-    def test_op(
-        self, m, n, dtype, static_persistent, backend, arch
-    ):
+    def test_op(self, m, n, dtype, static_persistent, backend, arch):
 
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
@@ -60,17 +61,13 @@ class Test_RMSNorm(common.PyTestCase):
         w_shape = (n,)
 
         x = (
-            torch.rand(
-                x_shape, dtype=dtype, device=device, requires_grad=False
-            )
+            torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False)
             .mul_(0.5)
             .add_(-2.3)
         )
         x = x.detach().requires_grad_(True)
 
-        weight = torch.randn(
-            w_shape, dtype=dtype, device=device, requires_grad=True
-        )
+        weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=True)
         with torch.no_grad():
             self.assertCorrectness(
                 tilegym.ops.rms_norm,

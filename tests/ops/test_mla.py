@@ -31,9 +31,7 @@ class Test_MLA(common.PyTestCase):
         # Handle multi-query attention (when num_head_q != num_head_kv)
         if num_head_q != num_head_kv:
             # Make sure num_head_q is divisible by num_head_kv
-            assert (
-                num_head_q % num_head_kv == 0
-            ), "Query heads must be divisible by KV heads"
+            assert num_head_q % num_head_kv == 0, "Query heads must be divisible by KV heads"
 
             # Calculate how many query heads are served by each kv head
             query_group_size = num_head_q // num_head_kv
@@ -43,16 +41,12 @@ class Test_MLA(common.PyTestCase):
             k_expanded = k.unsqueeze(2).expand(
                 batch_size, num_head_kv, query_group_size, seq_len, head_dim
             )
-            k_expanded = k_expanded.reshape(
-                batch_size, num_head_q, seq_len, head_dim
-            )
+            k_expanded = k_expanded.reshape(batch_size, num_head_q, seq_len, head_dim)
 
             v_expanded = v.unsqueeze(2).expand(
                 batch_size, num_head_kv, query_group_size, seq_len, head_dim
             )
-            v_expanded = v_expanded.reshape(
-                batch_size, num_head_q, seq_len, head_dim
-            )
+            v_expanded = v_expanded.reshape(batch_size, num_head_q, seq_len, head_dim)
 
             # Use expanded tensors
             k = k_expanded
@@ -81,22 +75,25 @@ class Test_MLA(common.PyTestCase):
         qk -= m.unsqueeze(-1)
         p = qk.exp_()
         l = torch.sum(p, dim=-1)
-        p /= (l.unsqueeze(-1))
+        p /= l.unsqueeze(-1)
         p = p.to(qkv_dtype)
         # Calculate output
         o = torch.matmul(p.half(), v).to(qkv_dtype)
         return o
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize("is_causal", [True, False])
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("BLOCK_M", [64] if torch.cuda.get_device_capability() in [(12, 0), (12, 1)] else [128, 256])
-    @pytest.mark.parametrize("BLOCK_N", [64] if torch.cuda.get_device_capability() in [(12, 0), (12, 1)] else [128])
+    @pytest.mark.parametrize(
+        "BLOCK_M", [64] if torch.cuda.get_device_capability() in [(12, 0), (12, 1)] else [128, 256]
+    )
+    @pytest.mark.parametrize(
+        "BLOCK_N", [64] if torch.cuda.get_device_capability() in [(12, 0), (12, 1)] else [128]
+    )
     @pytest.mark.parametrize("num_group_size", [1, 4])
     @pytest.mark.parametrize("backend", _backends)
-    def test_op(
-        self, is_causal, num_group_size, dtype, BLOCK_M, BLOCK_N, backend, arch
-    ):
+    def test_op(self, is_causal, num_group_size, dtype, BLOCK_M, BLOCK_N, backend, arch):
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
 
@@ -126,26 +123,26 @@ class Test_MLA(common.PyTestCase):
         device = torch.device('cuda')
 
         # Create random tensors with appropriate head dimensions
-        q = torch.empty(
-            num_batch, num_head_q, S_qkv, BLOCK_D, device=device, dtype=dtype
-        ).normal_(mean=0.0, std=0.3)
+        q = torch.empty(num_batch, num_head_q, S_qkv, BLOCK_D, device=device, dtype=dtype).normal_(
+            mean=0.0, std=0.3
+        )
 
         qpe = torch.empty(
             num_batch, num_head_q, S_qkv, BLOCK_KPE, device=device, dtype=dtype
         ).normal_(mean=0.0, std=0.3)
 
         # Key and value tensors use num_head_kv
-        k = torch.empty(
-            num_batch, num_head_kv, S_qkv, BLOCK_D, device=device, dtype=dtype
-        ).normal_(mean=0.0, std=0.3)
+        k = torch.empty(num_batch, num_head_kv, S_qkv, BLOCK_D, device=device, dtype=dtype).normal_(
+            mean=0.0, std=0.3
+        )
 
-        kpe = torch.empty(
-            num_batch, 1, S_qkv, BLOCK_KPE, device=device, dtype=dtype
-        ).normal_(mean=0.0, std=0.3)
+        kpe = torch.empty(num_batch, 1, S_qkv, BLOCK_KPE, device=device, dtype=dtype).normal_(
+            mean=0.0, std=0.3
+        )
 
-        v = torch.empty(
-            num_batch, num_head_kv, S_qkv, BLOCK_D, device=device, dtype=dtype
-        ).normal_(mean=0.0, std=0.3)
+        v = torch.empty(num_batch, num_head_kv, S_qkv, BLOCK_D, device=device, dtype=dtype).normal_(
+            mean=0.0, std=0.3
+        )
 
         # Calculate scaling
         scaling = 1.0 / math.sqrt(q.size(-1) + qpe.size(-1))
@@ -161,9 +158,12 @@ class Test_MLA(common.PyTestCase):
                 "BLOCK_M": BLOCK_M,
                 "BLOCK_N": BLOCK_N,
             }
+
         # Define a wrapper to match the interface expected by assertCorrectness
         def mla_wrapper(q, k, v, qpe, kpe, is_causal, scaling, kernel_configs):
-            return mla_interface(q, k, v, qpe, kpe, is_causal, scaling, kernel_configs=kernel_configs)
+            return mla_interface(
+                q, k, v, qpe, kpe, is_causal, scaling, kernel_configs=kernel_configs
+            )
 
         # Use assertCorrectness to compare the implementations
         self.assertCorrectness(
@@ -184,4 +184,3 @@ class Test_MLA(common.PyTestCase):
             rtol=1e-2,
             atol=1e-2,
         )
-

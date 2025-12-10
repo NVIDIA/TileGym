@@ -16,6 +16,7 @@ import random
 import unittest
 
 import pytest
+
 # import pandas as pd
 import torch
 from functools import wraps
@@ -80,6 +81,7 @@ def get_tensor_alignment(tensor):
     address = tensor.data_ptr()
     alignment = (((address - 1) ^ address) + 1) >> 1
     return alignment
+
 
 class PyTestCase:
     r'''
@@ -174,9 +176,7 @@ class PyTestCase:
                 if isinstance(value, torch.Tensor):
                     detected_dtype = value.dtype
                     break
-                elif isinstance(value, TestParam) and isinstance(
-                    value.tensor, torch.Tensor
-                ):
+                elif isinstance(value, TestParam) and isinstance(value.tensor, torch.Tensor):
                     detected_dtype = value.tensor.dtype
                     break
 
@@ -186,9 +186,7 @@ class PyTestCase:
                     if isinstance(value, torch.Tensor):
                         detected_dtype = value.dtype
                         break
-                    elif isinstance(value, TestParam) and isinstance(
-                        value.tensor, torch.Tensor
-                    ):
+                    elif isinstance(value, TestParam) and isinstance(value.tensor, torch.Tensor):
                         detected_dtype = value.tensor.dtype
                         break
 
@@ -206,22 +204,13 @@ class PyTestCase:
                 if atol is None:
                     atol = 1e-8
 
-        fn_kwargs = {
-            k: v.tensor if isinstance(v, TestParam) else v
-            for k, v in kwargs.items()
-        }
+        fn_kwargs = {k: v.tensor if isinstance(v, TestParam) else v for k, v in kwargs.items()}
 
         tensor_args_with_grad = {
-            k: v
-            for k, v in fn_kwargs.items()
-            if isinstance(v, torch.Tensor) and v.requires_grad
+            k: v for k, v in fn_kwargs.items() if isinstance(v, torch.Tensor) and v.requires_grad
         }
         for k, v in extra_test_kwargs.items():
-            if (
-                k in extra_ref_kwargs
-                and isinstance(v, torch.Tensor)
-                and v.requires_grad
-            ):
+            if k in extra_ref_kwargs and isinstance(v, torch.Tensor) and v.requires_grad:
                 assert (
                     isinstance(extra_ref_kwargs[k], torch.Tensor)
                     and extra_ref_kwargs[k].requires_grad
@@ -246,15 +235,9 @@ class PyTestCase:
         assert len(test_check) == len(ref_check)
         for ind, (ro, to) in enumerate(zip(ref_check, test_check)):
             if output_processor is not None:
-                to = output_processor(
-                    ind, to, fn_kwargs, extra_test_kwargs, extra_ref_kwargs
-                )
-                ro = output_processor(
-                    ind, ro, fn_kwargs, extra_test_kwargs, extra_ref_kwargs
-                )
-            out_close, msg = compare_tensors(
-                to, ro, rtol, atol, equal_nan, check_stride
-            )
+                to = output_processor(ind, to, fn_kwargs, extra_test_kwargs, extra_ref_kwargs)
+                ro = output_processor(ind, ro, fn_kwargs, extra_test_kwargs, extra_ref_kwargs)
+            out_close, msg = compare_tensors(to, ro, rtol, atol, equal_nan, check_stride)
             if not out_close:
                 passed = False
                 prefix = (
@@ -265,8 +248,7 @@ class PyTestCase:
                 failed_msgs.extend(msg)
             else:
                 prefix = (
-                    f'*** OUTPUT {ind} MATCHED THE REFERENCE '
-                    f'(rtol={rtol}, atol={atol}) ***'
+                    f'*** OUTPUT {ind} MATCHED THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
                 )
             all_msgs.append(prefix)
             all_msgs.extend(msg)
@@ -279,8 +261,7 @@ class PyTestCase:
             ref_out.backward(gradient)
 
             ref_grads = {
-                name: arg.grad.detach().clone()
-                for name, arg in tensor_args_with_grad.items()
+                name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()
             }
 
             for arg in tensor_args_with_grad.values():
@@ -289,8 +270,7 @@ class PyTestCase:
             test_out.backward(gradient)
 
             test_grads = {
-                name: arg.grad.detach().clone()
-                for name, arg in tensor_args_with_grad.items()
+                name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()
             }
 
             for arg in tensor_args_with_grad.values():
@@ -398,9 +378,7 @@ class PyTestCase:
                 if isinstance(value, torch.Tensor):
                     detected_dtype = value.dtype
                     break
-                elif isinstance(value, TestParam) and isinstance(
-                    value.tensor, torch.Tensor
-                ):
+                elif isinstance(value, TestParam) and isinstance(value.tensor, torch.Tensor):
                     detected_dtype = value.tensor.dtype
                     break
 
@@ -421,10 +399,7 @@ class PyTestCase:
         ref_out = None
         ref_grads = None
 
-        fn_kwargs = {
-            k: v.tensor if isinstance(v, TestParam) else v
-            for k, v in kwargs.items()
-        }
+        fn_kwargs = {k: v.tensor if isinstance(v, TestParam) else v for k, v in kwargs.items()}
 
         tensor_args_with_grad = {
             k: v
@@ -441,8 +416,7 @@ class PyTestCase:
                 out_close = torch.allclose(out, ref_out, rtol, atol, equal_nan)
                 if not out_close:
                     print(
-                        '*** OUTPUT DID NOT MATCH THE REFERENCE '
-                        f'(rtol={rtol}, atol={atol}) ***'
+                        '*** OUTPUT DID NOT MATCH THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
                     )
                     passed = False
 
@@ -457,10 +431,7 @@ class PyTestCase:
                         for name, arg in tensor_args_with_grad.items()
                     }
                 else:
-                    current_grads = {
-                        name: arg.grad
-                        for name, arg in tensor_args_with_grad.items()
-                    }
+                    current_grads = {name: arg.grad for name, arg in tensor_args_with_grad.items()}
 
                     for name in ref_grads:
                         if isinstance(kwargs[name], TestParam):
@@ -503,9 +474,7 @@ class PyTestCase:
     ):
         # Auto-detect tolerances based on data type if not provided
         if rtol is None or atol is None:
-            detected_dtype = (
-                input.dtype if isinstance(input, torch.Tensor) else None
-            )
+            detected_dtype = input.dtype if isinstance(input, torch.Tensor) else None
             if detected_dtype is not None:
                 default_tols = get_dtype_tolerances(detected_dtype)
                 if rtol is None:
@@ -519,14 +488,10 @@ class PyTestCase:
                 if atol is None:
                     atol = 1e-8
 
-        allclose, msgs = compare_tensors(
-            input, reference, rtol, atol, equal_nan, check_stride
-        )
+        allclose, msgs = compare_tensors(input, reference, rtol, atol, equal_nan, check_stride)
         assert allclose, msgs
 
-    def assertDiffsClose(
-        self, input, reference_fp16, reference_fp32, tolerance
-    ):
+    def assertDiffsClose(self, input, reference_fp16, reference_fp32, tolerance):
         input_fp32_diff = (input - reference_fp32).abs()
         max_input_fp32_diff = input_fp32_diff.max().item()
 
@@ -608,20 +573,14 @@ def flatten_keys(l0):
     res = {}
     for name, l1 in l0.items():
         for direction, l2 in l1.items():
-            selected = {
-                (name, direction, metric): l2[metric]
-                for metric in Config.fields
-            }
+            selected = {(name, direction, metric): l2[metric] for metric in Config.fields}
             res.update(selected)
     return res
 
 
 def convert_non_primitive_to_repr(arguments):
     primitive_types = (numbers.Number, bool, str)
-    arguments = {
-        k: v if isinstance(v, primitive_types) else repr(v)
-        for k, v in arguments.items()
-    }
+    arguments = {k: v if isinstance(v, primitive_types) else repr(v) for k, v in arguments.items()}
     return arguments
 
 
@@ -646,9 +605,7 @@ def load_previous(name, argument_names, expanded_argument_names):
         load_path,
         header=[0, 1, 2],
     )
-    loaded_df = loaded_df.rename(
-        columns=lambda x: x if 'Unnamed' not in str(x) else ''
-    )
+    loaded_df = loaded_df.rename(columns=lambda x: x if 'Unnamed' not in str(x) else '')
 
     loaded_df.set_index(expanded_argument_names)
     selected_cols = expanded_argument_names + [
@@ -659,9 +616,7 @@ def load_previous(name, argument_names, expanded_argument_names):
 
     loaded_names = [c[0] for c in loaded_df.columns]
     names2 = [n for n in loaded_names if n not in argument_names]
-    loaded_df = loaded_df.rename(
-        columns=lambda x: f'loaded_{x}' if x in names2 else x
-    )
+    loaded_df = loaded_df.rename(columns=lambda x: f'loaded_{x}' if x in names2 else x)
     return loaded_df
 
 
@@ -684,12 +639,9 @@ def add_relative_columns(df, main_name, other_names):
 
     relative_metrics = [m for m in metrics if m not in non_relative_metrics]
 
-    for other_name, mode, metric in itertools.product(
-        other_names, modes, relative_metrics
-    ):
+    for other_name, mode, metric in itertools.product(other_names, modes, relative_metrics):
         df[(f'{other_name}/{main_name}', mode, metric)] = (
-            df[(f'{other_name}', mode, metric)]
-            / df[(f'{main_name}', mode, metric)]
+            df[(f'{other_name}', mode, metric)] / df[(f'{main_name}', mode, metric)]
         )
 
 
@@ -754,24 +706,15 @@ def compare_tensors(
                 atol = 1e-8
 
     if test.shape != reference.shape:
-        msgs = (
-            f'shape mismatch, test: {test.shape}, '
-            f'reference: {reference.shape}'
-        )
+        msgs = f'shape mismatch, test: {test.shape}, ' f'reference: {reference.shape}'
         raise RuntimeError(msgs)
 
     if check_stride and test.stride() != reference.stride():
-        msgs = (
-            f'stride mismatch, test: {test.stride()}, '
-            f'reference: {reference.stride()}'
-        )
+        msgs = f'stride mismatch, test: {test.stride()}, ' f'reference: {reference.stride()}'
         raise RuntimeError(msgs)
 
     if test.dtype != reference.dtype:
-        msgs = (
-            f'dtype mismatch, test: {test.dtype}, '
-            f'reference: {reference.dtype}'
-        )
+        msgs = f'dtype mismatch, test: {test.dtype}, ' f'reference: {reference.dtype}'
         raise RuntimeError(msgs)
 
     dtype = test.dtype
@@ -835,10 +778,9 @@ def any_output_requires_grad(fn):
     if not isinstance(out, tuple):
         out = (out,)
 
-    any_requires = any(
-        i.requires_grad for i in out if isinstance(i, torch.Tensor)
-    )
+    any_requires = any(i.requires_grad for i in out if isinstance(i, torch.Tensor))
     return any_requires
+
 
 def markif(condition_func, mark):
     """

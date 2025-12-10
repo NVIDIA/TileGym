@@ -72,9 +72,7 @@ def reference_add_rmsnorm(x, y, normalized_shape, weight, eps):
 
 # Available backends
 ALL_BACKENDS = [
-    ("triton_cutile", "Triton+CuTile", ("red", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("triton_cutile", "Triton+CuTile", ("red", "-")) if is_backend_available("cutile") else None,
     ("pytorch", "PyTorch", ("green", "-")),
 ]
 
@@ -95,9 +93,7 @@ def create_benchmark_config(dtype):
 
     return triton.testing.Benchmark(
         x_names=["N"],
-        x_vals=[
-            2**i for i in range(10, 15)
-        ],  # Hidden size from 1024 to 16384
+        x_vals=[2**i for i in range(10, 15)],  # Hidden size from 1024 to 16384
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
@@ -112,10 +108,7 @@ def create_benchmark_config(dtype):
 
 
 @triton.testing.perf_report(
-    [
-        create_benchmark_config(dtype)
-        for dtype in [torch.float16, torch.bfloat16]
-    ]
+    [create_benchmark_config(dtype) for dtype in [torch.float16, torch.bfloat16]]
 )
 def bench_mix_triton_cutile(N, backend, dtype, M, device=DEVICE):
     eps = 1e-5
@@ -124,23 +117,11 @@ def bench_mix_triton_cutile(N, backend, dtype, M, device=DEVICE):
     x_shape = (M, N)
     w_shape = (N,)
 
-    x = (
-        torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False)
-        .mul_(0.5)
-        .add_(-2.3)
-    )
-    y = (
-        torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False)
-        .mul_(0.5)
-        .add_(-1.5)
-    )
-    weight = torch.randn(
-        w_shape, dtype=dtype, device=device, requires_grad=False
-    )
+    x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
+    y = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-1.5)
+    weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=False)
 
-    ref_implementation = lambda: reference_add_rmsnorm(
-        x, y, w_shape, weight, eps
-    )
+    ref_implementation = lambda: reference_add_rmsnorm(x, y, w_shape, weight, eps)
 
     # Setup based on backend
     if backend == "pytorch":
@@ -152,9 +133,7 @@ def bench_mix_triton_cutile(N, backend, dtype, M, device=DEVICE):
             # Step 1: Triton vector add
             added = triton_vector_add(x, y)
             # Step 2: CuTile rmsnorm
-            return tilegym.ops.cutile.rms_norm(
-                added, w_shape, weight, eps, static_persistent=True
-            )
+            return tilegym.ops.cutile.rms_norm(added, w_shape, weight, eps, static_persistent=True)
 
         fn = mixed_fn
 

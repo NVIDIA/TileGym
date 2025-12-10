@@ -45,15 +45,14 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         """Calculate the default attention scale factor"""
         return 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize("num_heads", [16, 32])
     @pytest.mark.parametrize("seq_len", [129, 1024, 8192, 11049])
     @pytest.mark.parametrize("kv_len_per_split", [128, 512])
     @pytest.mark.parametrize("dtype", [torch.float16])
     @pytest.mark.parametrize("backend", _backends)
-    def test_op(
-        self, num_heads, seq_len, kv_len_per_split, dtype, backend, arch
-    ):
+    def test_op(self, num_heads, seq_len, kv_len_per_split, dtype, backend, arch):
         """Test functional correctness of MLA decoding with split-kv"""
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
@@ -76,18 +75,10 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         torch.manual_seed(42)  # For reproducibility
         device = torch.device('cuda')
 
-        q = torch.randn(batch_size, num_heads, head_dim, device=device).to(
-            dtype
-        )
-        qpe = torch.randn(batch_size, num_heads, kpe_dim, device=device).to(
-            dtype
-        )
-        kv = torch.randn(batch_size, seq_len, head_dim, device=device).to(
-            dtype
-        )
-        kpe = torch.randn(batch_size, seq_len, kpe_dim, device=device).to(
-            dtype
-        )
+        q = torch.randn(batch_size, num_heads, head_dim, device=device).to(dtype)
+        qpe = torch.randn(batch_size, num_heads, kpe_dim, device=device).to(dtype)
+        kv = torch.randn(batch_size, seq_len, head_dim, device=device).to(dtype)
+        kpe = torch.randn(batch_size, seq_len, kpe_dim, device=device).to(dtype)
 
         # Compute softmax scale
         sm_scale = self._get_sm_scale(q, qpe)
@@ -98,5 +89,6 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         def ref_fn():
             return self.reference(q, qpe, kv, kpe, sm_scale)
 
-        self.assertCorrectness(split_kv_fn, ref_fn, {}, atol=1e-2, rtol=1e-2, multiple_outputs=False)
-
+        self.assertCorrectness(
+            split_kv_fn, ref_fn, {}, atol=1e-2, rtol=1e-2, multiple_outputs=False
+        )

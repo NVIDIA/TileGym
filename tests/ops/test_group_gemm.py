@@ -10,6 +10,8 @@ from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
 
 from .. import common
+
+
 class Test_GroupGemm(common.PyTestCase):
     @staticmethod
     def reference(group_A, group_B, transpose_b=False):
@@ -22,7 +24,8 @@ class Test_GroupGemm(common.PyTestCase):
             for a, b in zip(group_A, group_B)
         ]
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "group_m, group_n, group_k, transpose_b, dtype",
         [
@@ -45,11 +48,7 @@ class Test_GroupGemm(common.PyTestCase):
             ]
         ],
         ids=lambda x: (
-            str(x)
-            if isinstance(x, list)
-            else x.__name__
-            if hasattr(x, '__name__')
-            else str(x)
+            str(x) if isinstance(x, list) else x.__name__ if hasattr(x, '__name__') else str(x)
         ),
     )
     @pytest.mark.parametrize("backend", _backends)
@@ -64,9 +63,7 @@ class Test_GroupGemm(common.PyTestCase):
     ):
 
         if torch.cuda.get_device_capability()[0] == 8:
-            pytest.skip(
-                "skip due to unsupported multi cta on sm80"
-            )
+            pytest.skip("skip due to unsupported multi cta on sm80")
         if not is_backend_available(backend):
             pytest.skip("Cutile backend not available")
 
@@ -104,4 +101,3 @@ class Test_GroupGemm(common.PyTestCase):
             atol=1e-8,
             multiple_outputs=True,
         )
-

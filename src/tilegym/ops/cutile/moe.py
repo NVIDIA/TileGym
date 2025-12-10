@@ -17,6 +17,7 @@ from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
 
+
 @ct.kernel
 def fused_moe_kernel(
     # Pointers to matrices
@@ -101,9 +102,7 @@ def fused_moe_kernel(
         off_experts = off_experts.item()
         row_indices = offs_token // top_k
         a_row_offset = row_indices[:, None] * a_stride_1
-        mask_a = ct.broadcast_to(
-            token_mask[:, None], (TILE_SIZE_M, TILE_SIZE_K)
-        )
+        mask_a = ct.broadcast_to(token_mask[:, None], (TILE_SIZE_M, TILE_SIZE_K))
         # -----------------------------------------------------------
         # Iterate to compute a tile of the C matrix.
         # We accumulate into a `[TILE_SIZE_M, TILE_SIZE_N]` tile.

@@ -15,10 +15,12 @@ logger = get_logger(__name__)
 
 try:
     import cuda.tile as ct
+
     CUTILE_AVAILABLE = True
 
 except ImportError:
     import warnings
+
     warnings.warn("Failed to import cuda_tile_compiler, CUDA Tile backend is not available")
     CUTILE_AVAILABLE = False
 
@@ -26,8 +28,11 @@ except ImportError:
 def is_cutile_available():
     return CUTILE_AVAILABLE
 
+
 _AVAILABLE_BACKENDS: Set[str] = set()
 _CURRENT_BACKENDS: str = "cutile"
+
+
 def _check_backends_availability() -> Dict[str, bool]:
     availability = {
         "cutile": is_cutile_available(),
@@ -58,8 +63,10 @@ def _load_from_environment():
 def get_available_backends() -> Set[str]:
     return _AVAILABLE_BACKENDS
 
+
 def get_current_backend() -> str:
     return _CURRENT_BACKENDS
+
 
 def set_backend(backend: str) -> None:
     '''set the backend for ops'''
@@ -74,10 +81,14 @@ def is_backend_available(backend: str) -> bool:
     '''check if the backend is available'''
     return backend in _AVAILABLE_BACKENDS
 
+
 def assert_backend_available(backend: str) -> None:
     '''assert the backend is available'''
     if not is_backend_available(backend):
-        raise ValueError(f"Backend {backend} is not available, available backends: {_AVAILABLE_BACKENDS}")
+        raise ValueError(
+            f"Backend {backend} is not available, available backends: {_AVAILABLE_BACKENDS}"
+        )
+
 
 _initialize_available_backends()
 _load_from_environment()

@@ -34,25 +34,15 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
     def __init__(self, config, hidden_size=None, intermediate_size=None):
         super().__init__()
         self.config = config
-        self.hidden_size = (
-            config.hidden_size if hidden_size is None else hidden_size
-        )
+        self.hidden_size = config.hidden_size if hidden_size is None else hidden_size
         self.intermediate_size = (
-            config.intermediate_size
-            if intermediate_size is None
-            else intermediate_size
+            config.intermediate_size if intermediate_size is None else intermediate_size
         )
 
         # Keep individual weights for checkpoint compatibility
-        self.gate_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False
-        )
-        self.up_proj = nn.Linear(
-            self.hidden_size, self.intermediate_size, bias=False
-        )
-        self.down_proj = nn.Linear(
-            self.intermediate_size, self.hidden_size, bias=False
-        )
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
         # Create fused weight parameter for gate+up projections
         # This will be initialized in _initialize_fused_weights()
@@ -93,9 +83,7 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
 
         # Step 1: Fused gate+up projection
         # x @ fused_weight.T
-        fused_output = self.apply_matmul_internal(
-            x, self.fused_gate_up_weight, trans_b=True
-        )
+        fused_output = self.apply_matmul_internal(x, self.fused_gate_up_weight, trans_b=True)
 
         # Step 2: Fused SiLU and multiply
         # silu(fused_output[:, :intermediate_size]) * fused_output[:, intermediate_size:]
@@ -104,9 +92,7 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
 
         # Step 3: Down projection
         # glu_output @ down_proj.weight.T
-        result = self.apply_matmul_internal(
-            glu_output, self.down_proj.weight, trans_b=True
-        )
+        result = self.apply_matmul_internal(glu_output, self.down_proj.weight, trans_b=True)
 
         return result.view(*orig_shape)
 
@@ -116,9 +102,7 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
     def apply_matmul_internal(self, x, weight, trans_b):
         from tilegym.ops import matmul
 
-        return matmul(
-            x, weight, trans_b=trans_b, use_tma=True, static_persistent=True
-        )
+        return matmul(x, weight, trans_b=trans_b, use_tma=True, static_persistent=True)
 
     def update_fused_weights(self):
         """
@@ -126,4 +110,3 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
         Call this after loading checkpoints or updating weights.
         """
         self._initialize_fused_weights()
-

@@ -13,10 +13,12 @@ from tilegym.backend.cutile.autotuner import Autotuner
 from tilegym.backend.cutile.autotuner import Config
 from tilegym.backend.cutile.autotuner import autotune
 from tilegym.logger import get_logger
+
 logger = get_logger(__name__)
 
 # Type aliases for constants
 ConstInt = ct.Constant[int]
+
 
 def swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
     # Get the global IDs of the current CUDA block (CTA) in a 1D grid.
@@ -33,10 +35,14 @@ def swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
 
 
 @ct.kernel(num_ctas=ct.ByTarget(sm_100=2))
-def matmul_kernel(A, B, C,
-                  TILE_SIZE_M: ConstInt,         # Tile size along M dimension (rows of C)
-                  TILE_SIZE_N: ConstInt,         # Tile size along N dimension (columns of C)
-                  TILE_SIZE_K: ConstInt):        # Tile size along K dimension (inner product dimension)
+def matmul_kernel(
+    A,
+    B,
+    C,
+    TILE_SIZE_M: ConstInt,  # Tile size along M dimension (rows of C)
+    TILE_SIZE_N: ConstInt,  # Tile size along N dimension (columns of C)
+    TILE_SIZE_K: ConstInt,
+):  # Tile size along K dimension (inner product dimension)
     """
     cuTile kernel for performing matrix multiplication C = A @ B.
 
@@ -82,12 +88,16 @@ def matmul_kernel(A, B, C,
         # Load tile from matrix A.
         # The `index=(bidx, k_tile_idx)` specifies which (M-tile, K-tile) to load
         # from global memory A. `shape=(TILE_SIZE_M, TILE_SIZE_K)` defines the size of this tile.
-        a = ct.load(A, index=(bidx, k), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad).astype(dtype)
+        a = ct.load(
+            A, index=(bidx, k), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad
+        ).astype(dtype)
 
         # Load tile from matrix B.
         # The `index=(k_tile_idx, bidy)` specifies which (K-tile, N-tile) to load
         # from global memory B. `shape=(TILE_SIZE_K, TILE_SIZE_N)` defines the size of this tile.
-        b = ct.load(B, index=(k, bidy), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad).astype(dtype)
+        b = ct.load(
+            B, index=(k, bidy), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad
+        ).astype(dtype)
 
         # Perform Matrix Multiplication for the current tiles.
         # `ct.mma` computes the product of the two loaded tiles and accumulates the result.
@@ -101,6 +111,7 @@ def matmul_kernel(A, B, C,
     # The `(bidx, bidy)` directly corresponds to the tile's position in the 2D output matrix.
     ct.store(C, index=(bidx, bidy), tile=accumulator)
 
+
 def _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M):
     group_id = tile_id // num_bid_in_group
     first_bid_m = group_id * GROUP_SIZE_M
@@ -108,6 +119,7 @@ def _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M):
     bid_m = first_bid_m + (tile_id % group_size_m)
     bid_n = (tile_id % num_bid_in_group) // group_size_m
     return bid_m, bid_n
+
 
 @ct.kernel(num_ctas=2)
 def static_persistent_matmul_kernel(
@@ -139,9 +151,7 @@ def static_persistent_matmul_kernel(
     for tile_id in range(start_bid, num_tiles, num_programs):
         # Calculate tile coordinates using GROUP_SIZE_M grouping
         num_bid_in_group = GROUP_SIZE_M * num_bid_n
-        bid_m, bid_n = _compute_bid(
-            tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M
-        )
+        bid_m, bid_n = _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M)
 
         # Initialize accumulator
         accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=ct.float32)
@@ -177,7 +187,6 @@ def static_persistent_matmul_kernel(
         # Convert to output dtype and store
         result = ct.astype(accumulator, C.dtype)
         ct.store(C, index=(bid_m, bid_n), tile=result)
-
 
 
 def _matmul_autotune_configs():
@@ -224,32 +233,112 @@ def _static_persistent_matmul_autotune_configs():
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
         configs = [
-            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
-            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
-            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
+            Config(
+                TILE_SIZE_M=64,
+                TILE_SIZE_N=64,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=2,
+            ),
+            Config(
+                TILE_SIZE_M=64,
+                TILE_SIZE_N=64,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=4,
+            ),
+            Config(
+                TILE_SIZE_M=64,
+                TILE_SIZE_N=64,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=1,
+            ),
+            Config(
+                TILE_SIZE_M=128,
+                TILE_SIZE_N=64,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=2,
+            ),
+            Config(
+                TILE_SIZE_M=128,
+                TILE_SIZE_N=64,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=1,
+            ),
+            Config(
+                TILE_SIZE_M=128,
+                TILE_SIZE_N=64,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=4,
+            ),
+            Config(
+                TILE_SIZE_M=256,
+                TILE_SIZE_N=256,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=1,
+            ),
         ]
     else:
         # sm100 (Blackwell)
         configs = [
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
+            Config(
+                TILE_SIZE_M=128,
+                TILE_SIZE_N=512,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=4,
+                occupancy=1,
+            ),
+            Config(
+                TILE_SIZE_M=256,
+                TILE_SIZE_N=256,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=2,
+                occupancy=1,
+            ),
+            Config(
+                TILE_SIZE_M=256,
+                TILE_SIZE_N=256,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=1,
+            ),
+            Config(
+                TILE_SIZE_M=256,
+                TILE_SIZE_N=256,
+                TILE_SIZE_K=128,
+                GROUP_SIZE_M=8,
+                num_ctas=2,
+                occupancy=1,
+            ),
         ]
     return configs
 
 
 @autotune(search_space=_static_persistent_matmul_autotune_configs())
-def cutile_autotune_static_persistent_matmul(a, b, c, M, N, K, trans_a, trans_b, autotuner: Autotuner | None = None):
+def cutile_autotune_static_persistent_matmul(
+    a, b, c, M, N, K, trans_a, trans_b, autotuner: Autotuner | None = None
+):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     tuned_result = autotuner(
         torch.cuda.current_stream(),
         grid_fn=lambda named_args, cfg: (
-            min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
+            min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N))
+            * cfg.occupancy,
             1,
             1,
         ),
@@ -306,5 +395,6 @@ def matmul(
         assert trans_b == False, "trans_b is not supported for cutile"
         cutile_autotune_matmul(a, b, c)
     return c
+
 
 register_impl("matmul", "cutile")(matmul)

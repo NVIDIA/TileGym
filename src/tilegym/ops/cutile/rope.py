@@ -12,6 +12,7 @@ from .utils import next_power_of_2
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 
+
 @ct.kernel
 def rope_kernel(
     q,
@@ -37,12 +38,12 @@ def rope_kernel(
     # ####################################################################
     # Load cos and sin values
     # ####################################################################
-    cos_row = ct.load(
-        cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)
-    ).reshape((1, TILE_HD))
-    sin_row = ct.load(
-        sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)
-    ).reshape((1, TILE_HD))
+    cos_row = ct.load(cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape(
+        (1, TILE_HD)
+    )
+    sin_row = ct.load(sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape(
+        (1, TILE_HD)
+    )
 
     # ####################################################################
     # Process Q tensor
@@ -63,16 +64,12 @@ def rope_kernel(
     ct.store(
         q,
         index=(batch_idx, 0, row_idx, 0, 0),
-        tile=new_q_tile_1.reshape((1, TILE_QH, 1, 1, TILE_HD)).astype(
-            q.dtype
-        ),
+        tile=new_q_tile_1.reshape((1, TILE_QH, 1, 1, TILE_HD)).astype(q.dtype),
     )
     ct.store(
         q,
         index=(batch_idx, 0, row_idx, 1, 0),
-        tile=new_q_tile_2.reshape((1, TILE_QH, 1, 1, TILE_HD)).astype(
-            q.dtype
-        ),
+        tile=new_q_tile_2.reshape((1, TILE_QH, 1, 1, TILE_HD)).astype(q.dtype),
     )
 
     # ####################################################################
@@ -94,16 +91,12 @@ def rope_kernel(
     ct.store(
         k,
         index=(batch_idx, 0, row_idx, 0, 0),
-        tile=new_k_tile_1.reshape((1, TILE_KH, 1, 1, TILE_HD)).astype(
-            k.dtype
-        ),
+        tile=new_k_tile_1.reshape((1, TILE_KH, 1, 1, TILE_HD)).astype(k.dtype),
     )
     ct.store(
         k,
         index=(batch_idx, 0, row_idx, 1, 0),
-        tile=new_k_tile_2.reshape((1, TILE_KH, 1, 1, TILE_HD)).astype(
-            k.dtype
-        ),
+        tile=new_k_tile_2.reshape((1, TILE_KH, 1, 1, TILE_HD)).astype(k.dtype),
     )
 
 
@@ -183,9 +176,7 @@ class TileRopeFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
-        ctx, q, k, cos, sin, position_ids=None, unsqueeze_dim=1
-    ):
+    def forward(ctx, q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         """
         q size: (bsz, n_q_head, seq_len, head_dim)
         k size: (bsz, n_kv_head, seq_len, head_dim)
@@ -201,9 +192,7 @@ class TileRopeFunction(torch.autograd.Function):
         """
         Backward pass not yet implemented
         """
-        raise NotImplementedError(
-            "Backward pass is not implemented for TileRopeFunction"
-        )
+        raise NotImplementedError("Backward pass is not implemented for TileRopeFunction")
 
 
 @register_impl("apply_rope_base", backend="cutile")
@@ -222,9 +211,7 @@ def apply_rope_base(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     Returns:
         Query and key tensor pair with RoPE applied
     """
-    return TileRopeFunction.apply(
-        q, k, cos, sin, position_ids, unsqueeze_dim
-    )
+    return TileRopeFunction.apply(q, k, cos, sin, position_ids, unsqueeze_dim)
 
 
 @register_impl("get_apply_rope_func", backend="cutile")
@@ -232,6 +219,7 @@ def get_apply_rope_func(model='llama'):
     if model == 'llama':
         return apply_rope_base
     elif model == 'deepseek':
+
         def wrapper(q, k, freqs_cis):
             cos, sin = freqs_cis.real, freqs_cis.imag
 

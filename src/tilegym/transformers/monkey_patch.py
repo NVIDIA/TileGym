@@ -22,6 +22,7 @@ from tilegym.transformers.deepseek2.modeling_deepseek import (
 
 logger = get_logger(__name__)
 
+
 def apply_tilegym_kernel_to_llama(
     rope: bool = True,
     rms_norm: bool = True,
@@ -61,6 +62,7 @@ def apply_tilegym_kernel_to_llama(
 
         ALL_ATTENTION_FUNCTIONS['sdpa'] = get_fmha_interface()
 
+
 def apply_tilegym_kernel_to_deepseek_v2(
     rope: bool = True,
     rms_norm: bool = True,
@@ -94,9 +96,7 @@ def apply_tilegym_kernel_to_deepseek_v2(
         set_backend("cutile")
 
     if rope:
-        modeling_deepseek.apply_rotary_emb = get_apply_rope_func(
-            model='deepseek'
-        )
+        modeling_deepseek.apply_rotary_emb = get_apply_rope_func(model='deepseek')
 
     if rms_norm:
         modeling_deepseek.DeepseekV2RMSNorm = get_rms_norm_module()
@@ -109,16 +109,16 @@ def apply_tilegym_kernel_to_deepseek_v2(
 
     if attn:
         # Replace attention forward with TileGym implementation
-        modeling_deepseek.DeepseekV2Attention.forward = (
-            tilegym_deepseek_v2_forward
-        )
+        modeling_deepseek.DeepseekV2Attention.forward = tilegym_deepseek_v2_forward
     if moe:
         modeling_deepseek.DeepseekV2MoE = DeepseekV2MoETileGym
+
 
 MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "llama": apply_tilegym_kernel_to_llama,
     "deepseek_v2": apply_tilegym_kernel_to_deepseek_v2,
 }
+
 
 def _apply_tilegym_kernel(model_type: str, **kwargs) -> None:
     """
@@ -134,9 +134,7 @@ def _apply_tilegym_kernel(model_type: str, **kwargs) -> None:
         - kwargs: keyword arguments that are passed to the corresponding apply_TileGym_kernel_to_* function.
     """
     if not model_type:
-        logger.info(
-            "Model type was not provided. No TileGym kernels will be applied."
-        )
+        logger.info("Model type was not provided. No TileGym kernels will be applied.")
         return
 
     if model_type not in MODEL_TYPE_TO_APPLY_TILEGYM_FN.keys():
@@ -149,9 +147,13 @@ def _apply_tilegym_kernel(model_type: str, **kwargs) -> None:
     apply_fn_signature = inspect.signature(apply_fn)
 
     # Filter out the keyword arguments that are not supported by the apply function
-    applicable_kwargs = {key: value for key, value in kwargs.items() if key in apply_fn_signature.parameters}
+    applicable_kwargs = {
+        key: value for key, value in kwargs.items() if key in apply_fn_signature.parameters
+    }
 
-    logger.info(f"Applying TileGym kernels for model type: {model_type} with kwargs: {applicable_kwargs}")
+    logger.info(
+        f"Applying TileGym kernels for model type: {model_type} with kwargs: {applicable_kwargs}"
+    )
 
     # Assume this is invoked pre-model initialization, so we only need to patch transformers code
     apply_fn(**applicable_kwargs)

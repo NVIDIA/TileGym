@@ -23,6 +23,7 @@ from tilegym.backend import get_current_backend
 # NN Operations
 # ============================================================================
 
+
 @dispatch(
     "get_apply_rope_func",
 )
@@ -36,9 +37,7 @@ def get_apply_rope_func(model: str = 'llama'):
     Returns:
         Callable implementing RoPE application with signature similar to `apply_rope_base`
     """
-    raise NotImplementedError(
-        f"get_apply_rope_func is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"get_apply_rope_func is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -68,9 +67,7 @@ def apply_rope_base(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Query and key tensor pair with RoPE applied
     """
-    raise NotImplementedError(
-        f"apply_rope_base is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"apply_rope_base is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -85,9 +82,7 @@ def get_swiglu_module():
     Returns:
         nn.Module subclass implementing the SwiGLU MLP
     """
-    raise NotImplementedError(
-        f"get_swiglu_module is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"get_swiglu_module is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -104,9 +99,7 @@ def get_swiglu():
         a: (batch_size, seq_len, intermediate_size)
         b: (batch_size, seq_len, intermediate_size)
     """
-    raise NotImplementedError(
-        f"get_swiglu is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"get_swiglu is not implemented for {get_current_backend()}")
 
 
 def get_fused_swiglu_module():
@@ -126,6 +119,7 @@ def get_fused_swiglu_module():
         PartiallyFusedSwiGLUMLP class
     """
     from tilegym.ops.fused_swiglu import PartiallyFusedSwiGLUMLP
+
     return PartiallyFusedSwiGLUMLP
 
 
@@ -153,9 +147,7 @@ def rms_norm(
         static_persistent: Whether to use static persistent kernel, default is False
         **kwargs: Additional arguments for backend-specific configurations
     """
-    raise NotImplementedError(
-        f"rms_norm is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"rms_norm is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -165,9 +157,7 @@ def get_rms_norm_module():
     """
     Returns the RMSNorm module class.
     """
-    raise NotImplementedError(
-        f"get_rms_norm_module is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"get_rms_norm_module is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -191,9 +181,7 @@ def silu_and_mul(
     Returns:
         torch.Tensor with shape input[..., :H]
     """
-    raise NotImplementedError(
-        f"silu_and_mul is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"silu_and_mul is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -215,9 +203,7 @@ def softmax(
     Returns:
         torch.Tensor of shape (M, N) containing softmax probabilities
     """
-    raise NotImplementedError(
-        f"softmax is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"softmax is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -250,9 +236,7 @@ def fmha(
     Returns:
         Output tensor of shape (B, H, S, D)
     """
-    raise NotImplementedError(
-        f"fmha is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"fmha is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -280,9 +264,7 @@ def fmha_decode(
     Returns:
         Output tensor of shape (B, H_q, 1, D)
     """
-    raise NotImplementedError(
-        f"fmha_decode is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"fmha_decode is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -317,9 +299,7 @@ def mla(
     Returns:
         Output tensor of shape (B, H, S, D)
     """
-    raise NotImplementedError(
-        f"mla is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"mla is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -351,9 +331,7 @@ def mla_decoding(
             o: (B, H, D)
             l: (B, H)
     """
-    raise NotImplementedError(
-        f"mla_decoding is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"mla_decoding is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -411,24 +389,26 @@ def splitk_reduce(
     Returns:
         The finalized `attn_out` tensor [B, H, D]
     """
-    raise NotImplementedError(
-        f"splitk_reduce is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"splitk_reduce is not implemented for {get_current_backend()}")
 
 
 # ============================================================================
 # Linear Algebra Operations
 # ============================================================================
 
+
 @dispatch(
     "matmul",
 )
-def matmul(a: torch.Tensor, b: torch.Tensor,
-           trans_a: Optional[bool] = None,
-           trans_b: Optional[bool] = None,
-           static_persistent: Optional[bool] = True,
-           use_tma: Optional[bool] = True,
-           **kwargs: Any):
+def matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    trans_a: Optional[bool] = None,
+    trans_b: Optional[bool] = None,
+    static_persistent: Optional[bool] = True,
+    use_tma: Optional[bool] = True,
+    **kwargs: Any,
+):
     """
     Matrix multiplication operation that automatically selects implementation based on current backend
 
@@ -443,7 +423,9 @@ def matmul(a: torch.Tensor, b: torch.Tensor,
     Returns:
         torch.Tensor: Matrix multiplication result
     """
-    raise NotImplementedError(f"Matmul is not implemented for this backend: {get_current_backend()}")
+    raise NotImplementedError(
+        f"Matmul is not implemented for this backend: {get_current_backend()}"
+    )
 
 
 @dispatch(
@@ -475,5 +457,6 @@ def group_gemm(
     Returns:
         List[torch.Tensor]: Results of matrix multiplications
     """
-    raise NotImplementedError(f"Group GEMM is not implemented for this backend: {get_current_backend()}")
-
+    raise NotImplementedError(
+        f"Group GEMM is not implemented for this backend: {get_current_backend()}"
+    )

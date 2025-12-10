@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+
 def next_power_of_2(n: int):
     """Return the smallest power of 2 greater than or equal to n"""
     n -= 1

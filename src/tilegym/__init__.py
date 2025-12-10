@@ -49,4 +49,3 @@ __version__ = '0.1.0'
 
 import contextlib
 from enum import Enum
-

@@ -19,14 +19,13 @@ def reference_softmax(
     """Reference implementation of softmax using PyTorch"""
     return torch.nn.functional.softmax(x, dim=-1)
 
+
 register_impl("softmax", "torch")(reference_softmax)
 
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("blue", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 

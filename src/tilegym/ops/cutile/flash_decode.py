@@ -19,6 +19,7 @@ ConstInt = ct.Constant[int]
 
 INV_LOG_2 = 1.0 / math.log(2)
 
+
 @ct.kernel
 def attention_decode_kernel_grouped(
     Q,
@@ -134,18 +135,14 @@ def attention_decode_kernel_grouped(
             m_i = m_ij
 
     l = ct.sum(l_i, 0)
-    acc = ct.truediv(
-        acc, l[None, :], flush_to_zero=True, rounding_mode=RMd.APPROX
-    )
+    acc = ct.truediv(acc, l[None, :], flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = ct.astype(acc, ct.float32)
     acc = ct.transpose(acc)
     acc = ct.astype(acc, Att_Out.dtype)
     l = ct.add(m_i, ct.log2(l))
 
     # Store attention output
-    acc_reshaped = ct.reshape(
-        acc, (1, 1, QUERY_GROUP_TILE_SIZE, 1, HEAD_DIM)
-    )
+    acc_reshaped = ct.reshape(acc, (1, 1, QUERY_GROUP_TILE_SIZE, 1, HEAD_DIM))
 
     if NUM_Q_HEAD_PER_KV == QUERY_GROUP_TILE_SIZE:
         # Use TMA store for optimal performance
@@ -210,9 +207,7 @@ class _attention_decode(torch.autograd.Function):
         # Calculate number of tiles
         TILE_N = 128
         if kv_len_per_split is None:
-            NUM_SMS = torch.cuda.get_device_properties(
-                "cuda"
-            ).multi_processor_count
+            NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
             NUM_KV_SPLITS = NUM_SMS // (batch_size * num_kv_heads)
             TILE_SIZE = max(
                 TILE_N,

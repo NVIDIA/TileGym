@@ -48,10 +48,7 @@ def group_gemm_kernel(
         num_tiles = num_m_tiles * num_n_tiles
 
         # Process tiles for this group using persistent scheduling
-        while (
-            tile_idx >= last_problem_end
-            and tile_idx < last_problem_end + num_tiles
-        ):
+        while tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles:
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
             tile_n_idx = tile_idx_in_gemm % num_n_tiles

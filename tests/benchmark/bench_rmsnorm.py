@@ -21,9 +21,7 @@ def reference_rms_norm(
 ):
     """Reference implementation of RMSNorm"""
     if bias is not None:
-        raise NotImplementedError(
-            "Bias is not supported in standard CuTile RMSNorm"
-        )
+        raise NotImplementedError("Bias is not supported in standard CuTile RMSNorm")
     dims = tuple(i for i in range(-1, -len(normalized_shape) - 1, -1))
     variance = input.to(torch.float32).pow(2).mean(dims, keepdim=True)
     input = input * torch.rsqrt(variance + eps)
@@ -37,14 +35,13 @@ def reference_rms_norm(
 
     return weight * input
 
+
 register_impl("rms_norm", "torch")(reference_rms_norm)
 
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("blue", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -65,9 +62,7 @@ def create_benchmark_config(dtype, static_persistent=True):
 
     return triton.testing.Benchmark(
         x_names=["N"],
-        x_vals=[
-            2**i for i in range(10, 15)
-        ],  # Hidden size from 1024 to 16384
+        x_vals=[2**i for i in range(10, 15)],  # Hidden size from 1024 to 16384
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
@@ -96,16 +91,12 @@ def bench_rmsnorm(N, backend, dtype, static_persistent, M, device=DEVICE):
     x_shape = (M, N)
     w_shape = (N,)
 
-    x = (
-        torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False)
-        .mul_(0.5)
-        .add_(-2.3)
-    )
-    weight = torch.randn(
-        w_shape, dtype=dtype, device=device, requires_grad=False
-    )
+    x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
+    weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=False)
 
-    fn = lambda: tilegym.ops.rms_norm(x, w_shape, weight, eps, static_persistent=static_persistent, backend=backend)
+    fn = lambda: tilegym.ops.rms_norm(
+        x, w_shape, weight, eps, static_persistent=static_persistent, backend=backend
+    )
     ref = lambda: reference_rms_norm(x, w_shape, weight, eps)
     torch.testing.assert_close(fn(), ref(), atol=5e-2, rtol=0.0)
 

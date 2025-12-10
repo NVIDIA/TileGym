@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tilegym.backend import dispatch
 from tilegym.backend import get_current_backend
 
+
 @dispatch(
     "invoke_fused_moe_kernel",
 )
@@ -17,6 +18,7 @@ def invoke_fused_moe_kernel(*args, **kwargs) -> None:
     raise NotImplementedError(
         f"invoke_fused_moe_kernel is not implemented for this backend: {get_current_backend()}"
     )
+
 
 @dispatch(
     "moe_align_block_size",
@@ -29,9 +31,7 @@ def moe_align_block_size(
     )
 
 
-def moe_align_block_size_torch(
-    topk_ids: torch.Tensor, block_size: int, num_experts: int
-):
+def moe_align_block_size_torch(topk_ids: torch.Tensor, block_size: int, num_experts: int):
     """Align and sort tokens for block-wise MoE computation.
 
     Args:
@@ -55,27 +55,19 @@ def moe_align_block_size_torch(
     sorted_token_indices = torch.argsort(flat_expert_ids, stable=True)
 
     # Count tokens per expert before padding
-    expert_token_counts = torch.bincount(
-        flat_expert_ids, minlength=num_experts
-    )
+    expert_token_counts = torch.bincount(flat_expert_ids, minlength=num_experts)
     expert_block_counts = (expert_token_counts - 1 + block_size) // block_size
     total_blocks = expert_block_counts.sum()
-    sorted_token_ids = (
-        torch.zeros((total_blocks * block_size,), device=device) + total_tokens
-    )
+    sorted_token_ids = torch.zeros((total_blocks * block_size,), device=device) + total_tokens
     sorted_expert_ids = torch.zeros((total_blocks,), device=device)
 
     current_block = 0
     current_token = 0
     for i in range(num_experts):
-        sorted_expert_ids[
-            current_block : current_block + expert_block_counts[i]
-        ] = i
+        sorted_expert_ids[current_block : current_block + expert_block_counts[i]] = i
         sorted_token_start = current_block * block_size
         sorted_token_end = sorted_token_start + expert_token_counts[i]
-        sorted_token_ids[
-            sorted_token_start:sorted_token_end
-        ] = sorted_token_indices[
+        sorted_token_ids[sorted_token_start:sorted_token_end] = sorted_token_indices[
             current_token : current_token + expert_token_counts[i]
         ]
         current_token += expert_token_counts[i]
@@ -84,9 +76,7 @@ def moe_align_block_size_torch(
     sorted_token_ids = sorted_token_ids.to(torch.int32).to(topk_ids.device)
     sorted_expert_ids = sorted_expert_ids.to(torch.int32).to(topk_ids.device)
     num_tokens_post_padded = (
-        torch.tensor(sorted_token_ids.numel())
-        .to(torch.int32)
-        .to(topk_ids.device)
+        torch.tensor(sorted_token_ids.numel()).to(torch.int32).to(topk_ids.device)
     )
     return sorted_token_ids, sorted_expert_ids, num_tokens_post_padded
 
@@ -120,9 +110,7 @@ def fused_moe_torch(A, B, C, topk_weights, topk_ids, mul_routed_weight):
     for i in range(M):
         acc_selected[i] = acc[i, topk_ids[i]]
     if mul_routed_weight:
-        acc_selected = torch.einsum(
-            "mkn, mk -> mkn", acc_selected, topk_weights
-        )
+        acc_selected = torch.einsum("mkn, mk -> mkn", acc_selected, topk_weights)
 
     return acc_selected
 
@@ -193,11 +181,9 @@ def fused_experts_impl(
         device=hidden_states.device,
         dtype=out_dtype,
     )
-    
-    compute_type = (
-        torch.bfloat16 if hidden_states.dtype == torch.bfloat16 else torch.float16
-    )
-    
+
+    compute_type = torch.bfloat16 if hidden_states.dtype == torch.bfloat16 else torch.float16
+
     if inplace:
         out_hidden_states = hidden_states
     else:
@@ -220,14 +206,11 @@ def fused_experts_impl(
             # so the cache size and config are already set correctly and
             # do not need to be adjusted.
             intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-            intermediate_cache2 = intermediate_cache2[
-                : tokens_in_chunk * topk_ids.shape[1]
-            ]
+            intermediate_cache2 = intermediate_cache2[: tokens_in_chunk * topk_ids.shape[1]]
             intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
-
 
         _backend = get_current_backend()
         if _backend == "cutile":
@@ -258,6 +241,7 @@ def fused_experts_impl(
         )
         # Lazy import to avoid circular import
         from tilegym.ops.ops import silu_and_mul
+
         silu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
 
         if intermediate_cache2.dtype != hidden_states.dtype:
@@ -265,7 +249,10 @@ def fused_experts_impl(
 
         if use_fp8_w8a8:
             a2_scale = torch.ones(
-                [intermediate_cache2.shape[0], intermediate_cache2.shape[1] // config["BLOCK_SIZE_N"]],
+                [
+                    intermediate_cache2.shape[0],
+                    intermediate_cache2.shape[1] // config["BLOCK_SIZE_N"],
+                ],
                 dtype=torch.float32,
                 device=intermediate_cache2.device,
             )
@@ -305,6 +292,7 @@ def fused_experts_impl(
                 out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
             )
     return out_hidden_states
+
 
 def fused_moe_kernel_interface(
     hidden_states: torch.Tensor,

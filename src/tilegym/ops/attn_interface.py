@@ -15,15 +15,12 @@ from tilegym.backend import *
 ################Multi-head attention interface################
 ######################################################################
 
+
 def repeat_kv(tensor: torch.Tensor, num_groups: int) -> torch.Tensor:
     """Repeat KV heads for grouped query attention"""
     batch_size, num_kv_heads, seq_len, head_dim = tensor.shape
-    tensor = tensor.unsqueeze(2).expand(
-        batch_size, num_kv_heads, num_groups, seq_len, head_dim
-    )
-    return tensor.reshape(
-        batch_size, num_kv_heads * num_groups, seq_len, head_dim
-    )
+    tensor = tensor.unsqueeze(2).expand(batch_size, num_kv_heads, num_groups, seq_len, head_dim)
+    return tensor.reshape(batch_size, num_kv_heads * num_groups, seq_len, head_dim)
 
 
 def fmha_interface(
@@ -48,7 +45,7 @@ def fmha_interface(
         v: Value tensor
         is_causal: Whether to apply causal masking
         scaling: Scaling factor for attention scores
-        backend: Backend to use (cutile, torch)  
+        backend: Backend to use (cutile, torch)
         has_backward: Whether backward pass is needed
         kernel_configs: Kernel configuration parameters
         **kwargs: Additional arguments for specific backends
@@ -76,7 +73,7 @@ def get_fmha_interface(backend=None, kernel_configs=None):
     Factory function that returns a configured FMHA interface.
 
     Args:
-        backend: Backend to use (cutile, torch)  
+        backend: Backend to use (cutile, torch)
         kernel_configs: Kernel configuration parameters
     """
 
@@ -100,6 +97,7 @@ def get_fmha_interface(backend=None, kernel_configs=None):
 
         if q.size(-2) == 1:
             from tilegym.ops import fmha_decode
+
             return fmha_decode(q, k, v, sm_scale=scaling), None
 
         # Set default values
@@ -152,7 +150,7 @@ def mla_interface(
         is_causal: Whether to use causal mask
         scaling: Scaling factor, defaults to 1/sqrt(hidden_dim + pe_dim)
         kernel_configs: Kernel configuration parameters
-        backend: Backend to use (cutile, torch)  
+        backend: Backend to use (cutile, torch)
 
     Returns:
         Output tensor [batch, heads, seq_len, hidden_dim]

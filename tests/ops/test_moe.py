@@ -28,17 +28,11 @@ class Test_MOE(common.PyTestCase):
         top_k = topk_ids.shape[1]
 
         # Split w1 into gate and up projections
-        w1_gate = w1[
-            :, :intermediate_size, :
-        ]  # [n_experts, intermediate_size, hidden_size]
-        w1_up = w1[
-            :, intermediate_size:, :
-        ]  # [n_experts, intermediate_size, hidden_size]
+        w1_gate = w1[:, :intermediate_size, :]  # [n_experts, intermediate_size, hidden_size]
+        w1_up = w1[:, intermediate_size:, :]  # [n_experts, intermediate_size, hidden_size]
 
         # Create output tensor
-        final_output = torch.zeros(
-            num_tokens, output_size, dtype=dtype, device=device
-        )
+        final_output = torch.zeros(num_tokens, output_size, dtype=dtype, device=device)
 
         # Process each token
         for token_idx in range(num_tokens):
@@ -50,12 +44,8 @@ class Test_MOE(common.PyTestCase):
                 weight = topk_weights[token_idx, k_idx]
 
                 # Gate and up projections
-                gate_output = torch.matmul(
-                    hidden_states[token_idx], w1_gate[expert_idx].T
-                )
-                up_output = torch.matmul(
-                    hidden_states[token_idx], w1_up[expert_idx].T
-                )
+                gate_output = torch.matmul(hidden_states[token_idx], w1_gate[expert_idx].T)
+                up_output = torch.matmul(hidden_states[token_idx], w1_up[expert_idx].T)
 
                 # SiLU activation on gate, then multiply with up
                 intermediate = F.silu(gate_output) * up_output
@@ -70,7 +60,8 @@ class Test_MOE(common.PyTestCase):
 
         return final_output
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "num_tokens, hidden_size, moe_intermediate_size, n_experts, top_k",
         [
@@ -132,7 +123,7 @@ class Test_MOE(common.PyTestCase):
         quant_block = 128
         if dtype == torch.float8_e4m3fn:
             hidden_states_scale = 1.5 * torch.ones(
-                 (num_tokens, hidden_size // quant_block), device=device, dtype=torch.float32
+                (num_tokens, hidden_size // quant_block), device=device, dtype=torch.float32
             )
             w1_scale = 1.2 * torch.ones(
                 (n_experts, moe_intermediate_size * 2 // quant_block, hidden_size // quant_block),
@@ -153,12 +144,10 @@ class Test_MOE(common.PyTestCase):
             w2 = w2_fp8.to(init_dtype) * 0.5
 
         # Create topk_ids and topk_weights
-        topk_ids = torch.randint(
-            0, n_experts, (num_tokens, top_k), dtype=torch.long, device=device
+        topk_ids = torch.randint(0, n_experts, (num_tokens, top_k), dtype=torch.long, device=device)
+        topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device=device), dim=-1).to(
+            init_dtype
         )
-        topk_weights = torch.softmax(
-            torch.randn(num_tokens, top_k, device=device), dim=-1
-        ).to(init_dtype)
 
         # Ensure all tensors are contiguous
         hidden_states = hidden_states.contiguous()
@@ -228,4 +217,3 @@ class Test_MOE(common.PyTestCase):
             rtol=rtol,
             atol=atol,
         )
-

@@ -22,6 +22,7 @@ from .splitk_reduce import splitk_reduce
 
 INV_LOG_2 = 1.0 / math.log(2)
 
+
 @ct.kernel(occupancy=2)
 def naive_absorb_mla_transpose(
     Q,
@@ -201,9 +202,7 @@ class _mla_decoding_split_kv(torch.autograd.Function):
 
         if kv_len_per_split is None:
             # We want each SM to have at least one split kv
-            NUM_SMS = torch.cuda.get_device_properties(
-                "cuda"
-            ).multi_processor_count
+            NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
             num_split_kv_estimated = NUM_SMS // B
             kv_len_per_split = next_power_of_2(S_kv // num_split_kv_estimated)
             kv_len_per_split = max(kv_len_per_split, TILE_N)
@@ -267,15 +266,11 @@ class _mla_decoding_split_kv(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do, dl):
-        raise NotImplementedError(
-            "MLA Decoding Split-KV backward is not implemented yet"
-        )
+        raise NotImplementedError("MLA Decoding Split-KV backward is not implemented yet")
 
 
 @register_impl("mla_decoding_split_kv", backend="cutile")
-def mla_decoding_split_kv(
-    q, qpe, kv, kpe, sm_scale=None, kv_len_per_split=None, **kwargs
-):
+def mla_decoding_split_kv(q, qpe, kv, kpe, sm_scale=None, kv_len_per_split=None, **kwargs):
     """
     MLA Decoding with Split-KV interface
 

@@ -27,9 +27,7 @@ REQUIRED_TRANSFORMERS_VERSION = "4.55.2"
 current_version = transformers.__version__
 
 if version.parse(current_version) < version.parse(REQUIRED_TRANSFORMERS_VERSION):
-    raise ImportError(
-        f"In new transformers version, past_key_value is named to past_key_values"
-    )
+    raise ImportError(f"In new transformers version, past_key_value is named to past_key_values")
 
 from tilegym.ops import group_gemm
 from tilegym.logger import get_logger
@@ -76,17 +74,15 @@ def tilegym_deepseek_v2_forward(
         apply_rotary_emb,
     )
 
-    q_pe, k_pe = apply_rotary_emb(
-        q_pe, k_pe, position_embeddings.to(q_pe.device)
-    )
+    q_pe, k_pe = apply_rotary_emb(q_pe, k_pe, position_embeddings.to(q_pe.device))
 
     if past_key_values is not None:
         cache_kwargs = {"cache_position": cache_position}
         k_nope = self.kv_a_layernorm(k_nope)
-        k_nope,k_pe = past_key_values.update(k_nope, k_pe, self.layer_idx, cache_kwargs)
+        k_nope, k_pe = past_key_values.update(k_nope, k_pe, self.layer_idx, cache_kwargs)
 
     # prefill, normal implementation(mha)
-    if seq_length !=1 :
+    if seq_length != 1:
         if k_nope.shape[1] != seq_length:
             print(f"k_nope.shape: {k_nope.shape}, seq_length: {seq_length}")
             raise NotImplementedError("don't support chunk prefill now")
@@ -142,11 +138,7 @@ def _forward_normal(
     k_nope, value_states = torch.split(k_nope, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
     k_pe = k_pe.expand(*k_nope.shape[:-1], -1)
 
-    is_causal = (
-        q_nope.shape[2] > 1
-        and attention_mask is None
-        and getattr(self, "is_causal", True)
-    )
+    is_causal = q_nope.shape[2] > 1 and attention_mask is None and getattr(self, "is_causal", True)
     attn_output = (
         mla_interface(
             q_nope,
@@ -178,8 +170,8 @@ def _forward_absorb(
     if not hasattr(self, "k_up_proj"):
         wkv_b = self.kv_b_proj.weight
         wkv_b = wkv_b.view(q_head_num, -1, self.kv_lora_rank)
-        self.k_up_proj = wkv_b[:, :self.qk_nope_head_dim].contiguous()
-        self.v_up_proj = wkv_b[:, -self.v_head_dim:].contiguous()
+        self.k_up_proj = wkv_b[:, : self.qk_nope_head_dim].contiguous()
+        self.v_up_proj = wkv_b[:, -self.v_head_dim :].contiguous()
 
     # Use group_gemm to replace einsum operations - eliminates aten::matmul calls
     # Verified to work perfectly with bfloat16 (the model's dtype)
@@ -193,16 +185,10 @@ def _forward_absorb(
 
     if batch_size_mla == 1 and seq_len_mla == 1:
         # Fast path for decode (single token) - use group_gemm to eliminate aten::matmul
-        group_A_list = [
-            q_nope[0, h, 0, :].reshape(1, -1) for h in range(num_heads_mla)
-        ]
+        group_A_list = [q_nope[0, h, 0, :].reshape(1, -1) for h in range(num_heads_mla)]
         group_B_list = [self.k_up_proj[h, :, :] for h in range(num_heads_mla)]
-        group_C_list = group_gemm(
-            group_A_list, group_B_list, transpose_b=False
-        )
-        q_nope = torch.stack(
-            [c.reshape(seq_len_mla, -1) for c in group_C_list], dim=0
-        ).unsqueeze(0)
+        group_C_list = group_gemm(group_A_list, group_B_list, transpose_b=False)
+        q_nope = torch.stack([c.reshape(seq_len_mla, -1) for c in group_C_list], dim=0).unsqueeze(0)
     else:
         # Use group_gemm for prefill as well
         # einsum: "bhsd,hdc->bhsc" means for each (b, h): q_nope[b,h,:,:] @ k_up_proj[h,:,:]
@@ -216,9 +202,7 @@ def _forward_absorb(
                 # k_up_proj[h, :, :] has shape (qk_nope_head_dim, kv_lora_rank)
                 group_B_list.append(self.k_up_proj[h, :, :])
 
-        group_C_list = group_gemm(
-            group_A_list, group_B_list, transpose_b=False
-        )
+        group_C_list = group_gemm(group_A_list, group_B_list, transpose_b=False)
 
         # Reshape results back to (batch, heads, seq, kv_lora_rank)
         q_nope_list = []
@@ -253,16 +237,13 @@ def _forward_absorb(
     if batch_size_attn == 1 and seq_len_attn == 1:
         # Fast path for decode - use group_gemm to eliminate aten::matmul
         group_A_list = [
-            attn_output_expanded[0, h, 0, :].reshape(1, -1)
-            for h in range(num_heads_mla)
+            attn_output_expanded[0, h, 0, :].reshape(1, -1) for h in range(num_heads_mla)
         ]
         # v_up_proj is (heads, v_head_dim, kv_lora_rank), use transpose_b=True to avoid non-contiguous tensors
         group_B_list = [self.v_up_proj[h, :, :] for h in range(num_heads_mla)]
         group_C_list = group_gemm(group_A_list, group_B_list, transpose_b=True)
         attn_output = (
-            torch.stack(
-                [c.reshape(seq_len_attn, -1) for c in group_C_list], dim=0
-            )
+            torch.stack([c.reshape(seq_len_attn, -1) for c in group_C_list], dim=0)
             .unsqueeze(0)
             .transpose(1, 2)
         )
@@ -293,6 +274,7 @@ def _forward_absorb(
         attn_output = torch.stack(attn_output_list, dim=0).transpose(1, 2)
     return attn_output, attn_weights
 
+
 class DeepseekV2MoETileGym(nn.Module):
     """
     A mixed expert module containing shared experts.
@@ -305,24 +287,16 @@ class DeepseekV2MoETileGym(nn.Module):
 
         self.experts = nn.ModuleList(
             [
-                (
-                    DeepseekV2MLP(
-                        config, intermediate_size=config.moe_intermediate_size
-                    )
-                )
+                (DeepseekV2MLP(config, intermediate_size=config.moe_intermediate_size))
                 for _ in range(config.n_routed_experts)
             ]
         )
         self.gate = DeepseekV2MoEGate(config)
         if config.n_shared_experts is not None:
-            intermediate_size = (
-                config.moe_intermediate_size * config.n_shared_experts
-            )
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             # Use PartiallyFusedSwiGLUMLP for shared experts to eliminate PyTorch linear operations
             FusedSwiGLUMLP = get_fused_swiglu_module()
-            self.shared_experts = FusedSwiGLUMLP(
-                config=config, intermediate_size=intermediate_size
-            )
+            self.shared_experts = FusedSwiGLUMLP(config=config, intermediate_size=intermediate_size)
         self.ep_rank = 0
         self.experts_per_rank = config.n_routed_experts
         self.init = False
@@ -331,9 +305,7 @@ class DeepseekV2MoETileGym(nn.Module):
         if self.init:
             return
         if not hasattr(self, 'experts') or len(self.experts) == 0:
-            print(
-                "experts is empty, self.w1_merged and self.w2_merged will not be initialized"
-            )
+            print("experts is empty, self.w1_merged and self.w2_merged will not be initialized")
             return
 
         w1_merged = torch.cat(
@@ -369,9 +341,7 @@ class DeepseekV2MoETileGym(nn.Module):
         orig_shape = hidden_states.shape
         topk_indices, topk_weights = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        hidden_states = self.moe_infer(
-            hidden_states, topk_indices, topk_weights
-        ).view(*orig_shape)
+        hidden_states = self.moe_infer(hidden_states, topk_indices, topk_weights).view(*orig_shape)
         hidden_states = hidden_states + self.shared_experts(residuals)
         return hidden_states
 
@@ -397,11 +367,7 @@ class DeepseekV2MoETileGym(nn.Module):
             outputs.append(expert_out)
             start_idx = end_idx
 
-        outs = (
-            torch.cat(outputs, dim=0)
-            if len(outputs)
-            else sorted_tokens.new_empty(0)
-        )
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
         new_x = torch.empty_like(outs)
         new_x[idxs] = outs
         final_out = (

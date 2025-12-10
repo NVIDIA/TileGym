@@ -9,25 +9,28 @@ import tilegym
 
 from .. import common
 
+
 class Test_Softmax(common.PyTestCase):
     @staticmethod
     def reference(x):
         return torch.nn.functional.softmax(x, dim=-1)
 
-    _backends = ["cutile"]  
-    @pytest.mark.parametrize("m,n,dtype", [
-        (256, 256, torch.float32),
-        (256, 2048, torch.float32),
-        (256, 1024 * 32, torch.float32),
-        (256, 256, torch.float16),
-        (256, 2048, torch.float16),
-        (256, 9, torch.float16),
-        (256, 1009, torch.float16),
-    ])
-    @pytest.mark.parametrize("backend", _backends)
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
-        "use_tma", [True, False], ids=["use_tma=True", "use_tma=False"]
+        "m,n,dtype",
+        [
+            (256, 256, torch.float32),
+            (256, 2048, torch.float32),
+            (256, 1024 * 32, torch.float32),
+            (256, 256, torch.float16),
+            (256, 2048, torch.float16),
+            (256, 9, torch.float16),
+            (256, 1009, torch.float16),
+        ],
     )
+    @pytest.mark.parametrize("backend", _backends)
+    @pytest.mark.parametrize("use_tma", [True, False], ids=["use_tma=True", "use_tma=False"])
     def test_op(self, m, n, dtype, arch, backend, use_tma):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
@@ -36,7 +39,10 @@ class Test_Softmax(common.PyTestCase):
 
         device = torch.device('cuda')
         x = torch.rand(
-            m, n, device=device, dtype=dtype,
+            m,
+            n,
+            device=device,
+            dtype=dtype,
         )
         dout = torch.rand_like(x)
 

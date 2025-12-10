@@ -34,14 +34,12 @@ def reference_mla(
         qk = qk + torch.matmul(qpe, kpe.transpose(2, 3))
 
     qk = qk.float() * scaling
-    
+
     # Apply causal mask if needed
     if is_causal:
         seq_len = qk.shape[-2]
         if seq_len > 1:
-            mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=qk.device), diagonal=1
-            )
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=qk.device), diagonal=1)
             qk = qk.masked_fill(mask.bool(), float("-inf"))
 
     # Softmax attention
@@ -57,9 +55,7 @@ register_impl("mla", "torch")(reference_mla)
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("blue", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -97,12 +93,7 @@ def create_benchmark_config(dtype):
     )
 
 
-@triton.testing.perf_report(
-    [
-        create_benchmark_config(dtype)
-        for dtype in [torch.bfloat16]
-    ]
-)
+@triton.testing.perf_report([create_benchmark_config(dtype) for dtype in [torch.bfloat16]])
 def bench_mla(
     seq_len,
     backend,
@@ -114,25 +105,25 @@ def bench_mla(
     device=DEVICE,
 ):
     # Create input tensors
-    q = torch.empty(
-        batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype
-    ).normal_(mean=0.0, std=0.3)
+    q = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(
+        mean=0.0, std=0.3
+    )
 
-    qpe = torch.empty(
-        batch_size, num_heads, seq_len, d_pe, device=device, dtype=dtype
-    ).normal_(mean=0.0, std=0.3)
+    qpe = torch.empty(batch_size, num_heads, seq_len, d_pe, device=device, dtype=dtype).normal_(
+        mean=0.0, std=0.3
+    )
 
-    k = torch.empty(
-        batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype
-    ).normal_(mean=0.0, std=0.3)
+    k = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(
+        mean=0.0, std=0.3
+    )
 
-    kpe = torch.empty(
-        batch_size, 1, seq_len, d_pe, device=device, dtype=dtype
-    ).normal_(mean=0.0, std=0.3)
+    kpe = torch.empty(batch_size, 1, seq_len, d_pe, device=device, dtype=dtype).normal_(
+        mean=0.0, std=0.3
+    )
 
-    v = torch.empty(
-        batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype
-    ).normal_(mean=0.0, std=0.3)
+    v = torch.empty(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(
+        mean=0.0, std=0.3
+    )
 
     # Calculate scaling
     scaling = 1.0 / math.sqrt(head_dim + d_pe)

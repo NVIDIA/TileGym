@@ -27,9 +27,7 @@ register_impl("get_swiglu", "torch")(get_reference_swiglu)
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("blue", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 

@@ -10,6 +10,7 @@ import tilegym
 from tilegym.backend import set_backend
 from tests import common
 
+
 class Test_MLADecoding(common.PyTestCase):
     @staticmethod
     def reference(q, qpe, kv, kpe, sm_scale=None, compute_dtype=torch.half):
@@ -45,7 +46,8 @@ class Test_MLADecoding(common.PyTestCase):
         """Calculate the default attention scale factor"""
         return 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "num_heads, transpose",
         [(16, True), (32, True), (64, False), (128, False)],
@@ -80,29 +82,38 @@ class Test_MLADecoding(common.PyTestCase):
         device = torch.device('cuda')
 
         # Generate test data
-        q = torch.empty(
-            num_batch, num_heads, BLOCK_D, device=device, dtype=torch.float32
-        ).normal_(mean=0.3, std=0.2).to(dtype)
-
-        qpe = torch.empty(
-            num_batch, num_heads, BLOCK_KPE, device=device, dtype=torch.float32
-        ).normal_(mean=0.3, std=0.1).to(dtype) if BLOCK_KPE > 0 else torch.empty(
-            num_batch, num_heads, 0, device=device, dtype=dtype
+        q = (
+            torch.empty(num_batch, num_heads, BLOCK_D, device=device, dtype=torch.float32)
+            .normal_(mean=0.3, std=0.2)
+            .to(dtype)
         )
 
-        kv = torch.empty(
-            num_batch, S_kv, BLOCK_D, device=device, dtype=torch.float32
-        ).normal_(mean=0.3, std=0.2).to(dtype)
+        qpe = (
+            torch.empty(num_batch, num_heads, BLOCK_KPE, device=device, dtype=torch.float32)
+            .normal_(mean=0.3, std=0.1)
+            .to(dtype)
+            if BLOCK_KPE > 0
+            else torch.empty(num_batch, num_heads, 0, device=device, dtype=dtype)
+        )
 
-        kpe = torch.empty(
-            num_batch, S_kv, BLOCK_KPE, device=device, dtype=torch.float32
-        ).normal_(mean=0.3, std=0.1).to(dtype) if BLOCK_KPE > 0 else torch.empty(
-            num_batch, S_kv, 0, device=device, dtype=dtype
+        kv = (
+            torch.empty(num_batch, S_kv, BLOCK_D, device=device, dtype=torch.float32)
+            .normal_(mean=0.3, std=0.2)
+            .to(dtype)
+        )
+
+        kpe = (
+            torch.empty(num_batch, S_kv, BLOCK_KPE, device=device, dtype=torch.float32)
+            .normal_(mean=0.3, std=0.1)
+            .to(dtype)
+            if BLOCK_KPE > 0
+            else torch.empty(num_batch, S_kv, 0, device=device, dtype=dtype)
         )
 
         # Calculate proper scale factor
         sm_scale = self._get_sm_scale(q, qpe)
         if backend == "cutile":
+
             def tilegym_fn():
                 return tilegym.ops.cutile.mla_decoding.mla_decoding(
                     q,
@@ -111,6 +122,7 @@ class Test_MLADecoding(common.PyTestCase):
                     kpe,
                     sm_scale,
                 )
+
         else:
             pytest.skip(f"Backend {backend} not supported")
 

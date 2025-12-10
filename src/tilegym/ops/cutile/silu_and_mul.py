@@ -15,6 +15,7 @@ from cuda.tile._numeric_semantics import RoundingMode as RMd
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 
+
 def ensure_contiguous(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -26,6 +27,7 @@ def ensure_contiguous(fn):
         return fn(*args, **kwargs)
 
     return wrapper
+
 
 # To be launched with grid = number of rows (batch_size)
 # each "block" computes an entire row of the ouptut
@@ -68,6 +70,7 @@ def silu_and_mul_kernel_row_wise(
     out_col_idx = offsets
     ct.scatter(output, (row_idx, out_col_idx), result, check_bounds=True)
 
+
 @register_impl("silu_and_mul", backend="cutile")
 @ensure_contiguous
 def silu_and_mul(
@@ -92,9 +95,7 @@ def silu_and_mul(
     # Flatten input to 2D: (batch_size, 2 * hidden_size)
     input_flat = input.view(-1, original_shape[-1])
     batch_size = input_flat.shape[0]
-    n_elements = (
-        batch_size * hidden_size
-    )  # Total elements to process in output
+    n_elements = batch_size * hidden_size  # Total elements to process in output
 
     # Get final output shape
     output_shape = list(original_shape)
@@ -122,12 +123,6 @@ def silu_and_mul(
         torch.cuda.current_stream(),
         grid,
         silu_and_mul_kernel_row_wise,
-        (
-            input_flat,
-            output,
-            TILE_SIZE,
-            n_elements,
-            hidden_size
-        ),
+        (input_flat, output, TILE_SIZE, n_elements, hidden_size),
     )
     return output.reshape(*output_shape)

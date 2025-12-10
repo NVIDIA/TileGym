@@ -8,6 +8,7 @@ Cutile backend integration for TileGym
 
 try:
     from . import autotuner
+
     _AUTOTUNER_AVAILABLE = True
 except ImportError:
     autotuner = None

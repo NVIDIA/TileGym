@@ -22,14 +22,13 @@ def reference_persistent_matmul(
     """Reference implementation using PyTorch"""
     return torch.matmul(a, b)
 
+
 register_impl("matmul", "torch")(reference_persistent_matmul)
 
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("orange", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -74,28 +73,24 @@ if hasattr(torch, "float8_e5m2"):
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, backend, datatype, static_persistent):
     if datatype == torch.float8_e5m2:
-        a = torch.randn((M, K), device=DEVICE, dtype=torch.float16).to(
-            torch.float8_e5m2
-        )
-        b = torch.randn((K, N), device=DEVICE, dtype=torch.float16).to(
-            torch.float8_e5m2
-        )
+        a = torch.randn((M, K), device=DEVICE, dtype=torch.float16).to(torch.float8_e5m2)
+        b = torch.randn((K, N), device=DEVICE, dtype=torch.float16).to(torch.float8_e5m2)
     else:
         a = torch.randn((M, K), device=DEVICE, dtype=datatype)
         b = torch.randn((K, N), device=DEVICE, dtype=datatype)
 
     quantiles = [0.5, 0.2, 0.8]
 
-    fn = lambda: tilegym.ops.matmul(a, b, use_tma=True, static_persistent=static_persistent, backend=backend)
+    fn = lambda: tilegym.ops.matmul(
+        a, b, use_tma=True, static_persistent=static_persistent, backend=backend
+    )
 
     if datatype != torch.float8_e5m2:
         # torch doesn't support FP8 matmul
         ref = lambda: reference_persistent_matmul(a, b)
         torch.testing.assert_close(fn(), ref())
 
-    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-        fn, quantiles=quantiles
-    )
+    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 

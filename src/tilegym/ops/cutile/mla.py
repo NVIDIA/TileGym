@@ -10,6 +10,7 @@ import torch
 from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from tilegym.backend import register_impl
+
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 
@@ -180,9 +181,7 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do):
-        raise NotImplementedError(
-            "Backward pass is not implemented for CuTile MLA"
-        )
+        raise NotImplementedError("Backward pass is not implemented for CuTile MLA")
 
 
 class Attention:

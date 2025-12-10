@@ -13,9 +13,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("blue", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -64,10 +62,7 @@ def create_benchmark_config(head_dim, use_split_kv, dtype):
 
     return triton.testing.Benchmark(
         x_names=["kv_seq_len"],
-        x_vals=[
-            2**i for i in range(8, 15)  # KV cache length from 256 to 16384
-        ]
-        + [11043],
+        x_vals=[2**i for i in range(8, 15)] + [11043],  # KV cache length from 256 to 16384
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
@@ -104,27 +99,29 @@ def bench_mla_decoding(
     use_split_kv,
     device=DEVICE,
 ):
-    q = torch.empty(
-        batch_size, num_heads, head_dim, device=device, dtype=dtype
-    ).normal_(mean=0.3, std=0.2)
+    q = torch.empty(batch_size, num_heads, head_dim, device=device, dtype=dtype).normal_(
+        mean=0.3, std=0.2
+    )
 
-    qpe = torch.empty(
-        batch_size, num_heads, d_pe, device=device, dtype=dtype
-    ).normal_(mean=0.3, std=0.1)
+    qpe = torch.empty(batch_size, num_heads, d_pe, device=device, dtype=dtype).normal_(
+        mean=0.3, std=0.1
+    )
 
-    kv = torch.empty(
-        batch_size, kv_seq_len, head_dim, device=device, dtype=dtype
-    ).normal_(mean=0.3, std=0.2)
+    kv = torch.empty(batch_size, kv_seq_len, head_dim, device=device, dtype=dtype).normal_(
+        mean=0.3, std=0.2
+    )
 
-    kpe = torch.empty(
-        batch_size, kv_seq_len, d_pe, device=device, dtype=dtype
-    ).normal_(mean=0.3, std=0.1)
+    kpe = torch.empty(batch_size, kv_seq_len, d_pe, device=device, dtype=dtype).normal_(
+        mean=0.3, std=0.1
+    )
 
     scaling = 1.0 / math.sqrt(head_dim + d_pe)
 
     # Use unified dispatch system
     if use_split_kv:
-        fn_raw = lambda: tilegym.ops.mla_decoding_split_kv(q, qpe, kv, kpe, scaling, backend=backend)
+        fn_raw = lambda: tilegym.ops.mla_decoding_split_kv(
+            q, qpe, kv, kpe, scaling, backend=backend
+        )
     else:
         fn_raw = lambda: tilegym.ops.mla_decoding(q, qpe, kv, kpe, scaling, backend=backend)
 

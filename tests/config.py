@@ -105,10 +105,7 @@ class Config(metaclass=CacheMeta):
             default=None,
             choices=['txt', 'html', 'csv', 'json', 'md'],
             type=str,
-            help=(
-                'set DUMP to store results of performance tests in a '
-                'specified format'
-            ),
+            help=('set DUMP to store results of performance tests in a ' 'specified format'),
         )
         parser.add_argument(
             '--dump-dir',
@@ -117,10 +114,7 @@ class Config(metaclass=CacheMeta):
             required=False,
             default='/tmp/',
             type=str,
-            help=(
-                'set DUMP_DIR to specify directory to store results of '
-                'performance tests'
-            ),
+            help=('set DUMP_DIR to specify directory to store results of ' 'performance tests'),
         )
         parser.add_argument(
             '--load',
@@ -130,10 +124,7 @@ class Config(metaclass=CacheMeta):
             default=None,
             choices=['txt', 'html', 'csv', 'json', 'md'],
             type=str,
-            help=(
-                'set LOAD to load results of performance tests in a '
-                'specified format'
-            ),
+            help=('set LOAD to load results of performance tests in a ' 'specified format'),
         )
         parser.add_argument(
             '--load-dir',
@@ -142,10 +133,7 @@ class Config(metaclass=CacheMeta):
             required=False,
             default='/tmp/',
             type=str,
-            help=(
-                'set LOAD_DIR to specify directory to load results of '
-                'performance tests'
-            ),
+            help=('set LOAD_DIR to specify directory to load results of ' 'performance tests'),
         )
         parser.add_argument(
             '--load-names',
@@ -154,9 +142,7 @@ class Config(metaclass=CacheMeta):
             nargs='*',
             default=['cutile'],
             type=str,
-            help=(
-                'set LOAD_NAMES to select which test series should be loaded'
-            ),
+            help=('set LOAD_NAMES to select which test series should be loaded'),
         )
         parser.add_argument(
             '--warmup',
@@ -164,10 +150,7 @@ class Config(metaclass=CacheMeta):
             action=FromEnvironment,
             default=100,
             type=float,
-            help=(
-                'set WARMUP to specify the warmup duration for performance '
-                'tests [ms]'
-            ),
+            help=('set WARMUP to specify the warmup duration for performance ' 'tests [ms]'),
         )
         parser.add_argument(
             '--rep',
@@ -285,9 +268,7 @@ class Config(metaclass=CacheMeta):
             action=FromEnvironment,
             default=False,
             type=bool,
-            help=(
-                'set PRINT_MATCHING to always print info from assertAllClose'
-            ),
+            help=('set PRINT_MATCHING to always print info from assertAllClose'),
         )
         parser.add_argument(
             '--verbose',
@@ -311,4 +292,3 @@ class Config(metaclass=CacheMeta):
         if cls.args.help:
             parser.print_help()
             sys.exit(0)
-

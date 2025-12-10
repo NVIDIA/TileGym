@@ -9,13 +9,15 @@ from tilegym import set_backend
 from tilegym.ops import get_swiglu
 from tests import common
 
+
 class Test_SwiGLU(common.PyTestCase):
     @staticmethod
-    def reference(a,b):
+    def reference(a, b):
         """Reference implementation of SwiGLU using vanilla PyTorch"""
         return F.silu(a) * b
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "batch_size,seq_len,hidden_size,intermediate_size",
         [
@@ -32,7 +34,6 @@ class Test_SwiGLU(common.PyTestCase):
             set_backend(backend)
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
-
 
         # Generate input data
         a = torch.randn(batch_size, seq_len, hidden_size, device='cuda')

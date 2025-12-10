@@ -11,6 +11,7 @@ import torch
 
 from tilegym.backend import register_impl
 
+
 def ceil_div(a, b):
     return (a + b - 1) // b
 
@@ -87,9 +88,7 @@ def moe_align_block_size_stage3(
         cnt_offset = off_cnt + i - 1 + ct.arange(1, dtype=ct.int32)
         token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
 
-        block_size_tile = ct.full(
-            (1,), block_size, dtype=token_cnt.dtype
-        )
+        block_size_tile = ct.full((1,), block_size, dtype=token_cnt.dtype)
         div_result = ct.add(
             token_cnt,
             ct.sub(block_size_tile, ct.ones((1,), dtype=token_cnt.dtype)),
@@ -183,9 +182,7 @@ def _moe_align_block_size(
     )
     tokens_cnts_flat = tokens_cnts.reshape(-1)
 
-    cumsum = torch.zeros(
-        (num_experts + 1,), dtype=torch.int32, device=topk_ids.device
-    )
+    cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
     tokens_per_thread = ceil_div(numel, num_experts)
 
     # Launch stage 1
@@ -232,9 +229,7 @@ def _moe_align_block_size(
 
 
 def moe_align_block_size(
-    topk_ids: torch.Tensor,
-    block_size: int,
-    num_experts: int
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -274,19 +269,11 @@ def moe_align_block_size(
         by block_size for proper block matrix operations.
     """
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-    sorted_ids = torch.empty(
-        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
-    )
+    sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
-    max_num_m_blocks = math.ceil(
-        max_num_tokens_padded / block_size
-    )
-    expert_ids = torch.empty(
-        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
-    )
-    num_tokens_post_pad = torch.empty(
-        (1), dtype=torch.int32, device=topk_ids.device
-    )
+    max_num_m_blocks = math.ceil(max_num_tokens_padded / block_size)
+    expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
     _moe_align_block_size(
         topk_ids,
         num_experts,

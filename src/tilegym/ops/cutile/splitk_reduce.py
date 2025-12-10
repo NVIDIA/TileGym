@@ -18,6 +18,7 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
 
+
 @ct.kernel(occupancy=4)
 def splitk_reduce_kernel(
     attn_splitk_out,
@@ -85,13 +86,10 @@ def splitk_reduce_kernel(
             ct.astype(out_splitk, ct.float32),
             ct.zeros((1, TILE_D), dtype=ct.float32),
         )
-        numerator_normalized = ct.extract(
-            mma_result, (0, 0), shape=(1, TILE_D)
-        )
+        numerator_normalized = ct.extract(mma_result, (0, 0), shape=(1, TILE_D))
     else:
         numerator_normalized = ct.sum(
-            out_splitk
-            * ct.reshape(sumexp_normalized_splitk, (NUM_KV_SPLITS_POW2, 1)),
+            out_splitk * ct.reshape(sumexp_normalized_splitk, (NUM_KV_SPLITS_POW2, 1)),
             axis=0,
         )
 
@@ -110,6 +108,7 @@ def splitk_reduce_kernel(
         allow_tma=True,
         latency=2,
     )
+
 
 @register_impl("splitk_reduce", backend="cutile")
 def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):

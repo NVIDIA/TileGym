@@ -11,6 +11,7 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
+
 @ct.kernel
 def rms_norm_kernel_gather(
     x,
@@ -47,6 +48,7 @@ def rms_norm_kernel_gather(
         yj = ct.astype(yj, x.dtype)
         ct.scatter(out, (row, offs), yj, latency=1)
 
+
 @ct.kernel
 def rms_norm_kernel_static_persistent(
     X,  # Input tensor
@@ -80,7 +82,9 @@ def rms_norm_kernel_static_persistent(
     for current_bid in range(bid, upper_bound, num_tile_blocks):
         # Load input tile
         x = ct.load(
-            X, index=(current_bid, 0), shape=(TILE_SIZE_M, TILE_SIZE_N),
+            X,
+            index=(current_bid, 0),
+            shape=(TILE_SIZE_M, TILE_SIZE_N),
             latency=10,  # +2% perf from this hint
         )
         x = ct.astype(x, ct.float32)
@@ -89,9 +93,7 @@ def rms_norm_kernel_static_persistent(
         x_squared = ct.mul(x, x)
 
         # Step 2: Reduce sum along axis=1 (columns)
-        x2_sum = ct.sum(
-            x_squared, axis=1, keepdims=True
-        )  # Shape: [TILE_SIZE_M, 1]
+        x2_sum = ct.sum(x_squared, axis=1, keepdims=True)  # Shape: [TILE_SIZE_M, 1]
 
         # Step 3: Compute variance (divide by N)
         N_f32 = ct.full((TILE_SIZE_M, 1), N * 1.0, dtype=ct.float32)
@@ -119,10 +121,13 @@ def rms_norm_kernel_static_persistent(
 
         # Store result
         ct.store(
-            Y, index=(current_bid, 0), tile=y,
+            Y,
+            index=(current_bid, 0),
+            tile=y,
             allow_tma=False,  # +30% perf
             latency=3,  # +3% perf from this hint
         )
+
 
 class RMSNorm(torch.autograd.Function):
     @staticmethod
@@ -167,9 +172,7 @@ class RMSNorm(torch.autograd.Function):
             bias = bias.detach()
         x_arg = x_arg.detach()
 
-        NUM_SMS = torch.cuda.get_device_properties(
-            "cuda"
-        ).multi_processor_count
+        NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
         if static_persistent is None:
             if M > NUM_SMS * 2:
@@ -207,21 +210,12 @@ class RMSNorm(torch.autograd.Function):
                 torch.cuda.current_stream(),
                 grid,
                 kernel_sp,
-                (
-                    x_arg,
-                    y,
-                    weight,
-                    TILE_SIZE_M,
-                    TILE_SIZE_N,
-                    eps
-                ),
+                (x_arg, y, weight, TILE_SIZE_M, TILE_SIZE_N, eps),
             )
         else:
             # Standard mode
             if bias is not None:
-                raise NotImplementedError(
-                    "Bias is not supported in standard CuTile RMSNorm"
-                )
+                raise NotImplementedError("Bias is not supported in standard CuTile RMSNorm")
 
             rstd = torch.empty((M,), dtype=torch.float32, device='cuda')
             MAX_FUSED_SIZE = 4096 // x.element_size()
@@ -256,15 +250,11 @@ class RMSNorm(torch.autograd.Function):
         Backward pass - currently only implemented for standard mode.
         Static persistent mode backward pass would need additional implementation.
         """
-        raise NotImplementedError(
-            "Backward pass is not implemented for RMSNorm"
-        )
+        raise NotImplementedError("Backward pass is not implemented for RMSNorm")
 
 
 @register_impl("rms_norm", backend="cutile")
-def rms_norm(
-    input, normalized_shape, weight, eps, bias=None, static_persistent=None, **kwargs
-):
+def rms_norm(input, normalized_shape, weight, eps, bias=None, static_persistent=None, **kwargs):
     """
     Root mean square normalization implemented using CUDA Tile
 
@@ -280,9 +270,8 @@ def rms_norm(
     Returns:
         Normalized tensor with same shape as input
     """
-    return RMSNorm.apply(
-        input, normalized_shape, weight, eps, bias, static_persistent
-    )
+    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, static_persistent)
+
 
 class TileRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -320,9 +309,7 @@ class TileRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(
-            variance + self.variance_epsilon
-        )
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):

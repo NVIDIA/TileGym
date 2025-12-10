@@ -17,6 +17,7 @@ ConstBool = ct.Constant[bool]
 
 INV_LOG_2 = 1.0 / math.log(2)
 
+
 @ct.kernel
 def naive_absorb_mla_transpose(
     Q,
@@ -152,9 +153,7 @@ class _mla_decoding(torch.autograd.Function):
         TILE_KPE = kpe.shape[2]
         S_kv = kv.shape[1]
         o = torch.empty_like(q)
-        l = torch.empty(
-            (B, num_head), device=q.device, dtype=torch.float32
-        )
+        l = torch.empty((B, num_head), device=q.device, dtype=torch.float32)
 
         # Launch fmha fwd kernel
         grid = (math.ceil(num_head / TILE_H), B, 1)
@@ -186,7 +185,6 @@ class _mla_decoding(torch.autograd.Function):
         raise NotImplementedError()
 
 
-
 @register_impl("mla_decoding", backend="cutile")
 def mla_decoding(
     q: torch.Tensor,
@@ -200,11 +198,7 @@ def mla_decoding(
     TILE_H = 16
     TILE_N = 128
     num_ctas = None  # Let compiler auto-pick
-    assert (
-        transpose == True
-    ), "CuTile MLA Decoding only supports transpose=True"
+    assert transpose == True, "CuTile MLA Decoding only supports transpose=True"
     if sm_scale is None:
         sm_scale = 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
-    return _mla_decoding.apply(
-        q, qpe, kv, kpe, sm_scale, TILE_H, TILE_N, num_ctas
-    )
+    return _mla_decoding.apply(q, qpe, kv, kpe, sm_scale, TILE_H, TILE_N, num_ctas)

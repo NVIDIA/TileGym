@@ -22,14 +22,13 @@ def reference_matmul(
     """Reference implementation using PyTorch"""
     return torch.matmul(a, b)
 
+
 register_impl("matmul", "torch")(reference_matmul)
 
 
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
-    ("cutile", "CuTile", ("orange", "-"))
-    if is_backend_available("cutile")
-    else None,
+    ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
@@ -70,19 +69,12 @@ def create_benchmark_config(datatype):
 
 
 @triton.testing.perf_report(
-    [
-        create_benchmark_config(datatype)
-        for datatype in [torch.float16, torch.float8_e5m2]
-    ]
+    [create_benchmark_config(datatype) for datatype in [torch.float16, torch.float8_e5m2]]
 )
 def benchmark(M, N, K, backend, datatype):
     if datatype == torch.float8_e5m2:
-        a = torch.randn((M, K), device=DEVICE, dtype=torch.float16).to(
-            torch.float8_e5m2
-        )
-        b = torch.randn((K, N), device=DEVICE, dtype=torch.float16).to(
-            torch.float8_e5m2
-        )
+        a = torch.randn((M, K), device=DEVICE, dtype=torch.float16).to(torch.float8_e5m2)
+        b = torch.randn((K, N), device=DEVICE, dtype=torch.float16).to(torch.float8_e5m2)
     else:
         a = torch.randn((M, K), device=DEVICE, dtype=datatype)
         b = torch.randn((K, N), device=DEVICE, dtype=datatype)
@@ -96,9 +88,7 @@ def benchmark(M, N, K, backend, datatype):
         ref = lambda: reference_matmul(a, b)
         torch.testing.assert_close(fn(), ref())
 
-    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-        fn, quantiles=quantiles
-    )
+    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 

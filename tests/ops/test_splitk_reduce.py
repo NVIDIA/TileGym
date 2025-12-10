@@ -22,15 +22,11 @@ class Test_SplitkReduce(common.PyTestCase):
         lse_splitk = lse_splitk_out.float()
 
         # Find the maximum LSE across splits for numerical stability
-        lse_max = torch.max(lse_splitk, dim=-1, keepdim=True)[
-            0
-        ]  # [B, num_heads, 1]
+        lse_max = torch.max(lse_splitk, dim=-1, keepdim=True)[0]  # [B, num_heads, 1]
 
         # Compute normalized sum-exp values
         # Convert from log2 to natural log, then back to log2
-        sumexp_normalized_splitk = torch.exp2(lse_splitk - lse_max) / math.log(
-            2
-        )
+        sumexp_normalized_splitk = torch.exp2(lse_splitk - lse_max) / math.log(2)
         sumexp_normalized = torch.sum(
             sumexp_normalized_splitk, dim=-1, keepdim=True
         )  # [B, num_heads, 1]
@@ -41,19 +37,16 @@ class Test_SplitkReduce(common.PyTestCase):
         )  # [B, num_heads, head_dim]
 
         # Final output
-        attn_out = (
-            numerator_normalized / sumexp_normalized
-        )  # [B, num_heads, head_dim]
+        attn_out = numerator_normalized / sumexp_normalized  # [B, num_heads, head_dim]
 
         return attn_out.to(attn_splitk_out.dtype)
 
-    _backends = ["cutile"]  
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize("batch_size", [1, 2])  # Match MLA workload
     @pytest.mark.parametrize("num_heads", [16, 32])  # Match MLA workload
     @pytest.mark.parametrize("head_dim", [512])  # Match MLA BLOCK_D
-    @pytest.mark.parametrize(
-        "num_kv_splits", [1, 2, 8, 16]
-    )  # Common MLA split counts
+    @pytest.mark.parametrize("num_kv_splits", [1, 2, 8, 16])  # Common MLA split counts
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("backend", _backends)
     def test_op(
@@ -119,14 +112,10 @@ class Test_SplitkReduce(common.PyTestCase):
         )  # Scale to reasonable LSE range
 
         # Allocate output tensor
-        attn_out = torch.empty(
-            batch_size, num_heads, head_dim, device=device, dtype=dtype
-        )
+        attn_out = torch.empty(batch_size, num_heads, head_dim, device=device, dtype=dtype)
 
         def splitk_reduce_fn():
-            return tilegym.ops.splitk_reduce(
-                attn_splitk_out, lse_splitk_out, attn_out, S_kv
-            )
+            return tilegym.ops.splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv)
 
         def ref_fn():
             return self.reference(attn_splitk_out, lse_splitk_out, S_kv)
@@ -139,4 +128,3 @@ class Test_SplitkReduce(common.PyTestCase):
             rtol=1e-2,
             multiple_outputs=False,
         )
-
