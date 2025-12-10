@@ -6,6 +6,9 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:  # Allow manual trigger
 
+env:
+  IMAGE_NAME: tilegym-transformers
+
 jobs:
   cleanup:
     name: Delete Images for Closed PRs
@@ -15,7 +18,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const packageName = 'tilegym-transformers';
+            const packageName = process.env.IMAGE_NAME;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             
