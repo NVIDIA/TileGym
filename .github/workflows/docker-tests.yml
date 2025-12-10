@@ -1,0 +1,189 @@
+name: tilegym-build-and-test
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+
+jobs:
+  config:
+    name: parse-ci-config
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.parse.outputs.build }}
+      run_ops: ${{ steps.parse.outputs.run_ops }}
+      run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
+      image_tag: ${{ steps.parse.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get PR info
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prBody = '';
+            let prNumber = '';
+            if (context.eventName === 'pull_request') {
+              prBody = context.payload.pull_request.body || '';
+              prNumber = context.payload.pull_request.number.toString();
+            }
+            return { prBody, prNumber };
+
+      - name: Parse config
+        id: parse
+        env:
+          PR_BODY: ${{ fromJSON(steps.pr.outputs.result).prBody }}
+          PR_NUMBER: ${{ fromJSON(steps.pr.outputs.result).prNumber }}
+        run: |
+          pip install pyyaml --quiet
+          python3 .github/scripts/parse_pr_config.py
+          
+          # Set image tag based on context
+          if [ -n "$PR_NUMBER" ]; then
+            echo "image_tag=pr-${PR_NUMBER}" >> $GITHUB_OUTPUT
+          else
+            echo "image_tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: build-tilegym-transformers-image
+    needs: config
+    if: needs.config.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and export Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./modeling/transformers/Dockerfile
+          tags: |
+            tilegym-transformers:latest
+            ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ needs.config.outputs.image_tag }}
+            ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/tilegym-transformers.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Compress Docker image
+        run: |
+          gzip /tmp/tilegym-transformers.tar
+          ls -lh /tmp/tilegym-transformers.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilegym-docker-image
+          path: /tmp/tilegym-transformers.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+      - name: Push to GHCR for future reuse
+        run: |
+          docker load --input /tmp/tilegym-transformers.tar
+          docker push ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ needs.config.outputs.image_tag }}
+          docker push ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ github.sha }}
+
+  test-ops:
+    name: test-ops
+    needs: [config, build]
+    if: |
+      always() && 
+      needs.config.outputs.run_ops == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: linux-amd64-gpu-rtxpro6000-latest-1
+    steps:
+      - name: Download Docker image artifact (if built)
+        if: needs.config.outputs.build == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: tilegym-docker-image
+          path: /tmp
+
+      - name: Load Docker image from artifact
+        if: needs.config.outputs.build == 'true'
+        run: |
+          gunzip /tmp/tilegym-transformers.tar.gz
+          docker load --input /tmp/tilegym-transformers.tar
+
+      - name: Pull Docker image from GHCR (if build skipped)
+        if: needs.config.outputs.build == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo $GITHUB_TOKEN | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ needs.config.outputs.image_tag }} || \
+            (echo "Error: No cached image found in GHCR. Please run with build: true first." && exit 1)
+          docker tag ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ needs.config.outputs.image_tag }} tilegym-transformers:latest
+
+      - name: Run ops tests
+        run: |
+          docker run --rm \
+            --gpus all \
+            -w /workspace/tilegym \
+            tilegym-transformers:latest \
+            pytest -s tests/ops -v -k test_op
+
+  test-benchmark:
+    name: test-benchmark
+    needs: [config, build]
+    if: |
+      always() && 
+      needs.config.outputs.run_benchmark == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: linux-amd64-gpu-rtxpro6000-latest-1
+    steps:
+      - name: Download Docker image artifact (if built)
+        if: needs.config.outputs.build == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: tilegym-docker-image
+          path: /tmp
+
+      - name: Load Docker image from artifact
+        if: needs.config.outputs.build == 'true'
+        run: |
+          gunzip /tmp/tilegym-transformers.tar.gz
+          docker load --input /tmp/tilegym-transformers.tar
+
+      - name: Pull Docker image from GHCR (if build skipped)
+        if: needs.config.outputs.build == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo $GITHUB_TOKEN | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ needs.config.outputs.image_tag }} || \
+            (echo "Error: No cached image found in GHCR. Please run with build: true first." && exit 1)
+          docker tag ghcr.io/${{ github.repository_owner }}/tilegym-transformers:${{ needs.config.outputs.image_tag }} tilegym-transformers:latest
+
+      - name: Run all benchmarks in parallel
+        run: |
+          docker run --rm \
+            --gpus all \
+            -w /workspace/tilegym/tests/benchmark \
+            tilegym-transformers:latest \
+            ./run_all.sh --parallel

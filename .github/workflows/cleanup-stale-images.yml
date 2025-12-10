@@ -1,0 +1,97 @@
+name: Cleanup Stale PR Images
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  cleanup:
+    name: Delete Images for Closed PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup stale PR images
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const packageName = 'tilegym-transformers';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            
+            console.log('Checking for stale PR images...');
+            
+            try {
+              // Get all package versions
+              let versions;
+              try {
+                // Try org endpoint first
+                versions = await github.rest.packages.getAllPackageVersionsForPackageOwnedByOrg({
+                  package_type: 'container',
+                  package_name: packageName,
+                  org: owner,
+                });
+              } catch (error) {
+                // Fallback to user endpoint
+                versions = await github.rest.packages.getAllPackageVersionsForPackageOwnedByUser({
+                  package_type: 'container',
+                  package_name: packageName,
+                  username: owner,
+                });
+              }
+              
+              // Get all open PRs
+              const { data: openPRs } = await github.rest.pulls.list({
+                owner,
+                repo,
+                state: 'open',
+              });
+              const openPRNumbers = new Set(openPRs.map(pr => pr.number));
+              
+              // Check each version for PR tags
+              for (const version of versions.data) {
+                if (version.metadata && version.metadata.container && version.metadata.container.tags) {
+                  for (const tag of version.metadata.container.tags) {
+                    // Check if this is a PR tag
+                    const prMatch = tag.match(/^pr-(\d+)$/);
+                    if (prMatch) {
+                      const prNumber = parseInt(prMatch[1]);
+                      
+                      // If PR is closed, delete the image
+                      if (!openPRNumbers.has(prNumber)) {
+                        console.log(`PR #${prNumber} is closed, deleting image with tag ${tag}...`);
+                        try {
+                          await github.rest.packages.deletePackageVersionForOrg({
+                            package_type: 'container',
+                            package_name: packageName,
+                            org: owner,
+                            package_version_id: version.id,
+                          });
+                          console.log(`Successfully deleted image for closed PR #${prNumber}`);
+                        } catch (deleteError) {
+                          // Try user endpoint
+                          try {
+                            await github.rest.packages.deletePackageVersionForUser({
+                              package_type: 'container',
+                              package_name: packageName,
+                              username: owner,
+                              package_version_id: version.id,
+                            });
+                            console.log(`Successfully deleted image for closed PR #${prNumber}`);
+                          } catch (userError) {
+                            console.error(`Failed to delete: ${userError.message}`);
+                          }
+                        }
+                        break; // Move to next version after deleting
+                      }
+                    }
+                  }
+                }
+              }
+              
+              console.log('Cleanup complete!');
+            } catch (error) {
+              console.error(`Error during cleanup: ${error.message}`);
+              // Don't fail the workflow
+            }
+

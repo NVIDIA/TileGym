@@ -1,0 +1,16 @@
+name: tilegym-lint
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+
+jobs:
+  python-formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: psf/black@25.12.0
+        with:
+          options: "--check --verbose -l 100"
