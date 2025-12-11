@@ -9,25 +9,18 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 
 **Jobs:**
 - `config` - Parses PR body for CI configuration options
-- `build` - Builds `tilegym-transformers` Docker image and pushes to GHCR
+- `build` - Builds `tilegym` Docker image and pushes to GHCR
 - `test-ops` - Runs ops tests (`pytest -s tests/ops`)
-- `test-benchmark` - Runs benchmark tests in parallel (`tests/benchmark/run_all.sh --parallel`)
-
-**Triggers:** Push to `main`, push to `pull-request/*` branches, nightly at 2 AM UTC, manual
+- `test-benchmark` - Runs benchmark tests sequentially (`tests/benchmark/run_all.sh`)
 
 **Scripts used:**
 - `scripts/parse_pr_config.py` - Parse PR body config
 - `scripts/check_image_exists.py` - Skip nightly builds if tests already passed
 
-**Features:**
-- PR-configurable builds via YAML in PR description
-- GHCR caching for fast rebuilds
-- Separate PR and nightly image repositories
-- JUnit XML test reporting (visible in GitHub Actions "Checks" tab)
-- Parallel benchmark execution
-- Smart nightly skipping: only skips if previous build passed all tests
-- `latest` tag always points to newest tested, passing image
-- `<SHA>-verified` tags provide permanent audit trail of passing builds
+**Test Results:**
+- **ops-test-results:** JUnit XML + HTML report with test pass/fail status (visible in "Checks" tab)
+- **benchmark-results:** Individual `*_results.txt` files containing performance tables with TFLOPS/GBps metrics for each benchmark (downloadable artifacts)
+- **Benchmark summary:** Formatted markdown tables visible in the workflow "Summary" tab
 
 ---
 
@@ -70,6 +63,7 @@ Located in `scripts/`, these Python utilities are used by workflows:
 - **`parse_pr_config.py`** - Extract CI configuration from PR descriptions
 - **`check_image_exists.py`** - Check if Docker images exist in GHCR
 - **`cleanup_stale_images.py`** - Delete stale Docker images from GHCR
+- **`format_benchmark_summary.py`** - Parse benchmark results and format as markdown tables for GitHub Actions summary
 - **`utils.py`** - Shared utilities (GitHub token, API headers, outputs)
 
 All scripts have comprehensive docstrings and are fully tested.
@@ -117,12 +111,9 @@ See `.github/pull_request_template.md` for the full template.
 
 ## Docker Images
 
-**PR images:** `ghcr.io/<owner>/tilegym-transformers-pr:pr-<NUMBER>`  
-**Nightly images:** `ghcr.io/<owner>/tilegym-transformers:<SHA>`, `nightly-<DATETIME>`  
-**Verified images:** `ghcr.io/<owner>/tilegym-transformers:<SHA>-verified` (permanent proof tests passed)  
-**Latest verified:** `ghcr.io/<owner>/tilegym-transformers:latest` (points to newest passing build)
-
-Images are cached and reused across jobs to optimize for time.
+**Nightly images:** `ghcr.io/<owner>/tilegym:<SHA>`, `nightly-<DATETIME>`  
+**Verified images:** `ghcr.io/<owner>/tilegym:<SHA>-verified` (permanent proof tests passed)  
+**Latest verified:** `ghcr.io/<owner>/tilegym:latest` (points to newest passing build)
 
 **Tagging strategy:**
 - Build pushes: `<SHA>`, `nightly-<DATETIME>`

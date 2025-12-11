@@ -12,7 +12,7 @@ permissions:
   pull-requests: read
 
 env:
-  IMAGE_NAME_PR: tilegym-transformers-pr
+  IMAGE_NAME_PR: tilegym-pr
 
 jobs:
   cleanup:

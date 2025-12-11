@@ -17,8 +17,8 @@ permissions:
 
 env:
   # PR images go to a temp repo, main/nightly go to main repo
-  IMAGE_NAME_PR: tilegym-transformers-pr
-  IMAGE_NAME_MAIN: tilegym-transformers
+  IMAGE_NAME_PR: tilegym-pr
+  IMAGE_NAME_MAIN: tilegym
 
 jobs:
   config:
@@ -134,7 +134,7 @@ jobs:
           echo "image_name=${{ steps.context.outputs.image_name }}" >> $GITHUB_OUTPUT
 
   build:
-    name: build-tilegym-transformers-image
+    name: build-tilegym-image
     needs: config
     if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
@@ -214,7 +214,7 @@ jobs:
             type=gha
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:latest
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
-            type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner_lower }}/tilegym-transformers:latest
+            type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner_lower }}/tilegym:latest
           cache-to: type=gha,mode=max
 
   test-ops:
@@ -300,22 +300,27 @@ jobs:
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym/tests/benchmark \
             ${IMAGE} \
-            ./run_all.sh --parallel --junit-xml /test-results/benchmark-results.xml
+            ./run_all.sh /test-results
+
+      - name: Checkout code (for summary script)
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/scripts/format_benchmark_summary.py
+          sparse-checkout-cone-mode: false
+
+      - name: Format benchmark summary
+        if: always()
+        run: python3 .github/scripts/format_benchmark_summary.py test-results
 
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-test-results
-          path: test-results/benchmark-*
+          name: benchmark-results
+          path: test-results/*_results.txt
           retention-days: 30
-
-      - name: Publish benchmark results
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        if: always()
-        with:
-          files: test-results/benchmark-results.xml
-          check_name: Benchmark Test Results
 
   promote-to-latest:
     name: promote-to-latest

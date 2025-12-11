@@ -21,7 +21,7 @@ def check_image_exists(registry_image: str, tag: str, token: str) -> bool:
     successfully tested (promoted to 'latest').
 
     Args:
-        registry_image: Full registry path (e.g., ghcr.io/nvidia/tilegym-transformers)
+        registry_image: Full registry path (e.g., ghcr.io/nvidia/tilegym)
         tag: SHA tag to check (e.g., commit SHA)
         token: GitHub token for authentication
 

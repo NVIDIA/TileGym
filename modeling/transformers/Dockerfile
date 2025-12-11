@@ -24,8 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     build-essential \
-    parallel \
-    bc \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
