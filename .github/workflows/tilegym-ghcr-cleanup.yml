@@ -36,5 +36,5 @@ jobs:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PACKAGE_NAME: ${{ env.IMAGE_NAME_PR }}
-          ORPHAN_DAYS_THRESHOLD: 7
+          UNTRACKED_DAYS_THRESHOLD: 7
         run: python3 .github/scripts/cleanup_stale_images.py

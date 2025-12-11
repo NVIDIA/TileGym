@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   python-formatting:
@@ -55,3 +56,10 @@ jobs:
         with:
           name: infra-test-results
           path: infra-test-results.xml
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: infra-test-results.xml
+          check_name: Infrastructure Test Results

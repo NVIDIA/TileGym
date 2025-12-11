@@ -13,6 +13,7 @@ permissions:
   contents: read
   packages: write
   pull-requests: read
+  checks: write
 
 env:
   # PR images go to a temp repo, main/nightly go to main repo

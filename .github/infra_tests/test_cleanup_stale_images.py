@@ -31,35 +31,35 @@ class TestCleanupStaleImages:
         should_delete, reason = cleanup_stale_images.should_delete_closed_pr_image(["pr-2"], open_prs)
         assert should_delete is False
 
-    def test_should_delete_orphaned_image_with_latest(self):
+    def test_should_delete_untracked_image_with_latest(self):
         """Test that images with 'latest' tag are not deleted."""
         old_date = (datetime.now() - timedelta(days=10)).isoformat() + "Z"
-        should_delete, _ = cleanup_stale_images.should_delete_orphaned_image(["latest", "abc123"], old_date, 7)
+        should_delete, _ = cleanup_stale_images.should_delete_untracked_image(["latest", "abc123"], old_date, 7)
         assert should_delete is False
 
-    def test_should_delete_orphaned_image_with_pr_tag(self):
+    def test_should_delete_untracked_image_with_pr_tag(self):
         """Test that images with pr-* tags are not deleted."""
         old_date = (datetime.now() - timedelta(days=10)).isoformat() + "Z"
-        should_delete, _ = cleanup_stale_images.should_delete_orphaned_image(["pr-1", "abc123"], old_date, 7)
+        should_delete, _ = cleanup_stale_images.should_delete_untracked_image(["pr-1", "abc123"], old_date, 7)
         assert should_delete is False
 
-    def test_should_delete_orphaned_image_with_verified_tag(self):
+    def test_should_delete_untracked_image_with_verified_tag(self):
         """Test that images with -verified tags are not deleted."""
         old_date = (datetime.now() - timedelta(days=10)).isoformat() + "Z"
-        should_delete, _ = cleanup_stale_images.should_delete_orphaned_image(["abc123-verified"], old_date, 7)
+        should_delete, _ = cleanup_stale_images.should_delete_untracked_image(["abc123-verified"], old_date, 7)
         assert should_delete is False
 
-    def test_should_delete_orphaned_image_old_enough(self):
-        """Test that old orphaned images are marked for deletion."""
+    def test_should_delete_untracked_image_old_enough(self):
+        """Test that old untracked images are marked for deletion."""
         old_date = (datetime.now() - timedelta(days=10)).isoformat() + "Z"
-        should_delete, reason = cleanup_stale_images.should_delete_orphaned_image(["abc123", "def456"], old_date, 7)
+        should_delete, reason = cleanup_stale_images.should_delete_untracked_image(["abc123", "def456"], old_date, 7)
         assert should_delete is True
-        assert "Orphaned" in reason
+        assert "Untracked" in reason
 
-    def test_should_delete_orphaned_image_too_recent(self):
-        """Test that recent orphaned images are not deleted."""
+    def test_should_delete_untracked_image_too_recent(self):
+        """Test that recent untracked images are not deleted."""
         recent_date = (datetime.now() - timedelta(days=3)).isoformat() + "Z"
-        should_delete, _ = cleanup_stale_images.should_delete_orphaned_image(["abc123"], recent_date, 7)
+        should_delete, _ = cleanup_stale_images.should_delete_untracked_image(["abc123"], recent_date, 7)
         assert should_delete is False
 
     @patch("cleanup_stale_images.requests.get")

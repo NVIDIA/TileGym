@@ -23,7 +23,7 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 - PR-configurable builds via YAML in PR description
 - GHCR caching for fast rebuilds
 - Separate PR and nightly image repositories
-- JUnit XML test reporting
+- JUnit XML test reporting (visible in GitHub Actions "Checks" tab)
 - Parallel benchmark execution
 - Smart nightly skipping: only skips if previous build passed all tests
 - `latest` tag always points to newest tested, passing image
@@ -49,16 +49,16 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 **GHCR maintenance** - Cleans up old Docker images to save storage.
 
 **Jobs:**
-- `cleanup` - Deletes stale PR images and orphaned images
+- `cleanup` - Deletes stale PR images and untracked images
 
 **Triggers:** Daily at 2 AM UTC, manual
 
 **Scripts used:**
-- `scripts/cleanup_stale_images.py` - Delete closed PR and orphaned images
+- `scripts/cleanup_stale_images.py` - Delete closed PR and untracked images
 
 **Cleanup rules:**
 - Images for closed PRs (`pr-*` tags)
-- Orphaned images (no `pr-*`, `latest`, or `-verified` tags, older than 7 days)
+- Untracked images (no `pr-*`, `latest`, or `-verified` tags, older than 7 days)
 - Verified images (`*-verified` tags) are kept indefinitely
 
 ---
@@ -82,7 +82,7 @@ Located in `infra_tests/`, these pytest-based tests validate all CI scripts incl
 
 - PR config parsing logic
 - Image existence checks and latest tag validation
-- Image cleanup logic including verified tag preservation
+- Image cleanup logic (verified tag preservation, untracked image detection)
 - Shared utility functions
 
 **Run locally:**
@@ -91,6 +91,8 @@ pytest .github/infra_tests/ -v
 ```
 
 Tests are independent of the main TileGym package (no torch/CUDA dependencies).
+
+**Test results:** Available in GitHub Actions UI under "Checks" tab and as downloadable artifacts (`infra-test-results`).
 
 ---
 

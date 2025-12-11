@@ -4,7 +4,7 @@ Clean up stale Docker images from GHCR.
 
 Removes:
 1. Images for closed PRs (pr-* tags)
-2. Orphaned images without pr-* or latest tags (older than threshold)
+2. Untracked images without pr-* or latest tags (older than threshold)
 """
 
 import os
@@ -82,12 +82,12 @@ def should_delete_closed_pr_image(tags: List[str], open_pr_numbers: set) -> tupl
     return False, ""
 
 
-def should_delete_orphaned_image(tags: List[str], created_at: str, days_threshold: int) -> tuple[bool, str]:
-    """Check if image is orphaned and old enough to delete."""
+def should_delete_untracked_image(tags: List[str], created_at: str, days_threshold: int) -> tuple[bool, str]:
+    """Check if image is untracked and old enough to delete."""
     if not tags:
         return False, ""
 
-    # Check if orphaned (no pr-*, latest, or -verified tags)
+    # Check if untracked (no pr-*, latest, or -verified tags)
     has_pr_tag = any(tag.startswith("pr-") for tag in tags)
     has_latest_tag = "latest" in tags
     has_verified_tag = any(tag.endswith("-verified") for tag in tags)
@@ -102,12 +102,12 @@ def should_delete_orphaned_image(tags: List[str], created_at: str, days_threshol
 
     if age_days > days_threshold:
         tag_str = ", ".join(tags[:3])  # Show first 3 tags
-        return True, f"Orphaned (age: {age_days} days, tags: {tag_str})"
+        return True, f"Untracked (age: {age_days} days, tags: {tag_str})"
 
     return False, ""
 
 
-def cleanup_images(owner: str, repo: str, package_name: str, token: str, orphan_days: int = 7):
+def cleanup_images(owner: str, repo: str, package_name: str, token: str, untracked_days: int = 7):
     """Main cleanup logic."""
     print(f"Starting cleanup for package: {package_name}", file=sys.stderr)
 
@@ -137,9 +137,9 @@ def cleanup_images(owner: str, repo: str, package_name: str, token: str, orphan_
         # Check for closed PR images
         should_delete, reason = should_delete_closed_pr_image(tags, open_prs)
 
-        # Check for orphaned images if not already marked for deletion
+        # Check for untracked images if not already marked for deletion
         if not should_delete:
-            should_delete, reason = should_delete_orphaned_image(tags, created_at, orphan_days)
+            should_delete, reason = should_delete_untracked_image(tags, created_at, untracked_days)
 
         if should_delete:
             print(f"Deleting version {version_id}: {reason}", file=sys.stderr)
@@ -156,7 +156,7 @@ def main():
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
     repo = os.environ.get("GITHUB_REPOSITORY", "").split("/")[-1]
     package_name = os.environ.get("PACKAGE_NAME")
-    orphan_days = int(os.environ.get("ORPHAN_DAYS_THRESHOLD", "7"))
+    untracked_days = int(os.environ.get("UNTRACKED_DAYS_THRESHOLD", "7"))
 
     if not all([owner, repo, package_name]):
         print("Error: Missing required environment variables", file=sys.stderr)
@@ -166,7 +166,7 @@ def main():
         sys.exit(1)
 
     token = get_github_token()
-    cleanup_images(owner, repo, package_name, token, orphan_days)
+    cleanup_images(owner, repo, package_name, token, untracked_days)
 
 
 if __name__ == "__main__":
