@@ -16,6 +16,7 @@ TileGym is a CUDA Tile kernel library that provides a rich collection of kernel 
 ## Overview
 
 This repository aims to provide helpful kernel tutorials and examples for tile-based GPU programming. TileGym is a playground for experimenting with CUDA Tile, where you can learn how to build efficient GPU kernels and explore their integration into real-world large language models such as Llama 3.1 and DeepSeek V2. Whether you're learning tile-based GPU programming or looking to optimize your LLM implementations, TileGym offers practical examples and comprehensive guidance.
+<img width="90%" alt="TileGym_repo" src="https://github.com/user-attachments/assets/1d8741f0-f15c-49ff-ad5c-32d1ae6ec71e" />
 
 ## Features
 

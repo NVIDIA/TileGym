@@ -36,7 +36,6 @@ def silu_and_mul_kernel_row_wise(
     input,
     output,
     TILE_SIZE: ConstInt,
-    n_elements: ConstInt,
     hidden_size: ConstInt,
 ):
     bid = ct.bid(0)  # this gives us our row
@@ -47,7 +46,6 @@ def silu_and_mul_kernel_row_wise(
     row_idx = bid
     a_col_idx = offsets  # First half: [0, hidden_size)
     b_col_idx = offsets + hidden_size  # Second half: [hidden_size, 2*hidden_size)
-    out_offsets = bid * hidden_size + offsets
 
     # Load tiles using gather with 2D indices
     # gather broadcasts (scalar, tile) to (tile,)
@@ -95,7 +93,6 @@ def silu_and_mul(
     # Flatten input to 2D: (batch_size, 2 * hidden_size)
     input_flat = input.view(-1, original_shape[-1])
     batch_size = input_flat.shape[0]
-    n_elements = batch_size * hidden_size  # Total elements to process in output
 
     # Get final output shape
     output_shape = list(original_shape)
@@ -123,6 +120,11 @@ def silu_and_mul(
         torch.cuda.current_stream(),
         grid,
         silu_and_mul_kernel_row_wise,
-        (input_flat, output, TILE_SIZE, n_elements, hidden_size),
+        (
+            input_flat,
+            output,
+            TILE_SIZE,
+            hidden_size
+        ),
     )
     return output.reshape(*output_shape)
