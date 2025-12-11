@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 from unittest.mock import patch
+
 import pytest
 
 # Add scripts directory to path
@@ -31,11 +32,11 @@ class TestUtils:
         """Test writing GitHub output."""
         with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
             output_file = f.name
-        
+
         try:
             with patch.dict(os.environ, {"GITHUB_OUTPUT": output_file}):
                 utils.write_github_output("test_key", "test_value")
-            
+
             with open(output_file) as f:
                 content = f.read()
                 assert content == "test_key=test_value\n"
@@ -51,8 +52,4 @@ class TestUtils:
     def test_get_github_api_headers(self):
         """Test GitHub API headers generation."""
         headers = utils.get_github_api_headers("my_token")
-        assert headers == {
-            "Authorization": "token my_token",
-            "Accept": "application/vnd.github.v3+json"
-        }
-
+        assert headers == {"Authorization": "token my_token", "Accept": "application/vnd.github.v3+json"}

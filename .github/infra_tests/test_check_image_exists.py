@@ -1,10 +1,12 @@
 """Unit tests for check_image_exists.py"""
 
+import json
 import os
 import sys
 import tempfile
-import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
 import pytest
 
 # Add scripts directory to path
@@ -62,17 +64,11 @@ class TestCheckImageExists:
         # Mock login
         login_result = MagicMock(returncode=0)
         # Mock latest inspect
-        latest_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode()
-        )
+        latest_result = MagicMock(returncode=0, stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode())
         # Mock SHA inspect
-        sha_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode()
-        )
+        sha_result = MagicMock(returncode=0, stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode())
         mock_run.side_effect = [login_result, latest_result, sha_result]
-        
+
         result = check_image_exists.check_image_exists("ghcr.io/test/image", "sha123", "token")
         assert result is True
 
@@ -82,17 +78,11 @@ class TestCheckImageExists:
         # Mock login
         login_result = MagicMock(returncode=0)
         # Mock latest inspect (different digest)
-        latest_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode()
-        )
+        latest_result = MagicMock(returncode=0, stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode())
         # Mock SHA inspect (different digest)
-        sha_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({"config": {"digest": "sha256:def456"}}).encode()
-        )
+        sha_result = MagicMock(returncode=0, stdout=json.dumps({"config": {"digest": "sha256:def456"}}).encode())
         mock_run.side_effect = [login_result, latest_result, sha_result]
-        
+
         result = check_image_exists.check_image_exists("ghcr.io/test/image", "sha456", "token")
         assert result is False
 
@@ -104,7 +94,7 @@ class TestCheckImageExists:
         # Mock latest inspect (not found)
         latest_result = MagicMock(returncode=1)
         mock_run.side_effect = [login_result, latest_result]
-        
+
         result = check_image_exists.check_image_exists("ghcr.io/test/image", "sha123", "token")
         assert result is False
 
@@ -114,14 +104,11 @@ class TestCheckImageExists:
         # Mock login
         login_result = MagicMock(returncode=0)
         # Mock latest inspect (exists)
-        latest_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode()
-        )
+        latest_result = MagicMock(returncode=0, stdout=json.dumps({"config": {"digest": "sha256:abc123"}}).encode())
         # Mock SHA inspect (not found)
         sha_result = MagicMock(returncode=1)
         mock_run.side_effect = [login_result, latest_result, sha_result]
-        
+
         result = check_image_exists.check_image_exists("ghcr.io/test/image", "sha123", "token")
         assert result is False
 
@@ -139,4 +126,3 @@ class TestCheckImageExists:
             assert "skipped=true" in content
         finally:
             os.unlink(output_file)
-

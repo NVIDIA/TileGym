@@ -3,6 +3,7 @@
 import os
 import sys
 from unittest.mock import patch
+
 import pytest
 
 # Add scripts directory to path
@@ -66,4 +67,3 @@ config:
         config = parse_pr_config.resolve_config("")
         assert config["build"] is True  # defaults
         assert config["test"] == ["ops", "benchmark"]
-

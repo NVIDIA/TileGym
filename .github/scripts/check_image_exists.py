@@ -44,31 +44,26 @@ def check_image_exists(registry_image: str, tag: str, token: str) -> bool:
 
         # Get digest of 'latest' tag
         latest_inspect = subprocess.run(
-            ["docker", "manifest", "inspect", latest_image], 
-            capture_output=True, 
-            check=False
+            ["docker", "manifest", "inspect", latest_image], capture_output=True, check=False
         )
-        
+
         if latest_inspect.returncode != 0:
             print(f"'latest' tag does not exist", file=sys.stderr)
             return False
 
         # Get digest of SHA tag
-        sha_inspect = subprocess.run(
-            ["docker", "manifest", "inspect", sha_image], 
-            capture_output=True, 
-            check=False
-        )
-        
+        sha_inspect = subprocess.run(["docker", "manifest", "inspect", sha_image], capture_output=True, check=False)
+
         if sha_inspect.returncode != 0:
             print(f"SHA tag '{tag}' does not exist", file=sys.stderr)
             return False
 
         # Compare digests (both outputs are JSON with a 'config' field containing the digest)
         import json
+
         latest_digest = json.loads(latest_inspect.stdout)['config']['digest']
         sha_digest = json.loads(sha_inspect.stdout)['config']['digest']
-        
+
         return latest_digest == sha_digest
 
     except subprocess.CalledProcessError as e:

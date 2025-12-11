@@ -91,7 +91,7 @@ def should_delete_orphaned_image(tags: List[str], created_at: str, days_threshol
     has_pr_tag = any(tag.startswith("pr-") for tag in tags)
     has_latest_tag = "latest" in tags
     has_verified_tag = any(tag.endswith("-verified") for tag in tags)
-    
+
     if has_pr_tag or has_latest_tag or has_verified_tag:
         return False, ""
 

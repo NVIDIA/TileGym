@@ -2,8 +2,11 @@
 
 import os
 import sys
-from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
+from datetime import datetime
+from datetime import timedelta
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
 import pytest
 
 # Add scripts directory to path
@@ -18,12 +21,12 @@ class TestCleanupStaleImages:
     def test_should_delete_closed_pr_image(self):
         """Test detection of closed PR images."""
         open_prs = {1, 2, 3}
-        
+
         # Closed PR
         should_delete, reason = cleanup_stale_images.should_delete_closed_pr_image(["pr-4"], open_prs)
         assert should_delete is True
         assert "Closed PR" in reason
-        
+
         # Open PR
         should_delete, reason = cleanup_stale_images.should_delete_closed_pr_image(["pr-2"], open_prs)
         assert should_delete is False
@@ -66,7 +69,6 @@ class TestCleanupStaleImages:
         mock_response.json.return_value = [{"number": 1}, {"number": 2}, {"number": 3}]
         mock_response.raise_for_status = MagicMock()
         mock_get.return_value = mock_response
-        
+
         pr_numbers = cleanup_stale_images.get_open_pr_numbers("owner", "repo", "token")
         assert pr_numbers == {1, 2, 3}
-
