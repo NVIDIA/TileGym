@@ -34,7 +34,6 @@ def silu_and_mul_kernel_row_wise(
     input,
     output,
     TILE_SIZE: ConstInt,
-    n_elements: ConstInt,
     hidden_size: ConstInt,
 ):
     bid = ct.bid(0)  # this gives us our row
