@@ -5,10 +5,15 @@ Parse benchmark results and format them as markdown for GitHub Actions summary.
 Reads *_results.txt files and converts pandas-style tables to markdown.
 """
 
+import logging
 import os
 import re
 import sys
 from pathlib import Path
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s', stream=sys.stderr)
+logger = logging.getLogger(__name__)
 
 
 def parse_benchmark_file(filepath):
@@ -74,16 +79,24 @@ def table_to_markdown(table_text):
 
 def format_benchmark_summary(results_dir):
     """Format all benchmark results as markdown summary."""
-    results_dir = Path(results_dir)
+    results_dir = Path(results_dir).resolve()  # Get absolute path
+
+    logger.info(f"Looking for results in: {results_dir}")
+    logger.info(f"Directory exists: {results_dir.exists()}")
 
     if not results_dir.exists():
-        return "## Benchmark Results\n\n❌ No benchmark results found.\n"
+        logger.error(f"Results directory does not exist")
+        return "## Benchmark Results\n\n❌ No benchmark results found (directory does not exist).\n"
 
     # Find all result files
     result_files = sorted(results_dir.glob("*_results.txt"))
+    logger.info(f"Found {len(result_files)} result files")
 
     if not result_files:
-        return "## Benchmark Results\n\n❌ No benchmark results found.\n"
+        # List what IS in the directory
+        all_files = list(results_dir.glob("*"))
+        logger.warning(f"Files in directory: {[f.name for f in all_files]}")
+        return "## Benchmark Results\n\n❌ No benchmark results found (no *_results.txt files).\n"
 
     summary = "# 📊 Benchmark Results\n\n"
 
@@ -115,20 +128,27 @@ def format_benchmark_summary(results_dir):
     return summary
 
 
-def main():
-    results_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+def get_results_directory():
+    """Get results directory from command line args."""
+    return sys.argv[1] if len(sys.argv) > 1 else "."
 
-    summary = format_benchmark_summary(results_dir)
 
-    # Write to GitHub Actions summary
+def write_summary(summary):
+    """Write summary to GitHub Actions or stdout."""
     github_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if github_summary:
         with open(github_summary, "a") as f:
             f.write(summary)
-        print(f"✅ Benchmark summary written to GitHub Actions summary", file=sys.stderr)
+        logger.info("Benchmark summary written to GitHub Actions summary")
     else:
         # Print to stdout if not in GitHub Actions
         print(summary)
+
+
+def main():
+    results_dir = get_results_directory()
+    summary = format_benchmark_summary(results_dir)
+    write_summary(summary)
 
 
 if __name__ == "__main__":

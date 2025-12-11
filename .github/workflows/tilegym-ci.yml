@@ -279,6 +279,13 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
+      - name: Checkout code (sparse - only need formatting script)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/scripts/format_benchmark_summary.py
+          sparse-checkout-cone-mode: false
+
       - name: Create test results directory
         run: mkdir -p ${{ github.workspace }}/test-results
 
@@ -310,14 +317,6 @@ jobs:
           echo ""
           echo "Files matching *_results.txt:"
           ls -lh ${{ github.workspace }}/test-results/*_results.txt 2>/dev/null || echo "No matching files found"
-
-      - name: Checkout code (for summary script)
-        if: always()
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/scripts/format_benchmark_summary.py
-          sparse-checkout-cone-mode: false
 
       - name: Format benchmark summary
         if: always()

@@ -163,3 +163,37 @@ fused-attention-batch4-head32-d128-fwd-causal=False-float8_e5m2-TFLOPS:
                 with patch.object(sys, 'argv', ['format_benchmark_summary.py', tmpdir]):
                     # Should not raise, just print
                     format_benchmark_summary.main()
+
+    def test_get_results_directory_default(self):
+        """Test get_results_directory with no args."""
+        with patch.object(sys, 'argv', ['format_benchmark_summary.py']):
+            result_dir = format_benchmark_summary.get_results_directory()
+            assert result_dir == "."
+
+    def test_get_results_directory_with_arg(self):
+        """Test get_results_directory with command line arg."""
+        with patch.object(sys, 'argv', ['format_benchmark_summary.py', '/custom/path']):
+            result_dir = format_benchmark_summary.get_results_directory()
+            assert result_dir == "/custom/path"
+
+    def test_write_summary_to_github(self):
+        """Test write_summary writes to GitHub Actions summary file."""
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False) as f:
+            summary_path = f.name
+
+        try:
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_path}):
+                format_benchmark_summary.write_summary("Test summary content")
+
+            with open(summary_path) as f:
+                content = f.read()
+
+            assert content == "Test summary content"
+        finally:
+            os.unlink(summary_path)
+
+    def test_write_summary_to_stdout(self):
+        """Test write_summary prints to stdout when not in GitHub Actions."""
+        with patch.dict(os.environ, {}, clear=True):
+            # Should not raise, just print
+            format_benchmark_summary.write_summary("Test content")
