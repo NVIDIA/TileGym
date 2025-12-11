@@ -1,4 +1,4 @@
-name: tilegym-lint
+name: ci-infra-tests
 
 on:
   push:
@@ -28,3 +28,27 @@ jobs:
             --isort \
             --revision origin/main... \
             .
+
+  utility-scripts-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install pytest pytest-mock pyyaml requests
+
+      - name: Run tests
+        run: pytest .github/infra_tests/ --junit-xml=infra-test-results.xml -v
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-test-results
+          path: infra-test-results.xml

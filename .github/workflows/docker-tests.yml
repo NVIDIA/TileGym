@@ -132,19 +132,35 @@ jobs:
     needs: config
     if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      skipped: ${{ steps.check-existing.outputs.skipped || 'false' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check if image already exists (for nightly)
+        id: check-existing
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_PR: ${{ needs.config.outputs.is_pr }}
+        run: |
+          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          export REGISTRY_IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}"
+          export IMAGE_TAG="${{ github.sha }}"
+          python3 .github/scripts/check_image_exists.py
+
       - name: Set image variables
         id: vars
+        if: steps.check-existing.outputs.skipped != 'true'
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           REGISTRY_IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}"
           
+          echo "owner_lower=${OWNER_LOWER}" >> $GITHUB_OUTPUT
           echo "registry_image=${REGISTRY_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Free up disk space
+        if: steps.check-existing.outputs.skipped != 'true'
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -154,28 +170,45 @@ jobs:
           df -h
 
       - name: Set up Docker Buildx
+        if: steps.check-existing.outputs.skipped != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
+        if: steps.check-existing.outputs.skipped != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Generate tags
+        if: steps.check-existing.outputs.skipped != 'true'
+        id: tags
+        run: |
+          TAGS="${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}"
+          TAGS="${TAGS},${{ steps.vars.outputs.registry_image }}:${{ github.sha }}"
+          
+          # Add datetime tag for nightly builds
+          if [[ "${{ needs.config.outputs.is_pr }}" == "false" ]]; then
+            DATETIME=$(date -u +%Y%m%d-%H%M%S)
+            TAGS="${TAGS},${{ steps.vars.outputs.registry_image }}:nightly-${DATETIME}"
+          fi
+          
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image to GHCR
+        if: steps.check-existing.outputs.skipped != 'true'
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./modeling/transformers/Dockerfile
-          tags: |
-            ${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
-            ${{ steps.vars.outputs.registry_image }}:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.tags }}
           push: true
           cache-from: |
             type=gha
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:latest
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
+            type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner_lower }}/tilegym-transformers:latest
           cache-to: type=gha,mode=max
 
   test-ops:
@@ -184,6 +217,7 @@ jobs:
     if: |
       always() && 
       needs.config.outputs.run_ops == 'true' &&
+      needs.build.outputs.skipped != 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
@@ -235,6 +269,7 @@ jobs:
     if: |
       always() && 
       needs.config.outputs.run_benchmark == 'true' &&
+      needs.build.outputs.skipped != 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:

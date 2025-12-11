@@ -11,6 +11,7 @@ import re
 import sys
 
 import yaml
+from utils import write_github_output
 
 
 def get_default_config():
@@ -62,10 +63,6 @@ def resolve_config(pr_body):
 
 def write_github_outputs(config):
     """Write config to GitHub Actions outputs."""
-    github_output = os.environ.get('GITHUB_OUTPUT')
-    if not github_output:
-        return
-
     # Normalize test list
     test_list = config.get('test', [])
     if not isinstance(test_list, list):
@@ -78,10 +75,9 @@ def write_github_outputs(config):
         'run_benchmark': str('benchmark' in test_list).lower(),
     }
 
-    # Write to file
-    with open(github_output, 'a') as f:
-        for key, value in outputs.items():
-            f.write(f"{key}={value}\n")
+    # Write outputs
+    for key, value in outputs.items():
+        write_github_output(key, value)
 
     # Log final config
     print(
