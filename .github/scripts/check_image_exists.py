@@ -15,21 +15,25 @@ from utils import write_github_output
 
 def check_image_exists(registry_image: str, tag: str, token: str) -> bool:
     """
-    Check if an image with the given tag exists in the registry.
+    Check if 'latest' tag points to the image with the given SHA tag.
+
+    This ensures we only skip builds when the current commit SHA has been
+    successfully tested (promoted to 'latest').
 
     Args:
         registry_image: Full registry path (e.g., ghcr.io/nvidia/tilegym-transformers)
-        tag: Image tag to check (e.g., commit SHA)
+        tag: SHA tag to check (e.g., commit SHA)
         token: GitHub token for authentication
 
     Returns:
-        True if image exists, False otherwise
+        True if 'latest' points to the same image as the SHA tag, False otherwise
     """
-    full_image = f"{registry_image}:{tag}"
+    latest_image = f"{registry_image}:latest"
+    sha_image = f"{registry_image}:{tag}"
 
     try:
         # Login to GHCR
-        print(f"Checking if image exists: {full_image}", file=sys.stderr)
+        print(f"Checking if 'latest' points to SHA: {tag}", file=sys.stderr)
 
         login_process = subprocess.run(
             ["docker", "login", "ghcr.io", "-u", os.environ.get("GITHUB_ACTOR", ""), "--password-stdin"],
@@ -38,12 +42,34 @@ def check_image_exists(registry_image: str, tag: str, token: str) -> bool:
             check=True,
         )
 
-        # Check if manifest exists
-        inspect_process = subprocess.run(
-            ["docker", "manifest", "inspect", full_image], capture_output=True, check=False
+        # Get digest of 'latest' tag
+        latest_inspect = subprocess.run(
+            ["docker", "manifest", "inspect", latest_image], 
+            capture_output=True, 
+            check=False
         )
+        
+        if latest_inspect.returncode != 0:
+            print(f"'latest' tag does not exist", file=sys.stderr)
+            return False
 
-        return inspect_process.returncode == 0
+        # Get digest of SHA tag
+        sha_inspect = subprocess.run(
+            ["docker", "manifest", "inspect", sha_image], 
+            capture_output=True, 
+            check=False
+        )
+        
+        if sha_inspect.returncode != 0:
+            print(f"SHA tag '{tag}' does not exist", file=sys.stderr)
+            return False
+
+        # Compare digests (both outputs are JSON with a 'config' field containing the digest)
+        import json
+        latest_digest = json.loads(latest_inspect.stdout)['config']['digest']
+        sha_digest = json.loads(sha_inspect.stdout)['config']['digest']
+        
+        return latest_digest == sha_digest
 
     except subprocess.CalledProcessError as e:
         print(f"Error checking image: {e}", file=sys.stderr)
@@ -76,14 +102,14 @@ def should_skip_build(registry_image: str, tag: str, token: str, is_pr: bool) ->
         print("PR context detected, skipping image existence check", file=sys.stderr)
         return False
 
-    print("Nightly/main context detected, checking if image exists", file=sys.stderr)
-    exists = check_image_exists(registry_image, tag, token)
+    print("Nightly/main context detected, checking if 'latest' points to current SHA", file=sys.stderr)
+    latest_matches = check_image_exists(registry_image, tag, token)
 
-    if exists:
-        print(f"✅ Image {registry_image}:{tag} already exists", file=sys.stderr)
+    if latest_matches:
+        print(f"✅ 'latest' already points to SHA {tag} (tests passed previously)", file=sys.stderr)
         return True
     else:
-        print(f"🔨 Image {registry_image}:{tag} does not exist", file=sys.stderr)
+        print(f"🔨 'latest' does not point to SHA {tag} (build and test needed)", file=sys.stderr)
         return False
 
 

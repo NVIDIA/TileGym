@@ -40,6 +40,12 @@ class TestCleanupStaleImages:
         should_delete, _ = cleanup_stale_images.should_delete_orphaned_image(["pr-1", "abc123"], old_date, 7)
         assert should_delete is False
 
+    def test_should_delete_orphaned_image_with_verified_tag(self):
+        """Test that images with -verified tags are not deleted."""
+        old_date = (datetime.now() - timedelta(days=10)).isoformat() + "Z"
+        should_delete, _ = cleanup_stale_images.should_delete_orphaned_image(["abc123-verified"], old_date, 7)
+        assert should_delete is False
+
     def test_should_delete_orphaned_image_old_enough(self):
         """Test that old orphaned images are marked for deletion."""
         old_date = (datetime.now() - timedelta(days=10)).isoformat() + "Z"

@@ -1,10 +1,15 @@
-name: Cleanup Stale PR Images
+name: tilegym-ghcr-cleanup
 
 on:
   schedule:
     # Run daily at 2 AM UTC
     - cron: '0 2 * * *'
   workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
 
 env:
   IMAGE_NAME_PR: tilegym-transformers-pr

@@ -87,11 +87,12 @@ def should_delete_orphaned_image(tags: List[str], created_at: str, days_threshol
     if not tags:
         return False, ""
 
-    # Check if orphaned (no pr-* or latest tags)
+    # Check if orphaned (no pr-*, latest, or -verified tags)
     has_pr_tag = any(tag.startswith("pr-") for tag in tags)
     has_latest_tag = "latest" in tags
-
-    if has_pr_tag or has_latest_tag:
+    has_verified_tag = any(tag.endswith("-verified") for tag in tags)
+    
+    if has_pr_tag or has_latest_tag or has_verified_tag:
         return False, ""
 
     # Check age
