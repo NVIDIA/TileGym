@@ -90,9 +90,6 @@ def silu_and_mul(
     # Flatten input to 2D: (batch_size, 2 * hidden_size)
     input_flat = input.view(-1, original_shape[-1])
     batch_size = input_flat.shape[0]
-    n_elements = (
-        batch_size * hidden_size
-    )  # Total elements to process in output
 
     # Get final output shape
     output_shape = list(original_shape)
@@ -124,7 +121,6 @@ def silu_and_mul(
             input_flat,
             output,
             TILE_SIZE,
-            n_elements,
             hidden_size
         ),
     )
