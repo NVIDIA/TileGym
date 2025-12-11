@@ -302,6 +302,15 @@ jobs:
             ${IMAGE} \
             ./run_all.sh /test-results
 
+      - name: Debug - List test results directory
+        if: always()
+        run: |
+          echo "Contents of test-results directory:"
+          ls -lah ${{ github.workspace }}/test-results/ || echo "Directory does not exist"
+          echo ""
+          echo "Files matching *_results.txt:"
+          ls -lh ${{ github.workspace }}/test-results/*_results.txt 2>/dev/null || echo "No matching files found"
+
       - name: Checkout code (for summary script)
         if: always()
         uses: actions/checkout@v4
