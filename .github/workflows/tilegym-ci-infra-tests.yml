@@ -30,6 +30,7 @@ jobs:
         run: |
           darker --check --diff \
             --isort \
+            --line-length 120 \
             --revision origin/main... \
             .
 
