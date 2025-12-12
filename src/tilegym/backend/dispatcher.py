@@ -72,15 +72,11 @@ def dispatch(name: str, fallback_backend: str = "pytorch"):
             else:
                 current_backend = get_current_backend()
 
-            logger.debug(
-                f"[Backend Dispatch] Function: '{name}', Current backend: '{current_backend}'"
-            )
+            logger.debug(f"[Backend Dispatch] Function: '{name}', Current backend: '{current_backend}'")
 
             # Try implementation from current backend
             if name in _REGISTRY and current_backend in _REGISTRY[name]:
-                logger.debug(
-                    f"[Backend Dispatch] Using '{current_backend}' implementation for '{name}'"
-                )
+                logger.debug(f"[Backend Dispatch] Using '{current_backend}' implementation for '{name}'")
                 return _REGISTRY[name][current_backend](*args, **kwargs)
 
             # Try implementation from fallback backend
@@ -92,15 +88,11 @@ def dispatch(name: str, fallback_backend: str = "pytorch"):
                         f"falling back to '{fallback_backend}' backend"
                     )
                     _LOGGED_WARNINGS.add(warning_key)
-                logger.debug(
-                    f"[Backend Dispatch] Using fallback '{fallback_backend}' implementation for '{name}'"
-                )
+                logger.debug(f"[Backend Dispatch] Using fallback '{fallback_backend}' implementation for '{name}'")
                 return _REGISTRY[name][fallback_backend](*args, **kwargs)
 
             # Use default implementation
-            logger.warning(
-                f"No backend implementation found for '{name}', using default implementation"
-            )
+            logger.warning(f"No backend implementation found for '{name}', using default implementation")
             logger.debug(f"[Backend Dispatch] Using default implementation for '{name}'")
             return default_impl(*args, **kwargs)
 

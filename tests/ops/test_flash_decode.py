@@ -15,9 +15,7 @@ class Test_FlashDecode(common.PyTestCase):
     @staticmethod
     def reference(q, k, v, sm_scale):
         torch.backends.cuda.mem_efficient_sdp_enabled()
-        ref_output = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, scale=sm_scale, enable_gqa=True
-        )
+        ref_output = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=sm_scale, enable_gqa=True)
 
         return ref_output
 

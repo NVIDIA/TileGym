@@ -61,9 +61,7 @@ class Test_MLA(common.PyTestCase):
         # Apply causal mask if needed
         if is_causal:
             if q.size(-2) > 1:
-                rows, cols = torch.triu_indices(
-                    qk.shape[-2], qk.shape[-1], offset=1, device=qk.device
-                )
+                rows, cols = torch.triu_indices(qk.shape[-2], qk.shape[-1], offset=1, device=qk.device)
                 qk[..., rows, cols] = float("-inf")
 
         # Calculate attention weights
@@ -107,9 +105,7 @@ class Test_MLA(common.PyTestCase):
         # Create test data
         num_batch = 1
         num_head_q = 16  # Query heads
-        num_head_kv = (
-            num_head_q // num_group_size
-        )  # Key/Value heads - should divide num_head_q evenly
+        num_head_kv = num_head_q // num_group_size  # Key/Value heads - should divide num_head_q evenly
         S_qkv = 9
         BLOCK_D = 128
         BLOCK_KPE = 64

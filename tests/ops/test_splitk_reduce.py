@@ -27,9 +27,7 @@ class Test_SplitkReduce(common.PyTestCase):
         # Compute normalized sum-exp values
         # Convert from log2 to natural log, then back to log2
         sumexp_normalized_splitk = torch.exp2(lse_splitk - lse_max) / math.log(2)
-        sumexp_normalized = torch.sum(
-            sumexp_normalized_splitk, dim=-1, keepdim=True
-        )  # [B, num_heads, 1]
+        sumexp_normalized = torch.sum(sumexp_normalized_splitk, dim=-1, keepdim=True)  # [B, num_heads, 1]
 
         # Weight each split's attention output by its normalized sum-exp
         numerator_normalized = torch.sum(

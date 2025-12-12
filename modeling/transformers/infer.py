@@ -185,9 +185,7 @@ def parse_args():
 def get_messages_list(args):
     messages_list = []
     if args.mock_input_len > 0:
-        line = " Hello" * (
-            args.mock_input_len - 1
-        )  # Because `<|begin_of_text|>` token will be added by the tokenizer
+        line = " Hello" * (args.mock_input_len - 1)  # Because `<|begin_of_text|>` token will be added by the tokenizer
         for _ in range(args.batch_size):
             messages_list.append(line)
     elif args.sentence_file is not None:

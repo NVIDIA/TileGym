@@ -101,9 +101,7 @@ def silu_and_mul(
     if out is not None:
         # Ensure out shape is correct
         if out.shape != tuple(output_shape):
-            raise ValueError(
-                f"Output tensor shape {out.shape} does not match expected shape {tuple(output_shape)}"
-            )
+            raise ValueError(f"Output tensor shape {out.shape} does not match expected shape {tuple(output_shape)}")
         output = out.view(-1, hidden_size)
     else:
         output = torch.empty(
@@ -120,11 +118,6 @@ def silu_and_mul(
         torch.cuda.current_stream(),
         grid,
         silu_and_mul_kernel_row_wise,
-        (
-            input_flat,
-            output,
-            TILE_SIZE,
-            hidden_size
-        ),
+        (input_flat, output, TILE_SIZE, hidden_size),
     )
     return output.reshape(*output_shape)

@@ -110,9 +110,7 @@ def group_gemm(
         raise ValueError("group_A and group_B must not be empty")
 
     if len(group_A) != len(group_B):
-        raise ValueError(
-            f"group_A and group_B must have same length, got {len(group_A)} and {len(group_B)}"
-        )
+        raise ValueError(f"group_A and group_B must have same length, got {len(group_A)} and {len(group_B)}")
 
     device = group_A[0].device
     dtype = group_A[0].dtype
@@ -151,9 +149,7 @@ def group_gemm(
     grid_size = NUM_SMS // num_ctas_for_grid
     grid = (grid_size,)
 
-    logger.debug(
-        f"[cuTile] group_gemm launching with grid={grid}, num_ctas={num_ctas}, NUM_SMS={NUM_SMS}"
-    )
+    logger.debug(f"[cuTile] group_gemm launching with grid={grid}, num_ctas={num_ctas}, NUM_SMS={NUM_SMS}")
 
     ct.launch(
         torch.cuda.current_stream(),

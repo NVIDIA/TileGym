@@ -39,9 +39,7 @@ ALL_BACKENDS = [
 def get_supported_backends(datatype):
     """Filter backends based on datatype support"""
     if datatype == torch.float8_e5m2:
-        return [
-            p for p in ALL_BACKENDS if p is not None and p[0] != "torch"
-        ]  # Torch cannot support FP8
+        return [p for p in ALL_BACKENDS if p is not None and p[0] != "torch"]  # Torch cannot support FP8
     return [p for p in ALL_BACKENDS if p is not None]  # Filter out None entries
 
 

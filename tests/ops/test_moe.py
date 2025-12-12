@@ -100,9 +100,7 @@ class Test_MOE(common.PyTestCase):
         device = "cuda"
 
         init_dtype = torch.float16 if dtype == torch.float8_e4m3fn else dtype
-        hidden_states = torch.randn(
-            num_tokens, hidden_size, dtype=init_dtype, device=device
-        ).normal_(0, 0.5)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=init_dtype, device=device).normal_(0, 0.5)
 
         # Create expert weights: w1 for gate+up projection, w2 for down projection
         w1 = torch.randn(

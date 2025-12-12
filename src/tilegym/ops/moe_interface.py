@@ -15,9 +15,7 @@ from tilegym.backend import get_current_backend
     "invoke_fused_moe_kernel",
 )
 def invoke_fused_moe_kernel(*args, **kwargs) -> None:
-    raise NotImplementedError(
-        f"invoke_fused_moe_kernel is not implemented for this backend: {get_current_backend()}"
-    )
+    raise NotImplementedError(f"invoke_fused_moe_kernel is not implemented for this backend: {get_current_backend()}")
 
 
 @dispatch(
@@ -26,9 +24,7 @@ def invoke_fused_moe_kernel(*args, **kwargs) -> None:
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    raise NotImplementedError(
-        f"moe_align_block_size is not implemented for this backend: {get_current_backend()}"
-    )
+    raise NotImplementedError(f"moe_align_block_size is not implemented for this backend: {get_current_backend()}")
 
 
 def moe_align_block_size_torch(topk_ids: torch.Tensor, block_size: int, num_experts: int):

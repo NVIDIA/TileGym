@@ -144,9 +144,7 @@ def naive_absorb_mla_transpose(
 
     # Finalize attention computation
     l_prev = ct.sum(l_prev, 0)  # [TILE_N, TILE_H] -> [TILE_H]
-    acc = ct.truediv(
-        acc, (l_prev[None, :]), flush_to_zero=True, rounding_mode=RMd.APPROX
-    )  # [TILE_D, TILE_H]
+    acc = ct.truediv(acc, (l_prev[None, :]), flush_to_zero=True, rounding_mode=RMd.APPROX)  # [TILE_D, TILE_H]
     l_prev = m_prev + ct.log2(l_prev)
 
     # Store results (adapted for split-kv format) with latency hints

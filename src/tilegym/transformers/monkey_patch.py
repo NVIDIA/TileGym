@@ -134,9 +134,7 @@ def _apply_tilegym_kernel(model_type: str, **kwargs) -> None:
         return
 
     if model_type not in MODEL_TYPE_TO_APPLY_TILEGYM_FN.keys():
-        logger.info(
-            f"There are currently no TileGym kernels supported for model type: {model_type}."
-        )
+        logger.info(f"There are currently no TileGym kernels supported for model type: {model_type}.")
         return
 
     apply_fn = MODEL_TYPE_TO_APPLY_TILEGYM_FN[model_type]

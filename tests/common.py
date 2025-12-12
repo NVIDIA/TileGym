@@ -17,6 +17,7 @@ import unittest
 from functools import wraps
 
 import pytest
+
 # import pandas as pd
 import torch
 
@@ -209,10 +210,7 @@ class PyTestCase:
         tensor_args_with_grad = {k: v for k, v in fn_kwargs.items() if isinstance(v, torch.Tensor) and v.requires_grad}
         for k, v in extra_test_kwargs.items():
             if k in extra_ref_kwargs and isinstance(v, torch.Tensor) and v.requires_grad:
-                assert (
-                    isinstance(extra_ref_kwargs[k], torch.Tensor)
-                    and extra_ref_kwargs[k].requires_grad
-                )
+                assert isinstance(extra_ref_kwargs[k], torch.Tensor) and extra_ref_kwargs[k].requires_grad
                 tensor_args_with_grad[k] = v
         assert not (len(tensor_args_with_grad) and multiple_outputs)
         test_out = test_fn(**fn_kwargs, **extra_test_kwargs)
@@ -238,10 +236,7 @@ class PyTestCase:
             out_close, msg = compare_tensors(to, ro, rtol, atol, equal_nan, check_stride)
             if not out_close:
                 passed = False
-                prefix = (
-                    f'*** OUTPUT {ind} DID NOT MATCH THE REFERENCE '
-                    f'(rtol={rtol}, atol={atol}) ***'
-                )
+                prefix = f'*** OUTPUT {ind} DID NOT MATCH THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
                 failed_msgs.append(prefix)
                 failed_msgs.extend(msg)
             else:
@@ -292,16 +287,12 @@ class PyTestCase:
                 if not grad_close:
                     passed = False
                     prefix = (
-                        f'*** GRAD FOR: {name} DID NOT MATCH THE REFERENCE '
-                        f'(rtol={grad_rtol}, atol={grad_atol}) ***'
+                        f'*** GRAD FOR: {name} DID NOT MATCH THE REFERENCE ' f'(rtol={grad_rtol}, atol={grad_atol}) ***'
                     )
                     failed_msgs.append(prefix)
                     failed_msgs.extend(msg)
                 else:
-                    prefix = (
-                        f'*** GRAD FOR: {name} MATCHED THE REFERENCE '
-                        f'(rtol={grad_rtol}, atol={grad_atol}) ***'
-                    )
+                    prefix = f'*** GRAD FOR: {name} MATCHED THE REFERENCE ' f'(rtol={grad_rtol}, atol={grad_atol}) ***'
                 all_msgs.append(prefix)
                 all_msgs.extend(msg)
 
@@ -394,9 +385,7 @@ class PyTestCase:
         fn_kwargs = {k: v.tensor if isinstance(v, TestParam) else v for k, v in kwargs.items()}
 
         tensor_args_with_grad = {
-            k: v
-            for k, v in fn_kwargs.items()
-            if isinstance(v, (torch.Tensor, TestParam)) and v.requires_grad
+            k: v for k, v in fn_kwargs.items() if isinstance(v, (torch.Tensor, TestParam)) and v.requires_grad
         }
 
         for i in range(iters):
@@ -416,10 +405,7 @@ class PyTestCase:
                 out.backward(gradient)
 
                 if ref_grads is None:
-                    ref_grads = {
-                        name: arg.grad.detach().clone()
-                        for name, arg in tensor_args_with_grad.items()
-                    }
+                    ref_grads = {name: arg.grad.detach().clone() for name, arg in tensor_args_with_grad.items()}
                 else:
                     current_grads = {name: arg.grad for name, arg in tensor_args_with_grad.items()}
 
@@ -513,9 +499,7 @@ class PyTestCase:
 
 
 def save_arguments():
-
     def outer_wrapper(func):
-
         @functools.wraps(func)
         def inner_wrapper(*args, **kwargs):
             self, *rest = args
@@ -598,9 +582,7 @@ def load_previous(name, argument_names, expanded_argument_names):
     loaded_df = loaded_df.rename(columns=lambda x: x if 'Unnamed' not in str(x) else '')
 
     loaded_df.set_index(expanded_argument_names)
-    selected_cols = expanded_argument_names + [
-        c for c in loaded_df.columns if c[0] in Config.load_names
-    ]
+    selected_cols = expanded_argument_names + [c for c in loaded_df.columns if c[0] in Config.load_names]
 
     loaded_df = loaded_df[selected_cols]
 

@@ -184,9 +184,7 @@ class RMSNorm(torch.autograd.Function):
         if static_persistent:
             # Static persistent mode
             if bias is not None:
-                raise NotImplementedError(
-                    "Bias is not supported in static persistent CuTile RMSNorm"
-                )
+                raise NotImplementedError("Bias is not supported in static persistent CuTile RMSNorm")
 
             def ceil_div(a, b):
                 return (a + b - 1) // b

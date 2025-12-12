@@ -57,11 +57,7 @@ def create_benchmark_config(M, use_tma=True):
 
 
 @triton.testing.perf_report(
-    [
-        create_benchmark_config(M, use_tma)
-        for M in [4096]  # Matrix height
-        for use_tma in [True, False]
-    ]
+    [create_benchmark_config(M, use_tma) for M in [4096] for use_tma in [True, False]]  # Matrix height
 )
 def bench_softmax(M, N, backend, use_tma, dtype=torch.float32, device=DEVICE):
     # Create data

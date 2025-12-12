@@ -63,9 +63,7 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
             # gate_proj.weight: [intermediate_size, hidden_size]
             # up_proj.weight: [intermediate_size, hidden_size]
             # fused_weight: [2 * intermediate_size, hidden_size]
-            self.fused_gate_up_weight = torch.cat(
-                [self.gate_proj.weight, self.up_proj.weight], dim=0
-            )
+            self.fused_gate_up_weight = torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
 
     def forward(self, x):
         # Lazy initialize fused weights if needed

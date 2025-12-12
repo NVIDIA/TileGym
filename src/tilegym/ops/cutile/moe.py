@@ -158,8 +158,7 @@ def invoke_fused_moe_kernel(
     assert sorted_token_ids.stride(0) == 1
     padded_size = 0  # only uses when using fp8
     grid = (
-        math.ceil(sorted_token_ids.shape[0] / config["TILE_SIZE_M"])
-        * math.ceil(B.shape[1] / config["TILE_SIZE_N"]),
+        math.ceil(sorted_token_ids.shape[0] / config["TILE_SIZE_M"]) * math.ceil(B.shape[1] / config["TILE_SIZE_N"]),
     )
 
     K = B.shape[2] - padded_size

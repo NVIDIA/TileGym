@@ -361,9 +361,7 @@ def mla_decoding_split_kv(
     Returns:
         Output tensor of shape (B, H, D)
     """
-    raise NotImplementedError(
-        f"mla_decoding_split_kv is not implemented for {get_current_backend()}"
-    )
+    raise NotImplementedError(f"mla_decoding_split_kv is not implemented for {get_current_backend()}")
 
 
 @dispatch(
