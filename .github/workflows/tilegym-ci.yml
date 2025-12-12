@@ -248,11 +248,12 @@ jobs:
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym \
             ${IMAGE} \
-            pytest -s tests/ops -v -k test_op \
-              -n auto \
-              --junitxml=/test-results/ops-results.xml \
-              --html=/test-results/ops-report.html \
-              --self-contained-html
+            bash -c "pip install --no-cache-dir pytest-xdist pytest-html && \
+              pytest -s tests/ops -v -k test_op \
+                -n auto \
+                --junitxml=/test-results/ops-results.xml \
+                --html=/test-results/ops-report.html \
+                --self-contained-html"
 
       - name: Upload test results
         if: always()

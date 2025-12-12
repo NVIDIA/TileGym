@@ -51,8 +51,8 @@ ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 # Install PyTorch with CUDA 13.0 support (after CUDA toolkit)
 RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
 
-# Install cuda-tile and pytest plugins (before copying source code)
-RUN pip install --no-cache-dir cuda-tile pytest-xdist pytest-html && \
+# Install cuda-tile and accelerate (before copying source code)
+RUN pip install --no-cache-dir cuda-tile && \
     pip install --no-cache-dir --no-deps accelerate
 
 # Set working directory
