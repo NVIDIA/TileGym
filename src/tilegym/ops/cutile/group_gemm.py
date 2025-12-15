@@ -11,8 +11,7 @@ from tilegym.logger import get_logger
 logger = get_logger(__name__)
 
 # Type aliases for constants
-ConstInt = ct.Constant[int]
-ConstBool = ct.Constant[bool]
+from .cutile_constants import ConstBool, ConstInt
 
 
 @ct.kernel
