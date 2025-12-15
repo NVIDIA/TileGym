@@ -12,10 +12,11 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 - `build` - Builds `tilegym` Docker image and pushes to GHCR
 - `test-ops` - Runs ops tests (`pytest -s tests/ops`)
 - `test-benchmark` - Runs benchmark tests sequentially (`tests/benchmark/run_all.sh`)
+- `promote-to-latest` - Tags passing nightly builds with `latest` and `<SHA>-verified`
 
 **Scripts used:**
 - `scripts/parse_pr_config.py` - Parse PR body config
-- `scripts/check_image_exists.py` - Skip nightly builds if tests already passed
+- `scripts/check_image_exists.py` - Skip nightly builds if `latest` already points to current SHA (tests passed previously)
 
 **Test Results:**
 - **ops-test-results:** JUnit XML + HTML report with test pass/fail status (visible in "Checks" tab)
