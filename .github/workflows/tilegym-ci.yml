@@ -316,8 +316,8 @@ jobs:
           echo "Contents of test-results directory:"
           ls -lah ${{ github.workspace }}/test-results/ || echo "Directory does not exist"
           echo ""
-          echo "Files matching *_results.txt:"
-          ls -lh ${{ github.workspace }}/test-results/*_results.txt 2>/dev/null || echo "No matching files found"
+          echo "Files matching *_results.json:"
+          ls -lh ${{ github.workspace }}/test-results/*_results.json 2>/dev/null || echo "No matching files found"
 
       - name: Format benchmark summary
         if: always()
@@ -328,7 +328,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: test-results/*_results.txt
+          path: test-results/*_results.json
           retention-days: 30
 
   promote-to-latest:

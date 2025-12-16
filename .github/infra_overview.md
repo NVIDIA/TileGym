@@ -19,7 +19,7 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 
 **Test Results:**
 - **ops-test-results:** JUnit XML + HTML report with test pass/fail status (visible in "Checks" tab)
-- **benchmark-results:** Individual `*_results.txt` files containing performance tables with TFLOPS/GBps metrics for each benchmark (downloadable artifacts)
+- **benchmark-results:** Individual `*_results.json` files containing structured performance data with TFLOPS/GBps metrics for each benchmark (downloadable artifacts)
 - **Benchmark summary:** Formatted markdown tables visible in the workflow "Summary" tab
 
 ---

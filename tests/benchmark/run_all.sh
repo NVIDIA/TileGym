@@ -32,21 +32,18 @@ for file in bench_*.py; do
     fi
     
     benchmark_name=$(basename "$file" .py)
-    output_file="$OUTPUT_DIR/${benchmark_name}_results.txt"
+    output_json="$OUTPUT_DIR/${benchmark_name}_results.json"
     
     echo "=========================================="
     echo "Running $file..."
     echo "=========================================="
     
-    # Ensure output file is created even if benchmark produces no output
-    touch "$output_file"
-    
-    if python "$file" 2>&1 | tee "$output_file"; then
+    # Run benchmark and capture output as JSON
+    if python "$(dirname "$0")/run_with_json.py" "$file" "$output_json"; then
         echo "✓ PASSED: $file"
-        echo "  Results saved to: $output_file"
+        echo "  Results saved to: $output_json"
     else
         echo "✗ FAILED: $file"
-        echo "FAILED" > "$output_file"
         exit 1  # Exit with error if any benchmark fails
     fi
     echo ""
@@ -56,5 +53,5 @@ echo "=========================================="
 echo "All benchmarks complete!"
 echo "Results directory: $OUTPUT_DIR"
 echo "Files created:"
-ls -lh "$OUTPUT_DIR"/*_results.txt 2>/dev/null || echo "  No result files found"
+ls -lh "$OUTPUT_DIR"/*_results.json 2>/dev/null || echo "  No result files found"
 echo "=========================================="
