@@ -52,7 +52,7 @@ jobs:
 
       - name: Check for code changes
         id: changed-files
-        uses: step-security/changed-files@v45
+        uses: step-security/changed-files@v46
         with:
           files: |
             src/**
@@ -225,6 +225,8 @@ jobs:
           file: ./modeling/transformers/Dockerfile
           tags: ${{ steps.tags.outputs.tags }}
           push: true
+          provenance: false
+          outputs: type=image,push=true,compression=zstd,compression-level=3
           cache-from: |
             type=gha
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:latest
