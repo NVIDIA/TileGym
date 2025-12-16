@@ -31,6 +31,7 @@ jobs:
       image_tag: ${{ steps.parse.outputs.image_tag }}
       image_name: ${{ steps.parse.outputs.image_name }}
       is_pr: ${{ steps.context.outputs.is_pr }}
+      code_changed: ${{ steps.changed-files.outputs.any_changed }}
     steps:
       - name: Determine context
         id: context
@@ -46,6 +47,20 @@ jobs:
           fi
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for code changes
+        id: changed-files
+        uses: step-security/changed-files@v45
+        with:
+          files: |
+            src/**
+            tests/**
+            modeling/**
+            setup.py
+            pyproject.toml
+            pytest.ini
 
       - name: Get PR info
         id: pr
@@ -225,7 +240,8 @@ jobs:
       always() && 
       needs.config.outputs.run_ops == 'true' &&
       needs.build.outputs.skipped != 'true' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.config.outputs.is_pr == 'false' || needs.config.outputs.code_changed == 'true')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
       - name: Create test results directory
@@ -280,7 +296,8 @@ jobs:
       always() && 
       needs.config.outputs.run_benchmark == 'true' &&
       needs.build.outputs.skipped != 'true' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.config.outputs.is_pr == 'false' || needs.config.outputs.code_changed == 'true')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
       - name: Checkout code (sparse - only need formatting script)
