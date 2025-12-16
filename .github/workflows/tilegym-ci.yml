@@ -31,7 +31,7 @@ jobs:
       image_tag: ${{ steps.parse.outputs.image_tag }}
       image_name: ${{ steps.parse.outputs.image_name }}
       is_pr: ${{ steps.context.outputs.is_pr }}
-      code_changed: ${{ steps.changed-files.outputs.any_changed }}
+      docs_only: ${{ steps.set-docs-only.outputs.docs_only }}
     steps:
       - name: Determine context
         id: context
@@ -50,17 +50,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check for code changes
+      - name: Check if only docs/markdown changed
         id: changed-files
         uses: step-security/changed-files@v46
         with:
           files: |
-            src/**
-            tests/**
-            modeling/**
-            setup.py
-            pyproject.toml
-            pytest.ini
+            **/*.md
+            LICENSE
+
+      - name: Log skip reason if docs-only
+        if: steps.changed-files.outputs.only_changed == 'true'
+        run: |
+          echo "::notice::Skipping tests: Only documentation files were modified (markdown files, LICENSE)"
+          echo "Changed files: ${{ steps.changed-files.outputs.all_changed_files }}"
+
+      - name: Set docs_only output
+        id: set-docs-only
+        run: |
+          if [[ "${{ steps.changed-files.outputs.only_changed }}" == "true" ]]; then
+            echo "docs_only=true" >> $GITHUB_OUTPUT
+            echo "Only documentation files changed - tests will be skipped for PR"
+          else
+            echo "docs_only=false" >> $GITHUB_OUTPUT
+            echo "Code changes detected - tests will run"
+          fi
 
       - name: Get PR info
         id: pr
@@ -243,7 +256,7 @@ jobs:
       needs.config.outputs.run_ops == 'true' &&
       needs.build.outputs.skipped != 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      (needs.config.outputs.is_pr == 'false' || needs.config.outputs.code_changed == 'true')
+      (needs.config.outputs.is_pr == 'false' || needs.config.outputs.docs_only != 'true')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
       - name: Create test results directory
@@ -299,7 +312,7 @@ jobs:
       needs.config.outputs.run_benchmark == 'true' &&
       needs.build.outputs.skipped != 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      (needs.config.outputs.is_pr == 'false' || needs.config.outputs.code_changed == 'true')
+      (needs.config.outputs.is_pr == 'false' || needs.config.outputs.docs_only != 'true')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
       - name: Checkout code (sparse - only need formatting script)
