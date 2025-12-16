@@ -98,11 +98,12 @@ docker build -t tilegym-transformers -f modeling/transformers/Dockerfile .
 docker run --gpus all -it tilegym-transformers bash
 ```
 
-If instead you'd like to use one of our images provided on GHCR, you can simple run the pre-built public docker image. We recommend using the "latest" tag, as it represents the most recent tested image.
+If you would like to use pre-built docker, you can run the following command:
 
 ```bash
 docker run --gpus all -it ghcr.io/nvidia/tilegym:latest bash
 ```
+*Note: We recommend using the "latest" tag, as it represents the most recent tested image.*
 
 More details in [modeling/transformers/README.md](modeling/transformers/README.md)
 
