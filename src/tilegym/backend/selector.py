@@ -8,7 +8,9 @@ Used to manage backend implementations of various operations in TileGym library
 """
 
 import os
-from typing import Dict, Set
+from typing import Dict
+from typing import Set
+
 from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,7 +71,7 @@ def get_current_backend() -> str:
 
 
 def set_backend(backend: str) -> None:
-    '''set the backend for ops'''
+    """set the backend for ops"""
     global _CURRENT_BACKENDS
     if backend not in _AVAILABLE_BACKENDS:
         raise ValueError(f"Unknown backend: {backend}, available backends: {_AVAILABLE_BACKENDS}")
@@ -78,12 +80,12 @@ def set_backend(backend: str) -> None:
 
 
 def is_backend_available(backend: str) -> bool:
-    '''check if the backend is available'''
+    """check if the backend is available"""
     return backend in _AVAILABLE_BACKENDS
 
 
 def assert_backend_available(backend: str) -> None:
-    '''assert the backend is available'''
+    """assert the backend is available"""
     if not is_backend_available(backend):
         raise ValueError(f"Backend {backend} is not available, available backends: {_AVAILABLE_BACKENDS}")
 

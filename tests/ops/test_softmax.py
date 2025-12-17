@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
-import torch
 import pytest
+import torch
 
 import tilegym
 
@@ -37,7 +37,7 @@ class Test_Softmax(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
-        device = torch.device('cuda')
+        device = torch.device("cuda")
         x = torch.rand(
             m,
             n,
@@ -54,8 +54,8 @@ class Test_Softmax(common.PyTestCase):
         self.assertCorrectness(
             tilegym.ops.softmax,
             self.reference,
-            {'x': x},
-            extra_test_kwargs={'use_tma': use_tma},
+            {"x": x},
+            extra_test_kwargs={"use_tma": use_tma},
             gradient=dout,
             rtol=rtol,
             atol=atol,

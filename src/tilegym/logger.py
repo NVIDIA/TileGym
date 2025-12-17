@@ -7,15 +7,17 @@ Unified logging management system for TileGym project
 Provides deduplicated warnings, hierarchical logging, performance monitoring and other features
 """
 
-import logging
-import warnings
-import os
 import inspect
-from typing import Set, Dict, Any, Optional
-from functools import wraps
+import logging
+import os
 import threading
-from collections import defaultdict
 import time
+from collections import defaultdict
+from functools import wraps
+from typing import Any
+from typing import Dict
+from typing import Optional
+from typing import Set
 
 
 class TileGymLogFormatter(logging.Formatter):
@@ -23,21 +25,21 @@ class TileGymLogFormatter(logging.Formatter):
 
     # ANSI color codes
     COLORS = {
-        'DEBUG': '\033[36m',  # Cyan
-        'INFO': '\033[32m',  # Green
-        'WARNING': '\033[33m',  # Yellow
-        'ERROR': '\033[31m',  # Red
-        'CRITICAL': '\033[35m',  # Magenta
-        'RESET': '\033[0m',  # Reset
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
+        "RESET": "\033[0m",  # Reset
     }
 
     def __init__(self, *args, use_colors=True, **kwargs):
         super().__init__(*args, **kwargs)
-        self.use_colors = use_colors and hasattr(os.sys.stderr, 'isatty') and os.sys.stderr.isatty()
+        self.use_colors = use_colors and hasattr(os.sys.stderr, "isatty") and os.sys.stderr.isatty()
 
     def format(self, record):
         # Add location information
-        if hasattr(record, 'caller_filename') and hasattr(record, 'caller_lineno'):
+        if hasattr(record, "caller_filename") and hasattr(record, "caller_lineno"):
             record.location = f"{record.caller_filename}:{record.caller_lineno}"
         else:
             # Fallback to default location info
@@ -49,7 +51,7 @@ class TileGymLogFormatter(logging.Formatter):
         # Add colors if enabled
         if self.use_colors and record.levelname in self.COLORS:
             color = self.COLORS[record.levelname]
-            reset = self.COLORS['RESET']
+            reset = self.COLORS["RESET"]
             # Color the entire message
             formatted = f"{color}{formatted}{reset}"
 
@@ -67,9 +69,9 @@ def _get_caller_info(skip_frames: int = 2) -> Dict[str, Any]:
 
         if frame:
             return {
-                'caller_filename': os.path.basename(frame.f_code.co_filename),
-                'caller_lineno': frame.f_lineno,
-                'caller_funcname': frame.f_code.co_name,
+                "caller_filename": os.path.basename(frame.f_code.co_filename),
+                "caller_lineno": frame.f_lineno,
+                "caller_funcname": frame.f_code.co_name,
             }
         return {}
     finally:
@@ -78,17 +80,17 @@ def _get_caller_info(skip_frames: int = 2) -> Dict[str, Any]:
 
 def _get_log_level_from_env() -> int:
     """Get log level from environment variable TILEGYM_LOG_LEVEL"""
-    env_level = os.getenv('TILEGYM_LOG_LEVEL', 'INFO').upper()
+    env_level = os.getenv("TILEGYM_LOG_LEVEL", "INFO").upper()
 
     # Map string levels to logging constants
     level_map = {
-        'DEBUG': logging.DEBUG,
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'WARN': logging.WARNING,  # Alternative spelling
-        'ERROR': logging.ERROR,
-        'CRITICAL': logging.CRITICAL,
-        'FATAL': logging.CRITICAL,  # Alternative spelling
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "WARN": logging.WARNING,  # Alternative spelling
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+        "FATAL": logging.CRITICAL,  # Alternative spelling
     }
 
     if env_level in level_map:
@@ -115,8 +117,8 @@ class TileGymLogger:
             handler = logging.StreamHandler()
             # Use custom formatter that handles caller info
             formatter = TileGymLogFormatter(
-                '[%(asctime)s] [%(name)s] [%(levelname)s] [%(location)s] %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S',
+                "[%(asctime)s] [%(name)s] [%(levelname)s] [%(location)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
@@ -140,10 +142,10 @@ class TileGymLogger:
                     formatted_message = message
 
                 # Get caller information for better location tracking
-                if _auto_caller_info and 'extra' not in kwargs:
+                if _auto_caller_info and "extra" not in kwargs:
                     caller_info = _get_caller_info(skip_frames=2)
                     if caller_info:
-                        kwargs.setdefault('extra', {}).update(caller_info)
+                        kwargs.setdefault("extra", {}).update(caller_info)
 
                 self.logger.warning(formatted_message, **kwargs)
 
@@ -169,15 +171,15 @@ class TileGymLogger:
                     formatted_message = message
 
                 if count == max_count:
-                    formatted_message += f" (This warning will not be shown again)"
+                    formatted_message += " (This warning will not be shown again)"
                 elif count > 1:
                     formatted_message += f" (shown {count}/{max_count} times)"
 
                 # Get caller information for better location tracking
-                if _auto_caller_info and 'extra' not in kwargs:
+                if _auto_caller_info and "extra" not in kwargs:
                     caller_info = _get_caller_info(skip_frames=2)
                     if caller_info:
-                        kwargs.setdefault('extra', {}).update(caller_info)
+                        kwargs.setdefault("extra", {}).update(caller_info)
 
                 self.logger.warning(formatted_message, **kwargs)
 
@@ -255,7 +257,7 @@ def warn_once(message: str, category: Optional[str] = None, **kwargs):
     # Add extra skip frame since we're going through this wrapper
     caller_info = _get_caller_info(skip_frames=2)
     if caller_info:
-        kwargs.setdefault('extra', {}).update(caller_info)
+        kwargs.setdefault("extra", {}).update(caller_info)
     _global_logger.warn_once(message, category, _auto_caller_info=False, **kwargs)
 
 
@@ -264,7 +266,7 @@ def warn_limited(message: str, max_count: int = 5, category: Optional[str] = Non
     # Add extra skip frame since we're going through this wrapper
     caller_info = _get_caller_info(skip_frames=2)
     if caller_info:
-        kwargs.setdefault('extra', {}).update(caller_info)
+        kwargs.setdefault("extra", {}).update(caller_info)
     _global_logger.warn_limited(message, max_count, category, _auto_caller_info=False, **kwargs)
 
 
@@ -362,13 +364,13 @@ def get_current_log_level() -> str:
     """Get current log level as string"""
     level_num = _global_logger.logger.level
     level_map = {
-        logging.DEBUG: 'DEBUG',
-        logging.INFO: 'INFO',
-        logging.WARNING: 'WARNING',
-        logging.ERROR: 'ERROR',
-        logging.CRITICAL: 'CRITICAL',
+        logging.DEBUG: "DEBUG",
+        logging.INFO: "INFO",
+        logging.WARNING: "WARNING",
+        logging.ERROR: "ERROR",
+        logging.CRITICAL: "CRITICAL",
     }
-    return level_map.get(level_num, 'UNKNOWN')
+    return level_map.get(level_num, "UNKNOWN")
 
 
 def reload_log_level_from_env():
@@ -380,12 +382,12 @@ def reload_log_level_from_env():
 
 def get_env_log_level() -> str:
     """Get the log level specified in environment variable"""
-    return os.getenv('TILEGYM_LOG_LEVEL', 'INFO').upper()
+    return os.getenv("TILEGYM_LOG_LEVEL", "INFO").upper()
 
 
 def set_env_log_level(level: str):
     """Set environment variable and update current log level"""
-    os.environ['TILEGYM_LOG_LEVEL'] = level.upper()
+    os.environ["TILEGYM_LOG_LEVEL"] = level.upper()
     return reload_log_level_from_env()
 
 

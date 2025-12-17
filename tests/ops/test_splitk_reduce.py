@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 
 import math
+
 import pytest
 import torch
 
 import tilegym
-import tests.config as config
 from tests import common
 
 
@@ -68,7 +68,7 @@ class Test_SplitkReduce(common.PyTestCase):
         if not torch.cuda.is_available():
             pytest.skip("CUDA not available, skipping splitk_reduce test")
 
-        device = torch.device('cuda')
+        device = torch.device("cuda")
         torch.manual_seed(42)  # For reproducibility
 
         # Set S_kv based on num_kv_splits to match MLA actual workload

@@ -48,7 +48,7 @@ def check_image_exists(registry_image: str, tag: str, token: str) -> bool:
         )
 
         if latest_inspect.returncode != 0:
-            print(f"'latest' tag does not exist", file=sys.stderr)
+            print("'latest' tag does not exist", file=sys.stderr)
             return False
 
         # Get digest of SHA tag
@@ -61,8 +61,8 @@ def check_image_exists(registry_image: str, tag: str, token: str) -> bool:
         # Compare digests (both outputs are JSON with a 'config' field containing the digest)
         import json
 
-        latest_digest = json.loads(latest_inspect.stdout)['config']['digest']
-        sha_digest = json.loads(sha_inspect.stdout)['config']['digest']
+        latest_digest = json.loads(latest_inspect.stdout)["config"]["digest"]
+        sha_digest = json.loads(sha_inspect.stdout)["config"]["digest"]
 
         return latest_digest == sha_digest
 

@@ -15,6 +15,7 @@ from torch.profiler import profile
 from torch.profiler import record_function
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
+
 from tilegym.transformers import apply_tilegym_kernel_to_deepseek_v2
 from tilegym.transformers import apply_tilegym_kernel_to_llama
 
@@ -25,15 +26,15 @@ def check_and_setup_model_cache(model_id):
     Returns the effective cache directory for the model.
     """
     # Get cache directory from environment or use default
-    cache_base = os.environ.get('TILEGYM_MODEL_CACHE_DIR', os.path.expanduser('~/.cache'))
+    cache_base = os.environ.get("TILEGYM_MODEL_CACHE_DIR", os.path.expanduser("~/.cache"))
 
     # Set up HuggingFace cache directories
-    hf_home = os.path.join(cache_base, 'huggingface')
-    hf_hub = os.path.join(hf_home, 'hub')
+    hf_home = os.path.join(cache_base, "huggingface")
+    hf_hub = os.path.join(hf_home, "hub")
 
     # Set environment variables for transformers
-    os.environ.setdefault('HF_HOME', hf_home)
-    os.environ.setdefault('HF_HUB_CACHE', hf_hub)
+    os.environ.setdefault("HF_HOME", hf_home)
+    os.environ.setdefault("HF_HUB_CACHE", hf_hub)
 
     # Create cache directories if they don't exist
     Path(hf_hub).mkdir(parents=True, exist_ok=True)
@@ -43,8 +44,8 @@ def check_and_setup_model_cache(model_id):
 
 def _check_cache_complete(model_id):
     """Check if cache directory exists with snapshots. Actual completeness verified during load."""
-    hf_home = os.environ.get('HF_HOME', os.path.expanduser('~/.cache/huggingface'))
-    hf_hub = os.path.join(hf_home, 'hub')
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    hf_hub = os.path.join(hf_home, "hub")
     model_cache_path = Path(hf_hub) / f"models--{model_id.replace('/', '--')}"
     snapshots_dir = model_cache_path / "snapshots"
 
@@ -75,15 +76,15 @@ def _load_with_fallback(model_id, loader_class, resource_name, **kwargs):
 
     # Try local cache first if available
     if _check_cache_complete(model_id):
-        print(f"Found cached files, attempting to use local cache")
+        print("Found cached files, attempting to use local cache")
         try:
             kwargs_local = kwargs.copy()
-            kwargs_local['local_files_only'] = True
+            kwargs_local["local_files_only"] = True
             result = loader_class.from_pretrained(model_id, **kwargs_local)
             print(f"Successfully loaded {resource_name} from local cache")
             return result
-        except Exception as e:
-            print(f"Failed to load from local cache, will download from HuggingFace")
+        except Exception:
+            print("Failed to load from local cache, will download from HuggingFace")
 
     # Fallback to download
     try:
@@ -287,7 +288,7 @@ def main():
     # Load model with cache support
     model_kwargs = {
         "trust_remote_code": False,
-        "device_map": 'cuda',
+        "device_map": "cuda",
         "torch_dtype": torch.bfloat16 if args.precision == "bfloat16" else torch.float32,
     }
 
@@ -316,7 +317,7 @@ def main():
     for i in range(args.warmup_runs):
         with torch.no_grad():
             _ = forward_wrapper.forward()
-        print(f"  Warmup run {i+1}/{args.warmup_runs} completed")
+        print(f"  Warmup run {i + 1}/{args.warmup_runs} completed")
 
     print(f"\nRunning benchmark with {args.num_runs} iterations...")
     generation_times = []
@@ -349,7 +350,7 @@ def main():
         tokens_per_second.append(total_tokens / elapsed_time)
 
         print(
-            f"Run {run+1}: Generated {generated_tokens} tokens in {elapsed_time:.4f}s ({generated_tokens/elapsed_time:.2f} tokens/sec)"
+            f"Run {run + 1}: Generated {generated_tokens} tokens in {elapsed_time:.4f}s ({generated_tokens / elapsed_time:.2f} tokens/sec)"
         )
 
     # Print results
@@ -375,7 +376,7 @@ def main():
         for batch_idx, outputs in enumerate(outputs_list):
             for i in range(outputs.shape[0]):
                 decoded_output = tokenizer.decode(outputs[i], skip_special_tokens=True)
-                print(f"\nBatch {batch_idx+1}, Output {i+1}:")
+                print(f"\nBatch {batch_idx + 1}, Output {i + 1}:")
                 print(decoded_output)
                 print("-" * 50)
 
@@ -473,16 +474,16 @@ def main():
             # Write CSV rows with self-time data and device type (include all operations for inspection)
             for item in all_results:
                 # Get device type string (e.g., "DeviceType.CUDA" or "DeviceType.CPU")
-                device_type_str = str(item.device_type) if hasattr(item, 'device_type') else ""
+                device_type_str = str(item.device_type) if hasattr(item, "device_type") else ""
                 f.write(
-                    f"\"{item.key}\",{item.cpu_time_total:.2f},{item.cpu_time:.2f},{item.device_time_total:.2f},{item.device_time:.2f},{item.self_cpu_time_total:.2f},{item.self_device_time_total:.2f},{item.count},{kernel_filter.contains(item.key)},{device_type_str}\n"
+                    f'"{item.key}",{item.cpu_time_total:.2f},{item.cpu_time:.2f},{item.device_time_total:.2f},{item.device_time:.2f},{item.self_cpu_time_total:.2f},{item.self_device_time_total:.2f},{item.count},{kernel_filter.contains(item.key)},{device_type_str}\n'
                 )
         trace_filename = f"{log_dir}/trace_{case_id}_{timestamp}.json"
         prof.export_chrome_trace(trace_filename)
 
         # Zip the trace file
         zip_filename = f"{log_dir}/trace_{case_id}_{timestamp}.zip"
-        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(trace_filename)
         # Remove the original trace file to save space
         os.remove(trace_filename)
@@ -496,7 +497,7 @@ def main():
             cuda_kernel_time_us = 0.0
             for item in all_results:
                 # Only count DeviceType.CUDA operations (actual kernels), exclude model_inference
-                device_type_str = str(item.device_type) if hasattr(item, 'device_type') else ""
+                device_type_str = str(item.device_type) if hasattr(item, "device_type") else ""
                 if device_type_str == "DeviceType.CUDA" and item.key != "model_inference":
                     cuda_kernel_time_us += item.self_device_time_total
 

@@ -6,7 +6,8 @@ import torch
 import triton
 
 import tilegym
-from tilegym.backend import is_backend_available, register_impl
+from tilegym.backend import is_backend_available
+from tilegym.backend import register_impl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -44,15 +45,15 @@ def create_benchmark_config(M, use_tma=True):
     backends, names, styles = zip(*available_backends)
 
     return triton.testing.Benchmark(
-        x_names=['N'],
+        x_names=["N"],
         x_vals=[2**i for i in range(10, 15)],
-        line_arg='backend',
+        line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
         styles=list(styles),
-        ylabel='GB/s',
-        plot_name=f'softmax-performance-tma-{use_tma}-GBps',
-        args={'M': M, 'use_tma': use_tma},
+        ylabel="GB/s",
+        plot_name=f"softmax-performance-tma-{use_tma}-GBps",
+        args={"M": M, "use_tma": use_tma},
     )
 
 

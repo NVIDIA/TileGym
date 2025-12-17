@@ -6,9 +6,9 @@ import math
 from typing import Any
 from typing import Dict
 from typing import Optional
-from typing import Tuple
 
 import torch
+
 from tilegym.backend import *
 
 ######################################################################

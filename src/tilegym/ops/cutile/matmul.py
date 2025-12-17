@@ -5,7 +5,6 @@
 from math import ceil
 
 import cuda.tile as ct
-import numpy as np
 import torch
 
 from tilegym.backend import register_impl
@@ -186,7 +185,6 @@ def static_persistent_matmul_kernel(
 
 
 def _matmul_autotune_configs():
-
     gpu_capability = torch.cuda.get_device_capability()
 
     if gpu_capability in [(12, 0), (12, 1)]:
@@ -223,7 +221,6 @@ def cutile_autotune_matmul(a, b, c, autotuner: Autotuner | None = None):
 
 
 def _static_persistent_matmul_autotune_configs():
-
     gpu_capability = torch.cuda.get_device_capability()
 
     if gpu_capability in [(12, 0), (12, 1)]:

@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-
 import torch
 
 import tilegym
@@ -38,7 +37,7 @@ class Test_SiLUAndMul(common.PyTestCase):
             pytest.skip(f"Backend {backend} is not available")
 
         self.setUp()
-        device = torch.device('cuda')
+        device = torch.device("cuda")
 
         # Create input tensor
         input_shape = (batch_size, seq_len, 2 * hidden_size)
@@ -51,7 +50,7 @@ class Test_SiLUAndMul(common.PyTestCase):
             tilegym.ops.silu_and_mul,
             self.reference,
             {
-                'input': x,
+                "input": x,
             },
             gradient=dy,
             rtol=0.0,

@@ -6,7 +6,8 @@ import torch
 import triton
 
 import tilegym
-from tilegym.backend import is_backend_available, register_impl
+from tilegym.backend import is_backend_available
+from tilegym.backend import register_impl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -48,7 +49,7 @@ def create_benchmark_config(datatype):
         return None
 
     backends, names, styles = zip(*available_backends)
-    dtype_name = str(datatype).split('.')[-1]  # e.g., 'float16' from 'torch.float16'
+    dtype_name = str(datatype).split(".")[-1]  # e.g., 'float16' from 'torch.float16'
     compute_capability = torch.cuda.get_device_capability()
     if compute_capability[0] == 10:
         max_range = 16

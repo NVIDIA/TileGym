@@ -15,5 +15,5 @@ except ImportError:
     _AUTOTUNER_AVAILABLE = False
 
 __all__ = [
-    'autotuner',
+    "autotuner",
 ]

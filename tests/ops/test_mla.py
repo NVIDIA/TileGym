@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 
 import pytest
 import torch
+
 from tilegym.backend import set_backend
 from tilegym.ops import mla_interface
+
 from .. import common
 
 
@@ -110,7 +111,7 @@ class Test_MLA(common.PyTestCase):
         BLOCK_D = 128
         BLOCK_KPE = 64
 
-        device = torch.device('cuda')
+        device = torch.device("cuda")
 
         # Create random tensors with appropriate head dimensions
         q = torch.empty(num_batch, num_head_q, S_qkv, BLOCK_D, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
@@ -150,16 +151,16 @@ class Test_MLA(common.PyTestCase):
             mla_wrapper,
             self.reference,
             {
-                'q': q,
-                'k': k,
-                'v': v,
-                'qpe': qpe,
-                'kpe': kpe,
-                'is_causal': is_causal,
-                'scaling': scaling,
+                "q": q,
+                "k": k,
+                "v": v,
+                "qpe": qpe,
+                "kpe": kpe,
+                "is_causal": is_causal,
+                "scaling": scaling,
             },
             extra_test_kwargs={
-                'kernel_configs': kernel_configs,
+                "kernel_configs": kernel_configs,
             },
             rtol=1e-2,
             atol=1e-2,

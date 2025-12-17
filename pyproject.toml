@@ -6,13 +6,19 @@
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.black]
-skip-string-normalization = true
+[tool.ruff]
 line-length = 120
 
-[tool.isort]
-force_single_line = true
-extra_standard_library = ["pkg_resources"]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = ["I"]  # I = isort (import sorting only)
+ignore = []
+
+[tool.ruff.lint.isort]
+force-single-line = true
 
 [tool.pylint]
 disable = [

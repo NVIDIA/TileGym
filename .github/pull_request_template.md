@@ -11,6 +11,7 @@ config:
 ```
 
 ## Checklist
+- [ ] Code formatted and imports sorted via repo specifications (`./format.sh`)
 - [ ] Documentation updated (if needed)
 - [ ] CI configuration reviewed
 
