@@ -91,17 +91,9 @@ pip install accelerate --no-deps
 
 **Containerized Setup (Docker)**:
 
-If you would like to build the TileGym docker image locally, you can use the following commands to do so:
-
 ```bash
 docker build -t tilegym-transformers -f modeling/transformers/Dockerfile .
 docker run --gpus all -it tilegym-transformers bash
-```
-
-If instead you'd like to use one of our images provided on GHCR, you can simple run the pre-built public docker image. We recommend using the "latest" tag, as it represents the most recent tested image.
-
-```bash
-docker run --gpus all -it ghcr.io/nvidia/tilegym:latest bash
 ```
 
 More details in [modeling/transformers/README.md](modeling/transformers/README.md)
