@@ -3,9 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import inspect
-import os
 
-import torch
 from transformers import PreTrainedModel
 
 from tilegym import set_backend
@@ -50,7 +48,7 @@ def apply_tilegym_kernel_to_llama(
         set_backend("cutile")
 
     if rope:
-        modeling_llama.apply_rotary_pos_emb = get_apply_rope_func(model='llama')
+        modeling_llama.apply_rotary_pos_emb = get_apply_rope_func(model="llama")
     if rms_norm:
         modeling_llama.LlamaRMSNorm = get_rms_norm_module()
     if swiglu:
@@ -58,7 +56,7 @@ def apply_tilegym_kernel_to_llama(
     if attn:
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-        ALL_ATTENTION_FUNCTIONS['sdpa'] = get_fmha_interface()
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
 
 
 def apply_tilegym_kernel_to_deepseek_v2(
@@ -92,7 +90,7 @@ def apply_tilegym_kernel_to_deepseek_v2(
         set_backend("cutile")
 
     if rope:
-        modeling_deepseek.apply_rotary_emb = get_apply_rope_func(model='deepseek')
+        modeling_deepseek.apply_rotary_emb = get_apply_rope_func(model="deepseek")
 
     if rms_norm:
         modeling_deepseek.DeepseekV2RMSNorm = get_rms_norm_module()

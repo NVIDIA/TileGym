@@ -44,17 +44,17 @@ def make_missing_backend_handler(package_name, available_items):
 
 __all__ = [
     # Backend selector
-    'get_available_backends',
-    'get_current_backend',
-    'set_backend',
-    'is_backend_available',
-    'assert_backend_available',
+    "get_available_backends",
+    "get_current_backend",
+    "set_backend",
+    "is_backend_available",
+    "assert_backend_available",
     # Backend dispatcher
-    'dispatch',
-    'register_impl',
-    'get_available_backends_for_op',
-    'get_registry_info',
-    'print_registry_info',
+    "dispatch",
+    "register_impl",
+    "get_available_backends_for_op",
+    "get_registry_info",
+    "print_registry_info",
     # Cutile utilities
-    'make_missing_backend_handler',
+    "make_missing_backend_handler",
 ]

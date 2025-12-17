@@ -5,7 +5,6 @@
 import collections
 import dataclasses
 import functools
-import gc
 import inspect
 import itertools
 import multiprocessing
@@ -13,22 +12,22 @@ import numbers
 import os
 import pathlib
 import random
-import unittest
 from functools import wraps
 
 import pytest
+
 # import pandas as pd
 import torch
 
 from .config import Config
 
 current_process = multiprocessing.current_process()
-if current_process.name == 'MainProcess' and not Config.quiet:
+if current_process.name == "MainProcess" and not Config.quiet:
     print(Config.args)
-    print(f'seed = {Config.seed}')
-    print(f'torch = {torch.__version__}')
+    print(f"seed = {Config.seed}")
+    print(f"torch = {torch.__version__}")
     if torch.cuda.is_available():
-        print(f'device = {torch.cuda.get_device_name()}')
+        print(f"device = {torch.cuda.get_device_name()}")
 
 
 def get_dtype_tolerances(dtype):
@@ -44,36 +43,36 @@ def get_dtype_tolerances(dtype):
     # Define tolerance mappings based on precision
     tolerance_map = {
         # High precision types
-        torch.float64: {'rtol': 1e-12, 'atol': 1e-15},
-        torch.complex128: {'rtol': 1e-12, 'atol': 1e-15},
+        torch.float64: {"rtol": 1e-12, "atol": 1e-15},
+        torch.complex128: {"rtol": 1e-12, "atol": 1e-15},
         # Standard precision types
-        torch.float32: {'rtol': 1e-5, 'atol': 1e-8},
-        torch.complex64: {'rtol': 1e-5, 'atol': 1e-8},
+        torch.float32: {"rtol": 1e-5, "atol": 1e-8},
+        torch.complex64: {"rtol": 1e-5, "atol": 1e-8},
         # Half precision types
-        torch.float16: {'rtol': 1e-2, 'atol': 1e-2},
-        torch.bfloat16: {'rtol': 1e-2, 'atol': 2e-2},
-        torch.complex32: {'rtol': 1e-2, 'atol': 1e-2},
+        torch.float16: {"rtol": 1e-2, "atol": 1e-2},
+        torch.bfloat16: {"rtol": 1e-2, "atol": 2e-2},
+        torch.complex32: {"rtol": 1e-2, "atol": 1e-2},
         # 8-bit float types (lower precision)
-        torch.float8_e4m3fn: {'rtol': 1e-1, 'atol': 1e-1},
-        torch.float8_e5m2: {'rtol': 5e-1, 'atol': 5e-1},
+        torch.float8_e4m3fn: {"rtol": 1e-1, "atol": 1e-1},
+        torch.float8_e5m2: {"rtol": 5e-1, "atol": 5e-1},
         # Integer types (exact comparison)
-        torch.int8: {'rtol': 0, 'atol': 0},
-        torch.int16: {'rtol': 0, 'atol': 0},
-        torch.int32: {'rtol': 0, 'atol': 0},
-        torch.int64: {'rtol': 0, 'atol': 0},
-        torch.uint8: {'rtol': 0, 'atol': 0},
-        torch.bool: {'rtol': 0, 'atol': 0},
+        torch.int8: {"rtol": 0, "atol": 0},
+        torch.int16: {"rtol": 0, "atol": 0},
+        torch.int32: {"rtol": 0, "atol": 0},
+        torch.int64: {"rtol": 0, "atol": 0},
+        torch.uint8: {"rtol": 0, "atol": 0},
+        torch.bool: {"rtol": 0, "atol": 0},
     }
 
     # Return specific tolerance or default for unknown types
-    return tolerance_map.get(dtype, {'rtol': 1e-5, 'atol': 1e-8})
+    return tolerance_map.get(dtype, {"rtol": 1e-5, "atol": 1e-8})
 
 
 def get_location(offset=2):
     frame = inspect.currentframe()
     for _ in range(offset):
         frame = frame.f_back
-    location = f'{frame.f_code.co_filename}:{frame.f_lineno}'
+    location = f"{frame.f_code.co_filename}:{frame.f_lineno}"
     return location
 
 
@@ -84,9 +83,9 @@ def get_tensor_alignment(tensor):
 
 
 class PyTestCase:
-    r'''
+    r"""
     Base class for TileGym unit tests.
-    '''
+    """
 
     @pytest.fixture(autouse=True)
     def setup_test(self, request):
@@ -97,16 +96,16 @@ class PyTestCase:
             self.file = Config.file
 
     def setUp(self):
-        r'''
+        r"""
         Automatically resets random seed to the value provided in config before
         running each test case.
-        '''
+        """
         torch.manual_seed(Config.seed)
         random.seed(Config.seed)
 
     def __str__(self):
         cls = self.__class__
-        return f'{cls.__module__}.{cls.__qualname__}.{self._testMethodName}'
+        return f"{cls.__module__}.{cls.__qualname__}.{self._testMethodName}"
 
     def assertCorrectness(
         self,
@@ -125,7 +124,7 @@ class PyTestCase:
         ref_index=None,
         output_processor=None,
     ):
-        r'''
+        r"""
         Check that a specified test function matches the reference.
 
         Relative and absolute tolerance for comparing gradients of inputs w.r.t
@@ -157,7 +156,7 @@ class PyTestCase:
                 at this index incase of multiple outputs. Default is None
             ref_index: Compare a specific tensor from the reference output tuple
                 at this index incase of multiple outputs. Default is None
-        '''
+        """
         passed = True
         all_msgs = []
         failed_msgs = []
@@ -194,9 +193,9 @@ class PyTestCase:
             if detected_dtype is not None:
                 default_tols = get_dtype_tolerances(detected_dtype)
                 if rtol is None:
-                    rtol = default_tols['rtol']
+                    rtol = default_tols["rtol"]
                 if atol is None:
-                    atol = default_tols['atol']
+                    atol = default_tols["atol"]
             else:
                 # Fallback to standard defaults if no dtype detected
                 if rtol is None:
@@ -235,11 +234,11 @@ class PyTestCase:
             out_close, msg = compare_tensors(to, ro, rtol, atol, equal_nan, check_stride)
             if not out_close:
                 passed = False
-                prefix = f'*** OUTPUT {ind} DID NOT MATCH THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
+                prefix = f"*** OUTPUT {ind} DID NOT MATCH THE REFERENCE (rtol={rtol}, atol={atol}) ***"
                 failed_msgs.append(prefix)
                 failed_msgs.extend(msg)
             else:
-                prefix = f'*** OUTPUT {ind} MATCHED THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***'
+                prefix = f"*** OUTPUT {ind} MATCHED THE REFERENCE (rtol={rtol}, atol={atol}) ***"
             all_msgs.append(prefix)
             all_msgs.extend(msg)
         if not multiple_outputs and test_out.requires_grad:
@@ -286,19 +285,19 @@ class PyTestCase:
                 if not grad_close:
                     passed = False
                     prefix = (
-                        f'*** GRAD FOR: {name} DID NOT MATCH THE REFERENCE ' f'(rtol={grad_rtol}, atol={grad_atol}) ***'
+                        f"*** GRAD FOR: {name} DID NOT MATCH THE REFERENCE (rtol={grad_rtol}, atol={grad_atol}) ***"
                     )
                     failed_msgs.append(prefix)
                     failed_msgs.extend(msg)
                 else:
-                    prefix = f'*** GRAD FOR: {name} MATCHED THE REFERENCE ' f'(rtol={grad_rtol}, atol={grad_atol}) ***'
+                    prefix = f"*** GRAD FOR: {name} MATCHED THE REFERENCE (rtol={grad_rtol}, atol={grad_atol}) ***"
                 all_msgs.append(prefix)
                 all_msgs.extend(msg)
 
-        all_msgs = '\n'.join([f'\t{msg}' for msg in all_msgs])
-        failed_msgs = '\n'.join([f'\t{msg}' for msg in failed_msgs])
+        all_msgs = "\n".join([f"\t{msg}" for msg in all_msgs])
+        failed_msgs = "\n".join([f"\t{msg}" for msg in failed_msgs])
 
-        assert passed, f'\n{failed_msgs}'
+        assert passed, f"\n{failed_msgs}"
 
         if Config.print_matching:
             test = self._subtest if self._subtest is not None else self
@@ -316,7 +315,7 @@ class PyTestCase:
         equal_nan=False,
         iters=100,
     ):
-        r'''
+        r"""
         Checks that a specified function returns deterministic results.
 
         On first iteration it stores returned output and gradients w.r.t. input
@@ -349,7 +348,7 @@ class PyTestCase:
                 absolute tolerance for gradients of inputs
             equal_nan: if ``True``, then two ``NaNs`` will be considered equal
             iters: number of test iterations to perform
-        '''
+        """
         passed = True
 
         # Auto-detect tolerances based on data type if not provided
@@ -368,9 +367,9 @@ class PyTestCase:
             if detected_dtype is not None:
                 default_tols = get_dtype_tolerances(detected_dtype)
                 if rtol is None:
-                    rtol = default_tols['rtol']
+                    rtol = default_tols["rtol"]
                 if atol is None:
-                    atol = default_tols['atol']
+                    atol = default_tols["atol"]
             else:
                 # Fallback to standard defaults if no dtype detected
                 if rtol is None:
@@ -395,7 +394,7 @@ class PyTestCase:
             else:
                 out_close = torch.allclose(out, ref_out, rtol, atol, equal_nan)
                 if not out_close:
-                    print('*** OUTPUT DID NOT MATCH THE REFERENCE ' f'(rtol={rtol}, atol={atol}) ***')
+                    print(f"*** OUTPUT DID NOT MATCH THE REFERENCE (rtol={rtol}, atol={atol}) ***")
                     passed = False
 
             if out.requires_grad:
@@ -425,8 +424,8 @@ class PyTestCase:
                         )
                         if not grad_close:
                             print(
-                                f'*** GRAD FOR: {name} DID NOT MATCH THE REFERENCE '
-                                f'(rtol={grad_rtol}, atol={grad_atol}) ***'
+                                f"*** GRAD FOR: {name} DID NOT MATCH THE REFERENCE "
+                                f"(rtol={grad_rtol}, atol={grad_atol}) ***"
                             )
                             passed = False
 
@@ -453,9 +452,9 @@ class PyTestCase:
             if detected_dtype is not None:
                 default_tols = get_dtype_tolerances(detected_dtype)
                 if rtol is None:
-                    rtol = default_tols['rtol']
+                    rtol = default_tols["rtol"]
                 if atol is None:
-                    atol = default_tols['atol']
+                    atol = default_tols["atol"]
             else:
                 # Fallback to standard defaults
                 if rtol is None:
@@ -482,17 +481,17 @@ class PyTestCase:
         close_percent = close_count / total_count * 100
 
         msg = (
-            f'\nClose: {close_count} / {total_count} [{close_percent:.2f}%],'
-            f'\nMax Input Ref-fp32 difference: {max_input_fp32_diff:.4e}'
-            f'\nMax Ref-fp16 Ref-fp32 difference: {max_ref_fp16_fp32_diff:.4e}'
-            f'\nScaled Max Ref-fp16 Ref-fp32 difference: {tolerance * max_ref_fp16_fp32_diff:.4e}'
-            f'\nMin Tolerance Possible: {max_input_fp32_diff / max_ref_fp16_fp32_diff:.4e}'
-            f'\nMismatched indices:\n{not_close_mask.nonzero()}'
+            f"\nClose: {close_count} / {total_count} [{close_percent:.2f}%],"
+            f"\nMax Input Ref-fp32 difference: {max_input_fp32_diff:.4e}"
+            f"\nMax Ref-fp16 Ref-fp32 difference: {max_ref_fp16_fp32_diff:.4e}"
+            f"\nScaled Max Ref-fp16 Ref-fp32 difference: {tolerance * max_ref_fp16_fp32_diff:.4e}"
+            f"\nMin Tolerance Possible: {max_input_fp32_diff / max_ref_fp16_fp32_diff:.4e}"
+            f"\nMismatched indices:\n{not_close_mask.nonzero()}"
         )
 
         if Config.print_matching:
             test = self._subtest if self._subtest is not None else self
-            verbose_msg = f'{test}\ndiffsclose: {diffs_close}{msg}\n'
+            verbose_msg = f"{test}\ndiffsclose: {diffs_close}{msg}\n"
             print(verbose_msg)
         assert diffs_close, msg
 
@@ -533,11 +532,11 @@ def unroll_generators(params):
 
 def df_write_descriptor(fmt):
     descriptor = {
-        'csv': {'method': 'to_csv', 'kwargs': {'index': False}},
-        'html': {'method': 'to_html', 'kwargs': {'index': False}},
-        'json': {'method': 'to_json', 'kwargs': {'orient': 'records'}},
-        'md': {'method': 'to_markdown', 'kwargs': {'index': False}},
-        'txt': {'method': 'to_string', 'kwargs': {'index': False}},
+        "csv": {"method": "to_csv", "kwargs": {"index": False}},
+        "html": {"method": "to_html", "kwargs": {"index": False}},
+        "json": {"method": "to_json", "kwargs": {"orient": "records"}},
+        "md": {"method": "to_markdown", "kwargs": {"index": False}},
+        "txt": {"method": "to_string", "kwargs": {"index": False}},
     }
     return descriptor[fmt]
 
@@ -572,13 +571,13 @@ def find_modes_metrics(df):
 
 def load_previous(name, argument_names, expanded_argument_names):
     load_dir = pathlib.Path(Config.load_dir)
-    load_name = pathlib.Path(f'{name}.{Config.load}')
+    load_name = pathlib.Path(f"{name}.{Config.load}")
     load_path = load_dir / load_name
     loaded_df = pd.read_csv(
         load_path,
         header=[0, 1, 2],
     )
-    loaded_df = loaded_df.rename(columns=lambda x: x if 'Unnamed' not in str(x) else '')
+    loaded_df = loaded_df.rename(columns=lambda x: x if "Unnamed" not in str(x) else "")
 
     loaded_df.set_index(expanded_argument_names)
     selected_cols = expanded_argument_names + [c for c in loaded_df.columns if c[0] in Config.load_names]
@@ -587,7 +586,7 @@ def load_previous(name, argument_names, expanded_argument_names):
 
     loaded_names = [c[0] for c in loaded_df.columns]
     names2 = [n for n in loaded_names if n not in argument_names]
-    loaded_df = loaded_df.rename(columns=lambda x: f'loaded_{x}' if x in names2 else x)
+    loaded_df = loaded_df.rename(columns=lambda x: f"loaded_{x}" if x in names2 else x)
     return loaded_df
 
 
@@ -596,38 +595,38 @@ def dump_results(df, name):
     os.makedirs(dump_dir, exist_ok=True)
     dump_format = Config.dump
     write_desc = df_write_descriptor(dump_format)
-    res = getattr(df, write_desc['method'])(**write_desc['kwargs'])
-    dump_name = pathlib.Path(f'{name}.{dump_format}')
+    res = getattr(df, write_desc["method"])(**write_desc["kwargs"])
+    dump_name = pathlib.Path(f"{name}.{dump_format}")
     dump_path = dump_dir / dump_name
-    with open(dump_path, 'w') as f:
+    with open(dump_path, "w") as f:
         f.write(res)
 
 
 def add_relative_columns(df, main_name, other_names):
-    non_relative_metrics = {'rel_std', 'nrep'}
+    non_relative_metrics = {"rel_std", "nrep"}
 
     modes, metrics = find_modes_metrics(df)
 
     relative_metrics = [m for m in metrics if m not in non_relative_metrics]
 
     for other_name, mode, metric in itertools.product(other_names, modes, relative_metrics):
-        df[(f'{other_name}/{main_name}', mode, metric)] = (
-            df[(f'{other_name}', mode, metric)] / df[(f'{main_name}', mode, metric)]
+        df[(f"{other_name}/{main_name}", mode, metric)] = (
+            df[(f"{other_name}", mode, metric)] / df[(f"{main_name}", mode, metric)]
         )
 
 
 def print_results(df, name):
     formatters = {}
     for col in df.columns:
-        if col[1] in {'forward', 'backward'}:
-            if col[2] == 'rel_std':
-                formatters[col] = '{:.1f}%'.format
-            elif col[2] == 'nrep':
-                formatters[col] = '{:d}'.format
+        if col[1] in {"forward", "backward"}:
+            if col[2] == "rel_std":
+                formatters[col] = "{:.1f}%".format
+            elif col[2] == "nrep":
+                formatters[col] = "{:d}".format
             else:
-                formatters[col] = '{:.2e}'.format
-        if '/' in col[0]:
-            formatters[col] = '{:.3f}'.format
+                formatters[col] = "{:.2e}".format
+        if "/" in col[0]:
+            formatters[col] = "{:.3f}".format
 
     print()
     print(name)
@@ -642,9 +641,9 @@ def print_results(df, name):
 
 @dataclasses.dataclass
 class TestParam:
-    r'''
+    r"""
     Class to specify per-tensor relative and absolute tolerances.
-    '''
+    """
 
     tensor: torch.Tensor
     rtol: float
@@ -658,7 +657,7 @@ def compare_tensors(
     atol=None,
     equal_nan=False,
     check_stride=True,
-    msg_prefix='\t',
+    msg_prefix="\t",
 ):
     # Auto-detect tolerances based on data type if not provided
     if rtol is None or atol is None:
@@ -666,9 +665,9 @@ def compare_tensors(
         if detected_dtype is not None:
             default_tols = get_dtype_tolerances(detected_dtype)
             if rtol is None:
-                rtol = default_tols['rtol']
+                rtol = default_tols["rtol"]
             if atol is None:
-                atol = default_tols['atol']
+                atol = default_tols["atol"]
         else:
             # Fallback to standard defaults
             if rtol is None:
@@ -677,21 +676,21 @@ def compare_tensors(
                 atol = 1e-8
 
     if test.shape != reference.shape:
-        msgs = f'shape mismatch, test: {test.shape}, ' f'reference: {reference.shape}'
+        msgs = f"shape mismatch, test: {test.shape}, reference: {reference.shape}"
         raise RuntimeError(msgs)
 
     if check_stride and test.stride() != reference.stride():
-        msgs = f'stride mismatch, test: {test.stride()}, ' f'reference: {reference.stride()}'
+        msgs = f"stride mismatch, test: {test.stride()}, reference: {reference.stride()}"
         raise RuntimeError(msgs)
 
     if test.dtype != reference.dtype:
-        msgs = f'dtype mismatch, test: {test.dtype}, ' f'reference: {reference.dtype}'
+        msgs = f"dtype mismatch, test: {test.dtype}, reference: {reference.dtype}"
         raise RuntimeError(msgs)
 
     dtype = test.dtype
     input = test.to(torch.float32)
     reference = reference.to(torch.float32)
-    input = torch.where(torch.isnan(reference), float('nan'), input)
+    input = torch.where(torch.isnan(reference), float("nan"), input)
 
     allclose = torch.allclose(input, reference, rtol, atol, equal_nan)
 
@@ -725,21 +724,21 @@ def compare_tensors(
     abs_input = input.abs()
 
     msgs = [
-        f'allclose: {allclose}',
-        f'matched: {close_count} / {total_count} [{close_percent:.2f}%]',
-        f'ref range:    {reference.min():11.4e} : {reference.max():11.4e}',
-        f'test range:   {input.min():11.4e} : {input.max():11.4e}',
-        f'|ref| range:  {abs_ref.min():11.4e} : {abs_ref.max():11.4e}',
-        f'|test| range: {abs_input.min():11.4e} : {abs_input.max():11.4e}',
-        f'max absolute difference: {max_abs_diff:11.4e}',
-        f'max relative change:     {max_rel_change:11.4e}',
-        f'max max mean change:     {max_max_mean_change:11.4e}',
-        f'max arith mean change:   {max_arith_mean_change:11.4e}',
-        f'shape: {input.shape} stride: {input.stride()} dtype: {dtype}',
-        f'mismatched indices:{not_close_mask.nonzero().cpu()}',
+        f"allclose: {allclose}",
+        f"matched: {close_count} / {total_count} [{close_percent:.2f}%]",
+        f"ref range:    {reference.min():11.4e} : {reference.max():11.4e}",
+        f"test range:   {input.min():11.4e} : {input.max():11.4e}",
+        f"|ref| range:  {abs_ref.min():11.4e} : {abs_ref.max():11.4e}",
+        f"|test| range: {abs_input.min():11.4e} : {abs_input.max():11.4e}",
+        f"max absolute difference: {max_abs_diff:11.4e}",
+        f"max relative change:     {max_rel_change:11.4e}",
+        f"max max mean change:     {max_max_mean_change:11.4e}",
+        f"max arith mean change:   {max_arith_mean_change:11.4e}",
+        f"shape: {input.shape} stride: {input.stride()} dtype: {dtype}",
+        f"mismatched indices:{not_close_mask.nonzero().cpu()}",
     ]
     if msg_prefix is not None:
-        msgs = [f'{msg_prefix}{msg}' for msg in msgs]
+        msgs = [f"{msg_prefix}{msg}" for msg in msgs]
 
     return allclose, msgs
 

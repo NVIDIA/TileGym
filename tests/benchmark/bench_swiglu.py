@@ -7,7 +7,8 @@ import torch.nn.functional as F
 import triton
 
 import tilegym
-from tilegym.backend import is_backend_available, register_impl
+from tilegym.backend import is_backend_available
+from tilegym.backend import register_impl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 

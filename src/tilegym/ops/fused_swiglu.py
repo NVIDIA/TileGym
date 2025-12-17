@@ -44,10 +44,10 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
 
         # Create fused weight parameter for gate+up projections
         # This will be initialized in _initialize_fused_weights()
-        self.register_buffer('fused_gate_up_weight', None)
+        self.register_buffer("fused_gate_up_weight", None)
 
         # Validate activation function
-        if hasattr(config, 'hidden_act') and config.hidden_act not in [
+        if hasattr(config, "hidden_act") and config.hidden_act not in [
             "silu",
             "swish",
         ]:
@@ -74,7 +74,6 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
         x = x.view(-1, x.shape[-1])
 
         # Lazy import to avoid circular dependency
-        from tilegym.ops import matmul
         from tilegym.ops import silu_and_mul
 
         # Step 1: Fused gate+up projection

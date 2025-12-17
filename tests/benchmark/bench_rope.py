@@ -2,14 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
-import unittest
 
 import torch
 import triton
 
 import tilegym
-from tilegym.backend import is_backend_available, register_impl
+from tilegym.backend import is_backend_available
+from tilegym.backend import register_impl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -94,7 +93,7 @@ def create_benchmark_config(datatype, BSZ, NUM_HEADS, HEAD_DIM):
         return None
 
     backends, names, styles = zip(*available_backends)
-    dtype_name = str(datatype).split('.')[-1]  # e.g., 'float16' from 'torch.float16'
+    dtype_name = str(datatype).split(".")[-1]  # e.g., 'float16' from 'torch.float16'
 
     return triton.testing.Benchmark(
         x_names=["SEQ_LEN"],

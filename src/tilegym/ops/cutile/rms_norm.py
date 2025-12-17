@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import cuda.tile as ct
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -215,7 +214,7 @@ class RMSNorm(torch.autograd.Function):
             if bias is not None:
                 raise NotImplementedError("Bias is not supported in standard CuTile RMSNorm")
 
-            rstd = torch.empty((M,), dtype=torch.float32, device='cuda')
+            rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
             MAX_FUSED_SIZE = 4096 // x.element_size()
             TILE_SIZE = min(MAX_FUSED_SIZE, next_power_of_2(N))
             grid = (M,)

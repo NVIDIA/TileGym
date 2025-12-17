@@ -43,7 +43,7 @@ def triton_vector_add(x, y):
     n_elements = x.numel()
 
     BLOCK_SIZE = 1024
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
     vector_add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE)
     return output
@@ -89,7 +89,7 @@ def create_benchmark_config(dtype):
         return None
 
     backends, names, styles = zip(*available_backends)
-    dtype_name = str(dtype).split('.')[-1]
+    dtype_name = str(dtype).split(".")[-1]
 
     return triton.testing.Benchmark(
         x_names=["N"],

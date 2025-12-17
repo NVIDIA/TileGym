@@ -9,7 +9,8 @@ import triton
 import triton.testing
 
 import tilegym
-from tilegym.backend import is_backend_available, register_impl
+from tilegym.backend import is_backend_available
+from tilegym.backend import register_impl
 
 # Available backends for benchmarking
 ALL_BACKENDS = [
@@ -48,7 +49,7 @@ def create_benchmark_config(datatype, hidden_size):
         return None
 
     backends, names, styles = zip(*available_backends)
-    dtype_name = str(datatype).split('.')[-1]  # e.g., 'float16' from 'torch.float16'
+    dtype_name = str(datatype).split(".")[-1]  # e.g., 'float16' from 'torch.float16'
 
     return triton.testing.Benchmark(
         x_names=["M"],

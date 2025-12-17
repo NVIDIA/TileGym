@@ -114,9 +114,9 @@ def rope_forward(q, k, cos, sin):
     n_kv_head = k.shape[1]
     q = q.reshape(batch_size, n_q_head, seq_len, 2, head_dim // 2)
     k = k.reshape(batch_size, n_kv_head, seq_len, 2, head_dim // 2)
-    assert (
-        cos.shape[-1] == head_dim // 2 or cos.shape[-1] == head_dim
-    ), f"cos.shape[-1]: {cos.shape[-1]}, head_dim: {head_dim}"
+    assert cos.shape[-1] == head_dim // 2 or cos.shape[-1] == head_dim, (
+        f"cos.shape[-1]: {cos.shape[-1]}, head_dim: {head_dim}"
+    )
     original_cos_shape = cos.shape
     original_sin_shape = sin.shape
     if cos.shape[-1] == head_dim:
@@ -211,10 +211,10 @@ def apply_rope_base(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 
 @register_impl("get_apply_rope_func", backend="cutile")
-def get_apply_rope_func(model='llama'):
-    if model == 'llama':
+def get_apply_rope_func(model="llama"):
+    if model == "llama":
         return apply_rope_base
-    elif model == 'deepseek':
+    elif model == "deepseek":
 
         def wrapper(q, k, freqs_cis):
             cos, sin = freqs_cis.real, freqs_cis.imag

@@ -5,15 +5,12 @@
 import math
 
 import cuda.tile as ct
-import numpy as np
 import torch
-
 from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 from tilegym.backend.cutile.autotuner import Autotuner
 from tilegym.backend.cutile.autotuner import Config
-from tilegym.backend.cutile.autotuner import SearchSpace
 from tilegym.backend.cutile.autotuner import autotune
 from tilegym.logger import get_logger
 
@@ -131,9 +128,12 @@ def fmha_kernel(
         acc = acc * alpha  # [TILE_M, TILE_N]
 
         # --- Compute PV product ---
-        v = ct.load(V, index=(batch_idx, off_kv_h, j, 0), shape=(1, 1, TILE_N, TILE_D), latency=4,).reshape(
-            (TILE_N, TILE_D)
-        )  # [TILE_N, TILE_D]
+        v = ct.load(
+            V,
+            index=(batch_idx, off_kv_h, j, 0),
+            shape=(1, 1, TILE_N, TILE_D),
+            latency=4,
+        ).reshape((TILE_N, TILE_D))  # [TILE_N, TILE_D]
         p = p.astype(Q.dtype)
         acc = ct.mma(p, v, acc)  # [TILE_M, TILE_N]
         m_i = m_ij  # [TILE_M, 1]
@@ -224,7 +224,7 @@ def tile_prefill_fmha(q, k, v, sm_scale, is_causal=True, kernel_configs=None):
 
     input_pos = 0  # prefill, causal
 
-    max_tile_n = max(cfg.kwargs['TILE_N'] for cfg in _fmha_autotune_configs())
+    max_tile_n = max(cfg.kwargs["TILE_N"] for cfg in _fmha_autotune_configs())
     EVEN_K = (k_len % max_tile_n) == 0
     return cutile_autotune_fmha(
         q, k, v, o, sm_scale, input_pos, hidden_size, num_heads, query_group_size, is_causal, EVEN_K
@@ -241,7 +241,7 @@ def tile_fmha(
 ):
     if scaling is None:
         scaling = 1.0 / math.sqrt(q.size(-1))
-    kernel_configs = kwargs.get('kernel_configs', None)
+    kernel_configs = kwargs.get("kernel_configs", None)
     o = tile_prefill_fmha(q, k, v, scaling, is_causal, kernel_configs)
     return o
 

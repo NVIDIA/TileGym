@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 import math
+
 import pytest
 import torch
 
 from tilegym.backend import set_backend
 from tilegym.ops import fmha_interface
+
 from .. import common
 
 
@@ -118,11 +120,11 @@ class Test_FMHA(common.PyTestCase):
                 fmha_interface,
                 self.reference,
                 {
-                    'q': q,
-                    'k': k,
-                    'v': v,
-                    'scaling': sm_scale,
-                    'is_causal': is_causal,
+                    "q": q,
+                    "k": k,
+                    "v": v,
+                    "scaling": sm_scale,
+                    "is_causal": is_causal,
                 },
                 atol=atol,
                 rtol=rtol,

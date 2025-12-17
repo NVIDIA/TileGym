@@ -47,7 +47,7 @@ class Test_GroupGemm(common.PyTestCase):
                 torch.float16,
             ]
         ],
-        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, '__name__') else str(x)),
+        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
     )
     @pytest.mark.parametrize("backend", _backends)
     def test_op(
@@ -59,13 +59,12 @@ class Test_GroupGemm(common.PyTestCase):
         dtype,
         backend,
     ):
-
         if torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("skip due to unsupported multi cta on sm80")
         if not is_backend_available(backend):
             pytest.skip("Cutile backend not available")
 
-        device = torch.device('cuda')
+        device = torch.device("cuda")
         self.setUp()
         set_backend(backend)
 
@@ -91,9 +90,9 @@ class Test_GroupGemm(common.PyTestCase):
             tilegym.ops.group_gemm,
             self.reference,
             {
-                'group_A': group_A,
-                'group_B': group_B,
-                'transpose_b': transpose_b,
+                "group_A": group_A,
+                "group_B": group_B,
+                "transpose_b": transpose_b,
             },
             rtol=1e-3,
             atol=1e-8,
