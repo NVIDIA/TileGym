@@ -273,6 +273,7 @@ jobs:
         with:
           files: test-results/ops-results.xml
           check_name: Ops Test Results
+          comment_mode: off
 
   test-benchmark:
     name: test-benchmark
