@@ -2,48 +2,47 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
 import pathlib
 
 import setuptools
 
-README = (pathlib.Path(__file__).parent / 'README.md').read_text()
+README = (pathlib.Path(__file__).parent / "README.md").read_text()
 
 setuptools.setup(
-    name='tilegym',
-    version='0.0.0',
-    author='NVIDIA Corporation',
-    description='TileGym',
+    name="tilegym",
+    version="0.0.0",
+    author="NVIDIA Corporation",
+    description="TileGym",
     long_description=README,
-    long_description_content_type='text/markdown',
-    url='',
-    packages=setuptools.find_packages(where='src'),
-    package_dir={'': 'src'},
-    license='MIT',
+    long_description_content_type="text/markdown",
+    url="",
+    packages=setuptools.find_packages(where="src"),
+    package_dir={"": "src"},
+    license="MIT",
     classifiers=[
-        'Development Status :: 4 - Beta',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.9',
-        'Operating System :: OS Independent',
+        "Development Status :: 4 - Beta",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
+        "Operating System :: OS Independent",
     ],
-    python_requires='>=3.9',
+    python_requires=">=3.9",
     install_requires=[
         # Note: torch and triton should be pre-installed in your environment
-        'transformers==4.56.2',
-        'tokenizers==0.22.0',
+        "transformers==4.56.2",
+        "tokenizers==0.22.0",
         # 'accelerate', # Use `pip install accelerate --no-deps` to avoid reinstall torch
-        'huggingface_hub',
-        'matplotlib',
-        'pandas',
-        'pytest',
-        'numpy',
+        "huggingface_hub",
+        "matplotlib",
+        "pandas",
+        "pytest",
+        "numpy",
         "cuda-tile",
         # 'nvidia-ml-py', # optional
     ],
     extras_require={
-        'dev': [
-            'black==23.3.0',
-            'isort==5.12.0',
+        "dev": [
+            "black==23.3.0",
+            "isort==5.12.0",
         ],
     },
 )

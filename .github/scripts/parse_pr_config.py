@@ -16,7 +16,7 @@ from utils import write_github_output
 
 def get_default_config():
     """Return default CI configuration."""
-    return {'build': True, 'test': ['ops', 'benchmark']}
+    return {"build": True, "test": ["ops", "benchmark"]}
 
 
 def extract_yaml_from_pr_body(pr_body):
@@ -24,7 +24,7 @@ def extract_yaml_from_pr_body(pr_body):
     if not pr_body:
         return None
 
-    pattern = r'```yaml\s*\nconfig:(.*?)\n```'
+    pattern = r"```yaml\s*\nconfig:(.*?)\n```"
     match = re.search(pattern, pr_body, re.DOTALL)
     return match.group(1) if match else None
 
@@ -34,7 +34,7 @@ def parse_config_yaml(yaml_text):
     try:
         config_text = "config:" + yaml_text
         parsed = yaml.safe_load(config_text)
-        return parsed.get('config', {})
+        return parsed.get("config", {})
     except yaml.YAMLError as e:
         print(f"Warning: Failed to parse config YAML: {e}", file=sys.stderr)
         return None
@@ -64,15 +64,15 @@ def resolve_config(pr_body):
 def write_github_outputs(config):
     """Write config to GitHub Actions outputs."""
     # Normalize test list
-    test_list = config.get('test', [])
+    test_list = config.get("test", [])
     if not isinstance(test_list, list):
         test_list = []
 
     # Calculate output values
     outputs = {
-        'build': str(config['build']).lower(),
-        'run_ops': str('ops' in test_list).lower(),
-        'run_benchmark': str('benchmark' in test_list).lower(),
+        "build": str(config["build"]).lower(),
+        "run_ops": str("ops" in test_list).lower(),
+        "run_benchmark": str("benchmark" in test_list).lower(),
     }
 
     # Write outputs
@@ -87,10 +87,10 @@ def write_github_outputs(config):
 
 
 def main():
-    pr_body = os.environ.get('PR_BODY', '')
+    pr_body = os.environ.get("PR_BODY", "")
     config = resolve_config(pr_body)
     write_github_outputs(config)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

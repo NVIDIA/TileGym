@@ -2,14 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 
-import numpy as np
 import math
 
-import torch
 import cuda.tile as ct
+import torch
+from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from tilegym.backend import register_impl
-from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 # Type aliases for constants
 ConstInt = ct.Constant[int]

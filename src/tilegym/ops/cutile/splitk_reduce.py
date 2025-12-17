@@ -112,14 +112,14 @@ def splitk_reduce_kernel(
 
 @register_impl("splitk_reduce", backend="cutile")
 def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
-    '''
+    """
     Reduce the intermediate attention results and lse results into the final output for attention decode
     Args:
         attn_splitk_out: intermediate attention results [B, num_heads, NUM_KV_SPLITS, head_dim]
         lse_splitk_out: intermediate lse results [B, num_heads, NUM_KV_SPLITS]
         attn_out: final output [B, num_heads, head_dim]
         S_kv: sequence length of the key-value tensor, used for boundary check
-    '''
+    """
     B, num_heads, NUM_KV_SPLITS, head_dim = attn_splitk_out.shape
     TILE_D = min(128, next_power_of_2(head_dim))
     NUM_KV_SPLITS_POW2 = next_power_of_2(NUM_KV_SPLITS)

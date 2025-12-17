@@ -17,8 +17,8 @@ import torch
 import tilegym
 
 if HAS_TRANSFORMERS:
-    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
     from transformers.models.llama.configuration_llama import LlamaConfig
+    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
     from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 from .. import common
@@ -72,7 +72,7 @@ class Test_RoPE(common.PyTestCase):
             tilegym.set_backend(backend)
         except Exception as e:
             pytest.skip(f"Failed to set backend {backend}: {e}")
-        device = torch.device('cuda')
+        device = torch.device("cuda")
         _tensor_q = (
             torch.randn((bsz, seq_len, num_q_heads, head_dim), device=device)
             .normal_(mean=0.0, std=1.0)

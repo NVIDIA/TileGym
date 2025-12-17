@@ -2,10 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
-import functools
 
 import cuda.tile as ct
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -40,10 +38,10 @@ def ceildiv(a, b):
 
 
 def swiglu_forward(a, b):
-    '''
+    """
     a: (batch_size, seq_len, intermediate_size)
     b: (batch_size, seq_len, intermediate_size)
-    '''
+    """
     ori_shape = a.shape
     n_cols = ori_shape[-1]
     a = a.view(-1, n_cols)

@@ -8,7 +8,6 @@ import torch
 import tilegym
 
 from .. import common
-from ..common import markif
 
 
 class Test_Matmul(common.PyTestCase):
@@ -29,7 +28,7 @@ class Test_Matmul(common.PyTestCase):
 
     @staticmethod
     def prepare_data(m, n, k, trans_a, trans_b, offset_a, offset_b, dtype):
-        device = torch.device('cuda')
+        device = torch.device("cuda")
 
         assert offset_a <= 64
         assert offset_b <= 64
@@ -71,7 +70,7 @@ class Test_Matmul(common.PyTestCase):
             (3072, 6144, 2720, 0, 0, torch.bfloat16),
         ],
         ids=lambda x: (
-            str(x) if isinstance(x, list) else f"{x.__module__}.{x.__name__}" if hasattr(x, '__name__') else str(x)
+            str(x) if isinstance(x, list) else f"{x.__module__}.{x.__name__}" if hasattr(x, "__name__") else str(x)
         ),
     )
     @pytest.mark.parametrize(
@@ -109,14 +108,14 @@ class Test_Matmul(common.PyTestCase):
             tilegym.ops.matmul,
             self.reference,
             {
-                'a': a,
-                'b': b,
-                'trans_a': False,
-                'trans_b': False,
+                "a": a,
+                "b": b,
+                "trans_a": False,
+                "trans_b": False,
             },
             extra_test_kwargs={
-                'static_persistent': static_persistent,
-                'use_tma': use_tma,
+                "static_persistent": static_persistent,
+                "use_tma": use_tma,
             },
             gradient=torch.rand_like,
             atol=1e-2,

@@ -10,14 +10,13 @@ backend implementation based on the current backend setting.
 """
 
 from typing import Any
-from typing import Dict
 from typing import List
 from typing import Optional
+
 import torch
 
 from tilegym.backend import dispatch
 from tilegym.backend import get_current_backend
-
 
 # ============================================================================
 # NN Operations
@@ -27,7 +26,7 @@ from tilegym.backend import get_current_backend
 @dispatch(
     "get_apply_rope_func",
 )
-def get_apply_rope_func(model: str = 'llama'):
+def get_apply_rope_func(model: str = "llama"):
     """
     Returns a callable that applies Rotary Position Embedding (RoPE) for a given model variant.
 

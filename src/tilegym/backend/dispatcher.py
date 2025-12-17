@@ -135,7 +135,7 @@ def get_registry_info() -> Dict[str, Dict[str, str]]:
         result[func_name] = {
             backend: (
                 impl.__module__ + "." + impl.__name__
-                if hasattr(impl, '__module__') and hasattr(impl, '__name__')
+                if hasattr(impl, "__module__") and hasattr(impl, "__name__")
                 else str(impl)
             )
             for backend, impl in backends.items()
@@ -153,7 +153,7 @@ def print_registry_info():
         for backend, impl in backends.items():
             impl_info = (
                 f"{impl.__module__}.{impl.__name__}"
-                if hasattr(impl, '__module__') and hasattr(impl, '__name__')
+                if hasattr(impl, "__module__") and hasattr(impl, "__name__")
                 else str(impl)
             )
             print(f"  └─ {backend}: {impl_info}")

@@ -6,7 +6,9 @@
 
 import pytest
 import torch
+
 from tilegym import set_backend
+
 from .. import common
 
 
@@ -204,11 +206,11 @@ class Test_MOE(common.PyTestCase):
             moe_wrapper_fp8 if dtype == torch.float8_e4m3fn else moe_wrapper,
             self.reference,
             {
-                'hidden_states': hidden_states,
-                'w1': w1,
-                'w2': w2,
-                'topk_weights': topk_weights,
-                'topk_ids': topk_ids,
+                "hidden_states": hidden_states,
+                "w1": w1,
+                "w2": w2,
+                "topk_weights": topk_weights,
+                "topk_ids": topk_ids,
             },
             rtol=rtol,
             atol=atol,

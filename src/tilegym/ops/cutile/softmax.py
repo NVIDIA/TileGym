@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import math
 
 import cuda.tile as ct
 import numpy as np

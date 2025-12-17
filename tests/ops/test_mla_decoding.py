@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 import math
+
 import pytest
 import torch
 
 import tilegym
-from tilegym.backend import set_backend
 from tests import common
+from tilegym.backend import set_backend
 
 
 class Test_MLADecoding(common.PyTestCase):
@@ -79,7 +80,7 @@ class Test_MLADecoding(common.PyTestCase):
         num_heads = 32
         num_batch = 2
         S_kv = 1024
-        device = torch.device('cuda')
+        device = torch.device("cuda")
 
         # Generate test data
         q = (

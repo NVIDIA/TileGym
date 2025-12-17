@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import warnings
-from typing import Callable
 from typing import Optional
 
 import torch
@@ -11,17 +10,15 @@ import transformers
 from packaging import version
 from torch import nn
 from transformers.cache_utils import Cache
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MoEGate
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import eager_attention_forward
 
 REQUIRED_TRANSFORMERS_VERSION = "4.55.2"
 current_version = transformers.__version__
 
 if version.parse(current_version) < version.parse(REQUIRED_TRANSFORMERS_VERSION):
-    raise ImportError(f"In new transformers version, past_key_value is named to past_key_values")
+    raise ImportError("In new transformers version, past_key_value is named to past_key_values")
 
 from tilegym.logger import get_logger
 from tilegym.ops import fused_moe_kernel_interface
@@ -292,7 +289,7 @@ class DeepseekV2MoETileGym(nn.Module):
     def init_merged_expert_weights(self):
         if self.init:
             return
-        if not hasattr(self, 'experts') or len(self.experts) == 0:
+        if not hasattr(self, "experts") or len(self.experts) == 0:
             print("experts is empty, self.w1_merged and self.w2_merged will not be initialized")
             return
 

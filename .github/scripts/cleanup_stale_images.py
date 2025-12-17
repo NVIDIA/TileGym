@@ -10,7 +10,6 @@ Removes:
 import os
 import sys
 from datetime import datetime
-from datetime import timedelta
 from typing import Any
 from typing import Dict
 from typing import List
@@ -145,9 +144,9 @@ def cleanup_images(owner: str, repo: str, package_name: str, token: str, untrack
             print(f"Deleting version {version_id}: {reason}", file=sys.stderr)
             if delete_package_version(owner, package_name, version_id, token, is_org):
                 deleted_count += 1
-                print(f"✅ Deleted successfully", file=sys.stderr)
+                print("✅ Deleted successfully", file=sys.stderr)
             else:
-                print(f"❌ Failed to delete", file=sys.stderr)
+                print("❌ Failed to delete", file=sys.stderr)
 
     print(f"Cleanup complete! Deleted {deleted_count} image(s)", file=sys.stderr)
 

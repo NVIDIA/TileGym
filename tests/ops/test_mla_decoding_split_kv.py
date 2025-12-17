@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import math
+
 import pytest
 import torch
 
@@ -73,7 +74,7 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
 
         # Create random input tensors
         torch.manual_seed(42)  # For reproducibility
-        device = torch.device('cuda')
+        device = torch.device("cuda")
 
         q = torch.randn(batch_size, num_heads, head_dim, device=device).to(dtype)
         qpe = torch.randn(batch_size, num_heads, kpe_dim, device=device).to(dtype)
