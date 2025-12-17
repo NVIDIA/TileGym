@@ -210,6 +210,8 @@ jobs:
           file: ./modeling/transformers/Dockerfile
           tags: ${{ steps.tags.outputs.tags }}
           push: true
+          provenance: false
+          outputs: type=image,push=true,compression=zstd,compression-level=3
           cache-from: |
             type=gha
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:latest
@@ -220,6 +222,7 @@ jobs:
   test-ops:
     name: test-ops
     needs: [config, build]
+    timeout-minutes: 12
     if: |
       always() && 
       needs.config.outputs.run_ops == 'true' &&
@@ -238,6 +241,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run ops tests
+        timeout-minutes: 10
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
@@ -269,10 +273,12 @@ jobs:
         with:
           files: test-results/ops-results.xml
           check_name: Ops Test Results
+          comment_mode: off
 
   test-benchmark:
     name: test-benchmark
     needs: [config, build]
+    timeout-minutes: 30
     if: |
       always() && 
       needs.config.outputs.run_benchmark == 'true' &&
@@ -298,6 +304,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run benchmarks
+        timeout-minutes: 25
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import math
+
 import pytest
 import torch
 
@@ -26,7 +27,6 @@ class Test_FlashDecode(common.PyTestCase):
     @pytest.mark.parametrize("dtype", [torch.float16])
     @pytest.mark.parametrize("backend", _backends)
     def test_op(self, seq_len, group_size, dtype, backend, arch):
-
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:
@@ -67,10 +67,10 @@ class Test_FlashDecode(common.PyTestCase):
             tilegym.ops.fmha_decode,
             self.reference,
             {
-                'q': q,
-                'k': k,
-                'v': v,
-                'sm_scale': sm_scale,
+                "q": q,
+                "k": k,
+                "v": v,
+                "sm_scale": sm_scale,
             },
             atol=1e-2,
             rtol=1e-2,

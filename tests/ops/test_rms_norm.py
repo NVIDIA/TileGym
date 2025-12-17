@@ -47,14 +47,13 @@ class Test_RMSNorm(common.PyTestCase):
         mark=pytest.mark.slow,
     )
     def test_op(self, m, n, dtype, static_persistent, backend, arch):
-
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
 
         self.setUp()
-        device = torch.device('cuda')
+        device = torch.device("cuda")
         eps = 1e-5
 
         x_shape = (m, n)
@@ -69,13 +68,13 @@ class Test_RMSNorm(common.PyTestCase):
                 tilegym.ops.rms_norm,
                 self.reference,
                 {
-                    'input': x,
-                    'normalized_shape': w_shape,
-                    'weight': weight,
-                    'eps': eps,
+                    "input": x,
+                    "normalized_shape": w_shape,
+                    "weight": weight,
+                    "eps": eps,
                 },
                 extra_test_kwargs={
-                    'static_persistent': static_persistent,
+                    "static_persistent": static_persistent,
                 },
                 rtol=0.0,
                 atol=5e-2,

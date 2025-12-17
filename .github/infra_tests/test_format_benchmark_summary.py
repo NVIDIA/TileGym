@@ -6,8 +6,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../scripts"))
 
@@ -19,7 +17,7 @@ class TestFormatBenchmarkSummary:
 
     def test_parse_failed_benchmark(self):
         """Test parsing a failed benchmark file."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='_results.txt', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_results.txt", delete=False) as f:
             f.write("FAILED")
             f.flush()
 
@@ -45,7 +43,7 @@ fused-attention-batch4-head32-d128-fwd-causal=False-float8_e5m2-TFLOPS:
 1   2048.0  540.122687
 """
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='_results.txt', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_results.txt", delete=False) as f:
             f.write(content)
             f.flush()
 
@@ -130,12 +128,12 @@ fused-attention-batch4-head32-d128-fwd-causal=False-float8_e5m2-TFLOPS:
             )
 
             # Create temp file for GitHub summary
-            with tempfile.NamedTemporaryFile(mode='w+', delete=False) as summary_file:
+            with tempfile.NamedTemporaryFile(mode="w+", delete=False) as summary_file:
                 summary_path = summary_file.name
 
             try:
                 with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary_path}):
-                    with patch.object(sys, 'argv', ['format_benchmark_summary.py', tmpdir]):
+                    with patch.object(sys, "argv", ["format_benchmark_summary.py", tmpdir]):
                         format_benchmark_summary.main()
 
                 # Read the summary file
@@ -160,25 +158,25 @@ fused-attention-batch4-head32-d128-fwd-causal=False-float8_e5m2-TFLOPS:
             )
 
             with patch.dict(os.environ, {}, clear=True):
-                with patch.object(sys, 'argv', ['format_benchmark_summary.py', tmpdir]):
+                with patch.object(sys, "argv", ["format_benchmark_summary.py", tmpdir]):
                     # Should not raise, just print
                     format_benchmark_summary.main()
 
     def test_get_results_directory_default(self):
         """Test get_results_directory with no args."""
-        with patch.object(sys, 'argv', ['format_benchmark_summary.py']):
+        with patch.object(sys, "argv", ["format_benchmark_summary.py"]):
             result_dir = format_benchmark_summary.get_results_directory()
             assert result_dir == "."
 
     def test_get_results_directory_with_arg(self):
         """Test get_results_directory with command line arg."""
-        with patch.object(sys, 'argv', ['format_benchmark_summary.py', '/custom/path']):
+        with patch.object(sys, "argv", ["format_benchmark_summary.py", "/custom/path"]):
             result_dir = format_benchmark_summary.get_results_directory()
             assert result_dir == "/custom/path"
 
     def test_write_summary_to_github(self):
         """Test write_summary writes to GitHub Actions summary file."""
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f:
             summary_path = f.name
 
         try:

@@ -8,9 +8,8 @@ from typing import Dict
 from typing import List
 from typing import Optional
 
-import torch
 import cuda.tile as ct
-import numpy as np
+import torch
 
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger

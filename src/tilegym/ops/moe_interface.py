@@ -6,7 +6,7 @@ from typing import Optional
 from typing import Tuple
 
 import torch
-import torch.nn.functional as F
+
 from tilegym.backend import dispatch
 from tilegym.backend import get_current_backend
 
@@ -123,13 +123,13 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     config: Optional[dict] = None,
 ):
-    '''
+    """
     hidden_states: [batch_size * seq_len, moe_intermediate_size] (9, 2048)
     w1: [n_experts, moe_intermediate_size, 2 * hidden_size] (64, 1408 * 2, 2048)
     w2: [n_experts, hidden_size, moe_intermediate_size] (64, 2048, 1408)
     topk_weights: [batch_size * seq_len, top_k] (9, 6)
     topk_ids: [batch_size * seq_len, top_k] (9, 6)
-    '''
+    """
     device = hidden_states.device
     if not w1.is_cuda:
         w1 = w1.to(device)
@@ -297,11 +297,11 @@ def fused_moe_kernel_interface(
     inplace: bool = False,
     activation: str = "silu",
 ):
-    '''
+    """
     hidden_states: [batch_size, top_k, moe_intermediate_size]
     topk_ids: [batch_size, top_k]
     topk_weights: [batch_size, top_k]
-    '''
+    """
     backend = get_current_backend()
     if backend == "cutile":
         kernel_configs = {
