@@ -64,4 +64,3 @@ jobs:
         with:
           files: infra-test-results.xml
           check_name: Infrastructure Test Results
-          comment_mode: off
