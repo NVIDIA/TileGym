@@ -29,11 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Upgrade pip
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Set CUDA 13.1 as default
-ENV CUDA_HOME=/usr/local/cuda-13.1
-ENV PATH=${CUDA_HOME}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
-
 # Install PyTorch with CUDA 13.0 support (after CUDA toolkit)
 RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
 
