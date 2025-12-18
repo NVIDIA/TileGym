@@ -2,9 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 
+import math
+
 import cuda.tile as ct
 import numpy as np
-import math
 import torch
 
 from tilegym.backend import register_impl
@@ -12,6 +13,7 @@ from tilegym.backend import register_impl
 # Approximation mode constants
 GELU_EXACT = 0
 GELU_TANH = 1
+
 
 def sigmoid_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     # sigmoid(x) = 1 / (1 + exp(-x))
@@ -39,12 +41,8 @@ def standard_normal_cdf_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     coeff_044715 = 0.044715  # new var
     half = ct.full((BLOCK_SIZE,), 0.5, dtype=x_val.dtype)  # new var
     one = ct.ones((BLOCK_SIZE,), dtype=x_val.dtype)  # new var
-    sqrt_2_div_pi_tensor = ct.full(
-        (BLOCK_SIZE,), sqrt_2_div_pi, dtype=x_val.dtype
-    )  # new var
-    coeff_tensor = ct.full(
-        (BLOCK_SIZE,), coeff_044715, dtype=x_val.dtype
-    )  # new var
+    sqrt_2_div_pi_tensor = ct.full((BLOCK_SIZE,), sqrt_2_div_pi, dtype=x_val.dtype)  # new var
+    coeff_tensor = ct.full((BLOCK_SIZE,), coeff_044715, dtype=x_val.dtype)  # new var
 
     # Compute erf approximation
     x_cubed = ct.mul(ct.mul(x_val, x_val), x_val)  # new var
@@ -64,12 +62,8 @@ def gelu_tanh_fwd_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     coeff_044715 = 0.044715  # new var
     half = ct.full((BLOCK_SIZE,), 0.5, dtype=x_val.dtype)  # new var
     one = ct.ones((BLOCK_SIZE,), dtype=x_val.dtype)  # new var
-    sqrt_2_div_pi_tensor = ct.full(
-        (BLOCK_SIZE,), sqrt_2_div_pi, dtype=x_val.dtype
-    )  # new var
-    coeff_tensor = ct.full(
-        (BLOCK_SIZE,), coeff_044715, dtype=x_val.dtype
-    )  # new var
+    sqrt_2_div_pi_tensor = ct.full((BLOCK_SIZE,), sqrt_2_div_pi, dtype=x_val.dtype)  # new var
+    coeff_tensor = ct.full((BLOCK_SIZE,), coeff_044715, dtype=x_val.dtype)  # new var
 
     x_cubed = ct.mul(ct.mul(x_val, x_val), x_val)  # new var
     coeff_x_cubed = ct.mul(coeff_tensor, x_cubed)  # new var
@@ -143,7 +137,7 @@ class GeLU_CT(torch.autograd.Function):
             Output tensor with GELU applied
         """
         # Convert string to integer enum
-        approx_mode = GELU_TANH if approximate == 'tanh' else GELU_EXACT
+        approx_mode = GELU_TANH if approximate == "tanh" else GELU_EXACT
 
         # Allocate output
         y = torch.empty_like(x)
@@ -166,14 +160,14 @@ class GeLU_CT(torch.autograd.Function):
 
         ctx.x = x
         return y
-    
+
     @staticmethod
     def backward(ctx, dy):
         raise NotImplementedError("Backward pass for GELU activation is not implemented")
 
 
 @register_impl("gelu", backend="cutile")
-def gelu(input: torch.Tensor, approximate='none'):
+def gelu(input: torch.Tensor, approximate="none"):
     """
     cuTile implementation of GELU activation function.
 

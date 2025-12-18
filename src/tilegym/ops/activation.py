@@ -25,7 +25,7 @@ def relu(x: torch.Tensor) -> torch.Tensor:
 
 
 @dispatch("gelu", fallback_backend="triton")
-def gelu(x: torch.Tensor, approximate: str = 'none') -> torch.Tensor:
+def gelu(x: torch.Tensor, approximate: str = "none") -> torch.Tensor:
     """
     Applies the Gaussian Error Linear Unit function element-wise.
 

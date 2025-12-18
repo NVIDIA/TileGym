@@ -5,12 +5,12 @@
 import cuda.tile as ct
 import numpy as np
 import torch
+
 from tilegym.backend import register_impl
 
+
 @ct.kernel
-def relu_fwd_kernel_ct(
-    x, y, n_elements: ct.Constant[int], BLOCK_SIZE: ct.Constant[int]
-):
+def relu_fwd_kernel_ct(x, y, n_elements: ct.Constant[int], BLOCK_SIZE: ct.Constant[int]):
     pid = ct.bid(0)  # new var
     block_start = pid * BLOCK_SIZE  # new var
     offsets_base = ct.arange(BLOCK_SIZE, dtype=ct.int32)  # new var
@@ -33,7 +33,8 @@ def relu_fwd_kernel_ct(
 
     # Store result
     ct.scatter(y, offsets, y_tile)
-    
+
+
 class ReLU_CT(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
