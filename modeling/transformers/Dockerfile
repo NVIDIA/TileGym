@@ -8,7 +8,7 @@
 # Build from tilegym repository root:
 #   docker build -t tilegym-transformers -f modeling/transformers/Dockerfile .
 
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu22.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.1.0-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ARG TORCH_VERSION=2.9.1
@@ -28,25 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Upgrade pip
 RUN python -m pip install --upgrade pip setuptools wheel
-
-# Install CUDA Toolkit 13.1 and clean up in same layer to reduce image size
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin && \
-    mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600 && \
-    wget https://developer.download.nvidia.com/compute/cuda/13.1.0/local_installers/cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
-    dpkg -i cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
-    cp /var/cuda-repo-ubuntu2204-13-1-local/cuda-*-keyring.gpg /usr/share/keyrings/ && \
-    apt-get update && \
-    apt-get -y install cuda-toolkit-13-1 && \
-    rm -f cuda-repo-ubuntu2204-13-1-local_13.1.0-590.44.01-1_amd64.deb && \
-    rm -rf /var/cuda-repo-ubuntu2204-13-1-local && \
-    rm -f /etc/apt/sources.list.d/cuda-ubuntu2204-13-1-local.list && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set CUDA 13.1 as default
-ENV CUDA_HOME=/usr/local/cuda-13.1
-ENV PATH=${CUDA_HOME}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
 # Install PyTorch with CUDA 13.0 support (after CUDA toolkit)
 RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
