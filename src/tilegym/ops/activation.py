@@ -24,7 +24,7 @@ def relu(x: torch.Tensor) -> torch.Tensor:
     raise NotImplementedError(f"relu is not implemented for {get_current_backend()}")
 
 
-@dispatch("gelu", fallback_backend="triton")
+@dispatch("gelu")
 def gelu(x: torch.Tensor, approximate: str = "none") -> torch.Tensor:
     """
     Applies the Gaussian Error Linear Unit function element-wise.
