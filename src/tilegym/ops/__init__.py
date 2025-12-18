@@ -8,6 +8,7 @@ from tilegym.backend import is_backend_available
 
 # Backend implementations
 # Import interface modules
+from . import activation
 from . import attn_interface
 from . import cutile
 from . import moe_interface

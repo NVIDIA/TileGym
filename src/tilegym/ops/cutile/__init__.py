@@ -12,6 +12,7 @@ if is_backend_available("cutile"):
     # Non-DL operations
     # Linear algebra operations
     # NN operations
+    from . import activation
     from . import attention
     from . import flash_decode
     from . import group_gemm
