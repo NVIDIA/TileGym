@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. 
+#
+# SPDX-License-Identifier: MIT 
+
 name: tilegym-ci-infra-tests
 
 on:
@@ -29,6 +33,19 @@ jobs:
       
       - name: Run ruff format check
         run: ruff format --check --diff .
+
+  spdx-headers-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      
+      - name: Check SPDX headers
+        run: python3 .github/scripts/check_spdx_headers.py --action check
 
   utility-scripts-tests:
     runs-on: ubuntu-latest

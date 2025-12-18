@@ -1,3 +1,7 @@
+<!--- SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. --->
+
+<!--- SPDX-License-Identifier: MIT --->
+
 # GitHub Workflows & Infrastructure
 
 This directory contains CI/CD workflows, utility scripts, and infrastructure tests for the TileGym repository.
@@ -29,7 +33,8 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 **Infrastructure validation** - Ensures code quality and validates CI scripts.
 
 **Jobs:**
-- `python-formatting` - Runs `darker` with `isort` for incremental formatting checks
+- `python-formatting` - Runs `ruff` for import sorting and format checks
+- `spdx-headers-check` - Verifies all source files have SPDX license headers
 - `utility-scripts-tests` - Runs pytest on all infrastructure tests
 
 **Triggers:** Push to `main`, push to `pull-request/*` branches
@@ -65,6 +70,7 @@ Located in `scripts/`, these Python utilities are used by workflows:
 - **`check_image_exists.py`** - Check if Docker images exist in GHCR
 - **`cleanup_stale_images.py`** - Delete stale Docker images from GHCR
 - **`format_benchmark_summary.py`** - Parse benchmark results and format as markdown tables for GitHub Actions summary
+- **`check_spdx_headers.py`** - Check and add SPDX license headers to source files
 - **`utils.py`** - Shared utilities (GitHub token, API headers, outputs)
 
 All scripts have comprehensive docstrings and are fully tested.
@@ -78,6 +84,7 @@ Located in `infra_tests/`, these pytest-based tests validate all CI scripts incl
 - PR config parsing logic
 - Image existence checks and latest tag validation
 - Image cleanup logic (verified tag preservation, untracked image detection)
+- SPDX header detection and addition
 - Shared utility functions
 
 **Run locally:**
@@ -86,6 +93,15 @@ pytest .github/infra_tests/ -v
 ```
 
 Tests are independent of the main TileGym package (no torch/CUDA dependencies).
+
+**Check SPDX headers locally:**
+```bash
+# Check all files have headers
+python3 .github/scripts/check_spdx_headers.py --action check
+
+# Add missing headers
+python3 .github/scripts/check_spdx_headers.py --action write
+```
 
 **Test results:** Available in GitHub Actions UI under "Checks" tab and as downloadable artifacts (`infra-test-results`).
 

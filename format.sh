@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. 
+#
+# SPDX-License-Identifier: MIT 
+
 # Quick formatting script for TileGym development
 # Formats code and sorts imports using ruff
 
@@ -13,6 +17,10 @@ if ! python3 -m ruff --version 2>/dev/null | grep -q "$RUFF_VERSION"; then
 fi
 
 echo ""
+echo "📝 Adding SPDX headers to files..."
+python3 .github/scripts/check_spdx_headers.py --action write
+
+echo ""
 echo "📋 Sorting imports..."
 python3 -m ruff check --select I --fix .
 
@@ -21,5 +29,5 @@ echo "✨ Formatting code..."
 python3 -m ruff format .
 
 echo ""
-echo "✅ Done! Code is formatted and imports are sorted."
+echo "✅ Done! SPDX headers added, code is formatted, and imports are sorted."
 
