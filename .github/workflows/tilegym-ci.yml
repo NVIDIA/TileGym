@@ -288,15 +288,30 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
-      - name: Checkout code (sparse - only need formatting script)
+      - name: Checkout code (sparse - only need scripts)
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
             .github/scripts/format_benchmark_summary.py
+            .github/scripts/check_benchmark_regression.py
           sparse-checkout-cone-mode: false
 
       - name: Create test results directory
         run: mkdir -p ${{ github.workspace }}/test-results
+
+      # Download previous baseline for regression detection
+      # Uses dawidd6 action to download artifacts from previous workflow runs
+      # (GitHub's built-in action only works within the same run)
+      - name: Download baseline benchmark results (nightly only)
+        if: needs.config.outputs.is_pr == 'false'
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: benchmark-baseline
+          path: ${{ github.workspace }}/baseline-results
+          workflow: tilegym-ci.yml
+          branch: main
+          if_no_artifact_found: warn
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -317,7 +332,53 @@ jobs:
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym/tests/benchmark \
             ${IMAGE} \
-            ./run_all.sh /test-results
+            ./run_all.sh /test-results --json
+
+      # Compare current results against baseline with three zones:
+      # - Regression zone (< -2%): Build fails
+      # - Neutral zone (-2% to +2%): Build passes, baseline NOT updated
+      # - Improvement zone (> +2%): Build passes, baseline updated
+      # Outputs: has_baseline, passed, should_update_baseline
+      - name: Check for performance regressions (nightly only)
+        id: regression_check
+        if: needs.config.outputs.is_pr == 'false'
+        continue-on-error: false
+        run: |
+          if [ -d "${{ github.workspace }}/baseline-results" ] && [ "$(ls -A ${{ github.workspace }}/baseline-results/*.json 2>/dev/null)" ]; then
+            echo "Baseline results found, checking for regressions..."
+            echo "has_baseline=true" >> $GITHUB_OUTPUT
+            
+            if python3 .github/scripts/check_benchmark_regression.py \
+              --current test-results \
+              --baseline baseline-results \
+              --threshold 2.0 \
+              --improvement-threshold 2.0 \
+              --output test-results/regression_report.json \
+              --fail-on-regression; then
+              echo "✅ No regressions detected"
+              echo "passed=true" >> $GITHUB_OUTPUT
+              
+              # Check if we should update baseline (only if significant improvements)
+              SHOULD_UPDATE=$(python3 -c "import json; print(json.load(open('test-results/regression_report.json'))['summary']['should_update_baseline'])" 2>/dev/null || echo "false")
+              echo "should_update_baseline=${SHOULD_UPDATE}" >> $GITHUB_OUTPUT
+              
+              if [ "$SHOULD_UPDATE" == "True" ]; then
+                echo "🎉 Significant improvements detected - will update baseline"
+              else
+                echo "🟡 Performance within neutral zone - baseline will not be updated"
+              fi
+            else
+              echo "❌ Performance regressions detected!"
+              echo "passed=false" >> $GITHUB_OUTPUT
+              echo "should_update_baseline=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          else
+            echo "No baseline results found - this will become the first baseline"
+            echo "has_baseline=false" >> $GITHUB_OUTPUT
+            echo "passed=true" >> $GITHUB_OUTPUT
+            echo "should_update_baseline=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Debug - List test results directory
         if: always()
@@ -325,8 +386,8 @@ jobs:
           echo "Contents of test-results directory:"
           ls -lah ${{ github.workspace }}/test-results/ || echo "Directory does not exist"
           echo ""
-          echo "Files matching *_results.txt:"
-          ls -lh ${{ github.workspace }}/test-results/*_results.txt 2>/dev/null || echo "No matching files found"
+          echo "JSON files:"
+          ls -lh ${{ github.workspace }}/test-results/*.json 2>/dev/null || echo "No JSON files found"
 
       - name: Format benchmark summary
         if: always()
@@ -337,8 +398,40 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: test-results/*_results.txt
+          path: test-results/*.json
           retention-days: 30
+
+      # HIGH WATER MARK STRATEGY WITH NEUTRAL ZONE:
+      # Three zones for baseline updates:
+      # 1. Regression zone (< -2%): Build fails, baseline NOT updated
+      # 2. Neutral zone (-2% to +2%): Build passes, baseline NOT updated (prevents noise)
+      # 3. Improvement zone (> +2%): Build passes, baseline updated (high water mark)
+      # This prevents both performance drift AND noisy baseline updates from small variations
+      - name: Update baseline (only if significant improvements or first run)
+        if: |
+          needs.config.outputs.is_pr == 'false' &&
+          steps.regression_check.outputs.should_update_baseline == 'True'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-baseline
+          path: test-results/*.json
+          retention-days: 90
+      
+      - name: Log baseline decision
+        if: needs.config.outputs.is_pr == 'false'
+        run: |
+          if [ "${{ steps.regression_check.outputs.should_update_baseline }}" == "True" ]; then
+            if [ "${{ steps.regression_check.outputs.has_baseline }}" == "false" ]; then
+              echo "✅ Baseline created: This is the first baseline"
+            else
+              echo "✅ Baseline updated: Performance improved by more than 2%"
+            fi
+          elif [ "${{ steps.regression_check.outputs.passed }}" == "true" ]; then
+            echo "🟡 Baseline NOT updated: Performance within ±2% (neutral zone)"
+            echo "   Baseline preserved to avoid noise from small variations"
+          else
+            echo "❌ Baseline NOT updated: Performance regressions detected"
+          fi
 
   promote-to-latest:
     name: promote-to-latest
