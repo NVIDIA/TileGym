@@ -27,7 +27,7 @@ def softmax_kernel(
     # Static persistent scheduling: each block processes multiple rows
     pid = ct.bid(0)
     num_programs = ct.num_blocks(0)
-    offsets = ct.arange(TILE_SIZE, dtype=torch.int32)
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
 
     for row_idx in range(pid, n_rows, num_programs):
         # Load the row tile using index-based access
