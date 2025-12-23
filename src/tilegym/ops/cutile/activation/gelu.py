@@ -5,7 +5,6 @@
 import math
 
 import cuda.tile as ct
-import numpy as np
 import torch
 
 from tilegym.backend import register_impl

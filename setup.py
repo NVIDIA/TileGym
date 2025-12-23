@@ -8,6 +8,7 @@ import setuptools
 
 README = (pathlib.Path(__file__).parent / "README.md").read_text()
 
+
 setuptools.setup(
     name="tilegym",
     version="0.0.0",
@@ -41,8 +42,7 @@ setuptools.setup(
     ],
     extras_require={
         "dev": [
-            "black==23.3.0",
-            "isort==5.12.0",
+            "ruff==0.14.9",
         ],
     },
 )

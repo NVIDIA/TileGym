@@ -225,6 +225,7 @@ def _moe_align_block_size(
             tokens_per_thread,
         ),
     )
+    return cumsum
 
 
 def moe_align_block_size(
@@ -273,7 +274,7 @@ def moe_align_block_size(
     max_num_m_blocks = math.ceil(max_num_tokens_padded / block_size)
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
-    _moe_align_block_size(
+    cumsum = _moe_align_block_size(
         topk_ids,
         num_experts,
         block_size,
@@ -281,7 +282,7 @@ def moe_align_block_size(
         expert_ids,
         num_tokens_post_pad,
     )
-    return sorted_ids, expert_ids, num_tokens_post_pad
+    return sorted_ids, expert_ids, num_tokens_post_pad, cumsum
 
 
 register_impl("moe_align_block_size", "cutile")(moe_align_block_size)

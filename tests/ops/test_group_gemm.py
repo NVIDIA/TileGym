@@ -59,8 +59,6 @@ class Test_GroupGemm(common.PyTestCase):
         dtype,
         backend,
     ):
-        if torch.cuda.get_device_capability()[0] == 8:
-            pytest.skip("skip due to unsupported multi cta on sm80")
         if not is_backend_available(backend):
             pytest.skip("Cutile backend not available")
 

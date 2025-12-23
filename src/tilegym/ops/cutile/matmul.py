@@ -226,98 +226,21 @@ def _static_persistent_matmul_autotune_configs():
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
         configs = [
-            Config(
-                TILE_SIZE_M=64,
-                TILE_SIZE_N=64,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=2,
-            ),
-            Config(
-                TILE_SIZE_M=64,
-                TILE_SIZE_N=64,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=4,
-            ),
-            Config(
-                TILE_SIZE_M=64,
-                TILE_SIZE_N=64,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=1,
-            ),
-            Config(
-                TILE_SIZE_M=128,
-                TILE_SIZE_N=64,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=2,
-            ),
-            Config(
-                TILE_SIZE_M=128,
-                TILE_SIZE_N=64,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=1,
-            ),
-            Config(
-                TILE_SIZE_M=128,
-                TILE_SIZE_N=64,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=4,
-            ),
-            Config(
-                TILE_SIZE_M=256,
-                TILE_SIZE_N=256,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=1,
-            ),
+            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
+            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
+            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
         ]
     else:
         # sm100 (Blackwell)
         configs = [
-            Config(
-                TILE_SIZE_M=128,
-                TILE_SIZE_N=512,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=4,
-                occupancy=1,
-            ),
-            Config(
-                TILE_SIZE_M=256,
-                TILE_SIZE_N=256,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=2,
-                occupancy=1,
-            ),
-            Config(
-                TILE_SIZE_M=256,
-                TILE_SIZE_N=256,
-                TILE_SIZE_K=64,
-                GROUP_SIZE_M=8,
-                num_ctas=1,
-                occupancy=1,
-            ),
-            Config(
-                TILE_SIZE_M=256,
-                TILE_SIZE_N=256,
-                TILE_SIZE_K=128,
-                GROUP_SIZE_M=8,
-                num_ctas=2,
-                occupancy=1,
-            ),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
+            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
+            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
+            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
         ]
     return configs
 

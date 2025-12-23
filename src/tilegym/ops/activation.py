@@ -8,7 +8,9 @@ from tilegym.backend import dispatch
 from tilegym.backend import get_current_backend
 
 
-@dispatch("relu")
+@dispatch(
+    "relu",
+)
 def relu(x: torch.Tensor) -> torch.Tensor:
     """
     Applies the Rectified Linear Unit function element-wise.
@@ -24,7 +26,9 @@ def relu(x: torch.Tensor) -> torch.Tensor:
     raise NotImplementedError(f"relu is not implemented for {get_current_backend()}")
 
 
-@dispatch("gelu")
+@dispatch(
+    "gelu",
+)
 def gelu(x: torch.Tensor, approximate: str = "none") -> torch.Tensor:
     """
     Applies the Gaussian Error Linear Unit function element-wise.

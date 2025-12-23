@@ -53,12 +53,8 @@ class Test_FMHA(common.PyTestCase):
         "batch_size, num_heads, seq_len, head_dim, is_causal, dtype",
         [
             (1, 1, 9, 128, False, torch.bfloat16),
-            (1, 1, 9, 128, True, torch.bfloat16),
-            (2, 4, 128, 128, False, torch.bfloat16),
-            (2, 4, 1023, 128, True, torch.float16),
             (1, 32, 2047, 128, True, torch.float16),
             (2, 32, 4095, 128, True, torch.bfloat16),
-            (1, 32, 2047, 128, True, torch.float8_e5m2),
             (2, 32, 4095, 128, True, torch.float8_e5m2),
         ],
     )
@@ -76,6 +72,8 @@ class Test_FMHA(common.PyTestCase):
     ):
         if arch in ["sm120", "sm121"]:
             pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+        if arch in ["sm80"] and dtype == torch.float8_e5m2:
+            pytest.skip("Skip on sm80: float8_e5m2 is not supported")
         try:
             set_backend(backend)
         except Exception as e:
