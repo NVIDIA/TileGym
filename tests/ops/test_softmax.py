@@ -23,15 +23,23 @@ class Test_Softmax(common.PyTestCase):
             (256, 256, torch.float32),
             (256, 2048, torch.float32),
             (256, 1024 * 32, torch.float32),
+            (256, 10000, torch.float32),  
+            (256, 65536, torch.float32),
+            (256, 131072, torch.float32),
             (256, 256, torch.float16),
             (256, 2048, torch.float16),
             (256, 9, torch.float16),
             (256, 1009, torch.float16),
+            (256, 10000, torch.float16),
+            (256, 65536, torch.float16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
     @pytest.mark.parametrize("use_tma", [True, False], ids=["use_tma=True", "use_tma=False"])
-    def test_op(self, m, n, dtype, arch, backend, use_tma):
+    @pytest.mark.parametrize("use_online", [True, False], ids=["use_online=True", "use_online=False"])
+    def test_op(self, m, n, dtype, arch, backend, use_tma, use_online):
+        if use_online and use_tma:
+            pytest.skip("Cannot use both TMA and online softmax at the same time")
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:

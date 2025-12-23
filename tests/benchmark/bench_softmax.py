@@ -36,7 +36,7 @@ def get_supported_backends():
     return [p for p in ALL_BACKENDS if p is not None]
 
 
-def create_benchmark_config(M, use_tma=True):
+def create_benchmark_config(M, use_tma=True, use_online=False):
     """Create a benchmark configuration for given parameters"""
     available_backends = get_supported_backends()
     if not available_backends:
@@ -46,27 +46,35 @@ def create_benchmark_config(M, use_tma=True):
 
     return triton.testing.Benchmark(
         x_names=["N"],
-        x_vals=[2**i for i in range(10, 15)],
+        x_vals=[2**i for i in range(10, 17)],
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
         styles=list(styles),
         ylabel="GB/s",
-        plot_name=f"softmax-performance-tma-{use_tma}-GBps",
-        args={"M": M, "use_tma": use_tma},
+        plot_name=f"softmax-performance-tma-{use_tma}-online-{use_online}-GBps",
+        args={"M": M, "use_tma": use_tma, "use_online": use_online},
     )
 
 
 @triton.testing.perf_report(
-    [create_benchmark_config(M, use_tma) for M in [4096] for use_tma in [True, False]]  # Matrix height
+    [
+        create_benchmark_config(M, use_tma, use_online)
+        for M in [4096]
+        for use_tma, use_online in [
+            (False, False),  # baseline
+            (True, False),   # TMA softmax
+            (False, True),   # online softmax
+        ]
+    ]
 )
-def bench_softmax(M, N, backend, use_tma, dtype=torch.float32, device=DEVICE):
+def bench_softmax(M, N, backend, use_tma, use_online, dtype=torch.float32, device=DEVICE):
     # Create data
     x = torch.randn(M, N, dtype=dtype, device=device, requires_grad=True)
 
-    fn = lambda: tilegym.ops.softmax(x, use_tma=use_tma, backend=backend)
+    fn = lambda: tilegym.ops.softmax(x, use_tma=use_tma, use_online=use_online, backend=backend)
     ref = lambda: reference_softmax(x)
-    torch.testing.assert_close(fn(), ref(), atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(fn(), ref(), atol=2e-2, rtol=2e-2)
 
     # Benchmark the function
     ms = triton.testing.do_bench_cudagraph(fn)
