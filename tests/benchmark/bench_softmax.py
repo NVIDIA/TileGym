@@ -74,7 +74,7 @@ def bench_softmax(M, N, backend, use_tma, use_chunked, dtype=torch.float32, devi
 
     fn = lambda: tilegym.ops.softmax(x, use_tma=use_tma, use_chunked=use_chunked, backend=backend)
     ref = lambda: reference_softmax(x)
-    # torch.testing.assert_close(fn(), ref(), atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(fn(), ref(), atol=1e-2, rtol=1e-2)
 
     # Benchmark the function
     ms = triton.testing.do_bench_cudagraph(fn)
