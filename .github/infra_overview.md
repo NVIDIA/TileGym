@@ -24,8 +24,19 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 
 **Test Results:**
 - **ops-test-results:** JUnit XML + HTML report with test pass/fail status (visible in "Checks" tab)
-- **benchmark-results:** Individual `*_results.txt` files containing performance tables with TFLOPS/GBps metrics for each benchmark (downloadable artifacts)
+- **benchmark-results:** Individual `*_results.json` files containing structured performance data with TFLOPS/GBps metrics for each benchmark (downloadable artifacts)
+- **benchmark-baseline:** Stored JSON results from successful nightly builds, used for regression detection in future runs (90-day retention)
 - **Benchmark summary:** Formatted markdown tables visible in the workflow "Summary" tab
+
+**Regression Detection (Nightly Builds Only):**
+- Benchmarks output structured JSON data
+- Previous successful results are stored as baseline 
+- **Three-zone detection system:**
+  - **Regression zone** (< -2%): Build fails, baseline NOT updated
+  - **Neutral zone** (±2%): Build passes, baseline NOT updated (prevents noise)
+  - **Improvement zone** (> +2%): Build passes, baseline updated (high water mark)
+- This prevents both performance drift AND noisy baseline updates from small variations
+- Regression reports are saved with detailed comparison data
 
 ---
 
@@ -69,7 +80,8 @@ Located in `scripts/`, these Python utilities are used by workflows:
 - **`parse_pr_config.py`** - Extract CI configuration from PR descriptions
 - **`check_image_exists.py`** - Check if Docker images exist in GHCR
 - **`cleanup_stale_images.py`** - Delete stale Docker images from GHCR
-- **`format_benchmark_summary.py`** - Parse benchmark results and format as markdown tables for GitHub Actions summary
+- **`format_benchmark_summary.py`** - Parse benchmark results (JSON or TXT) and format as markdown tables for GitHub Actions summary
+- **`check_benchmark_regression.py`** - Compare benchmark results against baseline and detect performance regressions
 - **`check_spdx_headers.py`** - Check and add SPDX license headers to source files
 - **`utils.py`** - Shared utilities (GitHub token, API headers, outputs)
 
@@ -85,6 +97,7 @@ Located in `infra_tests/`, these pytest-based tests validate all CI scripts incl
 - Image existence checks and latest tag validation
 - Image cleanup logic (verified tag preservation, untracked image detection)
 - SPDX header detection and addition
+- Benchmark regression detection and comparison
 - Shared utility functions
 
 **Run locally:**

@@ -6,9 +6,10 @@
 """
 Parse benchmark results and format them as markdown for GitHub Actions summary.
 
-Reads *_results.txt files and converts pandas-style tables to markdown.
+Reads *_results.txt or *_results.json files and converts to markdown tables.
 """
 
+import json
 import logging
 import os
 import sys
@@ -80,6 +81,57 @@ def table_to_markdown(table_text):
     return md
 
 
+def parse_json_results(filepath):
+    """Parse JSON benchmark results."""
+    with open(filepath, "r") as f:
+        data = json.load(f)
+
+    if data.get("status") == "FAILED":
+        return None, "FAILED"
+
+    return data.get("benchmarks", []), "PASSED"
+
+
+def json_benchmark_to_markdown(benchmark_data):
+    """Convert JSON benchmark data to markdown table."""
+    if not benchmark_data or not benchmark_data.get("configs"):
+        return ""
+
+    configs = benchmark_data["configs"]
+    if not configs:
+        return ""
+
+    # Determine columns: parameter name + all backend names
+    param_name = None
+    backends = []
+
+    for key in configs[0].keys():
+        if key not in ["CuTile", "PyTorch", "Triton", "TorchCompile"]:
+            param_name = key
+        else:
+            backends.append(key)
+
+    if not param_name:
+        return ""
+
+    # Build markdown table
+    headers = [param_name] + backends
+    md = "| " + " | ".join(headers) + " |\n"
+    md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+
+    for config in configs:
+        row = [str(config.get(param_name, ""))]
+        for backend in backends:
+            value = config.get(backend, "")
+            if isinstance(value, float):
+                row.append(f"{value:.2f}")
+            else:
+                row.append(str(value))
+        md += "| " + " | ".join(row) + " |\n"
+
+    return md
+
+
 def format_benchmark_summary(results_dir):
     """Format all benchmark results as markdown summary."""
     results_dir = Path(results_dir).resolve()  # Get absolute path
@@ -91,15 +143,20 @@ def format_benchmark_summary(results_dir):
         logger.error("Results directory does not exist")
         return "## Benchmark Results\n\n❌ No benchmark results found (directory does not exist).\n"
 
-    # Find all result files
-    result_files = sorted(results_dir.glob("*_results.txt"))
-    logger.info(f"Found {len(result_files)} result files")
+    # Find result files - prefer JSON, fall back to TXT
+    json_files = sorted(results_dir.glob("*_results.json"))
+    txt_files = sorted(results_dir.glob("*_results.txt"))
+
+    result_files = json_files if json_files else txt_files
+    file_format = "json" if json_files else "txt"
+
+    logger.info(f"Found {len(result_files)} {file_format} result files")
 
     if not result_files:
         # List what IS in the directory
         all_files = list(results_dir.glob("*"))
         logger.warning(f"Files in directory: {[f.name for f in all_files]}")
-        return "## Benchmark Results\n\n❌ No benchmark results found (no *_results.txt files).\n"
+        return "## Benchmark Results\n\n❌ No benchmark results found.\n"
 
     summary = "# 📊 Benchmark Results\n\n"
 
@@ -107,26 +164,51 @@ def format_benchmark_summary(results_dir):
         benchmark_name = result_file.stem.replace("_results", "").replace("_", " ").title()
         summary += f"## {benchmark_name}\n\n"
 
-        sections, status = parse_benchmark_file(result_file)
+        if file_format == "json":
+            benchmarks, status = parse_json_results(result_file)
 
-        if status == "FAILED":
-            summary += "❌ **FAILED**\n\n"
-            continue
+            if status == "FAILED":
+                summary += "❌ **FAILED**\n\n"
+                continue
 
-        if not sections:
-            summary += "⚠️ No results captured\n\n"
-            continue
+            if not benchmarks:
+                summary += "⚠️ No results captured\n\n"
+                continue
 
-        for section_name, table_text in sections:
-            # Clean up section name for display
-            display_name = section_name.replace("-", " ").replace("_", " ")
-            summary += f"### {display_name}\n\n"
+            for benchmark_data in benchmarks:
+                display_name = benchmark_data["name"].replace("-", " ").replace("_", " ")
+                unit = benchmark_data.get("unit", "")
+                summary += f"### {display_name}"
+                if unit:
+                    summary += f" ({unit})"
+                summary += "\n\n"
 
-            md_table = table_to_markdown(table_text)
-            if md_table:
-                summary += md_table + "\n"
-            else:
-                summary += "_No data_\n\n"
+                md_table = json_benchmark_to_markdown(benchmark_data)
+                if md_table:
+                    summary += md_table + "\n"
+                else:
+                    summary += "_No data_\n\n"
+        else:
+            sections, status = parse_benchmark_file(result_file)
+
+            if status == "FAILED":
+                summary += "❌ **FAILED**\n\n"
+                continue
+
+            if not sections:
+                summary += "⚠️ No results captured\n\n"
+                continue
+
+            for section_name, table_text in sections:
+                # Clean up section name for display
+                display_name = section_name.replace("-", " ").replace("_", " ")
+                summary += f"### {display_name}\n\n"
+
+                md_table = table_to_markdown(table_text)
+                if md_table:
+                    summary += md_table + "\n"
+                else:
+                    summary += "_No data_\n\n"
 
     return summary
 
