@@ -146,7 +146,7 @@ def group_gemm(
     kernel = group_gemm_kernel
     # When num_ctas is specified, adjust grid size to account for multiple CTAs per SM
     num_ctas_for_grid = num_ctas if num_ctas is not None else 1
-    grid_size = NUM_SMS // num_ctas_for_grid
+    grid_size = NUM_SMS * num_ctas_for_grid
     grid = (grid_size,)
 
     logger.debug(f"[cuTile] group_gemm launching with grid={grid}, num_ctas={num_ctas}, NUM_SMS={NUM_SMS}")
