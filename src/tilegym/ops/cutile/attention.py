@@ -226,7 +226,17 @@ def tile_prefill_fmha(q, k, v, sm_scale, is_causal=True, kernel_configs=None):
     EVEN_K = (k_len % max_tile_n) == 0
     return cutile_autotune_fmha(
         torch.cuda.current_stream(),
-        q, k, v, o, sm_scale, input_pos, hidden_size, num_heads, query_group_size, is_causal, EVEN_K
+        q,
+        k,
+        v,
+        o,
+        sm_scale,
+        input_pos,
+        hidden_size,
+        num_heads,
+        query_group_size,
+        is_causal,
+        EVEN_K,
     )
 
 
