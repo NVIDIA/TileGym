@@ -66,7 +66,8 @@ class Test_RoPE(common.PyTestCase):
         backend,
     ):
         if dtype == torch.bfloat16:
-            pytest.xfail("random result mismatch on tilegym bfloat16 rope")
+            pytest.skip("random result mismatch on tilegym bfloat16 rope")
+
         self.setUp()
         try:
             tilegym.set_backend(backend)

@@ -92,6 +92,7 @@ def naive_absorb_mla_transpose(
             index=(batch_idx, cnt, 0),
             shape=(1, TILE_N, TILE_D),
             allow_tma=True,
+            padding_mode=zero_pad,
             latency=2,
         )
         k = ct.reshape(k, (TILE_N, TILE_D))
@@ -104,6 +105,7 @@ def naive_absorb_mla_transpose(
             index=(batch_idx, cnt, 0),
             shape=(1, TILE_N, TILE_KPE),
             allow_tma=True,
+            padding_mode=zero_pad,
             latency=2,
         )
         kpe = ct.reshape(kpe, (TILE_N, TILE_KPE))
@@ -131,6 +133,7 @@ def naive_absorb_mla_transpose(
             shape=(TILE_N, 1, TILE_D),
             order=(1, 0, 2),
             allow_tma=True,
+            padding_mode=zero_pad,
             latency=2,
         )
         v = ct.reshape(v, (TILE_N, TILE_D))

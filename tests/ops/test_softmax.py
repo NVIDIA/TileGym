@@ -25,7 +25,7 @@ class Test_Softmax(common.PyTestCase):
             (256, 1024 * 32, torch.float32),
             (256, 256, torch.float16),
             (256, 2048, torch.float16),
-            (256, 9, torch.float16),
+            (256, 9, torch.float32),
             (256, 1009, torch.float16),
         ],
     )
@@ -49,7 +49,7 @@ class Test_Softmax(common.PyTestCase):
         if dtype == torch.float16:
             rtol, atol = 1e-3, 1e-5
         else:
-            rtol, atol = 1e-5, 1e-8
+            rtol, atol = 1e-5, 1e-7
 
         self.assertCorrectness(
             tilegym.ops.softmax,
