@@ -28,13 +28,22 @@ This directory contains CI/CD workflows, utility scripts, and infrastructure tes
 - **benchmark-baseline:** Stored JSON results from successful nightly builds, used for regression detection in future runs (90-day retention)
 - **Benchmark summary:** Formatted markdown tables visible in the workflow "Summary" tab
 
-**Regression Detection (Nightly Builds Only):**
+**Regression Detection (All Builds):**
 - Benchmarks output structured JSON data
-- Previous successful results are stored as baseline 
+- Previous successful results are stored as baseline (90-day retention)
+- **Regression checks run on ALL builds (PRs and nightly)** to catch issues early
+- **Baseline updates only happen on nightly builds** to prevent PR noise
 - **Three-zone detection system:**
-  - **Regression zone** (< -2%): Build fails, baseline NOT updated
-  - **Neutral zone** (±2%): Build passes, baseline NOT updated (prevents noise)
-  - **Improvement zone** (> +2%): Build passes, baseline updated (high water mark)
+  - **Regression zone** (< -5%): Build fails, baseline NOT updated for that benchmark
+  - **Neutral zone** (±5%): Build passes, baseline NOT updated (prevents noise)
+  - **Improvement zone** (> +5%): Build passes, baseline updated (high water mark, nightly only)
+- **Per-Benchmark Selective Updates (NEW):**
+  - Each benchmark file is evaluated independently
+  - Benchmarks that improve/stay neutral → baseline updated
+  - Benchmarks that regress → old baseline kept (forces fix)
+  - Build STILL FAILS if ANY benchmark regresses
+  - Preserves progress on non-regressing benchmarks
+  - Example: Matmul improves (+20%) → baseline updated; Softmax regresses (-10%) → old baseline kept, build fails
 - This prevents both performance drift AND noisy baseline updates from small variations
 - Regression reports are saved with detailed comparison data
 
@@ -82,6 +91,7 @@ Located in `scripts/`, these Python utilities are used by workflows:
 - **`cleanup_stale_images.py`** - Delete stale Docker images from GHCR
 - **`format_benchmark_summary.py`** - Parse benchmark results (JSON or TXT) and format as markdown tables for GitHub Actions summary
 - **`check_benchmark_regression.py`** - Compare benchmark results against baseline and detect performance regressions
+- **`merge_baseline_selective.py`** - Selectively merge old baseline with new results (keeps old for regressions, uses new for improvements)
 - **`check_spdx_headers.py`** - Check and add SPDX license headers to source files
 - **`utils.py`** - Shared utilities (GitHub token, API headers, outputs)
 

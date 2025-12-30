@@ -44,6 +44,9 @@ class RegressionChecker:
         self.improvements = []
         self.neutral = []
         self.no_baseline = []
+        # Track which benchmark files have regressions for selective updates
+        self.benchmark_files_with_regressions = set()
+        self.benchmark_files_checked = set()
 
     def load_results(self, results_dir: Path) -> Dict:
         """Load all benchmark results from a directory."""
@@ -166,6 +169,14 @@ class RegressionChecker:
             - 'no_regressions': True if no regressions found
             - 'has_improvements': True if significant improvements found
         """
+        # Track which benchmark files contain which benchmarks (for selective updates)
+        current_benchmark_to_file = {}
+        for bench_file in current_results.get("benchmarks", []):
+            file_name = bench_file.get("benchmark_file", "unknown")
+            self.benchmark_files_checked.add(file_name)
+            for bench in bench_file.get("benchmarks", []):
+                current_benchmark_to_file[bench["name"]] = file_name
+
         current_benchmarks = {}
         for bench_file in current_results.get("benchmarks", []):
             for bench in bench_file.get("benchmarks", []):
@@ -177,10 +188,17 @@ class RegressionChecker:
                 for bench in bench_file.get("benchmarks", []):
                     baseline_benchmarks[bench["name"]] = bench
 
-        # Compare each benchmark
+        # Compare each benchmark and track files with regressions
         for name, current_bench in current_benchmarks.items():
             baseline_bench = baseline_benchmarks.get(name)
+            regressions_before = len(self.regressions)
             self.compare_benchmark(current_bench, baseline_bench)
+
+            # If new regressions were found, mark this benchmark file
+            if len(self.regressions) > regressions_before:
+                file_name = current_benchmark_to_file.get(name)
+                if file_name:
+                    self.benchmark_files_with_regressions.add(file_name)
 
         return {
             "no_regressions": len(self.regressions) == 0,
@@ -246,6 +264,9 @@ class RegressionChecker:
 
     def save_report(self, output_file: Path):
         """Save detailed report as JSON."""
+        # Determine which benchmark files can be updated (those without regressions)
+        files_safe_to_update = sorted(self.benchmark_files_checked - self.benchmark_files_with_regressions)
+
         report = {
             "threshold_pct": self.threshold_pct,
             "improvement_threshold_pct": self.improvement_threshold_pct,
@@ -254,12 +275,26 @@ class RegressionChecker:
                 "improvements": len(self.improvements),
                 "neutral": len(self.neutral),
                 "no_baseline": len(self.no_baseline),
+                # Update baseline only if there are no regressions and improvements exist
+                # OR if this is the first run (no baseline yet)
                 "should_update_baseline": len(self.regressions) == 0 and len(self.improvements) > 0,
+                # NEW: Per-benchmark update eligibility
+                "total_benchmark_files": len(self.benchmark_files_checked),
+                "files_with_regressions": len(self.benchmark_files_with_regressions),
+                "files_safe_to_update": len(files_safe_to_update),
+                "can_do_partial_update": len(files_safe_to_update) > 0
+                and len(self.benchmark_files_with_regressions) > 0,
             },
             "regressions": self.regressions,
             "improvements": self.improvements,
             "neutral": self.neutral,
             "no_baseline": self.no_baseline,
+            # NEW: Lists of which files to update
+            "benchmark_files": {
+                "all_files": sorted(self.benchmark_files_checked),
+                "files_with_regressions": sorted(self.benchmark_files_with_regressions),
+                "files_safe_to_update": files_safe_to_update,
+            },
         }
 
         with open(output_file, "w") as f:
