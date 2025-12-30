@@ -152,7 +152,8 @@ def merge_baselines(
     return len(kept_old_regressions) == 0  # True if all were updated (no regressions)
 
 
-def main():
+def parse_arguments():
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Selectively merge baseline with new benchmark results")
     parser.add_argument(
         "--old-baseline", type=Path, required=True, help="Directory containing previous baseline results"
@@ -165,26 +166,28 @@ def main():
         help="JSON regression report from check_benchmark_regression.py",
     )
     parser.add_argument("--output", type=Path, required=True, help="Output directory for merged baseline")
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    # Validate inputs
-    if not args.old_baseline.exists():
-        logger.error(f"Error: Old baseline directory not found: {args.old_baseline}")
+def validate_inputs(old_baseline: Path, new_results: Path, regression_report: Path):
+    """Validate that all input paths exist."""
+    if not old_baseline.exists():
+        logger.error(f"Error: Old baseline directory not found: {old_baseline}")
         sys.exit(1)
 
-    if not args.new_results.exists():
-        logger.error(f"Error: New results directory not found: {args.new_results}")
+    if not new_results.exists():
+        logger.error(f"Error: New results directory not found: {new_results}")
         sys.exit(1)
 
-    if not args.regression_report.exists():
-        logger.error(f"Error: Regression report not found: {args.regression_report}")
+    if not regression_report.exists():
+        logger.error(f"Error: Regression report not found: {regression_report}")
         sys.exit(1)
 
-    all_updated = merge_baselines(args.old_baseline, args.new_results, args.regression_report, args.output)
 
-    # Exit code doesn't affect build status (that's determined by regression check)
-    sys.exit(0)
+def main():
+    args = parse_arguments()
+    validate_inputs(args.old_baseline, args.new_results, args.regression_report)
+    merge_baselines(args.old_baseline, args.new_results, args.regression_report, args.output)
 
 
 if __name__ == "__main__":

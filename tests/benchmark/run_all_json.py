@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import List
+from typing import Tuple
 
 
 def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
@@ -150,13 +151,16 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
         }
 
 
-def main():
-    # Determine output directory
+def setup_output_directory() -> Path:
+    """Parse arguments and setup output directory."""
     output_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
-    # Find benchmark files
+
+def find_benchmark_files() -> List[Path]:
+    """Find all benchmark files in the current directory."""
     benchmark_dir = Path(__file__).parent
     benchmark_files = sorted(benchmark_dir.glob("bench_*.py"))
 
@@ -164,10 +168,11 @@ def main():
         print("Error: No benchmark files found", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Found {len(benchmark_files)} benchmark files")
-    print(f"Output directory: {output_dir}\n")
+    return benchmark_files
 
-    # Run all benchmarks
+
+def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[Dict[str, Any], bool]:
+    """Run all benchmarks and save individual results."""
     all_results = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "benchmarks": [],
@@ -194,18 +199,33 @@ def main():
             print(f"  Results saved to: {output_file}")
         print()
 
-    # Save combined results
+    return all_results, failed
+
+
+def save_combined_results(all_results: Dict[str, Any], output_dir: Path) -> Path:
+    """Save combined results to a single JSON file."""
     combined_file = output_dir / "all_benchmarks.json"
     with open(combined_file, "w") as f:
         json.dump(all_results, f, indent=2)
+    return combined_file
+
+
+def main():
+    output_dir = setup_output_directory()
+    benchmark_files = find_benchmark_files()
+
+    print(f"Found {len(benchmark_files)} benchmark files")
+    print(f"Output directory: {output_dir}\n")
+
+    all_results, failed = run_all_benchmarks(benchmark_files, output_dir)
+    combined_file = save_combined_results(all_results, output_dir)
 
     print("=" * 60)
     print("All benchmarks complete!")
     print(f"Combined results: {combined_file}")
     print("=" * 60)
 
-    if failed:
-        sys.exit(1)
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

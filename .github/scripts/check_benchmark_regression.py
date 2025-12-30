@@ -303,7 +303,8 @@ class RegressionChecker:
         print(f"\nDetailed report saved to: {output_file}")
 
 
-def main():
+def parse_arguments():
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Check benchmark results for performance regressions")
     parser.add_argument(
         "--current", type=Path, required=True, help="Directory containing current benchmark results (JSON)"
@@ -322,38 +323,35 @@ def main():
     parser.add_argument(
         "--fail-on-regression", action="store_true", help="Exit with error code if regressions are found"
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    # Initialize checker
-    checker = RegressionChecker(threshold_pct=args.threshold, improvement_threshold_pct=args.improvement_threshold)
+def load_results(checker: RegressionChecker, current_path: Path, baseline_path: Path = None):
+    """Load current and baseline results."""
+    print(f"Loading current results from: {current_path}")
+    current = checker.load_results(current_path)
 
-    # Load results
-    print(f"Loading current results from: {args.current}")
-    current_results = checker.load_results(args.current)
-
-    baseline_results = None
-    if args.baseline:
-        print(f"Loading baseline results from: {args.baseline}")
-        baseline_results = checker.load_results(args.baseline)
+    baseline = None
+    if baseline_path:
+        print(f"Loading baseline results from: {baseline_path}")
+        baseline = checker.load_results(baseline_path)
     else:
         print("No baseline specified - will report current results only")
 
-    # Compare
-    result = checker.compare_all(current_results, baseline_results)
+    return current, baseline
 
-    # Print report
+
+def main():
+    args = parse_arguments()
+    checker = RegressionChecker(threshold_pct=args.threshold, improvement_threshold_pct=args.improvement_threshold)
+    current, baseline = load_results(checker, args.current, args.baseline)
+    result = checker.compare_all(current, baseline)
+
     checker.print_report()
-
-    # Save detailed report if requested
     if args.output:
         checker.save_report(args.output)
 
-    # Exit with appropriate code
-    if args.fail_on_regression and not result["no_regressions"]:
-        sys.exit(1)
-    else:
-        sys.exit(0)
+    sys.exit(1 if args.fail_on_regression and not result["no_regressions"] else 0)
 
 
 if __name__ == "__main__":
