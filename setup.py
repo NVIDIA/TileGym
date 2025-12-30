@@ -38,6 +38,7 @@ setuptools.setup(
         "pytest",
         "numpy",
         "cuda-tile",
+        "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental",
         # 'nvidia-ml-py', # optional
     ],
     extras_require={

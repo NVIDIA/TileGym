@@ -3,14 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 from math import ceil
+from types import SimpleNamespace
 
 import cuda.tile as ct
+import cuda.tile_experimental as ct_experimental
 import torch
 
 from tilegym.backend import register_impl
-from tilegym.backend.cutile.autotuner import Autotuner
-from tilegym.backend.cutile.autotuner import Config
-from tilegym.backend.cutile.autotuner import autotune
 from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
@@ -185,72 +184,71 @@ def static_persistent_matmul_kernel(
 
 
 def _matmul_autotune_configs():
+    """
+    Iterator of autotune configurations for matmul kernel.
+    """
     gpu_capability = torch.cuda.get_device_capability()
 
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
-        configs = [
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2),
-        ]
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
     else:
         # sm100 (Blackwell)
-        configs = [
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=4, occupancy=1),
-            Config(TILE_SIZE_M=512, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1),
-        ]
-    return configs
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=4, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=512, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1)
 
 
-@autotune(search_space=_matmul_autotune_configs())
-def cutile_autotune_matmul(a, b, c, autotuner: Autotuner | None = None):
+def cutile_autotune_matmul(stream, a, b, c):
     M, N = c.shape
-    tuned_result = autotuner(
-        torch.cuda.current_stream(),
-        grid_fn=lambda named_args, cfg: (
+    ct_experimental.autotune_launch(
+        stream,
+        grid_fn=lambda cfg: (
             ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N),
             1,
             1,
         ),
         kernel=matmul_kernel,
         args_fn=lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
+        hints_fn=lambda cfg: {
+            "num_ctas": cfg.num_ctas,
+            "occupancy": cfg.occupancy,
+        },
+        search_space=_matmul_autotune_configs,
     )
     return c
 
 
 def _static_persistent_matmul_autotune_configs():
+    """
+    Iterator of autotune configurations for static persistent matmul kernel.
+    """
     gpu_capability = torch.cuda.get_device_capability()
 
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
-        configs = [
-            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
-            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
-            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-        ]
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4)
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4)
+        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
     else:
         # sm100 (Blackwell)
-        configs = [
-            Config(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
-        ]
-    return configs
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1)
 
 
-@autotune(search_space=_static_persistent_matmul_autotune_configs())
-def cutile_autotune_static_persistent_matmul(a, b, c, M, N, K, trans_a, trans_b, autotuner: Autotuner | None = None):
+def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    tuned_result = autotuner(
-        torch.cuda.current_stream(),
-        grid_fn=lambda named_args, cfg: (
+    ct_experimental.autotune_launch(
+        stream,
+        grid_fn=lambda cfg: (
             min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
             1,
             1,
@@ -270,6 +268,11 @@ def cutile_autotune_static_persistent_matmul(a, b, c, M, N, K, trans_a, trans_b,
             trans_b,
             cfg.GROUP_SIZE_M,
         ),
+        hints_fn=lambda cfg: {
+            "num_ctas": cfg.num_ctas,
+            "occupancy": cfg.occupancy,
+        },
+        search_space=_static_persistent_matmul_autotune_configs,
     )
     return c
 
@@ -301,12 +304,13 @@ def matmul(
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
 
     # Grid calculation
+    stream = torch.cuda.current_stream()
     if static_persistent:
-        cutile_autotune_static_persistent_matmul(a, b, c, M, N, K, trans_a, trans_b)
+        cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b)
     else:
         assert trans_a == False, "trans_a is not supported for cutile"
         assert trans_b == False, "trans_b is not supported for cutile"
-        cutile_autotune_matmul(a, b, c)
+        cutile_autotune_matmul(stream, a, b, c)
     return c
 
 
