@@ -69,6 +69,7 @@ class Test_MOE(common.PyTestCase):
         [
             (16, 512, 256, 8, 2),
             (32, 1024, 512, 16, 4),
+            (64, 1024, 512, 20, 8),
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])

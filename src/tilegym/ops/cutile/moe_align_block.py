@@ -9,6 +9,7 @@ import cuda.tile as ct
 import torch
 
 from tilegym.backend import register_impl
+from tilegym.ops.cutile.utils import next_power_of_2
 
 
 def ceil_div(a, b):
@@ -54,13 +55,13 @@ def moe_align_block_size_stage1(
 def moe_align_block_size_stage2(
     tokens_cnts,
     num_experts: ct.Constant[int],
+    num_experts_pow2: ct.Constant[int],
 ):
     bid = ct.bid(0)
-    last_cnt = 0
 
     # Load all values at once
     base_offset = num_experts + bid
-    offsets = ct.arange(num_experts, dtype=ct.int32) * num_experts + base_offset
+    offsets = ct.arange(num_experts_pow2, dtype=ct.int32) * num_experts + base_offset
 
     token_cnts_vec = ct.gather(tokens_cnts, offsets, padding_value=0)
 
@@ -193,11 +194,12 @@ def _moe_align_block_size(
     )
 
     # Launch stage 2
+    num_experts_pow2 = next_power_of_2(num_experts)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
         moe_align_block_size_stage2,
-        (tokens_cnts_flat, num_experts),
+        (tokens_cnts_flat, num_experts, num_experts_pow2),
     )
 
     # Launch stage 3
@@ -225,6 +227,7 @@ def _moe_align_block_size(
             tokens_per_thread,
         ),
     )
+    return cumsum
 
 
 def moe_align_block_size(
@@ -270,10 +273,10 @@ def moe_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
-    max_num_m_blocks = math.ceil(max_num_tokens_padded / block_size)
+    max_num_m_blocks = ceil_div(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
-    _moe_align_block_size(
+    cumsum = _moe_align_block_size(
         topk_ids,
         num_experts,
         block_size,
@@ -281,7 +284,7 @@ def moe_align_block_size(
         expert_ids,
         num_tokens_post_pad,
     )
-    return sorted_ids, expert_ids, num_tokens_post_pad
+    return sorted_ids, expert_ids, num_tokens_post_pad, cumsum
 
 
 register_impl("moe_align_block_size", "cutile")(moe_align_block_size)

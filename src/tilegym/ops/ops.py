@@ -184,6 +184,34 @@ def silu_and_mul(
 
 
 @dispatch(
+    "dropout",
+)
+def dropout(
+    x: torch.Tensor,
+    seed: int,
+    p: float = 0.5,
+    training: bool = True,
+    inplace: bool = False,
+    **kwargs: Any,
+):
+    """
+    Dropout operation with stateless random generation from a given seed.
+
+    Args:
+        x: Input tensor
+        seed: Integer seed used to generate dropout mask in the kernel
+        p: Drop probability, default is 0.5
+        training: Apply dropout if True, otherwise return input
+        inplace: If True, perform the operation in-place
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Tensor of the same shape as `x` with dropout applied
+    """
+    raise NotImplementedError(f"dropout is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "softmax",
 )
 def softmax(

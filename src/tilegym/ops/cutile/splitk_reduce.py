@@ -28,13 +28,6 @@ def splitk_reduce_kernel(
     S_kv: ConstInt,
     num_heads: ConstInt,
     head_dim: ConstInt,
-    stride_att_b: ConstInt,
-    stride_att_m: ConstInt,
-    stride_att_s: ConstInt,
-    stride_lse_rb: ConstInt,
-    stride_lse_rm: ConstInt,
-    stride_ob: ConstInt,
-    stride_om: ConstInt,
     NUM_KV_SPLITS: ConstInt,
     NUM_KV_SPLITS_POW2: ConstInt,
     TILE_D: ConstInt,
@@ -124,10 +117,6 @@ def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
     TILE_D = min(128, next_power_of_2(head_dim))
     NUM_KV_SPLITS_POW2 = next_power_of_2(NUM_KV_SPLITS)
 
-    stride_att_b, stride_att_m, stride_att_s, _ = attn_splitk_out.stride()
-    stride_lse_rb, stride_lse_rm, _ = lse_splitk_out.stride()
-    stride_ob, stride_om, _ = attn_out.stride()
-
     # Determine if we should use dot product based on conditions
     USE_DOT = NUM_KV_SPLITS_POW2 >= 16
 
@@ -147,13 +136,6 @@ def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
             S_kv,
             num_heads,
             head_dim,
-            stride_att_b,
-            stride_att_m,
-            stride_att_s,
-            stride_lse_rb,
-            stride_lse_rm,
-            stride_ob,
-            stride_om,
             NUM_KV_SPLITS,
             NUM_KV_SPLITS_POW2,
             TILE_D,

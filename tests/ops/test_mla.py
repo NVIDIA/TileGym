@@ -86,7 +86,16 @@ class Test_MLA(common.PyTestCase):
     @pytest.mark.parametrize("BLOCK_N", [64] if torch.cuda.get_device_capability() in [(12, 0), (12, 1)] else [128])
     @pytest.mark.parametrize("num_group_size", [1, 4])
     @pytest.mark.parametrize("backend", _backends)
-    def test_op(self, is_causal, num_group_size, dtype, BLOCK_M, BLOCK_N, backend, arch):
+    def test_op(
+        self,
+        is_causal,
+        num_group_size,
+        dtype,
+        BLOCK_M,
+        BLOCK_N,
+        backend,
+        arch,
+    ):
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
 
