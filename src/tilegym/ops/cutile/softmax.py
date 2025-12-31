@@ -107,39 +107,44 @@ def softmax_kernel_chunked(
     num_programs = ct.num_blocks(0)
 
     for row_idx in range(pid, n_rows, num_programs):
-        row_max = ct.full((1, 1), -math.inf, dtype=ct.float32)
-        denominator = ct.full((1, 1), 0.0, dtype=ct.float32)
+        row_max = ct.full((1,), -math.inf, dtype=ct.float32)
+        denominator = ct.full((1,), 0.0, dtype=ct.float32)
         num_chunks = (n_cols + TILE_SIZE - 1) // TILE_SIZE
+        col_offsets_base = ct.arange(TILE_SIZE, dtype=ct.int32)
 
         # Pass 1: Find maximum
         for chunk_idx in range(num_chunks):
-            chunk = ct.load(
-                input, index=(row_idx, chunk_idx * TILE_SIZE), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.NEG_INF
-            )
+            chunk_start = chunk_idx * TILE_SIZE
+            col_indices = ct.add(ct.full((TILE_SIZE,), chunk_start, dtype=ct.int32), col_offsets_base)
+            chunk = ct.gather(input, (row_idx, col_indices), check_bounds=True, padding_value=-math.inf)
             chunk = ct.astype(chunk, ct.float32)
-            row_max = ct.maximum(row_max, ct.max(chunk, 1, keepdims=True))
+            chunk_max = ct.max(chunk, 0, keepdims=True)
+            row_max = ct.maximum(row_max, chunk_max)
 
         # Pass 2: First pass to compute denominator (sum of all exp values)
         for chunk_idx in range(num_chunks):
-            chunk = ct.load(
-                input, index=(row_idx, chunk_idx * TILE_SIZE), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.NEG_INF
-            )
+            chunk_start = chunk_idx * TILE_SIZE
+            col_indices = ct.add(ct.full((TILE_SIZE,), chunk_start, dtype=ct.int32), col_offsets_base)
+            chunk = ct.gather(input, (row_idx, col_indices), check_bounds=True, padding_value=-math.inf)
             chunk = ct.astype(chunk, ct.float32)
             row_minus_max = ct.sub(chunk, row_max)
             numerator = ct.exp(row_minus_max)
-            denominator = ct.add(denominator, ct.sum(numerator, 1, keepdims=True))
+            exponentials_sum = ct.sum(numerator, 0, keepdims=True)
+            denominator = ct.add(denominator, exponentials_sum)
 
         # Pass 3: Compute final softmax
         for chunk_idx in range(num_chunks):
-            chunk = ct.load(
-                input, index=(row_idx, chunk_idx * TILE_SIZE), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.NEG_INF
-            )
+            chunk_start = chunk_idx * TILE_SIZE
+            col_indices = ct.add(ct.full((TILE_SIZE,), chunk_start, dtype=ct.int32), col_offsets_base)
+            # Use gather to load chunk (returns 1D tensor like basic kernel)
+            chunk = ct.gather(input, (row_idx, col_indices), check_bounds=True, padding_value=-math.inf)
             chunk = ct.astype(chunk, ct.float32)
             row_minus_max = ct.sub(chunk, row_max)
             numerator = ct.exp(row_minus_max)
             softmax_output = ct.truediv(numerator, denominator)
             softmax_output = ct.astype(softmax_output, input.dtype)
-            ct.store(output, index=(row_idx, chunk_idx * TILE_SIZE), tile=softmax_output)
+            # Use scatter with bounds checking to avoid writing padded zeros
+            ct.scatter(output, (row_idx, col_indices), softmax_output, check_bounds=True)
 
 
 # Launch patterns for the kernels:
