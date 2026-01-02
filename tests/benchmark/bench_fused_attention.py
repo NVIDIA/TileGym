@@ -140,4 +140,6 @@ def bench_fused_attention(
 
 
 if __name__ == "__main__":
+    #TODO remove temporary failure addition
+    raise RuntimeError("temporary failure addition")
     bench_fused_attention.run(print_data=True)
