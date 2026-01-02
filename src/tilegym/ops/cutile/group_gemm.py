@@ -25,6 +25,7 @@ def group_gemm_kernel(
     TILE_K: ConstInt,
     num_sm: ConstInt,
     transpose_b: ConstBool,
+    GROUP_SIZE_M: ConstInt,
 ):
     tile_idx = ct.bid(0)
     last_problem_end = 0
@@ -49,9 +50,16 @@ def group_gemm_kernel(
 
         # Process tiles for this group using persistent scheduling
         while tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles:
+            # Convert linear tile id -> (tile_m_idx, tile_n_idx) with a 2D swizzle
+            # to improve L2 locality (Triton-style GROUP_M swizzle).
             tile_idx_in_gemm = tile_idx - last_problem_end
-            tile_m_idx = tile_idx_in_gemm // num_n_tiles
-            tile_n_idx = tile_idx_in_gemm % num_n_tiles
+            num_pid_in_group = GROUP_SIZE_M * num_n_tiles
+            group_id = tile_idx_in_gemm // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = ct.minimum(num_m_tiles - first_pid_m, GROUP_SIZE_M)
+            pid_in_group = tile_idx_in_gemm % num_pid_in_group
+            tile_m_idx = first_pid_m + (pid_in_group % group_size_m)
+            tile_n_idx = pid_in_group // group_size_m
 
             # Initialize accumulator
             acc = ct.zeros((TILE_M, TILE_N), dtype=ct.float32)
@@ -120,6 +128,8 @@ def group_gemm(
         "TILE_M": 128,
         "TILE_N": 128,
         "TILE_K": 64,
+        # 2D swizzle parameter (Triton-style GROUP_M). Tune for speed.
+        "GROUP_SIZE_M": 8,
         "num_ctas": None,  # Let compiler auto-pick
     }
     user_cfg = kwargs.get("kernel_configs")
@@ -130,6 +140,7 @@ def group_gemm(
     TILE_M = kernel_configs.get("TILE_M")
     TILE_N = kernel_configs.get("TILE_N")
     TILE_K = kernel_configs.get("TILE_K")
+    GROUP_SIZE_M = kernel_configs.get("GROUP_SIZE_M")
     num_ctas = kernel_configs.get("num_ctas", None)
     occupancy = kernel_configs.get("occupancy", None)
 
@@ -144,9 +155,11 @@ def group_gemm(
         group_C.append(C)
 
     kernel = group_gemm_kernel
-    # When num_ctas is specified, adjust grid size to account for multiple CTAs per SM
+    # When num_ctas is specified, treat it as "CTAs per SM" and increase the total
+    # number of programs accordingly. This value must match the stride we pass into
+    # the kernel for persistent scheduling (see `tile_idx += num_sm`).
     num_ctas_for_grid = num_ctas if num_ctas is not None else 1
-    grid_size = NUM_SMS // num_ctas_for_grid
+    grid_size = NUM_SMS * num_ctas_for_grid
     grid = (grid_size,)
 
     logger.debug(f"[cuTile] group_gemm launching with grid={grid}, num_ctas={num_ctas}, NUM_SMS={NUM_SMS}")
@@ -164,6 +177,7 @@ def group_gemm(
             TILE_K,
             grid_size,  # Use adjusted grid size for persistent scheduling stride
             transpose_b,
+            GROUP_SIZE_M,
         ),
     )
 

@@ -295,6 +295,34 @@ def fmha_decode(
 
 
 @dispatch(
+    "fmha_decode_fused",
+)
+def fmha_decode_fused(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sm_scale: Optional[float],
+    kv_len_per_split: Optional[int] = None,
+    **kwargs: Any,
+):
+    """
+    Experimental fused FMHA decode (split-kv + reduction in one kernel).
+
+    Args:
+        q: Query tensor of shape (B, H_q, 1, D)
+        k: Key tensor of shape (B, H_kv, S_kv, D)
+        v: Value tensor of shape (B, H_kv, S_kv, D)
+        sm_scale: Scale factor for attention computation
+        kv_len_per_split: Optional KV length per split for parallelization
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Output tensor of shape (B, H_q, 1, D)
+    """
+    raise NotImplementedError(f"fmha_decode_fused is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "mla",
 )
 def mla(

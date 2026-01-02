@@ -16,6 +16,7 @@ if is_backend_available("cutile"):
     from . import attention
     from . import dropout
     from . import flash_decode
+    from . import flash_decode_fused
     from . import group_gemm
     from . import matmul
     from . import mla
@@ -32,6 +33,7 @@ if is_backend_available("cutile"):
 
     # Import specific functions for direct access
     from .flash_decode import fmha_decode
+    from .flash_decode_fused import fmha_decode_fused
     from .moe import fused_moe_kernel as invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .rms_norm import get_rms_norm_module
@@ -47,7 +49,9 @@ if is_backend_available("cutile"):
     __all__ = [
         # NN operations
         "fmha_decode",
+        "fmha_decode_fused",
         "flash_decode",
+        "flash_decode_fused",
         "splitk_reduce",
         "invoke_fused_moe_kernel",
         "moe_align_block_size",
