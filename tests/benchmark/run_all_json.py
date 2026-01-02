@@ -26,7 +26,6 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
     """
     Parse benchmark output and extract structured data.
 
-    Triton benchmarks output tables with headers and data rows.
     Example format:
         benchmark-name-GBps:
                 N  CuTile  PyTorch
