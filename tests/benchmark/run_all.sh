@@ -7,6 +7,9 @@
 # Run all Python benchmark files and save results
 # Usage: ./run_all.sh [OUTPUT_DIR]
 
+# Enable pipefail to catch errors in piped commands
+set -o pipefail
+
 cd "$(dirname "$0")"
 
 OUTPUT_DIR="${1:-.}"
@@ -38,15 +41,19 @@ for file in bench_*.py; do
     echo "Running $file..."
     echo "=========================================="
 
-    # Ensure output file is created even if benchmark produces no output
-    touch "$output_file"
-
-    if python "$file" 2>&1 | tee "$output_file"; then
+    # Run benchmark and capture output
+    if python3 "$file" 2>&1 | tee "$output_file"; then
         echo "✓ PASSED: $file"
         echo "  Results saved to: $output_file"
     else
         echo "✗ FAILED: $file"
-        echo "FAILED" > "$output_file"
+        # Prepend FAILED marker to output file while preserving error details
+        tmp_file=$(mktemp)
+        echo "BENCHMARK FAILED" > "$tmp_file"
+        echo "" >> "$tmp_file"
+        cat "$output_file" >> "$tmp_file"
+        mv "$tmp_file" "$output_file"
+        echo "  Error details saved to: $output_file"
         exit 1  # Exit with error if any benchmark fails
     fi
     echo ""
