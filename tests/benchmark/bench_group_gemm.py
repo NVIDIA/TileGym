@@ -123,4 +123,5 @@ def bench_group_gemm(
 
 
 if __name__ == "__main__":
+    raise RuntimeError("temporary failure addition")
     bench_group_gemm.run(print_data=True)
