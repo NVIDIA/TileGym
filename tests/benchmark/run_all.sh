@@ -78,23 +78,21 @@ for file in bench_*.py; do
     echo "Running $file..."
     echo "=========================================="
 
-    # Create output file first to ensure it exists
-    touch "$output_file"
-    
     # Run benchmark and capture output
+    # Note: tee will create the file, errors go to both console and file
     if python3 "$file" 2>&1 | tee "$output_file"; then
-        chmod 644 "$output_file"
+        # Success - ensure file is readable
+        chmod 644 "$output_file" 2>/dev/null || true
         echo "✓ PASSED: $file"
         echo "  Results saved to: $output_file"
     else
+        # Failure - mark file and ensure readable
+        # tee already captured the output, just prepend marker
+        (echo "BENCHMARK FAILED"; echo ""; cat "$output_file") > "$output_file.new" 2>/dev/null && \
+            mv "$output_file.new" "$output_file" 2>/dev/null || \
+            echo "BENCHMARK FAILED" > "$output_file"
+        chmod 644 "$output_file" 2>/dev/null || true
         echo "✗ FAILED: $file"
-        # Prepend FAILED marker to output file while preserving error details
-        tmp_file=$(mktemp)
-        echo "BENCHMARK FAILED" > "$tmp_file"
-        echo "" >> "$tmp_file"
-        cat "$output_file" >> "$tmp_file"
-        mv "$tmp_file" "$output_file"
-        chmod 644 "$output_file"
         echo "  Error details saved to: $output_file"
         FAILED_BENCHMARKS+=("$file")
     fi
