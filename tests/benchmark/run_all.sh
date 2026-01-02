@@ -7,6 +7,9 @@
 # Run all Python benchmark files and save results
 # Usage: ./run_all.sh [OUTPUT_DIR] [--json]
 
+# Enable pipefail to catch errors in piped commands
+set -o pipefail
+
 cd "$(dirname "$0")"
 
 OUTPUT_DIR="${1:-.}"
@@ -44,7 +47,7 @@ fi
 # Use JSON runner if --json flag is set
 if [[ "$FORMAT" == "json" ]]; then
     echo "Using JSON output format..."
-    if python run_all_json.py "$OUTPUT_DIR"; then
+    if python3 run_all_json.py "$OUTPUT_DIR"; then
         echo ""
         echo "=========================================="
         echo "All benchmarks complete!"
@@ -60,6 +63,8 @@ if [[ "$FORMAT" == "json" ]]; then
 fi
 
 # Original text format runner
+FAILED_BENCHMARKS=()
+
 for file in bench_*.py; do
     if [[ ! -f "$file" ]]; then
         echo "Warning: No benchmark files matching bench_*.py found" >&2
@@ -73,23 +78,40 @@ for file in bench_*.py; do
     echo "Running $file..."
     echo "=========================================="
 
-    # Ensure output file is created even if benchmark produces no output
-    touch "$output_file"
-
-    if python "$file" 2>&1 | tee "$output_file"; then
+    # Run benchmark and capture output
+    if python3 "$file" 2>&1 | tee "$output_file"; then
         echo "✓ PASSED: $file"
         echo "  Results saved to: $output_file"
     else
         echo "✗ FAILED: $file"
-        echo "FAILED" > "$output_file"
-        exit 1  # Exit with error if any benchmark fails
+        # Prepend FAILED marker to output file while preserving error details
+        tmp_file=$(mktemp)
+        echo "BENCHMARK FAILED" > "$tmp_file"
+        echo "" >> "$tmp_file"
+        cat "$output_file" >> "$tmp_file"
+        mv "$tmp_file" "$output_file"
+        echo "  Error details saved to: $output_file"
+        FAILED_BENCHMARKS+=("$file")
     fi
     echo ""
 done
 
 echo "=========================================="
-echo "All benchmarks complete!"
+if [ ${#FAILED_BENCHMARKS[@]} -eq 0 ]; then
+    echo "All benchmarks complete! ✓"
+else
+    echo "Benchmarks complete with failures! ✗"
+    echo "Failed benchmarks:"
+    for failed in "${FAILED_BENCHMARKS[@]}"; do
+        echo "  - $failed"
+    done
+fi
 echo "Results directory: $OUTPUT_DIR"
 echo "Files created:"
 ls -lh "$OUTPUT_DIR"/*_results.txt 2>/dev/null || echo "  No result files found"
 echo "=========================================="
+
+# Exit with error if any benchmarks failed
+if [ ${#FAILED_BENCHMARKS[@]} -gt 0 ]; then
+    exit 1
+fi

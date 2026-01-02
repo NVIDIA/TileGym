@@ -118,10 +118,12 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
         )
 
         if result.returncode != 0:
+            # Combine stdout and stderr for complete error details
+            error_output = result.stdout + "\n" + result.stderr if result.stderr else result.stdout
             return {
                 "benchmark_file": benchmark_file.name,
                 "status": "FAILED",
-                "error": result.stderr,
+                "error": error_output.strip(),
                 "benchmarks": [],
             }
 
