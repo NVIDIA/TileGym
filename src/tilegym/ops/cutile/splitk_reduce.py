@@ -11,12 +11,9 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
-INV_LOG_2 = 1.0 / math.log(2)
-
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
-ConstFloat = ct.Constant[float]
 
 
 @ct.kernel(occupancy=4)
@@ -31,7 +28,6 @@ def splitk_reduce_kernel(
     NUM_KV_SPLITS: ConstInt,
     NUM_KV_SPLITS_POW2: ConstInt,
     TILE_D: ConstInt,
-    INV_LOG_2: ConstFloat,
     USE_DOT: ConstBool,
 ):
     # Get program IDs
@@ -67,7 +63,6 @@ def splitk_reduce_kernel(
     # Compute sumexp_normalized_splitk
     sumexp_normalized_splitk = ct.exp2(lse_splitk - lse_max)
     sumexp_normalized_splitk = ct.astype(sumexp_normalized_splitk, ct.float32)
-    sumexp_normalized_splitk = sumexp_normalized_splitk * INV_LOG_2
 
     # Compute sumexp_normalized
     sumexp_normalized = ct.sum(sumexp_normalized_splitk)
@@ -139,7 +134,6 @@ def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
             NUM_KV_SPLITS,
             NUM_KV_SPLITS_POW2,
             TILE_D,
-            INV_LOG_2,
             USE_DOT,
         ),
     )
