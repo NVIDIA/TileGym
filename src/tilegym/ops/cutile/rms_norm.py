@@ -109,11 +109,9 @@ def rms_norm_kernel_static_persistent(
         # Step 6: Apply linear transformation
         # Broadcast weight to match input shape
         w_broadcasted = ct.reshape(w, (1, TILE_SIZE_N))
-        b_broadcasted = ct.full((1, TILE_SIZE_N), 0.0, dtype=ct.float32)
 
-        # Apply linear transformation: y = x_normalized * w + b
+        # Apply linear transformation: y = x_normalized * w
         y = ct.mul(x_normalized, w_broadcasted)
-        y = ct.add(y, b_broadcasted)
 
         # Convert back to original dtype
         y = ct.astype(y, X.dtype)
