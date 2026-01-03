@@ -288,11 +288,12 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
-      - name: Checkout code (sparse - only need formatting script)
+      - name: Checkout code (sparse - need scripts and benchmarks)
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
             .github/scripts/format_benchmark_summary.py
+            tests/benchmark
           sparse-checkout-cone-mode: false
 
       - name: Create test results directory
