@@ -314,6 +314,7 @@ jobs:
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
+            -v ${{ github.workspace }}/tests/benchmark:/workspace/tilegym/tests/benchmark \
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym/tests/benchmark \
             ${IMAGE} \
