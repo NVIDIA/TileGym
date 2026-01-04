@@ -30,13 +30,10 @@ class Test_RMSNormBackward(common.PyTestCase):
             (4096, 2**8, torch.bfloat16),
             (31072, 4096, torch.bfloat16),
             (256, 256, torch.float32),
+            (2003, 2001, torch.float16),  # testing when dims are not multiples of 2
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
-    @markif(
-        lambda arch, m, n: arch in ["sm120", "sm121"] and m == 31072 and n == 4096,
-        mark=pytest.mark.slow,
-    )
     def test_op(self, m, n, dtype, backend, arch):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
