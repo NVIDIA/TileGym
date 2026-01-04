@@ -30,17 +30,17 @@ for file in bench_*.py; do
         echo "Warning: No benchmark files matching bench_*.py found" >&2
         continue
     fi
-    
+
     benchmark_name=$(basename "$file" .py)
     output_file="$OUTPUT_DIR/${benchmark_name}_results.txt"
-    
+
     echo "=========================================="
     echo "Running $file..."
     echo "=========================================="
-    
+
     # Ensure output file is created even if benchmark produces no output
     touch "$output_file"
-    
+
     if python "$file" 2>&1 | tee "$output_file"; then
         echo "✓ PASSED: $file"
         echo "  Results saved to: $output_file"

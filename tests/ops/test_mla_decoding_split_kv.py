@@ -59,8 +59,6 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
-        if arch in ["sm120", "sm121"] and backend == "cutile":
-            pytest.skip("Skip due to global memory OOM")
         self.setUp()
 
         # Skip test if CUDA is not available

@@ -3,15 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 import math
+from types import SimpleNamespace
 
 import cuda.tile as ct
+import cuda.tile_experimental as ct_experimental
 import torch
 from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
-from tilegym.backend.cutile.autotuner import Autotuner
-from tilegym.backend.cutile.autotuner import Config
-from tilegym.backend.cutile.autotuner import autotune
 from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
@@ -146,26 +145,21 @@ def fmha_kernel(
 
 def _fmha_autotune_configs():
     """
-    Get autotune configurations for FMHA kernel.
+    Iterator of autotune configurations for FMHA kernel.
     """
     gpu_capability = torch.cuda.get_device_capability()
 
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
-        configs = [
-            Config(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2),
-        ]
+        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
     else:
         # sm100 (Blackwell)
-        configs = [
-            Config(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1),
-            Config(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2),
-        ]
-    return configs
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2)
 
 
-@autotune(search_space=_fmha_autotune_configs())
 def cutile_autotune_fmha(
+    stream,
     q,
     k,
     v,
@@ -177,12 +171,11 @@ def cutile_autotune_fmha(
     query_group_size,
     is_causal,
     EVEN_K,
-    autotuner: Autotuner | None = None,
 ):
     batch_size, _, q_len, _ = q.shape
-    tuned_result = autotuner(
-        torch.cuda.current_stream(),
-        grid_fn=lambda named_args, cfg: (
+    ct_experimental.autotune_launch(
+        stream,
+        grid_fn=lambda cfg: (
             math.ceil(q_len / cfg.TILE_M),
             batch_size * num_heads,
             1,
@@ -203,6 +196,11 @@ def cutile_autotune_fmha(
             is_causal,
             EVEN_K,
         ),
+        hints_fn=lambda cfg: {
+            "num_ctas": cfg.num_ctas,
+            "occupancy": cfg.occupancy,
+        },
+        search_space=_fmha_autotune_configs,
     )
     return o
 
@@ -224,10 +222,21 @@ def tile_prefill_fmha(q, k, v, sm_scale, is_causal=True, kernel_configs=None):
 
     input_pos = 0  # prefill, causal
 
-    max_tile_n = max(cfg.kwargs["TILE_N"] for cfg in _fmha_autotune_configs())
+    max_tile_n = max(cfg.TILE_N for cfg in _fmha_autotune_configs())
     EVEN_K = (k_len % max_tile_n) == 0
     return cutile_autotune_fmha(
-        q, k, v, o, sm_scale, input_pos, hidden_size, num_heads, query_group_size, is_causal, EVEN_K
+        torch.cuda.current_stream(),
+        q,
+        k,
+        v,
+        o,
+        sm_scale,
+        input_pos,
+        hidden_size,
+        num_heads,
+        query_group_size,
+        is_causal,
+        EVEN_K,
     )
 
 

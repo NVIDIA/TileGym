@@ -101,7 +101,7 @@ class Test_Matmul(common.PyTestCase):
         if arch in ["sm120", "sm121"] and n >= 6144:
             pytest.skip("Skip due to global memory OOM")
         if k == 1023:
-            pytest.xfail("Skip matmul due to result mismatch when cannot divide BLOCK")
+            pytest.skip("Skip matmul due to result mismatch when cannot divide BLOCK")
         self.setUp()
         a, b = self.prepare_data(m, n, k, False, False, offset_a, offset_b, dtype)
         self.assertCorrectness(

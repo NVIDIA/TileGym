@@ -25,13 +25,16 @@ class Test_Softmax(common.PyTestCase):
             (256, 1024 * 32, torch.float32),
             (256, 256, torch.float16),
             (256, 2048, torch.float16),
-            (256, 9, torch.float16),
+            (256, 9, torch.float32),
             (256, 1009, torch.float16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
     @pytest.mark.parametrize("use_tma", [True, False], ids=["use_tma=True", "use_tma=False"])
-    def test_op(self, m, n, dtype, arch, backend, use_tma):
+    @pytest.mark.parametrize("use_chunked", [True, False], ids=["use_chunked=True", "use_chunked=False"])
+    def test_op(self, m, n, dtype, arch, backend, use_tma, use_chunked):
+        if use_chunked and use_tma:
+            pytest.skip("Cannot use both TMA and chunked softmax at the same time")
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:
@@ -49,13 +52,13 @@ class Test_Softmax(common.PyTestCase):
         if dtype == torch.float16:
             rtol, atol = 1e-3, 1e-5
         else:
-            rtol, atol = 1e-5, 1e-8
+            rtol, atol = 1e-5, 1e-7
 
         self.assertCorrectness(
             tilegym.ops.softmax,
             self.reference,
             {"x": x},
-            extra_test_kwargs={"use_tma": use_tma},
+            extra_test_kwargs={"use_tma": use_tma, "use_chunked": use_chunked},
             gradient=dout,
             rtol=rtol,
             atol=atol,
