@@ -14,6 +14,7 @@ if is_backend_available("cutile"):
     # NN operations
     from . import activation
     from . import attention
+    from . import dropout
     from . import flash_decode
     from . import group_gemm
     from . import matmul
@@ -59,6 +60,7 @@ if is_backend_available("cutile"):
         "get_rms_norm_module",
         "rms_norm",
         "silu_and_mul",
+        "dropout",
         "softmax",
         "mla_decoding_split_kv",
         "moe",

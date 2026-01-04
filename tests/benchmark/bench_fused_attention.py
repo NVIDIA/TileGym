@@ -105,19 +105,16 @@ def bench_fused_attention(
         (BATCH, H, N_CTX, HEAD_DIM),
         dtype=dtype,
         device=device,
-        requires_grad=True,
     )
     k = torch.randn(
         (BATCH, H, N_CTX, HEAD_DIM),
         dtype=dtype,
         device=device,
-        requires_grad=True,
     )
     v = torch.randn(
         (BATCH, H, N_CTX, HEAD_DIM),
         dtype=dtype,
         device=device,
-        requires_grad=True,
     )
 
     if datatype == torch.float8_e5m2:
