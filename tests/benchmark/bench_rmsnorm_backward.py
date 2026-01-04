@@ -153,8 +153,8 @@ def bench_rmsnorm_backward(N, backend, dtype, M, device=DEVICE):
 
     # Run once to verify correctness
     dx, dw = run_backward()
-    torch.testing.assert_close(dx, dx_ref, atol=5e-2, rtol=0.0)
-    torch.testing.assert_close(dw, dw_ref, atol=5e-2, rtol=0.0)
+    torch.testing.assert_close(dx, dx_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(dw, dw_ref, atol=1e-2, rtol=1e-2)
 
     # Benchmark ONLY the backward pass (no forward, no autograd overhead)
     ms = triton.testing.do_bench_cudagraph(run_backward)
