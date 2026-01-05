@@ -112,6 +112,42 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
     return results
 
 
+def parse_error_details(error_output: str) -> Dict[str, Any]:
+    """Extract structured error information from error output."""
+    error_info = {
+        "error_type": "Unknown",
+        "error_message": "",
+        "partial_results": 0,
+    }
+
+    lines = error_output.split("\n")
+
+    # Look for Python exceptions in traceback
+    for i, line in enumerate(lines):
+        if "Traceback" in line:
+            # Find the actual exception type and message
+            for j in range(i + 1, len(lines)):
+                if lines[j] and not lines[j].startswith(" "):
+                    # This is likely the exception line
+                    if ":" in lines[j]:
+                        parts = lines[j].split(":", 1)
+                        error_info["error_type"] = parts[0].split(".")[-1]  # Get class name only
+                        if len(parts) > 1:
+                            error_info["error_message"] = parts[1].strip()
+                            # Truncate very long messages
+                            if len(error_info["error_message"]) > 200:
+                                error_info["error_message"] = error_info["error_message"][:200] + "..."
+                    break
+            break
+
+    # Count partial results (benchmark tables that completed)
+    for line in lines:
+        if line.endswith("-TFLOPS:") or line.endswith("-GBps:"):
+            error_info["partial_results"] += 1
+
+    return error_info
+
+
 def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
     """Run a single benchmark file and return structured results."""
     try:
@@ -126,9 +162,14 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
         if result.returncode != 0:
             # Combine stdout and stderr for complete error details
             error_output = result.stdout + "\n" + result.stderr if result.stderr else result.stdout
+            error_details = parse_error_details(error_output)
+
             return {
                 "benchmark_file": benchmark_file.name,
                 "status": "FAILED",
+                "error_type": error_details["error_type"],
+                "error_message": error_details["error_message"],
+                "partial_results": error_details["partial_results"],
                 "error": error_output.strip(),
                 "benchmarks": [],
             }
@@ -146,6 +187,8 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
         return {
             "benchmark_file": benchmark_file.name,
             "status": "TIMEOUT",
+            "error_type": "TimeoutError",
+            "error_message": "Benchmark exceeded 10 minute timeout",
             "error": "Benchmark exceeded 10 minute timeout",
             "benchmarks": [],
         }
@@ -153,6 +196,8 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
         return {
             "benchmark_file": benchmark_file.name,
             "status": "ERROR",
+            "error_type": type(e).__name__,
+            "error_message": str(e)[:200],
             "error": str(e),
             "benchmarks": [],
         }
