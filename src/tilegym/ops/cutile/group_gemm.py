@@ -2,7 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 
+from types import SimpleNamespace
+
 import cuda.tile as ct
+import cuda.tile_experimental as ct_experimental
 import torch
 
 from tilegym.backend import register_impl
@@ -99,6 +102,46 @@ def group_gemm_kernel(
         last_problem_end = last_problem_end + num_tiles
 
 
+def _group_gemm_autotune_configs():
+    """
+    Iterator of autotune configurations for group GEMM kernel.
+    """
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability in [(12, 0), (12, 1)]:
+        yield SimpleNamespace(TILE_M=64, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=64, num_ctas=1, occupancy=1)
+    else:
+        yield SimpleNamespace(TILE_M=256, TILE_N=256, TILE_K=64, num_ctas=2, occupancy=1)
+
+
+def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device):
+    """Autotune group GEMM kernel."""
+    NUM_SMS = torch.cuda.get_device_properties(device).multi_processor_count
+
+    ct_experimental.autotune_launch(
+        stream,
+        grid_fn=lambda cfg: (NUM_SMS // cfg.num_ctas * cfg.occupancy, 1, 1),
+        kernel=group_gemm_kernel,
+        args_fn=lambda cfg: (
+            group_A,
+            group_B,
+            group_C,
+            cfg.TILE_M,
+            cfg.TILE_N,
+            cfg.TILE_K,
+            NUM_SMS // cfg.num_ctas * cfg.occupancy,
+            transpose_b,
+        ),
+        hints_fn=lambda cfg: {
+            "num_ctas": cfg.num_ctas,
+            "occupancy": cfg.occupancy,
+        },
+        search_space=_group_gemm_autotune_configs,
+    )
+    return group_C
+
+
 def group_gemm(
     group_A,
     group_B,
@@ -115,26 +158,6 @@ def group_gemm(
     device = group_A[0].device
     dtype = group_A[0].dtype
 
-    # Kernel configuration
-    default_configs = {
-        "TILE_M": 128,
-        "TILE_N": 128,
-        "TILE_K": 64,
-        "num_ctas": None,  # Let compiler auto-pick
-    }
-    user_cfg = kwargs.get("kernel_configs")
-    if user_cfg is None:
-        kernel_configs = default_configs
-    else:
-        kernel_configs = {**default_configs, **user_cfg}
-    TILE_M = kernel_configs.get("TILE_M")
-    TILE_N = kernel_configs.get("TILE_N")
-    TILE_K = kernel_configs.get("TILE_K")
-    num_ctas = kernel_configs.get("num_ctas", None)
-    occupancy = kernel_configs.get("occupancy", None)
-
-    NUM_SMS = torch.cuda.get_device_properties(device).multi_processor_count
-
     # Create output tensors
     group_C = []
     for A, B in zip(group_A, group_B):
@@ -143,30 +166,9 @@ def group_gemm(
         C = torch.empty((M, N), device=device, dtype=dtype)
         group_C.append(C)
 
-    kernel = group_gemm_kernel
-    # When num_ctas is specified, adjust grid size to account for multiple CTAs per SM
-    num_ctas_for_grid = num_ctas if num_ctas is not None else 1
-    grid_size = NUM_SMS // num_ctas_for_grid
-    grid = (grid_size,)
-
-    logger.debug(f"[cuTile] group_gemm launching with grid={grid}, num_ctas={num_ctas}, NUM_SMS={NUM_SMS}")
-
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        kernel,
-        (
-            group_A,
-            group_B,
-            group_C,
-            TILE_M,
-            TILE_N,
-            TILE_K,
-            grid_size,  # Use adjusted grid size for persistent scheduling stride
-            transpose_b,
-        ),
-    )
-
+    # Autotune mode
+    stream = torch.cuda.current_stream()
+    cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device)
     return group_C
 
 
