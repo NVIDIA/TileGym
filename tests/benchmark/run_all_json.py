@@ -191,7 +191,7 @@ def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[D
         logger.info("=" * 60)
         logger.info(f"Running {bench_file.name}...")
         logger.info("=" * 60)
-        
+
         result = run_benchmark(bench_file)
         all_results["benchmarks"].append(result)
 
@@ -199,7 +199,7 @@ def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[D
         output_file = output_dir / f"{bench_file.stem}_results.json"
         with open(output_file, "w") as f:
             json.dump(result, f, indent=2)
-        
+
         # Make file readable
         output_file.chmod(0o644)
 
@@ -212,7 +212,7 @@ def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[D
             logger.info(f"  Error details saved to: {output_file}")
             failed_benchmarks.append(bench_file.name)
             # Log error preview (first 5 lines)
-            error_lines = result.get('error', 'Unknown error').split('\n')
+            error_lines = result.get("error", "Unknown error").split("\n")
             for line in error_lines[:5]:
                 logger.error(f"  {line}")
             if len(error_lines) > 5:
@@ -242,7 +242,7 @@ def main():
     logger.info("")
 
     all_results, failed_benchmarks = run_all_benchmarks(benchmark_files, output_dir)
-    
+
     # Always save combined results, even if some benchmarks failed
     combined_file = save_combined_results(all_results, output_dir)
 
