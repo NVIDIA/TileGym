@@ -15,7 +15,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 def reference_softmax(
     x: torch.Tensor,
     use_tma: bool = False,  # Unused - kept for interface compatibility
-    use_online: bool = None,  # Unused - kept for interface compatibility
+    use_chunked: bool = None,  # Unused - kept for interface compatibility
 ):
     """Reference implementation of softmax using PyTorch"""
     return torch.nn.functional.softmax(x, dim=-1)
@@ -36,7 +36,7 @@ def get_supported_backends():
     return [p for p in ALL_BACKENDS if p is not None]
 
 
-def create_benchmark_config(M, use_tma=True):
+def create_benchmark_config(M, use_tma=True, use_chunked=False):
     """Create a benchmark configuration for given parameters"""
     available_backends = get_supported_backends()
     if not available_backends:
@@ -52,19 +52,27 @@ def create_benchmark_config(M, use_tma=True):
         line_names=list(names),
         styles=list(styles),
         ylabel="GB/s",
-        plot_name=f"softmax-performance-tma-{use_tma}-GBps",
-        args={"M": M, "use_tma": use_tma},
+        plot_name=f"softmax-performance-tma-{use_tma}-chunked-{use_chunked}-GBps",
+        args={"M": M, "use_tma": use_tma, "use_chunked": use_chunked},
     )
 
 
 @triton.testing.perf_report(
-    [create_benchmark_config(M, use_tma) for M in [4096] for use_tma in [True, False]]  # Matrix height
+    [
+        create_benchmark_config(M, use_tma, use_chunked)
+        for M in [4096]
+        for use_tma, use_chunked in [
+            (False, False),  # baseline
+            (True, False),  # TMA softmax
+            (False, True),  # chunked softmax
+        ]
+    ]
 )
-def bench_softmax(M, N, backend, use_tma, dtype=torch.float32, device=DEVICE):
+def bench_softmax(M, N, backend, use_tma, use_chunked, dtype=torch.float32, device=DEVICE):
     # Create data
     x = torch.randn(M, N, dtype=dtype, device=device)
 
-    fn = lambda: tilegym.ops.softmax(x, use_tma=use_tma, backend=backend)
+    fn = lambda: tilegym.ops.softmax(x, use_tma=use_tma, use_chunked=use_chunked, backend=backend)
     ref = lambda: reference_softmax(x)
     torch.testing.assert_close(fn(), ref(), atol=1e-2, rtol=1e-2)
 
