@@ -11,6 +11,7 @@ results in JSON format for easier processing and regression detection.
 """
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -20,6 +21,13 @@ from typing import Any
 from typing import Dict
 from typing import List
 from typing import Tuple
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
@@ -106,8 +114,6 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
 
 def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
     """Run a single benchmark file and return structured results."""
-    print(f"Running {benchmark_file.name}...")
-
     try:
         result = subprocess.run(
             [sys.executable, str(benchmark_file)],
@@ -166,22 +172,26 @@ def find_benchmark_files() -> List[Path]:
     benchmark_files = sorted(benchmark_dir.glob("bench_*.py"))
 
     if not benchmark_files:
-        print("Error: No benchmark files found", file=sys.stderr)
+        logger.error("No benchmark files found")
         sys.exit(1)
 
     return benchmark_files
 
 
-def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[Dict[str, Any], bool]:
+def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[Dict[str, Any], List[str]]:
     """Run all benchmarks and save individual results."""
     all_results = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "benchmarks": [],
     }
 
-    failed = False
+    failed_benchmarks = []
 
     for bench_file in benchmark_files:
+        logger.info("=" * 60)
+        logger.info(f"Running {bench_file.name}...")
+        logger.info("=" * 60)
+        
         result = run_benchmark(bench_file)
         all_results["benchmarks"].append(result)
 
@@ -189,18 +199,27 @@ def run_all_benchmarks(benchmark_files: List[Path], output_dir: Path) -> Tuple[D
         output_file = output_dir / f"{bench_file.stem}_results.json"
         with open(output_file, "w") as f:
             json.dump(result, f, indent=2)
+        
+        # Make file readable
+        output_file.chmod(0o644)
 
-        # Print status
-        status_symbol = "✓" if result["status"] == "PASSED" else "✗"
-        print(f"{status_symbol} {result['status']}: {bench_file.name}")
-        if result["status"] != "PASSED":
-            failed = True
-            print(f"  Error: {result.get('error', 'Unknown error')}")
+        # Log status
+        if result["status"] == "PASSED":
+            logger.info(f"✓ PASSED: {bench_file.name}")
+            logger.info(f"  Results saved to: {output_file}")
         else:
-            print(f"  Results saved to: {output_file}")
-        print()
+            logger.error(f"✗ FAILED: {bench_file.name}")
+            logger.info(f"  Error details saved to: {output_file}")
+            failed_benchmarks.append(bench_file.name)
+            # Log error preview (first 5 lines)
+            error_lines = result.get('error', 'Unknown error').split('\n')
+            for line in error_lines[:5]:
+                logger.error(f"  {line}")
+            if len(error_lines) > 5:
+                logger.error(f"  ... ({len(error_lines) - 5} more lines)")
+        logger.info("")
 
-    return all_results, failed
+    return all_results, failed_benchmarks
 
 
 def save_combined_results(all_results: Dict[str, Any], output_dir: Path) -> Path:
@@ -215,18 +234,39 @@ def main():
     output_dir = setup_output_directory()
     benchmark_files = find_benchmark_files()
 
-    print(f"Found {len(benchmark_files)} benchmark files")
-    print(f"Output directory: {output_dir}\n")
+    logger.info("Running benchmarks sequentially (parallel execution disabled to ensure accurate results)...")
+    logger.info("Output format: json")
+    logger.info(f"Results will be saved to: {output_dir}")
+    logger.info(f"Current directory: {Path.cwd()}")
+    logger.info(f"Benchmark files found: {len(benchmark_files)}")
+    logger.info("")
 
-    all_results, failed = run_all_benchmarks(benchmark_files, output_dir)
+    all_results, failed_benchmarks = run_all_benchmarks(benchmark_files, output_dir)
+    
+    # Always save combined results, even if some benchmarks failed
     combined_file = save_combined_results(all_results, output_dir)
 
-    print("=" * 60)
-    print("All benchmarks complete!")
-    print(f"Combined results: {combined_file}")
-    print("=" * 60)
+    logger.info("=" * 60)
+    if not failed_benchmarks:
+        logger.info("All benchmarks complete! ✓")
+    else:
+        logger.error("Benchmarks complete with failures! ✗")
+        logger.error("Failed benchmarks:")
+        for failed in failed_benchmarks:
+            logger.error(f"  - {failed}")
+    logger.info(f"Results directory: {output_dir}")
+    logger.info("Files created:")
+    json_files = sorted(output_dir.glob("*.json"))
+    if json_files:
+        for f in json_files:
+            logger.info(f"  {f.name}")
+    else:
+        logger.warning("  No result files found")
+    logger.info("=" * 60)
 
-    sys.exit(1 if failed else 0)
+    # Exit with error if any benchmarks failed
+    if failed_benchmarks:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
