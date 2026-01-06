@@ -132,6 +132,37 @@ def json_benchmark_to_markdown(benchmark_data):
     return md
 
 
+def format_gpu_info(results_dir):
+    """Format GPU information section."""
+    system_info_file = results_dir / "system_info.json"
+
+    if not system_info_file.exists():
+        return ""
+
+    try:
+        with open(system_info_file) as f:
+            system_info = json.load(f)
+
+        gpu_info = system_info.get("gpu_info", {})
+        if not gpu_info.get("available") or not gpu_info.get("gpus"):
+            return ""
+
+        summary = "## 🖥️ System Information\n\n"
+
+        for gpu in gpu_info["gpus"]:
+            summary += f"**GPU {gpu['index']}:** {gpu['name']}\n"
+            summary += f"- **Memory:** {gpu['memory_total_mb']} MB\n"
+            summary += f"- **Graphics Clock:** {gpu['clock_graphics_mhz']} MHz\n"
+            summary += f"- **SM Clock:** {gpu['clock_sm_mhz']} MHz\n"
+            summary += f"- **Memory Clock:** {gpu['clock_memory_mhz']} MHz\n"
+            summary += f"- **Driver Version:** {gpu['driver_version']}\n\n"
+
+        return summary
+    except Exception as e:
+        logger.warning(f"Failed to format GPU info: {e}")
+        return ""
+
+
 def format_benchmark_summary(results_dir):
     """Format all benchmark results as markdown summary."""
     results_dir = Path(results_dir).resolve()  # Get absolute path
@@ -159,6 +190,11 @@ def format_benchmark_summary(results_dir):
         return "## Benchmark Results\n\n❌ No benchmark results found.\n"
 
     summary = "# 📊 Benchmark Results\n\n"
+
+    # Add GPU info section if available
+    gpu_section = format_gpu_info(results_dir)
+    if gpu_section:
+        summary += gpu_section
 
     for result_file in result_files:
         benchmark_name = result_file.stem.replace("_results", "").replace("_", " ").title()

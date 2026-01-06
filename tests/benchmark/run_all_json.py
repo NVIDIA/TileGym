@@ -30,6 +30,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_gpu_info() -> Dict[str, Any]:
+    """Capture GPU information using nvidia-smi."""
+    gpu_info = {
+        "available": False,
+        "gpus": [],
+    }
+
+    try:
+        # Get GPU name, memory, driver version, CUDA version
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,driver_version,clocks.gr,clocks.sm,clocks.mem",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode == 0:
+            gpu_info["available"] = True
+            lines = result.stdout.strip().split("\n")
+            for line in lines:
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 7:
+                    gpu_info["gpus"].append(
+                        {
+                            "index": parts[0],
+                            "name": parts[1],
+                            "memory_total_mb": parts[2],
+                            "driver_version": parts[3],
+                            "clock_graphics_mhz": parts[4],
+                            "clock_sm_mhz": parts[5],
+                            "clock_memory_mhz": parts[6],
+                        }
+                    )
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        logger.warning(f"Failed to capture GPU info: {e}")
+
+    return gpu_info
+
+
 def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
     """
     Parse benchmark output and extract structured data.
@@ -275,9 +318,34 @@ def save_combined_results(all_results: Dict[str, Any], output_dir: Path) -> Path
     return combined_file
 
 
+def save_system_info(output_dir: Path, gpu_info: Dict[str, Any]) -> Path:
+    """Save system information to a separate JSON file."""
+    system_info_file = output_dir / "system_info.json"
+    with open(system_info_file, "w") as f:
+        json.dump({"gpu_info": gpu_info}, f, indent=2)
+    return system_info_file
+
+
 def main():
     output_dir = setup_output_directory()
     benchmark_files = find_benchmark_files()
+
+    # Capture GPU info before running benchmarks
+    logger.info("Capturing GPU information...")
+    gpu_info = get_gpu_info()
+
+    if gpu_info["available"] and gpu_info["gpus"]:
+        logger.info(f"Found {len(gpu_info['gpus'])} GPU(s):")
+        for gpu in gpu_info["gpus"]:
+            logger.info(f"  GPU {gpu['index']}: {gpu['name']}")
+            logger.info(f"    Memory: {gpu['memory_total_mb']} MB")
+            logger.info(f"    Clock (Graphics): {gpu['clock_graphics_mhz']} MHz")
+            logger.info(f"    Clock (SM): {gpu['clock_sm_mhz']} MHz")
+            logger.info(f"    Clock (Memory): {gpu['clock_memory_mhz']} MHz")
+            logger.info(f"    Driver: {gpu['driver_version']}")
+    else:
+        logger.warning("No GPU information available")
+    logger.info("")
 
     logger.info("Running benchmarks sequentially (parallel execution disabled to ensure accurate results)...")
     logger.info("Output format: json")
@@ -290,6 +358,9 @@ def main():
 
     # Always save combined results, even if some benchmarks failed
     combined_file = save_combined_results(all_results, output_dir)
+
+    # Save system info
+    save_system_info(output_dir, gpu_info)
 
     logger.info("=" * 60)
     if not failed_benchmarks:
