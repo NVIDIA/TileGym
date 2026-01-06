@@ -168,7 +168,39 @@ def format_benchmark_summary(results_dir):
             benchmarks, status = parse_json_results(result_file)
 
             if status == "FAILED":
+                # Read full data to get error details
+                with open(result_file) as f:
+                    data = json.load(f)
+
                 summary += "❌ **FAILED**\n\n"
+
+                # Show error type if available
+                error_type = data.get("error_type", "Unknown")
+                if error_type and error_type != "Unknown":
+                    summary += f"**Error Type:** `{error_type}`\n\n"
+
+                # Show error message if available
+                error_message = data.get("error_message", "")
+                if error_message:
+                    summary += f"**Error:** {error_message}\n\n"
+
+                # Show partial results info if available
+                partial_results = data.get("partial_results", 0)
+                if partial_results > 0:
+                    summary += f"**Progress:** {partial_results} configuration(s) completed before failure\n\n"
+
+                # Add expandable section with full error
+                full_error = data.get("error", "")
+                if full_error:
+                    # Limit error output to prevent huge summaries
+                    error_preview = full_error[:2000]
+                    if len(full_error) > 2000:
+                        error_preview += "\n... (truncated)"
+
+                    summary += "<details>\n<summary>📋 View full error output</summary>\n\n```\n"
+                    summary += error_preview
+                    summary += "\n```\n\n</details>\n\n"
+
                 continue
 
             if not benchmarks:
