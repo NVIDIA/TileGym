@@ -53,7 +53,7 @@ def create_benchmark_config(datatype, num_groups, transpose_b):
 
     return triton.testing.Benchmark(
         x_names=["M", "N", "K"],
-        x_vals=[2**i for i in range(10, 14)],
+        x_vals=[2**i for i in range(10, 13)],
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
