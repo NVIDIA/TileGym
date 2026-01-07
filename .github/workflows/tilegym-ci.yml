@@ -293,6 +293,8 @@ jobs:
         with:
           sparse-checkout: |
             .github/scripts/format_benchmark_summary.py
+            .github/scripts/check_benchmark_regression.py
+            .github/scripts/merge_baseline_selective.py
             tests/benchmark
           sparse-checkout-cone-mode: false
 
