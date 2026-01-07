@@ -292,9 +292,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            .github/scripts/format_benchmark_summary.py
-            .github/scripts/check_benchmark_regression.py
-            .github/scripts/merge_baseline_selective.py
+            .github/scripts
             tests/benchmark
           sparse-checkout-cone-mode: false
 
