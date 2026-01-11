@@ -14,6 +14,7 @@ if is_backend_available("cutile"):
     # NN operations
     from . import activation
     from . import attention
+    from . import bmm
     from . import dropout
     from . import flash_decode
     from . import group_gemm
@@ -69,6 +70,7 @@ if is_backend_available("cutile"):
         "swiglu",
         "apply_rope_base",
         # Linalg operations
+        "bmm",
         "matmul",
         "group_gemm",
     ]

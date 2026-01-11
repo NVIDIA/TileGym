@@ -481,3 +481,30 @@ def group_gemm(
         List[torch.Tensor]: Results of matrix multiplications
     """
     raise NotImplementedError(f"Group GEMM is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
+    "bmm",
+)
+def bmm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    transpose_a: Optional[bool] = None,
+    transpose_b: Optional[bool] = None,
+    static_persistent: Optional[bool] = True,
+    **kwargs: Any,
+):
+    """
+    Batch matrix multiplication operation that automatically selects implementation based on current backend
+
+    Args:
+        a: Input matrix A
+        b: Input matrix B
+        transpose_a: Whether to transpose matrix A (None uses backend default)
+        transpose_b: Whether to transpose matrix B (None uses backend default)
+        static_persistent: Whether to use static persistent mode (default: True)
+        **kwargs: Additional arguments, including kernel_configs if needed
+    Returns:
+        torch.Tensor: Matrix multiplication result
+    """
+    raise NotImplementedError(f"BMM is not implemented for this backend: {get_current_backend()}")

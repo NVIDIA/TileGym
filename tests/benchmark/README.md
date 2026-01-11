@@ -27,6 +27,7 @@ python bench_matrix_multiplication.py
 ```
 
 Available benchmark scripts:
+- `bench_bmm.py`
 - `bench_dropout.py`
 - `bench_fused_attention.py`
 - `bench_matrix_multiplication.py`
