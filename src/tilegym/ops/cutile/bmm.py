@@ -59,9 +59,9 @@ def ct_static_persistent_bmm_kernel(
     M: ct.Constant[int],
     N: ct.Constant[int],
     K: ct.Constant[int],
-    BLOCK_M: ct.Constant[int],
-    BLOCK_N: ct.Constant[int],
-    BLOCK_K: ct.Constant[int],
+    TILE_M: ct.Constant[int],
+    TILE_N: ct.Constant[int],
+    TILE_K: ct.Constant[int],
     GROUP_SIZE_M: ct.Constant[int],
     TRANSPOSE_A: ct.Constant[bool],
     TRANSPOSE_B: ct.Constant[bool],
@@ -76,16 +76,16 @@ def ct_static_persistent_bmm_kernel(
     bid = ct.bid(0)
 
     # Calculate total number of tiles
-    num_tiles_m = ct.cdiv(M, BLOCK_M)
-    num_tiles_n = ct.cdiv(N, BLOCK_N)
+    num_tiles_m = ct.cdiv(M, TILE_M)
+    num_tiles_n = ct.cdiv(N, TILE_N)
     total_tiles = num_tiles_m * num_tiles_n * Batch
 
     # Static persistent scheduling loop
     num_programs = ct.num_blocks(0)
     for current_bid in range(bid, total_tiles, num_programs):
         # Inline bmm_calculate_bid logic directly in kernel
-        num_bid_m = ct.cdiv(M, BLOCK_M)
-        num_bid_n = ct.cdiv(N, BLOCK_N)
+        num_bid_m = ct.cdiv(M, TILE_M)
+        num_bid_n = ct.cdiv(N, TILE_N)
         bid_q = current_bid // (num_bid_m * num_bid_n)
         num_bid_in_group = GROUP_SIZE_M * num_bid_n
 
@@ -98,37 +98,37 @@ def ct_static_persistent_bmm_kernel(
         bid_n = (current_bid_2d % num_bid_in_group) // group_size_m
 
         # Initialize 2D accumulator (avoid 3D reshape overhead)
-        accumulator = ct.full((BLOCK_M, BLOCK_N), 0.0, dtype=ct.float32)
+        accumulator = ct.full((TILE_M, TILE_N), 0.0, dtype=ct.float32)
 
         zero_pad = ct.PaddingMode.ZERO
 
         # K-dimension loop
-        num_k_tiles = ct.cdiv(K, BLOCK_K)
+        num_k_tiles = ct.cdiv(K, TILE_K)
         for k_tile in range(num_k_tiles):
             # Load A tile
             if TRANSPOSE_A:
-                # A is transposed: physical layout (Q, K, M), load as (BLOCK_M, BLOCK_K)
+                # A is transposed: physical layout (Q, K, M), load as (TILE_M, TILE_K)
                 # Use order=(0, 2, 1) to read transposed
                 a_tile_3d = ct.load(
                     A,
                     index=(bid_q, k_tile, bid_m),
-                    shape=(1, BLOCK_K, BLOCK_M),
+                    shape=(1, TILE_K, TILE_M),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
                 )
-                # Transpose to get (1, BLOCK_M, BLOCK_K)
+                # Transpose to get (1, TILE_M, TILE_K)
                 a_tile_3d = ct.permute(a_tile_3d, (0, 2, 1))
             else:
                 # A is normal: physical layout (Q, M, K)
                 a_tile_3d = ct.load(
                     A,
                     index=(bid_q, bid_m, k_tile),
-                    shape=(1, BLOCK_M, BLOCK_K),
+                    shape=(1, TILE_M, TILE_K),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
                 )
             # Reshape to 2D for MMA
-            a_tile = ct.reshape(a_tile_3d, (BLOCK_M, BLOCK_K))
+            a_tile = ct.reshape(a_tile_3d, (TILE_M, TILE_K))
 
             # Load B tile
             if TRANSPOSE_B:
@@ -136,23 +136,23 @@ def ct_static_persistent_bmm_kernel(
                 b_tile_3d = ct.load(
                     B,
                     index=(bid_q, bid_n, k_tile),
-                    shape=(1, BLOCK_N, BLOCK_K),
+                    shape=(1, TILE_N, TILE_K),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
                 )
-                # Transpose to get (1, BLOCK_K, BLOCK_N)
+                # Transpose to get (1, TILE_K, TILE_N)
                 b_tile_3d = ct.permute(b_tile_3d, (0, 2, 1))
             else:
                 # B is normal: physical layout (Q, K, N)
                 b_tile_3d = ct.load(
                     B,
                     index=(bid_q, k_tile, bid_n),
-                    shape=(1, BLOCK_K, BLOCK_N),
+                    shape=(1, TILE_K, TILE_N),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
                 )
             # Reshape to 2D for MMA
-            b_tile = ct.reshape(b_tile_3d, (BLOCK_K, BLOCK_N))
+            b_tile = ct.reshape(b_tile_3d, (TILE_K, TILE_N))
 
             # Matrix multiplication and accumulation (2D MMA)
             accumulator = ct.mma(a_tile, b_tile, acc=accumulator)
@@ -160,48 +160,48 @@ def ct_static_persistent_bmm_kernel(
         # Convert to output dtype
         result = ct.astype(accumulator, C.dtype)
         # Reshape to 3D for store
-        result_3d = ct.reshape(result, (1, BLOCK_M, BLOCK_N))
+        result_3d = ct.reshape(result, (1, TILE_M, TILE_N))
         ct.store(C, index=(bid_q, bid_m, bid_n), tile=result_3d, order=(0, 1, 2))
 
 
 def _bmm_autotune_configs():
     if torch.cuda.get_device_capability() in [(12, 0), (12, 1)]:
-        # B200 (sm_120/121): Use smaller blocks with occupancy tuning, num_ctas=1
-        for BLOCK_M in [64, 128]:
-            for BLOCK_N in [64, 128]:
-                for BLOCK_K in [32, 64]:
+        # B200 (sm_120/121): Use smaller tiles with occupancy tuning, num_ctas=1
+        for TILE_M in [64, 128]:
+            for TILE_N in [64, 128]:
+                for TILE_K in [32, 64]:
                     for occupancy in [1, 2, 4]:
                         yield SimpleNamespace(
-                            BLOCK_M=BLOCK_M,
-                            BLOCK_N=BLOCK_N,
-                            BLOCK_K=BLOCK_K,
+                            TILE_M=TILE_M,
+                            TILE_N=TILE_N,
+                            TILE_K=TILE_K,
                             GROUP_SIZE_M=8,
                             occupancy=occupancy,
                             num_ctas=1,
                         )
     elif torch.cuda.get_device_capability() == (9, 0):
-        # H100 (sm_90): Medium blocks with occupancy tuning
-        for BLOCK_M in [64, 128, 256]:
-            for BLOCK_N in [64, 128, 256]:
-                for BLOCK_K in [64]:
+        # H100 (sm_90): Medium tiles with occupancy tuning
+        for TILE_M in [64, 128, 256]:
+            for TILE_N in [64, 128, 256]:
+                for TILE_K in [64]:
                     for occupancy in [1, 2]:
                         yield SimpleNamespace(
-                            BLOCK_M=BLOCK_M,
-                            BLOCK_N=BLOCK_N,
-                            BLOCK_K=BLOCK_K,
+                            TILE_M=TILE_M,
+                            TILE_N=TILE_N,
+                            TILE_K=TILE_K,
                             GROUP_SIZE_M=8,
                             occupancy=occupancy,
                             num_ctas=1,
                         )
     else:
-        # Other GPUs (e.g., GB100): Larger blocks with num_ctas=2
-        for BLOCK_M in [128, 256]:
-            for BLOCK_N in [256]:
-                for BLOCK_K in [64]:
+        # Other GPUs (e.g., GB100): Larger tiles with num_ctas=2
+        for TILE_M in [128, 256]:
+            for TILE_N in [256]:
+                for TILE_K in [64]:
                     yield SimpleNamespace(
-                        BLOCK_M=BLOCK_M,
-                        BLOCK_N=BLOCK_N,
-                        BLOCK_K=BLOCK_K,
+                        TILE_M=TILE_M,
+                        TILE_N=TILE_N,
+                        TILE_K=TILE_K,
                         GROUP_SIZE_M=8,
                         occupancy=1,
                         num_ctas=2,
@@ -238,9 +238,9 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
             M,
             N,
             K,
-            cfg.BLOCK_M,
-            cfg.BLOCK_N,
-            cfg.BLOCK_K,
+            cfg.TILE_M,
+            cfg.TILE_N,
+            cfg.TILE_K,
             cfg.GROUP_SIZE_M,
             transpose_a,
             transpose_b,
@@ -249,8 +249,8 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
     # grid_fn: computes grid size based on config
     def grid_fn(cfg):
         NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-        num_tiles_m = (M + cfg.BLOCK_M - 1) // cfg.BLOCK_M
-        num_tiles_n = (N + cfg.BLOCK_N - 1) // cfg.BLOCK_N
+        num_tiles_m = (M + cfg.TILE_M - 1) // cfg.TILE_M
+        num_tiles_n = (N + cfg.TILE_N - 1) // cfg.TILE_N
         total_tiles = num_tiles_m * num_tiles_n * batch_size
 
         occupancy = getattr(cfg, "occupancy", 1)
@@ -286,7 +286,7 @@ def bmm(a, b, transpose_a=False, transpose_b=False, static_persistent=True, **kw
         transpose_a: Whether to transpose A
         transpose_b: Whether to transpose B
         static_persistent: Whether to use static persistent schedule
-        **kwargs: Additional arguments, including kernel_configs if needed (BLOCK_M, BLOCK_N, BLOCK_K, GROUP_SIZE_M, num_ctas)
+        **kwargs: Additional arguments, including kernel_configs if needed (TILE_M, TILE_N, TILE_K, GROUP_SIZE_M, num_ctas)
 
     Returns:
         Output tensor C with shape (Q, M, N) where Q is the batch size
@@ -315,25 +315,25 @@ def bmm(a, b, transpose_a=False, transpose_b=False, static_persistent=True, **kw
         assert not transpose_b, "Transpose B is not supported for BMM"
         # Defaults for non-persistent schedule (lighter tiles)
         default_configs = {
-            "BLOCK_M": 128,
-            "BLOCK_N": 128,
-            "BLOCK_K": 32,
+            "TILE_M": 128,
+            "TILE_N": 128,
+            "TILE_K": 32,
         }
         if kernel_configs is None:
             kernel_configs = default_configs
         else:
             kernel_configs = {**default_configs, **kernel_configs}
-        BLOCK_M = kernel_configs.get("BLOCK_M")
-        BLOCK_N = kernel_configs.get("BLOCK_N")
-        BLOCK_K = kernel_configs.get("BLOCK_K")
+        TILE_M = kernel_configs.get("TILE_M")
+        TILE_N = kernel_configs.get("TILE_N")
+        TILE_K = kernel_configs.get("TILE_K")
         # Grid calculation
-        grid = (ceil(M / BLOCK_M), ceil(N / BLOCK_N), Q_A)
+        grid = (ceil(M / TILE_M), ceil(N / TILE_N), Q_A)
         # Launch kernel
         ct.launch(
             torch.cuda.current_stream(),
             grid,
             ct_bmm_kernel,
-            (a, b, output, BLOCK_M, BLOCK_N, BLOCK_K),
+            (a, b, output, TILE_M, TILE_N, TILE_K),
         )
 
     return output
