@@ -271,6 +271,7 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
             "occupancy": cfg.occupancy,
         },
         search_space=_bmm_autotune_configs,
+        compiler_time_limit_sec=30,
     )
 
     return output
