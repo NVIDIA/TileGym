@@ -226,24 +226,13 @@ jobs:
   test-ops:
     name: test-ops
     needs: [config, build]
-    timeout-minutes: 25  # Increased to account for potential provisioning delays (10min) + execution (12min) + buffer
+    timeout-minutes: 12
     if: |
       always() && 
       needs.config.outputs.run_ops == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
-      - name: Checkout code (for GPU validation action)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/actions/validate-gpu
-          sparse-checkout-cone-mode: false
-
-      - name: Validate GPU provisioning
-        uses: ./.github/actions/validate-gpu
-        timeout-minutes: 15  # Allow time for retries during slow provisioning
-
       - name: Create test results directory
         run: mkdir -p ${{ github.workspace }}/test-results
 
@@ -292,25 +281,20 @@ jobs:
   test-benchmark:
     name: test-benchmark
     needs: [config, build]
-    timeout-minutes: 45  # Increased to account for potential provisioning delays (10min) + execution (30min) + buffer
+    timeout-minutes: 30
     if: |
       always() && 
       needs.config.outputs.run_benchmark == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
-      - name: Checkout code (sparse - need scripts, benchmarks, and actions)
+      - name: Checkout code (sparse - need scripts and benchmarks)
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            .github/actions/validate-gpu
             .github/scripts
             tests/benchmark
           sparse-checkout-cone-mode: false
-
-      - name: Validate GPU provisioning
-        uses: ./.github/actions/validate-gpu
-        timeout-minutes: 15  # Allow time for retries during slow provisioning
 
       - name: Create test results directory
         run: mkdir -p ${{ github.workspace }}/test-results
