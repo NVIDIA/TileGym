@@ -10,7 +10,19 @@ from tilegym.backend import is_backend_available
 # Import interface modules
 from . import activation
 from . import attn_interface
-from . import cutile
+
+# Make cutile optional - only import if backend is fully available
+if is_backend_available("cutile"):
+    try:
+        from . import cutile
+    except (ImportError, RuntimeError):
+        import warnings
+
+        warnings.warn("Cutile backend import failed, cutile operations will not be available")
+        cutile = None  # type: ignore
+else:
+    cutile = None  # type: ignore
+
 from . import moe_interface
 
 # Re-export key interfaces
@@ -26,7 +38,6 @@ from .ops import *
 __all__ = [
     # Export all operations from ops module
     # Backend implementations
-    "cutile",
     # Interface modules
     "attn_interface",
     "moe_interface",
@@ -38,3 +49,7 @@ __all__ = [
     "mla_decoding_interface",
     "fused_moe_kernel_interface",
 ]
+
+# Add cutile to exports only if successfully imported
+if cutile is not None:
+    __all__.append("cutile")
