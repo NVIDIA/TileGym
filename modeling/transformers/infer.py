@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 
 from tilegym.transformers import apply_tilegym_kernel_to_deepseek_v2
 from tilegym.transformers import apply_tilegym_kernel_to_llama
+from tilegym.transformers import apply_tilegym_kernel_to_qwen2
 
 
 def check_and_setup_model_cache(model_id):
@@ -209,6 +210,9 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         apply_tilegym_kernel_to_deepseek_v2(
             rope=True, rms_norm=True, swiglu=True, attn=use_attn, moe=True, use_cutile=use_cutile
         )
+
+    elif "qwen" in model_name:
+        apply_tilegym_kernel_to_qwen2(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     else:
         print(f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied.")
 

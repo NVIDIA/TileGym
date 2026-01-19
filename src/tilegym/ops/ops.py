@@ -31,7 +31,7 @@ def get_apply_rope_func(model: str = "llama"):
     Returns a callable that applies Rotary Position Embedding (RoPE) for a given model variant.
 
     Args:
-        model: Model name that determines the RoPE layout transformation. Supported: 'llama', 'deepseek'
+        model: Model name that determines the RoPE layout transformation. Supported: 'llama', 'qwen2', 'deepseek'
 
     Returns:
         Callable implementing RoPE application with signature similar to `apply_rope_base`

@@ -11,6 +11,7 @@ from .utils import next_power_of_2
 
 # Type aliases for constants
 ConstInt = ct.Constant[int]
+PAD_ZERO = ct.PaddingMode.ZERO
 
 
 @ct.kernel
@@ -38,8 +39,12 @@ def rope_kernel(
     # ####################################################################
     # Load cos and sin values
     # ####################################################################
-    cos_row = ct.load(cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
-    sin_row = ct.load(sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    cos_row = ct.load(
+        cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO
+    ).reshape((1, TILE_HD))
+    sin_row = ct.load(
+        sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO
+    ).reshape((1, TILE_HD))
 
     # ####################################################################
     # Process Q tensor
@@ -48,11 +53,13 @@ def rope_kernel(
         q,
         index=(batch_idx, 0, row_idx, 0, 0),
         shape=(1, TILE_QH, 1, 1, TILE_HD),
+        padding_mode=PAD_ZERO,
     ).reshape((TILE_QH, TILE_HD))
     q_tile_2 = ct.load(
         q,
         index=(batch_idx, 0, row_idx, 1, 0),
         shape=(1, TILE_QH, 1, 1, TILE_HD),
+        padding_mode=PAD_ZERO,
     ).reshape((TILE_QH, TILE_HD))
     # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
     new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
@@ -75,11 +82,13 @@ def rope_kernel(
         k,
         index=(batch_idx, 0, row_idx, 0, 0),
         shape=(1, TILE_KH, 1, 1, TILE_HD),
+        padding_mode=PAD_ZERO,
     ).reshape((TILE_KH, TILE_HD))
     k_tile_2 = ct.load(
         k,
         index=(batch_idx, 0, row_idx, 1, 0),
         shape=(1, TILE_KH, 1, 1, TILE_HD),
+        padding_mode=PAD_ZERO,
     ).reshape((TILE_KH, TILE_HD))
     # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
     new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
@@ -212,7 +221,7 @@ def apply_rope_base(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 @register_impl("get_apply_rope_func", backend="cutile")
 def get_apply_rope_func(model="llama"):
-    if model == "llama":
+    if model == "llama" or model == "qwen2":
         return apply_rope_base
     elif model == "deepseek":
 
