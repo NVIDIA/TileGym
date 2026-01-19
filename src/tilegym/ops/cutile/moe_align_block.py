@@ -73,6 +73,7 @@ def moe_align_block_size_stage2(
 @ct.kernel
 def moe_align_block_size_stage3(
     total_tokens_post_pad,
+    max_expert_cnt,
     tokens_cnts,
     cumsum,
     num_experts: ct.Constant[int],
@@ -82,11 +83,13 @@ def moe_align_block_size_stage3(
     off_cnt = num_experts * num_experts
     token_cnt = ct.zeros((1,), dtype=ct.int32)
     padded_cnt = ct.zeros((1,), dtype=ct.int32)
+    max_cnt = ct.zeros((1,), dtype=ct.int32)
 
     # Convert loop to sequential processing
     for i in range(1, num_experts + 1):
         cnt_offset = off_cnt + i - 1 + ct.arange(1, dtype=ct.int32)
         token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
+        max_cnt = ct.maximum(max_cnt, token_cnt)
 
         block_size_tile = ct.full((1,), block_size, dtype=token_cnt.dtype)
         div_result = ct.add(
@@ -102,6 +105,7 @@ def moe_align_block_size_stage3(
 
     zero_offset = ct.zeros((1,), dtype=ct.int32)
     ct.scatter(total_tokens_post_pad, zero_offset, last_cumsum)
+    ct.scatter(max_expert_cnt, zero_offset, max_cnt)
 
 
 @ct.kernel
@@ -169,6 +173,7 @@ def _moe_align_block_size(
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
+    max_expert_cnt: torch.Tensor,
 ) -> None:
     # Flatten topk_ids and tokens_cnts to 1D for gather/scatter operations
     topk_ids_flat = topk_ids.reshape(-1)
@@ -207,7 +212,7 @@ def _moe_align_block_size(
         torch.cuda.current_stream(),
         (1,),
         moe_align_block_size_stage3,
-        (num_tokens_post_pad, tokens_cnts_flat, cumsum, num_experts, block_size),
+        (num_tokens_post_pad, max_expert_cnt, tokens_cnts_flat, cumsum, num_experts, block_size),
     )
 
     # Launch stage 4
@@ -249,6 +254,9 @@ def moe_align_block_size(
     - expert_ids: A tensor indicating the assigned expert index for each block.
     - num_tokens_post_padded: The total number of tokens after padding,
         ensuring divisibility by block_size.
+    - cumsum: The exclusive prefix sums of token counts per expert, used to
+        compute per-expert write offsets into the sorted token buffer.
+    - max_expert_cnt: The maximum token count per expert before padding.
 
     This function pads the number of tokens that each expert needs to process
     so that it is divisible by block_size.
@@ -269,6 +277,9 @@ def moe_align_block_size(
         the subsequent matrix multiplication.
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
+    - With 3 tokens per expert, the padded counts are 4 each, so
+        cumsum = [0, 4, 8, 12, 16] and num_tokens_post_padded = 16.
+    - max_expert_cnt is 3 since the maximum pre-padding token count is 3.
     """
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
@@ -276,6 +287,7 @@ def moe_align_block_size(
     max_num_m_blocks = ceil_div(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    max_expert_cnt = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
     cumsum = _moe_align_block_size(
         topk_ids,
         num_experts,
@@ -283,8 +295,9 @@ def moe_align_block_size(
         sorted_ids,
         expert_ids,
         num_tokens_post_pad,
+        max_expert_cnt,
     )
-    return sorted_ids, expert_ids, num_tokens_post_pad, cumsum
+    return sorted_ids, expert_ids, num_tokens_post_pad, cumsum, max_expert_cnt
 
 
 register_impl("moe_align_block_size", "cutile")(moe_align_block_size)

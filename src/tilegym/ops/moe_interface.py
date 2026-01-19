@@ -27,57 +27,6 @@ def moe_align_block_size(
     raise NotImplementedError(f"moe_align_block_size is not implemented for this backend: {get_current_backend()}")
 
 
-def moe_align_block_size_torch(topk_ids: torch.Tensor, block_size: int, num_experts: int):
-    """Align and sort tokens for block-wise MoE computation.
-
-    Args:
-        topk_ids: Tensor of shape [num_tokens, top_k] containing expert assignments
-        block_size: Size of blocks for matrix operations
-        num_experts: Total number of experts
-
-    Returns:
-        sorted_token_ids: Tensor containing sorted and padded token indices
-        expert_ids: Tensor containing corresponding expert IDs
-        num_tokens_post_padded: Total number of tokens after padding
-        expert_cumsum: the cumsum of padded tokens per expert
-    """
-    device = "cpu"
-
-    # Calculate dimensions
-    num_tokens, top_k = topk_ids.shape
-    total_tokens = num_tokens * top_k
-
-    # Flatten both arrays
-    flat_expert_ids = topk_ids.reshape(-1).to(device)
-    sorted_token_indices = torch.argsort(flat_expert_ids, stable=True)
-
-    # Count tokens per expert before padding
-    expert_token_counts = torch.bincount(flat_expert_ids, minlength=num_experts)
-    expert_block_counts = (expert_token_counts - 1 + block_size) // block_size
-    total_blocks = expert_block_counts.sum()
-    sorted_token_ids = torch.zeros((total_blocks * block_size,), device=device) + total_tokens
-    sorted_expert_ids = torch.zeros((total_blocks,), device=device)
-
-    current_block = 0
-    current_token = 0
-    export_cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32)
-    for i in range(num_experts):
-        sorted_expert_ids[current_block : current_block + expert_block_counts[i]] = i
-        sorted_token_start = current_block * block_size
-        sorted_token_end = sorted_token_start + expert_token_counts[i]
-        sorted_token_ids[sorted_token_start:sorted_token_end] = sorted_token_indices[
-            current_token : current_token + expert_token_counts[i]
-        ]
-        current_token += expert_token_counts[i]
-        current_block += expert_block_counts[i]
-        export_cumsum[i + 1] = current_block * block_size
-
-    sorted_token_ids = sorted_token_ids.to(torch.int32).to(topk_ids.device)
-    sorted_expert_ids = sorted_expert_ids.to(torch.int32).to(topk_ids.device)
-    num_tokens_post_padded = torch.tensor(sorted_token_ids.numel()).to(torch.int32).to(topk_ids.device)
-    return sorted_token_ids, sorted_expert_ids, num_tokens_post_padded, export_cumsum.cuda()
-
-
 def fused_moe_torch(A, B, C, topk_weights, topk_ids, mul_routed_weight):
     """
     Fused MoE operation using PyTorch.
@@ -212,7 +161,9 @@ def fused_experts_impl(
         _backend = get_current_backend()
         if _backend == "cutile":
             block_size = config.get("TILE_SIZE_M", 128)
-        (sorted_token_ids, expert_ids, num_tokens_post_padded, _) = moe_align_block_size(curr_topk_ids, block_size, E)
+        (sorted_token_ids, expert_ids, num_tokens_post_padded, _, _) = moe_align_block_size(
+            curr_topk_ids, block_size, E
+        )
 
         invoke_fused_moe_kernel(
             curr_hidden_states,
