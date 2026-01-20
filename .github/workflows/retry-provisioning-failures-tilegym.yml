@@ -9,7 +9,9 @@ on:
   workflow_run:
     workflows: ["tilegym-ci"]
     types: [completed]
-    branches: [main]
+    branches:
+      - main
+      - "pull-request/[0-9]+"
 
 permissions:
   actions: write
