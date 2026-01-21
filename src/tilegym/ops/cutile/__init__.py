@@ -19,6 +19,7 @@ if is_backend_available("cutile"):
     from . import flash_decode
     from . import group_gemm
     from . import matmul
+    from . import mhc
     from . import mla
     from . import mla_decoding
     from . import mla_decoding_split_kv
@@ -33,6 +34,9 @@ if is_backend_available("cutile"):
 
     # Import specific functions for direct access
     from .flash_decode import fmha_decode
+    from .mhc import mhc_apply_residual
+    from .mhc import mhc_gemm_rms_scale
+    from .mhc import mhc_sinkhorn
     from .moe import fused_moe_kernel as invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .rms_norm import get_rms_norm_module
@@ -60,6 +64,9 @@ if is_backend_available("cutile"):
         "get_apply_rope_func",
         "get_rms_norm_module",
         "rms_norm",
+        "mhc_gemm_rms_scale",
+        "mhc_apply_residual",
+        "mhc_sinkhorn",
         "silu_and_mul",
         "dropout",
         "softmax",
@@ -73,6 +80,7 @@ if is_backend_available("cutile"):
         "bmm",
         "matmul",
         "group_gemm",
+        "mhc",
     ]
 else:
     __all__ = []

@@ -452,6 +452,86 @@ def matmul(
 
 
 @dispatch(
+    "mhc_gemm_rms_scale",
+)
+def mhc_gemm_rms_scale(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    n: int,
+    alpha_pre: float,
+    alpha_post: float,
+    alpha_res: float,
+    bias: torch.Tensor,
+    **kwargs: Any,
+):
+    """
+    GEMM + RMS reduce + scale/bias/sigmoid for mHC.
+
+    Args:
+        x: Input matrix X (M, K)
+        w: Weight matrix W (K, N)
+        n: Expansion factor
+        alpha_pre: Scalar for pre mixing
+        alpha_post: Scalar for post mixing
+        alpha_res: Scalar for residual mixing
+        bias: Bias vector of shape (N,)
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: (Y, R)
+    """
+    raise NotImplementedError(f"mhc_gemm_rms_scale is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "mhc_apply_residual",
+)
+def mhc_apply_residual(
+    x: torch.Tensor,
+    f_out: torch.Tensor,
+    y: torch.Tensor,
+    n: int,
+    **kwargs: Any,
+):
+    """
+    Apply H_res and H_post to residual stream.
+
+    Args:
+        x: Input tensor X with shape (B, nC)
+        f_out: Output tensor from block with shape (B, C)
+        y: Coefficients tensor with shape (B, n^2 + 2n)
+        n: Expansion factor
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        torch.Tensor: Output tensor with shape (B, nC)
+    """
+    raise NotImplementedError(f"mhc_apply_residual is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "mhc_sinkhorn",
+)
+def mhc_sinkhorn(
+    y: torch.Tensor,
+    n: int,
+    **kwargs: Any,
+):
+    """
+    Sinkhorn-Knopp normalization for residual block (in-place on Y).
+
+    Args:
+        y: Input/output matrix Y (M, N), modified in-place
+        n: Expansion factor
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        torch.Tensor: Output matrix (M, N)
+    """
+    raise NotImplementedError(f"mhc_sinkhorn is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "group_gemm",
 )
 def group_gemm(
