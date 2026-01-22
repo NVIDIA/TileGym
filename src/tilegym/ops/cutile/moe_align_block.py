@@ -174,7 +174,7 @@ def _moe_align_block_size(
     expert_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
     max_expert_cnt: torch.Tensor,
-) -> None:
+) -> torch.Tensor:
     # Flatten topk_ids and tokens_cnts to 1D for gather/scatter operations
     topk_ids_flat = topk_ids.reshape(-1)
 
@@ -237,7 +237,7 @@ def _moe_align_block_size(
 
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
