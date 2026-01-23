@@ -429,20 +429,6 @@ class TileRMSNorm(nn.Module):
             static_persistent=static_persistent,
         )
 
-    @staticmethod
-    def backward(ctx, dy):
-        """
-        Backward pass for RMSNorm.
-        Retrieves saved tensors and delegates to rms_norm_backward().
-        """
-        x, weight, rstd = ctx.saved_tensors
-
-        # Call the standalone backward function
-        dx, dw = rms_norm_backward(x, dy, weight, rstd)
-
-        # Return gradients: (x, normalized_shape, weight, eps, bias, static_persistent)
-        return dx, None, dw, None, None, None
-
     def forward_torch(self, hidden_states):
         """PyTorch reference implementation for comparison"""
         input_dtype = hidden_states.dtype
@@ -459,6 +445,18 @@ class TileRMSNorm(nn.Module):
         variance = x_fp32.pow(2).mean(dim=-1)
         rstd = torch.rsqrt(variance + eps)
         return rstd
+
+    @staticmethod
+    def rms_norm_backward(
+        x: torch.Tensor,
+        dy: torch.Tensor,
+        weight: torch.Tensor,
+        rstd: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Only for testing purposes.
+        """
+        return rms_norm_backward(x, dy, weight, rstd)
 
     @staticmethod
     def rms_norm_backward_torch(
