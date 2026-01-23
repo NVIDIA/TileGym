@@ -113,20 +113,17 @@ class Test_FMHA(common.PyTestCase):
         else:
             atol = 5e-2
             rtol = 1e-2
-        try:
-            self.assertCorrectness(
-                fmha_interface,
-                self.reference,
-                {
-                    "q": q,
-                    "k": k,
-                    "v": v,
-                    "scaling": sm_scale,
-                    "is_causal": is_causal,
-                },
-                atol=atol,
-                rtol=rtol,
-                check_stride=False,
-            )
-        except NotImplementedError as e:
-            pytest.skip(f"Skip due to not-implemented: {e}")
+        self.assertCorrectness(
+            fmha_interface,
+            self.reference,
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "scaling": sm_scale,
+                "is_causal": is_causal,
+            },
+            atol=atol,
+            rtol=rtol,
+            check_stride=False,
+        )

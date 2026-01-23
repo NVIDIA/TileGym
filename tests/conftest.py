@@ -46,10 +46,6 @@ def pytest_addoption(parser):
         pass
 
 
-def pytest_ignore_collect(collection_path: pathlib.Path, config):
-    return "transformers" in str(collection_path)
-
-
 @pytest.fixture
 def arch(request):
     return request.config.getoption("--arch")

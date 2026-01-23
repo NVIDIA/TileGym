@@ -12,6 +12,7 @@ End-to-end inference examples for transformer language models accelerated with T
 |-------|----------|----------|
 | LLaMA-3.1-8B | `meta-llama/Meta-Llama-3.1-8B` | RoPE, SwiGLU, RMSNorm, Attention*, Flash Decoding* |
 | DeepSeek-V2-Lite-Chat | `deepseek-ai/DeepSeek-V2-Lite-Chat` | RoPE, SwiGLU, RMSNorm, MoE, MLADecoding*, Attention* |
+| Qwen2-7B | `Qwen/Qwen2-7B` | RoPE, SwiGLU, RMSNorm, Attention* |
 
 *Optional: Enable with `--use_attn`, we can use attention provided in TileGym
 
@@ -97,6 +98,9 @@ Run benchmark scripts for automated comparison:
 
 # DeepSeek-V2-Lite benchmark
 ./bench_deepseek.sh
+
+# Qwen2-7B benchmark
+./bench_qwen.sh
 ```
 
 ### Manual Benchmark
@@ -140,6 +144,28 @@ python infer.py \
     --use_attn \
     --profile \
     --sentence_file sample_inputs/input_prompt_small.txt \
+    --output_length 100
+```
+
+#### Qwen2-7B Benchmark
+```bash
+# PyTorch baseline
+python infer.py \
+    --model_id Qwen/Qwen2-7B \
+    --profile \
+    --sentence_file sample_inputs/input_prompt_small.txt \
+    --batch_size 16 \
+    --output_length 100
+
+# TileGym CUTILE backend
+python infer.py \
+    --model_id Qwen/Qwen2-7B \
+    --use_tilegym \
+    --use_cutile \
+    --use_attn \
+    --profile \
+    --sentence_file sample_inputs/input_prompt_small.txt \
+    --batch_size 16 \
     --output_length 100
 ```
 

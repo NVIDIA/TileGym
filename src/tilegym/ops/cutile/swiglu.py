@@ -11,6 +11,8 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
+PAD_ZERO = ct.PaddingMode.ZERO
+
 
 def sigmoid(x):
     return 1.0 / (1.0 + ct.exp(-x))
@@ -25,8 +27,8 @@ def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
     col = ct.bid(1)
 
-    a_tile = ct.load(a, index=(row, col), shape=(1, TILE_SIZE))
-    b_tile = ct.load(b, index=(row, col), shape=(1, TILE_SIZE))
+    a_tile = ct.load(a, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+    b_tile = ct.load(b, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
 
     # Sigmoid requires type float32
     c_tile = silu(a_tile.astype(ct.float32)).astype(a.dtype) * b_tile

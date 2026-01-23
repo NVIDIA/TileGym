@@ -10,12 +10,19 @@ implementations based on the currently selected backend.
 """
 
 import functools
+import os
 from typing import Callable
 from typing import Dict
 
 from tilegym.logger import get_logger
 
 from .selector import get_current_backend
+
+
+def _is_fallback_disabled() -> bool:
+    """Check if fallback is disabled via environment variable."""
+    return os.environ.get("DISABLE_FALLBACK", "0") == "1"
+
 
 logger = get_logger(__name__)
 
@@ -81,6 +88,12 @@ def dispatch(name: str, fallback_backend: str = "pytorch"):
 
             # Try implementation from fallback backend
             if name in _REGISTRY and fallback_backend in _REGISTRY[name]:
+                # If DISABLE_FALLBACK=1, raise error instead of falling back
+                if _is_fallback_disabled():
+                    raise NotImplementedError(
+                        f"Current backend '{current_backend}' has no implementation for '{name}'. "
+                        f"Fallback to '{fallback_backend}' is disabled (DISABLE_FALLBACK=1)."
+                    )
                 warning_key = f"{name}_{current_backend}_{fallback_backend}"
                 if warning_key not in _LOGGED_WARNINGS:
                     logger.warning(
@@ -92,6 +105,12 @@ def dispatch(name: str, fallback_backend: str = "pytorch"):
                 return _REGISTRY[name][fallback_backend](*args, **kwargs)
 
             # Use default implementation
+            # If DISABLE_FALLBACK=1, raise error instead of using default
+            if _is_fallback_disabled():
+                raise NotImplementedError(
+                    f"No backend implementation found for '{name}' with backend '{current_backend}'. "
+                    f"Fallback to default implementation is disabled (DISABLE_FALLBACK=1)."
+                )
             logger.warning(f"No backend implementation found for '{name}', using default implementation")
             logger.debug(f"[Backend Dispatch] Using default implementation for '{name}'")
             return default_impl(*args, **kwargs)
