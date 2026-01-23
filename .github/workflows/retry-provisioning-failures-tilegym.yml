@@ -24,6 +24,6 @@ jobs:
     uses: ./.github/workflows/retry-provisioning-failures.yml
     with:
       run_id: ${{ github.event.workflow_run.id }}
-      max_retries: 2
+      max_retries: 3
       wait_minutes: 10  # Give infrastructure time to stabilize between retries
       job_name_filter: 'test-ops,test-benchmark'
