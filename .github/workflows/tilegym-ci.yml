@@ -304,6 +304,7 @@ jobs:
       # (GitHub's built-in action only works within the same run)
       # This runs for ALL builds (PRs and nightly) to catch regressions early
       - name: Download baseline benchmark results
+        timeout-minutes: 10  # Allow enough time for retries (action retries 3x with 100s timeout each)
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v3
         with:
