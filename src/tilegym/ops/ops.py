@@ -417,40 +417,6 @@ def splitk_reduce(
     raise NotImplementedError(f"splitk_reduce is not implemented for {get_current_backend()}")
 
 
-# ============================================================================
-# Linear Algebra Operations
-# ============================================================================
-
-
-@dispatch(
-    "matmul",
-)
-def matmul(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    trans_a: Optional[bool] = None,
-    trans_b: Optional[bool] = None,
-    static_persistent: Optional[bool] = True,
-    use_tma: Optional[bool] = True,
-    **kwargs: Any,
-):
-    """
-    Matrix multiplication operation that automatically selects implementation based on current backend
-
-    Args:
-        a: Input matrix A
-        b: Input matrix B
-        trans_a: Whether to transpose matrix A (None uses backend default)
-        trans_b: Whether to transpose matrix B (None uses backend default)
-        static_persistent: Whether to use static persistent mode (default: True)
-        use_tma: Whether to use TMA (default: True)
-        **kwargs: Additional arguments, including kernel_configs if needed
-    Returns:
-        torch.Tensor: Matrix multiplication result
-    """
-    raise NotImplementedError(f"Matmul is not implemented for this backend: {get_current_backend()}")
-
-
 @dispatch(
     "mhc_gemm_rms_scale",
 )
@@ -529,6 +495,40 @@ def mhc_sinkhorn(
         torch.Tensor: Output matrix (M, N)
     """
     raise NotImplementedError(f"mhc_sinkhorn is not implemented for {get_current_backend()}")
+
+
+# ============================================================================
+# Linear Algebra Operations
+# ============================================================================
+
+
+@dispatch(
+    "matmul",
+)
+def matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    trans_a: Optional[bool] = None,
+    trans_b: Optional[bool] = None,
+    static_persistent: Optional[bool] = True,
+    use_tma: Optional[bool] = True,
+    **kwargs: Any,
+):
+    """
+    Matrix multiplication operation that automatically selects implementation based on current backend
+
+    Args:
+        a: Input matrix A
+        b: Input matrix B
+        trans_a: Whether to transpose matrix A (None uses backend default)
+        trans_b: Whether to transpose matrix B (None uses backend default)
+        static_persistent: Whether to use static persistent mode (default: True)
+        use_tma: Whether to use TMA (default: True)
+        **kwargs: Additional arguments, including kernel_configs if needed
+    Returns:
+        torch.Tensor: Matrix multiplication result
+    """
+    raise NotImplementedError(f"Matmul is not implemented for this backend: {get_current_backend()}")
 
 
 @dispatch(
