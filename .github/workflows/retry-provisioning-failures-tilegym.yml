@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: retry-provisioning-failures-tilegym
+
+# Automatically triggered when tilegym-ci completes
+on:
+  workflow_run:
+    workflows: ["tilegym-ci"]
+    types: [completed]
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  retry:
+    # Only run if the workflow actually failed
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    uses: ./.github/workflows/retry-provisioning-failures.yml
+    with:
+      run_id: ${{ github.event.workflow_run.id }}
+      max_retries: 3
+      wait_minutes: 10  # Give infrastructure time to stabilize between retries
+      job_name_filter: 'test-ops,test-benchmark'

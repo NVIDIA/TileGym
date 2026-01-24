@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: retry-provisioning-failures
+
+# This is a reusable workflow that can be called from other workflows
+# To use in another project, create a workflow like:
+#
+# on:
+#   workflow_run:
+#     workflows: ["your-ci-name"]
+#     types: [completed]
+#     branches: [main]
+# jobs:
+#   retry:
+#     uses: NVIDIA/TileGym/.github/workflows/retry-provisioning-failures.yml@main
+#     with:
+#       run_id: ${{ github.event.workflow_run.id }}
+#       max_retries: 2
+#       wait_minutes: 5 
+#       job_name_filter: 'test-one,test-two'
+
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to analyze and potentially retry'
+        required: true
+        type: number
+      max_retries:
+        description: 'Maximum number of retry attempts (default: 2)'
+        required: false
+        type: number
+        default: 2
+      wait_minutes:
+        description: 'Minutes to wait before retrying (default: 5)'
+        required: false
+        type: number
+        default: 5
+      job_name_filter:
+        description: 'Comma-separated list of job name patterns to check (e.g., "test-ops,test-benchmark"). Empty = check all jobs.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  actions: write  # Required to re-run workflows
+  contents: read
+
+jobs:
+  check-and-retry:
+    name: Check for provisioning failures and retry
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Allow time for wait + API calls (10 min wait + overhead)
+    steps:
+      - name: Analyze failure and retry if needed
+        timeout-minutes: 25  # Kill step if it hangs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = ${{ inputs.run_id }};
+            const maxRetries = ${{ inputs.max_retries }};
+            const waitMinutes = ${{ inputs.wait_minutes }};
+            const jobNameFilter = '${{ inputs.job_name_filter }}'.split(',').map(s => s.trim()).filter(Boolean);
+            
+            core.info(`=== Configuration ===`);
+            core.info(`Run ID: ${runId}`);
+            core.info(`Max retries: ${maxRetries}`);
+            core.info(`Wait time: ${waitMinutes} minutes`);
+            core.info(`Job filter: ${jobNameFilter.length > 0 ? jobNameFilter.join(', ') : 'all jobs'}`);
+            
+            // Get detailed job information
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            
+            core.info(`\n=== Found ${jobs.data.jobs.length} jobs in workflow run ===`);
+            
+            // Analyze each failed job
+            let hasProvisioningFailure = false;
+            let failureDetails = [];
+            
+            for (const job of jobs.data.jobs) {
+              // Skip if not in filter
+              if (jobNameFilter.length > 0 && !jobNameFilter.some(pattern => job.name.includes(pattern))) {
+                continue;
+              }
+              
+              if (job.conclusion !== 'failure') continue;
+              
+              core.info(`\nAnalyzing failed job: ${job.name}`);
+              core.info(`  Status: ${job.status}`);
+              core.info(`  Conclusion: ${job.conclusion}`);
+              core.info(`  Started: ${job.started_at}`);
+              core.info(`  Completed: ${job.completed_at}`);
+              core.info(`  Steps completed: ${job.steps.length}`);
+              
+              // Check for provisioning failure patterns:
+              // 1. Job timed out before any steps ran
+              const noStepsRan = job.steps.length === 0 || 
+                                job.steps.every(step => step.conclusion === null);
+              
+              // 2. Job started and completed at nearly the same time (timeout in queue)
+              const startTime = new Date(job.started_at);
+              const completeTime = new Date(job.completed_at);
+              const executionSeconds = (completeTime - startTime) / 1000;
+              const timedOutInQueue = executionSeconds < 10; // Less than 10 seconds = didn't really run
+              
+              if (noStepsRan || timedOutInQueue) {
+                hasProvisioningFailure = true;
+                failureDetails.push({
+                  job: job.name,
+                  reason: noStepsRan ? 'No steps executed (likely timeout in queue)' : 
+                          `Job timed out after ${executionSeconds}s (provisioning issue)`,
+                  executionTime: executionSeconds,
+                });
+                core.warning(`⚠️  ${job.name}: Detected provisioning failure`);
+              } else if (job.conclusion === 'failure') {
+                core.info(`  Job failed for other reasons (not provisioning)`);
+              }
+            }
+            
+            // Check if this run was already a retry
+            const workflow = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            
+            const attemptNumber = workflow.data.run_attempt || 1;
+            
+            core.info(`\n=== Analysis Summary ===`);
+            core.info(`Provisioning failure detected: ${hasProvisioningFailure}`);
+            core.info(`Attempt number: ${attemptNumber}/${maxRetries}`);
+            core.info(`Failure details: ${JSON.stringify(failureDetails, null, 2)}`);
+            
+            // Decide whether to retry
+            if (hasProvisioningFailure && attemptNumber < maxRetries) {
+              core.warning(`🔄 Provisioning failure detected, will retry (attempt ${attemptNumber + 1}/${maxRetries})`);
+              
+              // Wait a bit before retrying (give time for capacity to free up)
+              core.info(`⏳ Waiting ${waitMinutes} minutes before retry...`);
+              await new Promise(resolve => setTimeout(resolve, waitMinutes * 60 * 1000));
+              
+              // Trigger retry
+              core.info(`🚀 Triggering retry for run ${runId}...`);
+              await github.rest.actions.reRunFailedJobs({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+              });
+              
+              core.info(`✅ Retry triggered successfully`);
+            } else if (hasProvisioningFailure && attemptNumber >= maxRetries) {
+              core.error(`❌ Max retries (${maxRetries}) reached, giving up`);
+              core.setFailed('Provisioning failures persist after retries');
+            } else if (!hasProvisioningFailure) {
+              core.info(`ℹ️  Workflow failed for other reasons (test failures, build errors, etc.)`);
+              core.info(`   No automatic retry will be attempted.`);
+            } else {
+              core.info(`✅ No action needed`);
+            }
