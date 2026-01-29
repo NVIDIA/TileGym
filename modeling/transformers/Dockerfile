@@ -47,7 +47,8 @@ COPY wheel/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && \
     rm -f /tmp/*.whl
 
-# Copy modeling scripts and examples (not included in wheel)
+# Copy modeling scripts for inference use cases (not included in wheel)
+# Note: Tests are mounted at runtime in CI, not needed in image
 COPY modeling/ /workspace/tilegym/modeling/
 COPY README.md LICENSE /workspace/tilegym/
 
