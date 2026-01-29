@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: Build Python Wheel (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: 'Python package name (e.g., tilegym)'
+        required: true
+        type: string
+      artifact-suffix:
+        description: 'Optional suffix for artifact name (e.g., -pr for PRs)'
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: 'Python version to use'
+        required: false
+        type: string
+        default: '3.10'
+      retention-days:
+        description: 'Artifact retention days'
+        required: false
+        type: number
+        default: 7
+    outputs:
+      artifact-name:
+        description: 'Name of the uploaded wheel artifact'
+        value: ${{ jobs.build-wheel.outputs.artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    name: Build wheel
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+          ls -lh dist/
+
+      - name: Validate wheel
+        run: |
+          pip install twine check-wheel-contents
+          check-wheel-contents dist/*.whl
+          twine check dist/*
+
+      - name: Test import
+        run: |
+          pip install dist/*.whl
+          python -c "import ${{ inputs.package-name }}; print('✅ Imported successfully')"
+
+      - name: Set artifact name
+        id: artifact
+        run: echo "name=${{ inputs.package-name }}${{ inputs.artifact-suffix }}-wheel-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist/*.whl
+          retention-days: ${{ inputs.retention-days }}

@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: Publish Python Wheel (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Name of wheel artifact to download and publish'
+        required: true
+        type: string
+      retention-days:
+        description: 'Days to retain verified artifact'
+        required: false
+        type: number
+        default: 30
+      publish-to-pypi:
+        description: 'Publish to public PyPI'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      PYPI_TOKEN:
+        description: 'PyPI API token (required if publish-to-pypi is true)'
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish wheel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/
+
+      - name: Re-upload as verified
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-verified
+          path: dist/
+          retention-days: ${{ inputs.retention-days }}
+
+      - name: Publish to PyPI
+        if: inputs.publish-to-pypi
+        run: |
+          pip install twine
+          twine upload --skip-existing dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "✅ Wheel published successfully"
+          ls -lh dist/

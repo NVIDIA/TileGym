@@ -5,7 +5,9 @@
 # TileGym Transformers Inference Container
 # This is a simplified Dockerfile for running TileGym-accelerated transformer inference
 #
+# This Dockerfile expects a pre-built wheel in the ./wheel directory
 # Build from tilegym repository root:
+#   python -m build --wheel
 #   docker build -t tilegym-transformers -f modeling/transformers/Dockerfile .
 
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.1.0-devel-ubuntu22.04
@@ -39,14 +41,15 @@ RUN pip install --no-cache-dir cuda-tile && \
 # Set working directory
 WORKDIR /workspace/tilegym
 
-# Copy TileGym source code (do this LATE so code changes don't invalidate above layers)
-COPY . /workspace/tilegym/
+# Copy and install TileGym wheel (faster and more production-ready than source install)
+# The wheel is built in CI and passed via build context
+COPY wheel/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && \
+    rm -f /tmp/*.whl
 
-# Verify the repository structure (fail fast if built from wrong directory)
-RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
-
-# Install TileGym (only this layer rebuilds on code changes)
-RUN pip install --no-cache-dir -e .
+# Copy modeling scripts and examples (not included in wheel)
+COPY modeling/ /workspace/tilegym/modeling/
+COPY README.md LICENSE /workspace/tilegym/
 
 # Set up model cache directory
 ENV HF_HOME=/workspace/.cache/huggingface \

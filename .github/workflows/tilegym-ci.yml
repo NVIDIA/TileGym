@@ -155,14 +155,31 @@ jobs:
           # Pass through image name from context
           echo "image_name=${{ steps.context.outputs.image_name }}" >> $GITHUB_OUTPUT
 
+  build-wheel:
+    name: build-python-wheel
+    needs: config
+    uses: ./.github/workflows/build-wheel.yml
+    with:
+      package-name: tilegym
+      # Artifact naming: PR builds -> tilegym-pr-wheel-{sha}, Main -> tilegym-wheel-{sha}
+      artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
+      python-version: '3.10'
+      retention-days: 7
+
   build:
     name: build-tilegym-image
-    needs: config
+    needs: [config, build-wheel]
     if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      
+      - name: Download TileGym wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact-name }}
+          path: ./wheel
 
       - name: Set image variables
         id: vars
@@ -499,6 +516,21 @@ jobs:
               fi
             fi
           fi
+
+  publish-wheel:
+    name: publish-verified-wheel
+    needs: [config, build-wheel, test-ops, test-benchmark]
+    if: |
+      always() &&
+      needs.config.outputs.is_pr == 'false' &&
+      needs.build-wheel.result == 'success' &&
+      needs.test-ops.result == 'success' &&
+      needs.test-benchmark.result == 'success'
+    uses: ./.github/workflows/publish-wheel.yml
+    with:
+      artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
+      retention-days: 30
+      publish-to-pypi: false  # Set to true and add PYPI_TOKEN secret when ready
 
   promote-to-latest:
     name: promote-to-latest
