@@ -252,11 +252,11 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
-      - name: Checkout code (sparse - need ops tests)
+      - name: Checkout code (sparse - need ops tests and shared utilities)
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            tests/ops
+            tests
           sparse-checkout-cone-mode: false
 
       - name: Create test results directory
@@ -278,7 +278,7 @@ jobs:
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
-            -v ${{ github.workspace }}/tests/ops:/workspace/tilegym/tests/ops \
+            -v ${{ github.workspace }}/tests:/workspace/tilegym/tests \
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym \
             ${IMAGE} \
