@@ -26,6 +26,11 @@ on:
         required: false
         type: number
         default: 7
+      skip-import-test:
+        description: 'Skip import test (for CUDA/GPU-dependent packages)'
+        required: false
+        type: boolean
+        default: false
     outputs:
       artifact-name:
         description: 'Name of the uploaded wheel artifact'
@@ -61,6 +66,7 @@ jobs:
           twine check dist/*
 
       - name: Test import
+        if: ${{ !inputs.skip-import-test }}
         run: |
           pip install dist/*.whl
           python -c "import ${{ inputs.package-name }}; print('✅ Imported successfully')"

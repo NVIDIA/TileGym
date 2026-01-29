@@ -158,6 +158,7 @@ jobs:
   build-wheel:
     name: build-python-wheel
     needs: config
+    if: needs.config.outputs.build == 'true'
     uses: ./.github/workflows/build-wheel.yml
     with:
       package-name: tilegym
@@ -165,6 +166,7 @@ jobs:
       artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
       python-version: '3.10'
       retention-days: 7
+      skip-import-test: true  # TileGym requires CUDA, test in Docker instead
 
   build:
     name: build-tilegym-image
