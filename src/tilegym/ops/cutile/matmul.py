@@ -160,7 +160,7 @@ def static_persistent_matmul_kernel(
                 a = ct.transpose(a)  # Convert to (TILE_SIZE_M, TILE_SIZE_K)
             else:
                 # A is normal: load from (M, K) layout
-                a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K))
+                a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad)
 
             # Load B tile
             if transpose_b:
