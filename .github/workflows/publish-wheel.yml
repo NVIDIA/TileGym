@@ -8,9 +8,19 @@ on:
   workflow_call:
     inputs:
       artifact-name:
-        description: 'Name of wheel artifact to download and publish'
+        description: 'Base name of wheel artifacts to download (e.g., tilegym-wheel-abc123)'
         required: true
         type: string
+      python-versions:
+        description: 'JSON array of Python versions to publish (e.g., ["3.10", "3.11", "3.12"])'
+        required: false
+        type: string
+        default: '["3.10"]'
+      architectures:
+        description: 'JSON array of architectures to publish (e.g., ["x86_64", "arm64"])'
+        required: false
+        type: string
+        default: '["x86_64"]'
       retention-days:
         description: 'Days to retain verified artifact'
         required: false
@@ -32,24 +42,61 @@ permissions:
 
 jobs:
   publish:
-    name: Publish wheel
+    name: Publish wheels (Python ${{ matrix.python-version }}, ${{ matrix.arch }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+        arch: ${{ fromJSON(inputs.architectures) }}
     steps:
-      - name: Download wheel
+      - name: Set artifact suffix
+        id: suffix
+        run: |
+          PY_VERSION="${{ matrix.python-version }}"
+          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
+          ARCH="${{ matrix.arch }}"
+          FULL_SUFFIX="${PY_SUFFIX}-${ARCH}"
+          echo "full=${FULL_SUFFIX}" >> $GITHUB_OUTPUT
+
+      - name: Download wheel (Python ${{ matrix.python-version }}, ${{ matrix.arch }})
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.artifact-name }}
+          name: ${{ inputs.artifact-name }}-${{ steps.suffix.outputs.full }}
           path: dist/
 
       - name: Re-upload as verified
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact-name }}-verified
+          name: ${{ inputs.artifact-name }}-${{ steps.suffix.outputs.full }}-verified
           path: dist/
           retention-days: ${{ inputs.retention-days }}
 
+  publish-to-pypi:
+    name: Publish all wheels to PyPI
+    needs: publish
+    if: inputs.publish-to-pypi
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+        arch: ${{ fromJSON(inputs.architectures) }}
+    steps:
+      - name: Set artifact suffix
+        id: suffix
+        run: |
+          PY_VERSION="${{ matrix.python-version }}"
+          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
+          ARCH="${{ matrix.arch }}"
+          FULL_SUFFIX="${PY_SUFFIX}-${ARCH}"
+          echo "full=${FULL_SUFFIX}" >> $GITHUB_OUTPUT
+
+      - name: Download verified wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-${{ steps.suffix.outputs.full }}-verified
+          path: dist/
+
       - name: Publish to PyPI
-        if: inputs.publish-to-pypi
         run: |
           pip install twine
           twine upload --skip-existing dist/*
@@ -59,5 +106,5 @@ jobs:
 
       - name: Summary
         run: |
-          echo "✅ Wheel published successfully"
+          echo "✅ Wheel for Python ${{ matrix.python-version }} (${{ matrix.arch }}) published to PyPI"
           ls -lh dist/

@@ -156,7 +156,7 @@ jobs:
           echo "image_name=${{ steps.context.outputs.image_name }}" >> $GITHUB_OUTPUT
 
   build-wheel:
-    name: build-python-wheel
+    name: build-python-wheels
     needs: config
     if: needs.config.outputs.build == 'true'
     uses: ./.github/workflows/build-wheel.yml
@@ -164,23 +164,28 @@ jobs:
       package-name: tilegym
       # Artifact naming: PR builds -> tilegym-pr-wheel-{sha}, Main -> tilegym-wheel-{sha}
       artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
-      python-version: '3.10'
+      python-versions: '["3.10", "3.11", "3.12"]'  # Build for multiple Python versions
+      architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
       retention-days: 7
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
+      # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
+      # runner-x86-64: [self-hosted, linux, x64, gpu]
 
   build:
     name: build-tilegym-image
     needs: [config, build-wheel]
     if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
+    # Note: Wheels are built for both x86_64 and arm64, but Docker tests only run on x86_64
+    # (ARM64 wheels available for download but not tested in CI due to lack of ARM GPU runners)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Download TileGym wheel
+      - name: Download TileGym wheel (Python 3.10, x86_64)
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build-wheel.outputs.artifact-name }}
+          name: ${{ needs.build-wheel.outputs.artifact-name }}-py310-x86_64
           path: ./wheel
 
       - name: Set image variables
@@ -529,7 +534,7 @@ jobs:
           fi
 
   publish-wheel:
-    name: publish-verified-wheel
+    name: publish-verified-wheels
     needs: [config, build-wheel, test-ops, test-benchmark]
     if: |
       always() &&
@@ -540,6 +545,8 @@ jobs:
     uses: ./.github/workflows/publish-wheel.yml
     with:
       artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
+      python-versions: '["3.10", "3.11", "3.12"]'  # Match build-wheel versions
+      architectures: '["x86_64", "arm64"]'  # Publish both architectures
       retention-days: 30
       publish-to-pypi: false  # Set to true and add PYPI_TOKEN secret when ready
 
