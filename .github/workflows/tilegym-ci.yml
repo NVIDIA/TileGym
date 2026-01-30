@@ -166,7 +166,7 @@ jobs:
       artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
       python-versions: '["3.10", "3.11", "3.12"]'  # Build for multiple Python versions
       architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
-      retention-days: 7
+      retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
       # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
       # runner-x86-64: [self-hosted, linux, x64, gpu]
@@ -176,8 +176,9 @@ jobs:
     needs: [config, build-wheel]
     if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
-    # Note: Wheels are built for both x86_64 and arm64, but Docker tests only run on x86_64
-    # (ARM64 wheels available for download but not tested in CI due to lack of ARM GPU runners)
+    # Note: Wheels are built for Python 3.10/3.11/3.12 and x86_64/arm64 (6 wheels total)
+    # However, Docker build and tests only use Python 3.10 x86_64 wheel
+    # Only the tested wheel (py310-x86_64) gets marked as "-verified" after tests pass
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -534,7 +535,7 @@ jobs:
           fi
 
   publish-wheel:
-    name: publish-verified-wheels
+    name: publish-verified-wheel
     needs: [config, build-wheel, test-ops, test-benchmark]
     if: |
       always() &&
@@ -544,9 +545,9 @@ jobs:
     uses: ./.github/workflows/publish-wheel.yml
     with:
       artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
-      python-versions: '["3.10", "3.11", "3.12"]'  # Match build-wheel versions
-      architectures: '["x86_64", "arm64"]'  # Publish both architectures
-      retention-days: 30  # Verified wheels kept longer than initial builds (7 days)
+      python-versions: '["3.10"]'  # Only verify the wheel actually tested in Docker
+      architectures: '["x86_64"]'  # Only verify the x86_64 wheel used in Docker tests
+      retention-days: 30  # Verified wheel kept longer than initial builds (7 days)
       publish-to-pypi: false  # Set to true and add PYPI_TOKEN secret when ready
 
   promote-to-latest:
