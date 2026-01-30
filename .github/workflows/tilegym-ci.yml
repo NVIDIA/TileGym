@@ -542,6 +542,8 @@ jobs:
       needs.build-wheel.result == 'success' &&
       needs.test-ops.result == 'success' &&
       needs.test-benchmark.result == 'success'
+    # Note: Only marks the py310-x86_64 wheel as "verified" because that's the wheel
+    # actually tested in Docker. Other wheels (py311, py312, arm64) are available but unverified.
     uses: ./.github/workflows/publish-wheel.yml
     with:
       artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
