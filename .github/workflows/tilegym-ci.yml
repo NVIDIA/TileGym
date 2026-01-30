@@ -538,7 +538,6 @@ jobs:
     needs: [config, build-wheel, test-ops, test-benchmark]
     if: |
       always() &&
-      needs.config.outputs.is_pr == 'false' &&
       needs.build-wheel.result == 'success' &&
       needs.test-ops.result == 'success' &&
       needs.test-benchmark.result == 'success'
@@ -547,7 +546,7 @@ jobs:
       artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
       python-versions: '["3.10", "3.11", "3.12"]'  # Match build-wheel versions
       architectures: '["x86_64", "arm64"]'  # Publish both architectures
-      retention-days: 30
+      retention-days: 30  # Verified wheels kept longer than initial builds (7 days)
       publish-to-pypi: false  # Set to true and add PYPI_TOKEN secret when ready
 
   promote-to-latest:
