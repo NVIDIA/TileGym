@@ -231,6 +231,7 @@ jobs:
         with:
           context: .
           file: ./modeling/transformers/Dockerfile
+          target: wheel  # Use wheel target for CI builds
           tags: ${{ steps.tags.outputs.tags }}
           push: true
           provenance: false
