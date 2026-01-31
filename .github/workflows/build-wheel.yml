@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: Build Python Wheel (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: 'Python package name (e.g., tilegym)'
+        required: true
+        type: string
+      artifact-suffix:
+        description: 'Optional suffix for artifact name (e.g., -pr for PRs)'
+        required: false
+        type: string
+        default: ''
+      python-versions:
+        description: 'JSON array of Python versions to build (e.g., ["3.10", "3.11", "3.12"])'
+        required: false
+        type: string
+        default: '["3.10"]'
+      architectures:
+        description: 'JSON array of architectures to build (e.g., ["x86_64", "arm64"])'
+        required: false
+        type: string
+        default: '["x86_64"]'
+      runner-x86-64:
+        description: 'Runner label for x86_64 builds (default: ubuntu-latest)'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      runner-arm64:
+        description: 'Runner label for arm64 builds (default: ubuntu-24.04-arm)'
+        required: false
+        type: string
+        default: 'ubuntu-24.04-arm'
+      retention-days:
+        description: 'Artifact retention days'
+        required: false
+        type: number
+        default: 7
+      skip-import-test:
+        description: 'Skip import test (for CUDA/GPU-dependent packages)'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      artifact-name:
+        description: 'Name of the uploaded wheel artifact (base name, without version suffix)'
+        value: ${{ jobs.build-wheel.outputs.artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    name: Build wheel (Python ${{ matrix.python-version }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'x86_64' && inputs.runner-x86-64 || inputs.runner-arm64 }}
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+        arch: ${{ fromJSON(inputs.architectures) }}
+    outputs:
+      artifact-name: ${{ steps.artifact.outputs.base-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+          ls -lh dist/
+          echo "Built wheel for Python ${{ matrix.python-version }}"
+
+      - name: Validate wheel
+        run: |
+          pip install twine check-wheel-contents
+          check-wheel-contents dist/*.whl
+          twine check dist/*
+
+      - name: Test import
+        if: ${{ !inputs.skip-import-test }}
+        run: |
+          pip install dist/*.whl
+          python -c "import ${{ inputs.package-name }}; print('✅ Imported successfully')"
+
+      - name: Set artifact names
+        id: artifact
+        run: |
+          # Base name (for outputs)
+          BASE_NAME="${{ inputs.package-name }}${{ inputs.artifact-suffix }}-wheel-${{ github.sha }}"
+          echo "base-name=${BASE_NAME}" >> $GITHUB_OUTPUT
+          
+          # Versioned name with arch (for upload)
+          PY_VERSION="${{ matrix.python-version }}"
+          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
+          ARCH="${{ matrix.arch }}"
+          VERSIONED_NAME="${BASE_NAME}-${PY_SUFFIX}-${ARCH}"
+          echo "versioned-name=${VERSIONED_NAME}" >> $GITHUB_OUTPUT
+          
+          echo "📦 Base artifact name: ${BASE_NAME}"
+          echo "📦 Versioned artifact name: ${VERSIONED_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.versioned-name }}
+          path: dist/*.whl
+          retention-days: ${{ inputs.retention-days }}

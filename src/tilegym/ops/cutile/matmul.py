@@ -139,6 +139,7 @@ def static_persistent_matmul_kernel(
     num_bid_n = ct.cdiv(N, TILE_SIZE_N)
     k_tiles = ct.cdiv(K, TILE_SIZE_K)
     num_tiles = num_bid_m * num_bid_n
+    zero_pad = ct.PaddingMode.ZERO
     num_programs = ct.num_blocks(0)
 
     # Static persistent scheduling loop
@@ -155,20 +156,20 @@ def static_persistent_matmul_kernel(
             # Load A tile
             if transpose_a:
                 # A is transposed: load from (K, M) layout
-                a = ct.load(A, index=(k_tile, bid_m), shape=(TILE_SIZE_K, TILE_SIZE_M))
+                a = ct.load(A, index=(k_tile, bid_m), shape=(TILE_SIZE_K, TILE_SIZE_M), padding_mode=zero_pad)
                 a = ct.transpose(a)  # Convert to (TILE_SIZE_M, TILE_SIZE_K)
             else:
                 # A is normal: load from (M, K) layout
-                a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K))
+                a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad)
 
             # Load B tile
             if transpose_b:
                 # B is transposed: load from (N, K) layout
-                b = ct.load(B, index=(bid_n, k_tile), shape=(TILE_SIZE_N, TILE_SIZE_K))
+                b = ct.load(B, index=(bid_n, k_tile), shape=(TILE_SIZE_N, TILE_SIZE_K), padding_mode=zero_pad)
                 b = ct.transpose(b)  # Convert to (TILE_SIZE_K, TILE_SIZE_N)
             else:
                 # B is normal: load from (K, N) layout
-                b = ct.load(B, index=(k_tile, bid_n), shape=(TILE_SIZE_K, TILE_SIZE_N))
+                b = ct.load(B, index=(k_tile, bid_n), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad)
 
             # Convert fp32 to tf32 to use tensorcore
             dtype = ct.tfloat32 if A.dtype == ct.float32 else A.dtype

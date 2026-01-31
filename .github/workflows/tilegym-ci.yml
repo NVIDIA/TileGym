@@ -155,14 +155,39 @@ jobs:
           # Pass through image name from context
           echo "image_name=${{ steps.context.outputs.image_name }}" >> $GITHUB_OUTPUT
 
-  build:
-    name: build-tilegym-image
+  build-wheel:
+    name: build-python-wheels
     needs: config
     if: needs.config.outputs.build == 'true'
+    uses: ./.github/workflows/build-wheel.yml
+    with:
+      package-name: tilegym
+      # Artifact naming: PR builds -> tilegym-pr-wheel-{sha}, Main -> tilegym-wheel-{sha}
+      artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
+      python-versions: '["3.10", "3.11", "3.12"]'  # Build for multiple Python versions
+      architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
+      retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
+      skip-import-test: true  # TileGym requires CUDA, test in Docker instead
+      # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
+      # runner-x86-64: [self-hosted, linux, x64, gpu]
+
+  build:
+    name: build-tilegym-image
+    needs: [config, build-wheel]
+    if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
+    # Note: Wheels are built for Python 3.10/3.11/3.12 and x86_64/arm64 (6 wheels total)
+    # However, Docker build and tests only use Python 3.10 x86_64 wheel
+    # Only the tested wheel (py310-x86_64) gets marked as "-verified" after tests pass
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      
+      - name: Download TileGym wheel (Python 3.10, x86_64)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact-name }}-py310-x86_64
+          path: ./wheel
 
       - name: Set image variables
         id: vars
@@ -212,6 +237,7 @@ jobs:
         with:
           context: .
           file: ./modeling/transformers/Dockerfile
+          target: wheel  # Use wheel target for CI builds
           tags: ${{ steps.tags.outputs.tags }}
           push: true
           provenance: false
@@ -233,6 +259,13 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     steps:
+      - name: Checkout code (sparse - need ops tests and shared utilities)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tests
+          sparse-checkout-cone-mode: false
+
       - name: Create test results directory
         run: mkdir -p ${{ github.workspace }}/test-results
 
@@ -252,6 +285,7 @@ jobs:
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
+            -v ${{ github.workspace }}/tests:/workspace/tilegym/tests \
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym \
             ${IMAGE} \
@@ -499,6 +533,24 @@ jobs:
               fi
             fi
           fi
+
+  publish-wheel:
+    name: publish-verified-wheel
+    needs: [config, build-wheel, test-ops, test-benchmark]
+    if: |
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      needs.test-ops.result == 'success' &&
+      needs.test-benchmark.result == 'success'
+    # Note: Only marks the py310-x86_64 wheel as "verified" because that's the wheel
+    # actually tested in Docker. Other wheels (py311, py312, arm64) are available but unverified.
+    uses: ./.github/workflows/publish-wheel.yml
+    with:
+      artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
+      python-versions: '["3.10"]'  # Only verify the wheel actually tested in Docker
+      architectures: '["x86_64"]'  # Only verify the x86_64 wheel used in Docker tests
+      retention-days: 30  # Verified wheel kept longer than initial builds (7 days)
+      publish-to-pypi: false  # Set to true and add PYPI_TOKEN secret when ready
 
   promote-to-latest:
     name: promote-to-latest

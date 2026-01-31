@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: Publish Python Wheel (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Base name of wheel artifacts to download (e.g., tilegym-wheel-abc123)'
+        required: true
+        type: string
+      python-versions:
+        description: 'JSON array of Python versions to publish (e.g., ["3.10", "3.11", "3.12"])'
+        required: false
+        type: string
+        default: '["3.10"]'
+      architectures:
+        description: 'JSON array of architectures to publish (e.g., ["x86_64", "arm64"])'
+        required: false
+        type: string
+        default: '["x86_64"]'
+      retention-days:
+        description: 'Days to retain verified artifact'
+        required: false
+        type: number
+        default: 30
+      publish-to-pypi:
+        description: 'Publish to public PyPI'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      PYPI_TOKEN:
+        description: 'PyPI API token (required if publish-to-pypi is true)'
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish wheels (Python ${{ matrix.python-version }}, ${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+        arch: ${{ fromJSON(inputs.architectures) }}
+    steps:
+      - name: Set artifact suffix
+        id: suffix
+        run: |
+          PY_VERSION="${{ matrix.python-version }}"
+          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
+          ARCH="${{ matrix.arch }}"
+          FULL_SUFFIX="${PY_SUFFIX}-${ARCH}"
+          echo "full=${FULL_SUFFIX}" >> $GITHUB_OUTPUT
+
+      - name: Download wheel (Python ${{ matrix.python-version }}, ${{ matrix.arch }})
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-${{ steps.suffix.outputs.full }}
+          path: dist/
+
+      - name: Re-upload as verified
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-${{ steps.suffix.outputs.full }}-verified
+          path: dist/
+          retention-days: ${{ inputs.retention-days }}
+
+  publish-to-pypi:
+    name: Publish all wheels to PyPI
+    needs: publish
+    if: inputs.publish-to-pypi
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+        arch: ${{ fromJSON(inputs.architectures) }}
+    steps:
+      - name: Set artifact suffix
+        id: suffix
+        run: |
+          PY_VERSION="${{ matrix.python-version }}"
+          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
+          ARCH="${{ matrix.arch }}"
+          FULL_SUFFIX="${PY_SUFFIX}-${ARCH}"
+          echo "full=${FULL_SUFFIX}" >> $GITHUB_OUTPUT
+
+      - name: Download verified wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-${{ steps.suffix.outputs.full }}-verified
+          path: dist/
+
+      - name: Publish to PyPI
+        run: |
+          pip install twine
+          twine upload --skip-existing dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "✅ Wheel for Python ${{ matrix.python-version }} (${{ matrix.arch }}) published to PyPI"
+          ls -lh dist/
