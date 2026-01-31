@@ -207,7 +207,7 @@ class _attention_decode(torch.autograd.Function):
         TILE_N = 128
         if kv_len_per_split is None:
             NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-            NUM_KV_SPLITS = NUM_SMS // (batch_size * num_kv_heads)
+            NUM_KV_SPLITS = max(1, NUM_SMS // (batch_size * num_kv_heads))
             TILE_SIZE = max(
                 TILE_N,
                 next_power_of_2((seq_len + NUM_KV_SPLITS - 1) // NUM_KV_SPLITS),

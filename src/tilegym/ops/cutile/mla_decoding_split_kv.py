@@ -202,7 +202,7 @@ class _mla_decoding_split_kv(torch.autograd.Function):
         if kv_len_per_split is None:
             # We want each SM to have at least one split kv
             NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-            num_split_kv_estimated = NUM_SMS // B
+            num_split_kv_estimated = max(1, NUM_SMS // B)
             kv_len_per_split = next_power_of_2(S_kv // num_split_kv_estimated)
             kv_len_per_split = max(kv_len_per_split, TILE_N)
 
