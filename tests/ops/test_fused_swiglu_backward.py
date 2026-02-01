@@ -47,7 +47,7 @@ class Test_FusedSwiGLUBackward(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.float32])
     @pytest.mark.parametrize("backend", _backends)
-    def test_backward(self, batch_size, seq_len, hidden_size, intermediate_size, dtype, backend, arch):
+    def test_op(self, batch_size, seq_len, hidden_size, intermediate_size, dtype, backend, arch):
         """Test backward pass of PartiallyFusedSwiGLUMLP."""
         try:
             set_backend(backend)
@@ -109,7 +109,7 @@ class Test_FusedSwiGLUBackward(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.float32])
     @pytest.mark.parametrize("backend", _backends)
-    def test_backward_irregular_shapes(self, batch_size, seq_len, hidden_size, intermediate_size, dtype, backend, arch):
+    def test_op_irregular(self, batch_size, seq_len, hidden_size, intermediate_size, dtype, backend, arch):
         """Test backward pass with irregular (non-power-of-2) shapes."""
         try:
             set_backend(backend)
