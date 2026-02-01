@@ -69,6 +69,75 @@ def swiglu_forward(a, b):
     return c.view(*ori_shape)
 
 
+# Backward kernel for swiglu
+# Forward: c = silu(a) * b
+# da = dc * b * (sigmoid(a) + a * sigmoid(a) * (1 - sigmoid(a)))
+#    = dc * b * sigmoid(a) * (1 + a * (1 - sigmoid(a)))
+# db = dc * silu(a)
+@ct.kernel
+def swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
+    row = ct.bid(0)
+    col = ct.bid(1)
+
+    dc_tile = ct.load(dc, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+    a_tile = ct.load(a, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+    b_tile = ct.load(b, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+
+    # Convert to float32 for precision
+    dc_tile = dc_tile.astype(ct.float32)
+    a_tile_f32 = a_tile.astype(ct.float32)
+    b_tile_f32 = b_tile.astype(ct.float32)
+
+    # Compute sigmoid(a) and silu(a)
+    sigmoid_a = sigmoid(a_tile_f32)
+    silu_a = a_tile_f32 * sigmoid_a
+
+    # db = dc * silu(a)
+    db_tile = dc_tile * silu_a
+    ct.store(db, index=(row, col), tile=db_tile.astype(a.dtype))
+
+    # da = dc * b * sigmoid(a) * (1 + a * (1 - sigmoid(a)))
+    one_minus_sigmoid = 1.0 - sigmoid_a
+    silu_grad = sigmoid_a * (1.0 + a_tile_f32 * one_minus_sigmoid)
+    da_tile = dc_tile * b_tile_f32 * silu_grad
+    ct.store(da, index=(row, col), tile=da_tile.astype(a.dtype))
+
+
+def swiglu_backward(dc, a, b):
+    """
+    Backward pass for SwiGLU operation.
+
+    Args:
+        dc: Gradient w.r.t. output c, shape (batch_size, seq_len, intermediate_size)
+        a: Original input a (gate), same shape as dc
+        b: Original input b (up), same shape as dc
+
+    Returns:
+        Tuple of (da, db) with same shapes as inputs
+    """
+    ori_shape = dc.shape
+    n_cols = ori_shape[-1]
+    dc = dc.view(-1, n_cols).contiguous()
+    a = a.view(-1, n_cols).contiguous()
+    b = b.view(-1, n_cols).contiguous()
+    n_rows = dc.shape[0]
+
+    da = torch.empty_like(a)
+    db = torch.empty_like(b)
+
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    TILE_N = ceildiv(NUM_SMS, n_rows)
+    TILE_SIZE = next_power_of_2(int(n_cols / TILE_N))
+    grid = (n_rows, ceildiv(n_cols, TILE_SIZE), 1)
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        swiglu_backward_kernel,
+        (dc, a, b, da, db, TILE_SIZE),
+    )
+    return da.view(*ori_shape), db.view(*ori_shape)
+
+
 class SiLUMulFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b):
@@ -78,7 +147,9 @@ class SiLUMulFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dc):
-        raise NotImplementedError("SwiGLU backward is not implemented.")
+        a, b = ctx.saved_tensors
+        da, db = swiglu_backward(dc, a, b)
+        return da, db
 
 
 class SwiGLUMLP(nn.Module):
