@@ -50,7 +50,7 @@ def create_benchmark_config(mode, hidden_size, dtype):
         line_vals=list(backends),
         line_names=list(names),
         styles=list(styles),
-        ylabel="ms",
+        ylabel="GB/s",
         plot_name=f"silu-and-mul-{mode_name}-hidden{hidden_size}-{dtype_name}",
         args={
             "hidden_size": hidden_size,
@@ -86,14 +86,24 @@ def bench_silu_and_mul(
     else:
         fn = lambda: reference_silu_and_mul(x)
 
+    # Calculate memory bytes
+    bytes_per_element = x.element_size()
+    input_bytes = x.numel() * bytes_per_element  # Read: (M, 2*hidden_size)
+    output_bytes = M * hidden_size * bytes_per_element  # Write: (M, hidden_size)
+
     if mode == "forward":
+        total_bytes = input_bytes + output_bytes
         ms = triton.testing.do_bench(fn, rep=10)
     elif mode == "backward":
         y = fn()
         dy = torch.randn_like(y)
+        # Backward reads: dy, recomputes from input, writes grad_input
+        total_bytes = output_bytes + input_bytes + input_bytes  # dy + input + grad_input
         ms = triton.testing.do_bench(lambda: y.backward(dy, retain_graph=True), rep=10)
     else:  # full
         dy = torch.randn(M, hidden_size, dtype=dtype, device=device)
+        # Forward + backward
+        total_bytes = (input_bytes + output_bytes) + (output_bytes + input_bytes + input_bytes)
 
         def full():
             y = fn()
@@ -101,7 +111,9 @@ def bench_silu_and_mul(
 
         ms = triton.testing.do_bench(full, rep=10)
 
-    return ms
+    # Calculate GB/s
+    gb_per_s = total_bytes * 1e-9 / (ms * 1e-3)
+    return gb_per_s
 
 
 if __name__ == "__main__":

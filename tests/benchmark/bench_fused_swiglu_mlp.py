@@ -72,7 +72,7 @@ def create_benchmark_config(mode, model_name, batch_size):
         line_vals=list(backends),
         line_names=list(names),
         styles=list(styles),
-        ylabel="ms",
+        ylabel="GB/s",
         plot_name=f"fused-swiglu-mlp-{mode_name}-{model_name}-bs{batch_size}",
         args={
             "model_name": model_name,
@@ -101,6 +101,8 @@ def bench_fused_swiglu_mlp(
 ):
     config_params = MODEL_CONFIGS[model_name]
     config = MockConfig(**config_params)
+    H = config.hidden_size
+    I = config.intermediate_size
 
     # Create MLP module
     if backend == "tilegym":
@@ -110,19 +112,30 @@ def bench_fused_swiglu_mlp(
         mlp = PyTorchSwiGLUMLP(config).to(device).to(dtype)
 
     # Create input
-    x = torch.randn(batch_size, seq_len, config.hidden_size, dtype=dtype, device=device, requires_grad=True)
+    x = torch.randn(batch_size, seq_len, H, dtype=dtype, device=device, requires_grad=True)
+    bytes_per_element = x.element_size()
+    M = batch_size * seq_len
 
     def fwd():
         return mlp(x)
 
+    # Memory calculation for SwiGLU MLP:
+    # Forward: x(M,H) -> gate(M,I), up(M,I) -> glu(M,I) -> out(M,H)
+    # Backward: similar pattern in reverse
+    fwd_bytes = M * (H + 2 * I + I + H) * bytes_per_element
+    bwd_bytes = fwd_bytes * 2  # Approximate: gradients have similar memory footprint
+
     if mode == "forward":
+        total_bytes = fwd_bytes
         ms = triton.testing.do_bench(fwd, rep=10)
     elif mode == "backward":
         y = fwd()
         dy = torch.randn_like(y)
+        total_bytes = bwd_bytes
         ms = triton.testing.do_bench(lambda: y.backward(dy, retain_graph=True), rep=10)
     else:  # full
-        dy = torch.randn(batch_size, seq_len, config.hidden_size, dtype=dtype, device=device)
+        dy = torch.randn(batch_size, seq_len, H, dtype=dtype, device=device)
+        total_bytes = fwd_bytes + bwd_bytes
 
         def full():
             y = fwd()
@@ -130,7 +143,9 @@ def bench_fused_swiglu_mlp(
 
         ms = triton.testing.do_bench(full, rep=10)
 
-    return ms
+    # Calculate GB/s
+    gb_per_s = total_bytes * 1e-9 / (ms * 1e-3)
+    return gb_per_s
 
 
 if __name__ == "__main__":

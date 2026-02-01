@@ -5,8 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Benchmark for SwiGLU forward and backward pass.
-Compares TileGym cutile implementation against PyTorch reference.
+Benchmark comparing SwiGLU forward and backward pass performance.
 """
 
 import torch
@@ -17,47 +16,38 @@ import tilegym
 from tilegym.backend import is_backend_available
 
 
-def reference_swiglu_forward(a, b):
-    """Reference SwiGLU forward using PyTorch."""
+def reference_swiglu_forward(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Reference implementation using PyTorch."""
     return torch.nn.functional.silu(a) * b
 
 
-def reference_swiglu_backward(dc, a, b):
-    """Reference SwiGLU backward using autograd."""
-    a = a.clone().requires_grad_(True)
-    b = b.clone().requires_grad_(True)
-    c = reference_swiglu_forward(a, b)
-    c.backward(dc)
-    return a.grad, b.grad
-
-
-# Available backends for benchmarking
-def get_supported_backends():
-    backends = [("torch", "PyTorch", ("green", "-"))]
+def get_providers():
+    """Get available providers for benchmarking."""
+    providers = [("torch", "PyTorch", ("green", "-"))]
     if is_backend_available("cutile"):
-        backends.insert(0, ("cutile", "CuTile", ("orange", "-")))
-    return backends
+        providers.insert(0, ("cutile", "CuTile", ("orange", "-")))
+    return providers
 
 
 def create_benchmark_config(mode, hidden_size, dtype):
     """Create a benchmark configuration."""
-    available_backends = get_supported_backends()
-    if not available_backends:
+    providers = get_providers()
+    if not providers:
         return None
 
-    backends, names, styles = zip(*available_backends)
+    backends, names, styles = zip(*providers)
     dtype_name = str(dtype).split(".")[-1]
     mode_name = mode.replace("_", "-")
 
     return triton.testing.Benchmark(
         x_names=["M"],
-        x_vals=[2**i for i in range(10, 15)],
+        x_vals=[2**i for i in range(10, 15)],  # 1K to 16K
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
         styles=list(styles),
-        ylabel="ms",
-        plot_name=f"swiglu-{mode_name}-hidden{hidden_size}-{dtype_name}-latency",
+        ylabel="GB/s",
+        plot_name=f"swiglu-{mode_name}-hidden{hidden_size}-{dtype_name}",
         args={
             "hidden_size": hidden_size,
             "dtype": dtype,
@@ -98,14 +88,24 @@ def bench_swiglu(
         def fwd():
             return reference_swiglu_forward(a, b)
 
+    # Calculate memory bytes
+    bytes_per_element = a.element_size()
+    # Forward: read a, b, write c -> 3 tensors of size (M, hidden_size)
+    fwd_bytes = 3 * M * hidden_size * bytes_per_element
+    # Backward: read dc, a, b, write da, db -> 5 tensors
+    bwd_bytes = 5 * M * hidden_size * bytes_per_element
+
     if mode == "forward":
+        total_bytes = fwd_bytes
         ms = triton.testing.do_bench(fwd, rep=10)
     elif mode == "backward":
         c = fwd()
         dc = torch.randn_like(c)
+        total_bytes = bwd_bytes
         ms = triton.testing.do_bench(lambda: c.backward(dc, retain_graph=True), rep=10)
     else:  # full
         dc = torch.randn(M, hidden_size, dtype=dtype, device=device)
+        total_bytes = fwd_bytes + bwd_bytes
 
         def full():
             c = fwd()
@@ -113,7 +113,9 @@ def bench_swiglu(
 
         ms = triton.testing.do_bench(full, rep=10)
 
-    return ms
+    # Calculate GB/s
+    gb_per_s = total_bytes * 1e-9 / (ms * 1e-3)
+    return gb_per_s
 
 
 if __name__ == "__main__":
