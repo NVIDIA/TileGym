@@ -212,6 +212,9 @@ class PyTestCase:
                 tensor_args_with_grad[k] = v
         assert not (len(tensor_args_with_grad) and multiple_outputs)
         test_out = test_fn(**fn_kwargs, **extra_test_kwargs)
+        # Clear CUDA cache after test_fn to release memory reserved by autotuning
+        # This prevents OOM during compare_tensors for large matrix operations
+        torch.cuda.empty_cache()
         ref_out = ref_fn(**fn_kwargs, **extra_ref_kwargs)
 
         if test_index is not None:

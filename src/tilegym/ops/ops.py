@@ -12,6 +12,7 @@ backend implementation based on the current backend setting.
 from typing import Any
 from typing import List
 from typing import Optional
+from typing import Tuple
 
 import torch
 
@@ -231,6 +232,70 @@ def softmax(
         torch.Tensor of shape (M, N) containing softmax probabilities
     """
     raise NotImplementedError(f"softmax is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "layer_norm_legacy",
+)
+def layer_norm_legacy(
+    x: torch.Tensor,
+    normalized_shape: Any,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    weight_shift: float = 0.0,
+    **kwargs: Any,
+):
+    """
+    Legacy LayerNorm of input along dimension N.
+
+    Args:
+        x: Input tensor shape (M, N)
+        normalized_shape: Unused
+        weight: Tensor of shape (N,)
+        bias: Tensor of shape (N,)
+        eps: Numerical stability epsilon
+        weight_shift: Float value to be added to the weight
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Normalized tensor with same shape as `x`
+    """
+    raise NotImplementedError(f"layer_norm_legacy is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "persistent_layer_norm",
+)
+def persistent_layer_norm(
+    input: torch.Tensor,
+    normalized_shape: Any,
+    weight: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    eps: float,
+    mean: Optional[torch.Tensor] = None,
+    rstd: Optional[torch.Tensor] = None,
+    **kwargs: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    """
+    Persistent LayerNorm with TMA support.
+
+    This is an optimized implementation using TMA descriptors and autotune.
+
+    Args:
+        input: Input tensor of shape (N, D)
+        normalized_shape: Unused (for API compatibility)
+        weight: Weight tensor of shape (D,)
+        bias: Bias tensor of shape (D,)
+        eps: Epsilon for numerical stability
+        mean: Optional pre-computed mean tensor
+        rstd: Optional pre-computed reciprocal std tensor
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Tuple of (output, mean, rstd, BLOCK_D, num_warps)
+    """
+    raise NotImplementedError(f"persistent_layer_norm is not implemented for {get_current_backend()}")
 
 
 @dispatch(

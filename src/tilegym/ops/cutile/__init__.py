@@ -18,6 +18,7 @@ if is_backend_available("cutile"):
     from . import dropout
     from . import flash_decode
     from . import group_gemm
+    from . import layer_norm_legacy
     from . import matmul
     from . import mhc
     from . import mla
