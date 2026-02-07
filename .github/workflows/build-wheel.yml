@@ -46,6 +46,11 @@ on:
         required: false
         type: boolean
         default: false
+      check-wheel-contents-ignore:
+        description: 'Comma-separated check codes to ignore (e.g., W002 for duplicate files from symlinks)'
+        required: false
+        type: string
+        default: ''
     outputs:
       artifact-name:
         description: 'Name of the uploaded wheel artifact (base name, without version suffix)'
@@ -82,7 +87,11 @@ jobs:
       - name: Validate wheel
         run: |
           pip install twine check-wheel-contents
-          check-wheel-contents dist/*.whl
+          if [ -n "${{ inputs.check-wheel-contents-ignore }}" ]; then
+            check-wheel-contents --ignore "${{ inputs.check-wheel-contents-ignore }}" dist/*.whl
+          else
+            check-wheel-contents dist/*.whl
+          fi
           twine check dist/*
 
       - name: Test import
