@@ -26,20 +26,27 @@ Before starting non-trivial work, please check for existing issues and consider 
 
 If you plan to submit code changes (new features, bug fixes, refactors):
 
-1. **Read the project README**
+1. **Review the Roadmap**
+   - **Before contributing**, please review the [ROADMAP.md](ROADMAP.md) to understand:
+     - Current operator support status (what's available, in progress, or planned)
+     - Contribution opportunities and priority areas
+     - Which kernels need help (marked as "🙋 Help Wanted")
+   - This helps ensure your contribution aligns with project priorities and avoids duplicate work.
+
+2. **Read the project README**
    - Review the project-level [`README.md`](README.md) for build, install, and basic usage instructions.
-2. **Pick or propose an issue**
+3. **Pick or propose an issue**
    - Look for existing issues that match what you want to do, or create a new issue describing your proposal.
    - Comment on the issue to indicate you are working on it.
-3. **Discuss significant changes first**
+4. **Discuss significant changes first**
    - For larger features or intrusive refactors, outline your approach in the issue so maintainers can provide feedback early.
-4. **Implement the change**
+5. **Implement the change**
    - Follow the existing coding style and patterns in the affected modules.
    - Add or update tests to cover new behavior.
-5. **Open a pull request**
+6. **Open a pull request**
    - Keep PRs focused on a single logical change.
    - Describe what the PR does, how you tested it, and any potential user-facing impact.
-6. **Respond to review**
+7. **Respond to review**
    - Address comments, push updates, and keep the discussion on the PR/issue.
 
 ### 3. Testing contributions (especially op tests)
