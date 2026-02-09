@@ -41,3 +41,6 @@ Available benchmark scripts:
 - `bench_silu_and_mul.py`
 - `bench_softmax.py`
 - `bench_swiglu.py`
+- `bench_fused_swiglu_mlp.py`
+- `bench_silu_and_mul_backward.py`
+- `bench_swiglu_backward.py`

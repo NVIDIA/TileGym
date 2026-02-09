@@ -65,7 +65,15 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
             # fused_weight: [2 * intermediate_size, hidden_size]
             self.fused_gate_up_weight = torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
 
-    def forward(self, x):
+    def forward(self, x, use_torch_matmul=None):
+        """
+        Forward pass with optional torch.matmul fallback for training.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_size)
+            use_torch_matmul: If True, use torch.matmul (supports backward).
+                              If None, auto-detect based on requires_grad.
+        """
         # Lazy initialize fused weights if needed
         if self.fused_gate_up_weight is None:
             self._initialize_fused_weights()
@@ -73,12 +81,19 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
         orig_shape = x.shape
         x = x.view(-1, x.shape[-1])
 
+        # Auto-detect: use torch.matmul if backward is needed
+        if use_torch_matmul is None:
+            use_torch_matmul = x.requires_grad
+
+        # Choose matmul function based on training mode
+        matmul_fn = self.apply_matmul if use_torch_matmul else self.apply_matmul_internal
+
         # Lazy import to avoid circular dependency
         from tilegym.ops import silu_and_mul
 
         # Step 1: Fused gate+up projection
         # x @ fused_weight.T
-        fused_output = self.apply_matmul_internal(x, self.fused_gate_up_weight, trans_b=True)
+        fused_output = matmul_fn(x, self.fused_gate_up_weight, trans_b=True)
 
         # Step 2: Fused SiLU and multiply
         # silu(fused_output[:, :intermediate_size]) * fused_output[:, intermediate_size:]
@@ -87,7 +102,7 @@ class PartiallyFusedSwiGLUMLP(nn.Module):
 
         # Step 3: Down projection
         # glu_output @ down_proj.weight.T
-        result = self.apply_matmul_internal(glu_output, self.down_proj.weight, trans_b=True)
+        result = matmul_fn(glu_output, self.down_proj.weight, trans_b=True)
 
         return result.view(*orig_shape)
 
