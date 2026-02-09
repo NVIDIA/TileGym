@@ -10,6 +10,7 @@ import cuda.tile_experimental as ct_experimental
 import torch
 
 from tilegym.backend import register_impl
+from tilegym.experimental import experimental_kernel
 from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,6 +33,7 @@ def _sigmoid(x):
     return 1.0 / (1.0 + ct.exp(-x))
 
 
+@experimental_kernel
 @ct.kernel
 def mhc_split_gemm_rms_kernel(
     X,
@@ -101,6 +103,7 @@ def mhc_split_gemm_rms_kernel(
     ct.store(R_acc, index=(bid_m_k, bid_n), tile=ct.reshape(rms_acc, (TILE_SIZE_M, 1)))
 
 
+@experimental_kernel
 @ct.kernel
 def mhc_finalize_scale_bias_sigmoid_kernel(
     Y_acc,
@@ -394,6 +397,7 @@ def mhc_gemm_rms_scale(
     )
 
 
+@experimental_kernel
 @ct.kernel
 def mhc_apply_residual_kernel(
     X,
@@ -508,6 +512,7 @@ def mhc_apply_residual(
     return out
 
 
+@experimental_kernel
 @ct.kernel
 def mhc_sinkhorn_kernel(
     Y,
