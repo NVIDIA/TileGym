@@ -20,7 +20,6 @@ if is_backend_available("cutile"):
     from . import group_gemm
     from . import layer_norm_legacy
     from . import matmul
-    from . import mhc
     from . import mla
     from . import mla_decoding
     from . import mla_decoding_split_kv
@@ -34,10 +33,11 @@ if is_backend_available("cutile"):
     from . import swiglu
 
     # Import specific functions for direct access
+    from .experimental import mhc
+    from .experimental.mhc import mhc_apply_residual
+    from .experimental.mhc import mhc_gemm_rms_scale
+    from .experimental.mhc import mhc_sinkhorn
     from .flash_decode import fmha_decode
-    from .mhc import mhc_apply_residual
-    from .mhc import mhc_gemm_rms_scale
-    from .mhc import mhc_sinkhorn
     from .moe import fused_moe_kernel as invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .rms_norm import get_rms_norm_module

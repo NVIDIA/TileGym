@@ -9,6 +9,7 @@ import cuda.tile as ct
 import torch
 
 from tilegym.backend import register_impl
+from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
@@ -94,6 +95,7 @@ def softmax_kernel_tma(
 
 
 # Chunked softmax kernel for large tensors (3-pass algorithm)
+@experimental_kernel
 @ct.kernel(occupancy=4)
 def softmax_kernel_chunked(
     output,

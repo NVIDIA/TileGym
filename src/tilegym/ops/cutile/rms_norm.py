@@ -9,10 +9,12 @@ import torch
 import torch.nn as nn
 
 from tilegym.backend import register_impl
+from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
 
+@experimental_kernel
 @ct.kernel(occupancy=2)
 def rms_norm_backward_kernel(
     dx,

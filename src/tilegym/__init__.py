@@ -2,11 +2,16 @@
 #
 # SPDX-License-Identifier: MIT
 
+# Apply experimental kernel tracking patch
+from .experimental import _apply_patch as _apply_experimental_patch
+
 # Import logging utilities
 from .logger import get_logger
 from .logger import set_env_log_level
 from .logger import set_log_level
 from .logger import warn_once
+
+_apply_experimental_patch()
 
 logger = get_logger()
 

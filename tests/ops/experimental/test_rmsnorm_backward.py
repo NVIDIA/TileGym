@@ -8,8 +8,8 @@ import torch
 import tilegym
 from tilegym.ops import get_rms_norm_module
 
-from .. import common
-from ..common import markif
+from ... import common
+from ...common import markif
 
 
 class Test_RMSNormBackward(common.PyTestCase):

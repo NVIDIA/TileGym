@@ -35,7 +35,7 @@ echo "Running benchmarks sequentially (parallel execution disabled to ensure acc
 echo "Output format: $FORMAT"
 echo "Results will be saved to: $OUTPUT_DIR"
 echo "Current directory: $(pwd)"
-echo "Benchmark files found: $(ls bench_*.py 2>/dev/null | wc -l)"
+echo "Benchmark files found: $(ls bench_*.py experimental/bench_*.py 2>/dev/null | wc -l)"
 echo ""
 
 # Check if output directory is writable
@@ -68,6 +68,39 @@ FAILED_BENCHMARKS=()
 for file in bench_*.py; do
     if [[ ! -f "$file" ]]; then
         echo "Warning: No benchmark files matching bench_*.py found" >&2
+        continue
+    fi
+
+    benchmark_name=$(basename "$file" .py)
+    output_file="$OUTPUT_DIR/${benchmark_name}_results.txt"
+
+    echo "=========================================="
+    echo "Running $file..."
+    echo "=========================================="
+
+    # Run benchmark and capture output
+    # Note: tee will create the file, errors go to both console and file
+    if python3 "$file" 2>&1 | tee "$output_file"; then
+        # Success - ensure file is readable
+        chmod 644 "$output_file" 2>/dev/null || true
+        echo "✓ PASSED: $file"
+        echo "  Results saved to: $output_file"
+    else
+        # Failure - mark file and ensure readable
+        # tee already captured the output, just prepend marker
+        (echo "BENCHMARK FAILED"; echo ""; cat "$output_file") > "$output_file.new" 2>/dev/null && \
+            mv "$output_file.new" "$output_file" 2>/dev/null || \
+            echo "BENCHMARK FAILED" > "$output_file"
+        chmod 644 "$output_file" 2>/dev/null || true
+        echo "✗ FAILED: $file"
+        echo "  Error details saved to: $output_file"
+        FAILED_BENCHMARKS+=("$file")
+    fi
+    echo ""
+done
+
+for file in experimental/bench_*.py; do
+    if [[ ! -f "$file" ]]; then
         continue
     fi
 
