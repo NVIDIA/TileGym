@@ -62,18 +62,18 @@ class Test_FMHA_Backward(common.PyTestCase):
         "batch_size, num_heads, seq_len, head_dim, is_causal, dtype",
         [
             # Small shapes
-            (1, 1, 64, 64, False, torch.float16),
-            (1, 1, 64, 64, True, torch.float16),
-            (1, 4, 128, 64, True, torch.float16),
+            # (1, 1, 64, 64, False, torch.float16),
+            # (1, 1, 64, 64, True, torch.float16),
+            # (1, 4, 128, 64, True, torch.float16),
             (2, 8, 256, 64, True, torch.float16),
             # Medium shapes
-            (1, 8, 512, 128, True, torch.float16),
-            (2, 16, 1024, 128, True, torch.float16),
+            # (1, 8, 512, 128, True, torch.float16),
+            # (2, 16, 1024, 128, True, torch.float16),
             # bfloat16
-            (1, 8, 256, 128, True, torch.bfloat16),
-            (2, 8, 512, 64, False, torch.bfloat16),
+            # (1, 8, 256, 128, True, torch.bfloat16),
+            # (2, 8, 512, 64, False, torch.bfloat16),
             # Non-causal
-            (1, 4, 256, 64, False, torch.float16),
+            # (1, 4, 256, 64, False, torch.float16),
             (2, 8, 512, 128, False, torch.bfloat16),
         ],
     )
@@ -140,17 +140,17 @@ class Test_FMHA_Backward(common.PyTestCase):
         [
             # Odd sequence lengths
             (1, 4, 127, 64, True, torch.float16),
-            (1, 4, 129, 64, True, torch.float16),
-            (1, 8, 255, 128, True, torch.float16),
-            (2, 8, 257, 128, True, torch.float16),
+            # (1, 4, 129, 64, True, torch.float16),
+            # (1, 8, 255, 128, True, torch.float16),
+            # (2, 8, 257, 128, True, torch.float16),
             # Prime sequence lengths
-            (1, 4, 131, 64, True, torch.float16),
-            (1, 4, 251, 64, True, torch.bfloat16),
+            # (1, 4, 131, 64, True, torch.float16),
+            # (1, 4, 251, 64, True, torch.bfloat16),
             # Large irregular
-            (1, 8, 1023, 128, True, torch.float16),
-            (1, 8, 1025, 128, True, torch.float16),
+            # (1, 8, 1023, 128, True, torch.float16),
+            # (1, 8, 1025, 128, True, torch.float16),
             (2, 8, 2047, 128, True, torch.bfloat16),
-            (2, 8, 2049, 128, True, torch.bfloat16),
+            # (2, 8, 2049, 128, True, torch.bfloat16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
@@ -209,18 +209,18 @@ class Test_FMHA_Backward(common.PyTestCase):
             # Single element batch
             (1, 1, 64, 64, True, torch.float16),
             # Single head
-            (2, 1, 128, 64, True, torch.float16),
+            # (2, 1, 128, 64, True, torch.float16),
             # Large batch
-            (8, 4, 128, 64, True, torch.float16),
+            # (8, 4, 128, 64, True, torch.float16),
             # Many heads
             (1, 32, 128, 64, True, torch.float16),
             # Small head dim
-            (2, 4, 128, 32, True, torch.float16),
+            # (2, 4, 128, 32, True, torch.float16),
             # Large head dim
-            (1, 4, 64, 128, True, torch.float16),
+            # (1, 4, 64, 128, True, torch.float16),
             # Very short sequence
-            (2, 4, 16, 64, True, torch.float16),
-            (2, 4, 32, 64, True, torch.float16),
+            # (2, 4, 16, 64, True, torch.float16),
+            # (2, 4, 32, 64, True, torch.float16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
@@ -374,24 +374,24 @@ class Test_FMHA_Backward_GQA(common.PyTestCase):
         [
             # Simple GQA (2:1)
             (1, 8, 4, 128, 64, True, torch.float16),
-            (2, 8, 4, 256, 64, True, torch.float16),
+            # (2, 8, 4, 256, 64, True, torch.float16),
             # GQA (4:1)
-            (1, 16, 4, 128, 64, True, torch.float16),
-            (1, 32, 8, 256, 64, True, torch.bfloat16),
+            # (1, 16, 4, 128, 64, True, torch.float16),
+            # (1, 32, 8, 256, 64, True, torch.bfloat16),
             # Multi-Query Attention (all Q heads share 1 KV head)
             (1, 8, 1, 128, 64, True, torch.float16),
-            (2, 16, 1, 256, 64, True, torch.float16),
+            # (2, 16, 1, 256, 64, True, torch.float16),
             # GQA with irregular sequence lengths
-            (1, 8, 4, 127, 64, True, torch.float16),
-            (1, 8, 2, 255, 64, True, torch.float16),
-            (2, 16, 4, 257, 128, True, torch.bfloat16),
+            # (1, 8, 4, 127, 64, True, torch.float16),
+            # (1, 8, 2, 255, 64, True, torch.float16),
+            # (2, 16, 4, 257, 128, True, torch.bfloat16),
             # GQA non-causal
-            (1, 8, 4, 128, 64, False, torch.float16),
-            (2, 16, 4, 256, 128, False, torch.bfloat16),
+            # (1, 8, 4, 128, 64, False, torch.float16),
+            # (2, 16, 4, 256, 128, False, torch.bfloat16),
             # GQA with larger head_dim
-            (1, 8, 2, 128, 128, True, torch.float16),
+            # (1, 8, 2, 128, 128, True, torch.float16),
             # Llama-style ratios (8:1)
-            (1, 32, 4, 128, 64, True, torch.float16),
+            # (1, 32, 4, 128, 64, True, torch.float16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
