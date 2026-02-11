@@ -93,6 +93,7 @@ class Test_MOE(common.PyTestCase):
             pytest.skip("Skip on sm80: don't support float8.")
         if backend == "cutile" and dtype == torch.float8_e4m3fn:
             pytest.skip("cutile haven't support it")
+
         try:
             set_backend(backend)
         except Exception as e:
