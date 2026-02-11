@@ -11,7 +11,7 @@ README = (pathlib.Path(__file__).parent / "README.md").read_text()
 
 setuptools.setup(
     name="tilegym",
-    version="0.0.0",
+    version="1.0.0",
     author="NVIDIA Corporation",
     description="TileGym",
     long_description=README,
