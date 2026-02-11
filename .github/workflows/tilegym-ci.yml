@@ -285,6 +285,7 @@ jobs:
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
+            -e DISABLE_AUTOTUNE=1 \
             -v ${{ github.workspace }}/tests:/workspace/tilegym/tests \
             -v ${{ github.workspace }}/test-results:/test-results \
             -w /workspace/tilegym \
