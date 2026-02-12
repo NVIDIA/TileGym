@@ -123,6 +123,213 @@ def get_fmha_interface(backend=None, kernel_configs=None):
 
 
 ######################################################################
+################Attention Sink interface################
+######################################################################
+
+
+def attention_sink_interface(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sinks: torch.Tensor,
+    scaling: Optional[float] = None,
+    sliding_window: Optional[int] = None,
+    start_q: Optional[torch.Tensor] = None,
+    backend: Optional[str] = None,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Unified interface for Attention with Sinks operations.
+
+    This is a high-level wrapper around tilegym.ops.attention_sink dispatch system.
+
+    Args:
+        q: Query tensor [batch, heads, seq_len, head_dim]
+        k: Key tensor [batch, kv_heads, seq_len, head_dim]
+        v: Value tensor [batch, kv_heads, seq_len, head_dim]
+        sinks: Attention sink values per head [heads]
+        scaling: Scaling factor for attention scores
+        sliding_window: Sliding window size (bandwidth), None for full attention
+        start_q: Starting position for query, defaults to 0
+        backend: Backend to use
+        **kwargs: Additional arguments for specific backends
+
+    Returns:
+        Output tensor [batch, seq_len, heads * head_dim]
+    """
+    from tilegym.ops import attention_sink
+
+    if scaling is None:
+        scaling = 1.0 / math.sqrt(q.size(-1))
+
+    if start_q is None:
+        start_q = torch.zeros(1, dtype=torch.long, device=q.device)
+
+    # Get num_key_value_groups from tensor shapes
+    num_heads = q.size(1)
+    num_kv_heads = k.size(1)
+    num_key_value_groups = num_heads // num_kv_heads
+
+    # Convert from [batch, heads, seq_len, head_dim] to [batch, seq_len, kv_heads, groups, head_dim]
+    batch_size, _, seq_len, head_dim = q.shape
+    kv_seq_len = k.size(2)
+
+    # Reshape q: [batch, heads, seq_len, head_dim] -> [batch, seq_len, kv_heads, groups, head_dim]
+    q = q.transpose(1, 2)  # [batch, seq_len, heads, head_dim]
+    q = q.reshape(batch_size, seq_len, num_kv_heads, num_key_value_groups, head_dim)
+
+    # Reshape k, v: [batch, kv_heads, seq_len, head_dim] -> [batch, seq_len, kv_heads, head_dim]
+    k = k.transpose(1, 2).contiguous()  # [batch, seq_len, kv_heads, head_dim]
+    v = v.transpose(1, 2).contiguous()  # [batch, seq_len, kv_heads, head_dim]
+
+    return attention_sink(
+        query=q,
+        key=k,
+        value=v,
+        sinks=sinks,
+        sm_scale=scaling,
+        sliding_window=sliding_window,
+        start_q=start_q,
+        backend=backend,
+        **kwargs,
+    )
+
+
+def attention_sink_ref(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sinks: torch.Tensor,
+    sm_scale: float = 0.125,
+    sliding_window: int | None = None,
+    start_q: int | torch.LongTensor = 0,
+):
+    batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
+    batch_size, num_keys, num_key_value_heads, head_dim = key.shape
+
+    sinks = sinks.view(1, num_key_value_heads, num_key_value_groups, 1, 1).float()
+    key = key.unsqueeze(3)
+    value = value.unsqueeze(3)
+
+    pos_keys = torch.arange(num_keys, device=query.device)
+    pos_queries = torch.arange(num_queries, device=query.device) + start_q
+    mask = pos_keys[None, :] > pos_queries[:, None]
+    mask = mask.float().masked_fill(mask, float("-inf"))
+
+    if sliding_window:
+        too_old = pos_keys[None, :] < (pos_queries[:, None] - sliding_window + 1)
+        mask.masked_fill_(too_old, float("-inf"))
+
+    logits = torch.einsum("bqhmd,bkhmd->bhmqk", query.float(), key.float()) * sm_scale
+    logits = logits + mask[None, None, None, :, :]
+
+    logits_max = torch.max(logits, dim=-1, keepdim=True).values
+    logits_or_sinks_max = torch.maximum(sinks, logits_max)
+    sinks = torch.exp(sinks - logits_or_sinks_max)
+    unnormalized_scores = torch.exp(logits - logits_or_sinks_max)
+    normalizer = unnormalized_scores.sum(dim=-1, keepdim=True) + sinks
+    scores = unnormalized_scores / normalizer
+
+    output = torch.einsum("bhmqk,bkhmd->bqhmd", scores, value.float())
+
+    output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups * head_dim).bfloat16()
+    return output
+
+
+def get_attention_sink_interface(backend=None):
+    """
+    Factory function that returns a configured Attention Sink interface.
+
+    This interface is compatible with transformers' eager_attention_forward signature.
+
+    Args:
+        backend: Backend to use (cutile, torch)
+    """
+
+    def attention_sink_interface_wrapper(
+        module: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        scaling: float,
+        dropout: float = 0.0,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Attention Sink implementation compatible with transformers' eager_attention_forward.
+
+        Input format (from transformers):
+            query: [batch, heads, seq_len, head_dim]
+            key: [batch, kv_heads, kv_seq_len, head_dim]
+            value: [batch, kv_heads, kv_seq_len, head_dim]
+
+        Output format (same as eager_attention_forward):
+            output: [batch, seq_len, heads, head_dim]
+        """
+        # Get sinks from module (nn.Parameter with shape [num_heads])
+        sinks = getattr(module, "sinks", None)
+
+        # Get sliding_window from kwargs (passed from GptOssAttention.forward)
+        sliding_window = kwargs.pop("sliding_window", None)
+
+        # Get sequence lengths
+        batch_size, num_heads, seq_len_q, head_dim = query.shape
+        kv_seq_len = key.size(2)
+        num_kv_heads = key.size(1)
+
+        # Get start_q: for decoding, this should be kv_seq_len - seq_len_q
+        # This tells the kernel where the query tokens start in the KV sequence
+        start_q = kwargs.pop("start_q", None)
+        if start_q is None:
+            # For decoding: query is at position (kv_seq_len - seq_len_q)
+            # For prefill: start_q = 0
+            start_pos = kv_seq_len - seq_len_q
+            start_q = torch.tensor([start_pos], dtype=torch.long, device=query.device)
+
+        # Get num_key_value_groups from module
+        num_key_value_groups = getattr(module, "num_key_value_groups", 1)
+
+        # attention_sink expects:
+        #   q: [batch, seq_len, kv_heads, groups, head_dim]
+        #   k: [batch, kv_seq_len, kv_heads, head_dim]
+        #   v: [batch, kv_seq_len, kv_heads, head_dim]
+
+        # Reshape query: [batch, heads, seq_len_q, head_dim] -> [batch, seq_len_q, kv_heads, groups, head_dim]
+        q = query.transpose(1, 2).contiguous()  # [batch, seq_len_q, heads, head_dim]
+        q = q.reshape(batch_size, seq_len_q, num_kv_heads, num_key_value_groups, head_dim)
+
+        # Reshape key, value: [batch, kv_heads, kv_seq_len, head_dim] -> [batch, kv_seq_len, kv_heads, head_dim]
+        k = key.transpose(1, 2).contiguous()  # [batch, kv_seq_len, kv_heads, head_dim]
+        v = value.transpose(1, 2).contiguous()  # [batch, kv_seq_len, kv_heads, head_dim]
+
+        if seq_len_q == 1:
+            from tilegym.ops import attention_sink_decode
+
+            return attention_sink_decode(q, k, v, sinks, scaling, sliding_window, start_q, backend=backend), None
+
+        from tilegym.ops import attention_sink
+
+        output = attention_sink(
+            query=q,
+            key=k,
+            value=v,
+            sinks=sinks,
+            sm_scale=scaling,
+            sliding_window=sliding_window,
+            start_q=start_q,
+            backend=backend,
+        )
+
+        # Reshape output: [batch, seq_len_q, heads * head_dim] -> [batch, seq_len_q, heads, head_dim]
+        output = output.view(batch_size, seq_len_q, num_heads, head_dim)
+
+        return output, None
+
+    return attention_sink_interface_wrapper
+
+
+######################################################################
 ################Multi-head linear attention interface################
 ######################################################################
 

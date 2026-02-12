@@ -676,6 +676,103 @@ def group_gemm(
 
 
 @dispatch(
+    "attention_sink",
+)
+def attention_sink(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sinks: torch.Tensor,
+    sm_scale: float = 0.125,
+    sliding_window: int | None = None,
+    start_q: torch.LongTensor = 0,
+    **kwargs: Any,
+):
+    """
+    Attention with sink tokens operation for efficient KV-cache inference.
+
+    This implements FlashAttention v2 with attention sink support, which maintains
+    a set of "sink" tokens that accumulate attention mass to stabilize long-context
+    generation. Supports optional sliding window (banded) attention.
+
+    Args:
+        query: Query tensor of shape (B, S_q, H_kv, G, D) where:
+            - B: batch size
+            - S_q: number of query tokens
+            - H_kv: number of key-value heads
+            - G: number of query groups per KV head (for GQA)
+            - D: head dimension
+        key: Key tensor of shape (B, S_kv, H_kv, D)
+        value: Value tensor of shape (B, S_kv, H_kv, D)
+        sinks: Attention sink logits of shape (H_kv * G,), representing the
+            pre-softmax attention scores for sink tokens per head
+        sm_scale: Softmax scale factor, typically 1/sqrt(D) (default: 0.125)
+        sliding_window: If specified, applies banded attention where each query
+            only attends to keys within this window size (default: None for full attention)
+        start_q: Starting position offset for queries in the KV sequence,
+            used for KV-cache scenarios where queries correspond to later positions
+        **kwargs: Additional backend-specific arguments
+
+    Returns:
+        Output tensor of shape (B, S_q, H_kv * G * D)
+    """
+    raise NotImplementedError(f"Attention sink is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
+    "attention_sink_decode",
+)
+def attention_sink_decode(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sinks: torch.Tensor,
+    sm_scale: float = 0.125,
+    sliding_window: int | None = None,
+    start_q: torch.LongTensor = 0,
+    kv_len_per_split: int | None = None,
+    **kwargs: Any,
+):
+    """
+    Attention with sink tokens using split-KV algorithm for decode phase.
+
+    This implementation splits the KV cache into multiple chunks and processes
+    them in parallel, then reduces the partial results. This is more efficient
+    for long KV caches during decode where we have a single query token.
+
+    The sink token contribution is incorporated into the first split's LSE,
+    making it compatible with the standard splitk_reduce.
+
+    The number of splits is dynamically determined based on GPU SM count to
+    maximize parallelism and SM utilization.
+
+    Args:
+        query: Query tensor of shape (B, 1, H_kv, G, D) where:
+            - B: batch size
+            - 1: single query token (decode)
+            - H_kv: number of key-value heads
+            - G: number of query groups per KV head (for GQA)
+            - D: head dimension
+        key: Key tensor of shape (B, S_kv, H_kv, D)
+        value: Value tensor of shape (B, S_kv, H_kv, D)
+        sinks: Attention sink logits of shape (H_kv * G,), representing the
+            pre-softmax attention scores for sink tokens per head
+        sm_scale: Softmax scale factor, typically 1/sqrt(D) (default: 0.125)
+        sliding_window: If specified, applies banded attention where each query
+            only attends to keys within this window size (default: None for full attention)
+        start_q: Starting position offset for queries in the KV sequence,
+            used for KV-cache scenarios where queries correspond to later positions
+        kv_len_per_split: Optional, KV length per split (power of 2, >= BLOCK_N).
+            If None, automatically determined based on GPU SM count.
+        **kwargs: Additional backend-specific arguments
+
+    Returns:
+        Output tensor of shape (B, 1, H_kv * G * D)
+    """
+    raise NotImplementedError(f"Attention sink decode is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
     "bmm",
 )
 def bmm(

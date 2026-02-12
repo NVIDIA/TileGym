@@ -14,6 +14,7 @@ End-to-end inference examples for transformer language models accelerated with T
 | DeepSeek-V2-Lite-Chat | `deepseek-ai/DeepSeek-V2-Lite-Chat` | RoPE, SwiGLU, RMSNorm, MoE, MLADecoding*, Attention* |
 | Qwen2-7B | `Qwen/Qwen2-7B` | RoPE, SwiGLU, RMSNorm, Attention* |
 | Gemma-3-4B-IT | `google/gemma-3-4b-it` | RoPE, GEGLU, RMSNorm, Attention* |
+| GPT-OSS | `openai/gpt-oss-20b` | RoPE, RMSNorm, Attention Sink* |
 
 *Optional: Enable with `--use_attn`, we can use attention provided in TileGym
 
@@ -105,6 +106,9 @@ Run benchmark scripts for automated comparison:
 
 # Gemma-3-4B-IT benchmark
 ./bench_gemma3.sh
+
+# GPT-OSS benchmark
+./bench_gpt_oss.sh
 ```
 
 ### Manual Benchmark

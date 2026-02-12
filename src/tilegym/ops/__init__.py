@@ -26,7 +26,9 @@ else:
 from . import moe_interface
 
 # Re-export key interfaces
+from .attn_interface import attention_sink_interface
 from .attn_interface import fmha_interface
+from .attn_interface import get_attention_sink_interface
 from .attn_interface import get_fmha_gemma3_interface
 from .attn_interface import get_fmha_interface
 from .attn_interface import mla_decoding_interface
@@ -44,7 +46,9 @@ __all__ = [
     "moe_interface",
     # Re-exported submodules
     # Key interfaces
+    "attention_sink_interface",
     "fmha_interface",
+    "get_attention_sink_interface",
     "get_fmha_interface",
     "get_fmha_gemma3_interface",
     "mla_interface",

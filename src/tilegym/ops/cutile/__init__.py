@@ -14,6 +14,8 @@ if is_backend_available("cutile"):
     # NN operations
     from . import activation
     from . import attention
+    from . import attention_sink
+    from . import attention_sink_decode
     from . import bmm
     from . import dropout
     from . import flash_decode
@@ -35,6 +37,8 @@ if is_backend_available("cutile"):
     from . import swiglu
 
     # Import specific functions for direct access
+    from .attention_sink import attention_sink
+    from .attention_sink_decode import attention_sink_decode
     from .experimental import mhc
     from .experimental.mhc import mhc_apply_residual
     from .experimental.mhc import mhc_gemm_rms_scale
@@ -60,6 +64,8 @@ if is_backend_available("cutile"):
         "invoke_fused_moe_kernel",
         "moe_align_block_size",
         "attention",
+        "attention_sink",
+        "attention_sink_decode",
         "mla",
         "mla_decoding",
         "get_swiglu_module",

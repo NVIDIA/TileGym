@@ -148,6 +148,59 @@ def apply_tilegym_kernel_to_qwen2(
         ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
 
 
+def apply_tilegym_kernel_to_gpt_oss(
+    rope: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = False,  # Set to False by default since GPT-OSS has custom expert implementation
+    attn: bool = True,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace GPT-OSS models.
+
+    NOTE: GPT-OSS is supported in transformers >= 4.55.0
+    NOTE: SwiGLU patching is disabled by default for GPT-OSS as it uses a custom expert
+          implementation with clamping and MXFP4 quantization.
+
+    Args:
+        rope (bool): Whether to apply TileGym's rotary position embedding. Default is True.
+        rms_norm (bool): Whether to apply TileGym's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply TileGym's SwiGLU MLP. Default is False.
+            Note: GPT-OSS uses a custom expert implementation, so SwiGLU patching is disabled by default.
+        attn (bool): Whether to apply TileGym's attention. Default is True.
+        use_cutile (bool): Whether to use cutile backend. Default is False.
+    """
+    import transformers
+    from packaging import version
+
+    if version.parse(transformers.__version__) < version.parse("4.55.0"):
+        logger.warning("GPT-OSS support requires transformers >= 4.55.0")
+        return
+
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_gpt_oss")
+    logger.info("--------------------------------")
+
+    from transformers.models.gpt_oss import modeling_gpt_oss
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        modeling_gpt_oss.apply_rotary_pos_emb = get_apply_rope_func(model="gpt-oss")
+
+    if rms_norm:
+        modeling_gpt_oss.GptOssRMSNorm = get_rms_norm_module()
+
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        from tilegym.ops import get_attention_sink_interface
+
+        # GPT-OSS uses attention sinks, so we use the attention sink interface
+        modeling_gpt_oss.eager_attention_forward = get_attention_sink_interface()
+
+
 def apply_tilegym_kernel_to_gemma3(
     rope: bool = True,
     rms_norm: bool = True,
@@ -208,6 +261,7 @@ def apply_tilegym_kernel_to_gemma3(
 MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "llama": apply_tilegym_kernel_to_llama,
     "deepseek_v2": apply_tilegym_kernel_to_deepseek_v2,
+    "gpt_oss": apply_tilegym_kernel_to_gpt_oss,
     "qwen2": apply_tilegym_kernel_to_qwen2,
     "gemma3": apply_tilegym_kernel_to_gemma3,
 }
