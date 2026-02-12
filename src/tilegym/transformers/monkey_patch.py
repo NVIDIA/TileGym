@@ -258,10 +258,54 @@ def apply_tilegym_kernel_to_gemma3(
             logger.info("   Registered to: eager, sdpa")
 
 
+def apply_tilegym_kernel_to_mistral(
+    rope: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+    attn: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace Mistral models.
+
+    Mistral uses the same core architecture as Llama (GQA attention with RoPE, SwiGLU MLP,
+    RMSNorm) with the addition of sliding window attention.
+
+    Args:
+        rope (bool): Whether to apply TileGym's rotary position embedding. Default is True.
+        rms_norm (bool): Whether to apply TileGym's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply TileGym's SwiGLU MLP. Default is True.
+        attn (bool): Whether to apply TileGym's attention. Default is True.
+        model (PreTrainedModel): The model instance to apply TileGym kernels to, if the model has already been
+        loaded. Default is None.
+        use_cutile (bool): Whether to apply using cutile. Default is False.
+    """
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_mistral")
+    logger.info("--------------------------------")
+    from transformers.models.mistral import modeling_mistral
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        modeling_mistral.apply_rotary_pos_emb = get_apply_rope_func(model="llama")
+    if rms_norm:
+        modeling_mistral.MistralRMSNorm = get_rms_norm_module()
+    if swiglu:
+        modeling_mistral.MistralMLP = get_swiglu_module()
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
+
+
 MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "llama": apply_tilegym_kernel_to_llama,
     "deepseek_v2": apply_tilegym_kernel_to_deepseek_v2,
     "gpt_oss": apply_tilegym_kernel_to_gpt_oss,
+    "mistral": apply_tilegym_kernel_to_mistral,
     "qwen2": apply_tilegym_kernel_to_qwen2,
     "gemma3": apply_tilegym_kernel_to_gemma3,
 }

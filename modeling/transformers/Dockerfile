@@ -38,9 +38,10 @@ RUN python -m pip install --upgrade pip setuptools wheel
 # Install PyTorch with CUDA 13.0 support
 RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
 
-# Install cuda-tile and accelerate
+# Install cuda-tile and transformers models' dependencies.
 RUN pip install --no-cache-dir cuda-tile && \
-    pip install --no-cache-dir --no-deps accelerate
+    pip install --no-cache-dir --no-deps accelerate && \
+    pip install --no-cache-dir sentencepiece protobuf
 
 WORKDIR /workspace/tilegym
 

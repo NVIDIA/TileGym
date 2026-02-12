@@ -162,6 +162,7 @@ cython_debug/
 
 # Cursor
 .cursorignore
+.vscode/
 
 # intermediate files
 **/temp/

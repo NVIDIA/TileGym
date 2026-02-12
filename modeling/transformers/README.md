@@ -15,6 +15,7 @@ End-to-end inference examples for transformer language models accelerated with T
 | Qwen2-7B | `Qwen/Qwen2-7B` | RoPE, SwiGLU, RMSNorm, Attention* |
 | Gemma-3-4B-IT | `google/gemma-3-4b-it` | RoPE, GEGLU, RMSNorm, Attention* |
 | GPT-OSS | `openai/gpt-oss-20b` | RoPE, RMSNorm, Attention Sink* |
+| Mistral-7B-Instruct-v0.3 | `mistralai/Mistral-7B-Instruct-v0.3` | RoPE, SwiGLU, RMSNorm, Attention* |
 
 *Optional: Enable with `--use_attn`, we can use attention provided in TileGym
 
@@ -109,6 +110,9 @@ Run benchmark scripts for automated comparison:
 
 # GPT-OSS benchmark
 ./bench_gpt_oss.sh
+
+# Mistral-7B benchmark
+./bench_mistral.sh
 ```
 
 ### Manual Benchmark
@@ -194,6 +198,26 @@ python infer.py \
     --use_attn \
     --profile \
     --sentence_file sample_inputs/input_prompt_small.txt \
+    --output_length 100
+```
+
+#### Mistral-7B Benchmark
+```bash
+# PyTorch baseline
+python infer.py \
+    --model_id mistralai/Mistral-7B-Instruct-v0.3 \
+    --profile \
+    --sentence_file sample_inputs/input_prompt_32K.txt \
+    --output_length 100
+
+# TileGym CUTILE backend
+python infer.py \
+    --model_id mistralai/Mistral-7B-Instruct-v0.3 \
+    --use_tilegym \
+    --use_cutile \
+    --use_attn \
+    --profile \
+    --sentence_file sample_inputs/input_prompt_32K.txt \
     --output_length 100
 ```
 

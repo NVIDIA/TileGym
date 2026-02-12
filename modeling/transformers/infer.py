@@ -20,6 +20,7 @@ from tilegym.transformers import apply_tilegym_kernel_to_deepseek_v2
 from tilegym.transformers import apply_tilegym_kernel_to_gemma3
 from tilegym.transformers import apply_tilegym_kernel_to_gpt_oss
 from tilegym.transformers import apply_tilegym_kernel_to_llama
+from tilegym.transformers import apply_tilegym_kernel_to_mistral
 from tilegym.transformers import apply_tilegym_kernel_to_qwen2
 
 
@@ -214,6 +215,8 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         )
     elif "gpt-oss" in model_name:
         apply_tilegym_kernel_to_gpt_oss(rope=True, rms_norm=True, swiglu=False, attn=use_attn, use_cutile=use_cutile)
+    elif "mistral" in model_name:
+        apply_tilegym_kernel_to_mistral(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     elif "qwen" in model_name:
         apply_tilegym_kernel_to_qwen2(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     elif "gemma" in model_name:
