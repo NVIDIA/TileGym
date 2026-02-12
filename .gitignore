@@ -163,6 +163,9 @@ cython_debug/
 # Cursor
 .cursorignore
 
+# Vendored at wheel build time (scripts/vendor_cuda_tile_experimental.py)
+src/cuda/
+
 # intermediate files
 **/temp/
 **/cuda-driver/

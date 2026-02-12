@@ -35,6 +35,7 @@ jobs:
       image_tag: ${{ steps.parse.outputs.image_tag }}
       image_name: ${{ steps.parse.outputs.image_name }}
       is_pr: ${{ steps.context.outputs.is_pr }}
+      pr_number: ${{ fromJSON(steps.pr.outputs.result).prNumber }}
     steps:
       - name: Determine context
         id: context
@@ -155,13 +156,39 @@ jobs:
           # Pass through image name from context
           echo "image_name=${{ steps.context.outputs.image_name }}" >> $GITHUB_OUTPUT
 
+  get-version:
+    name: get-dev-version
+    needs: config
+    if: needs.config.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate dev version
+        id: version
+        env:
+          PR_NUMBER: ${{ needs.config.outputs.pr_number }}
+        run: |
+          # Use get_version.py script to generate appropriate dev version
+          CONTEXT="${{ needs.config.outputs.is_pr == 'true' && 'pr' || 'nightly' }}"
+          python .github/scripts/get_version.py --context $CONTEXT --output-format github
+
   build-wheel:
     name: build-python-wheels
-    needs: config
+    needs: [config, get-version]
     if: needs.config.outputs.build == 'true'
     uses: ./.github/workflows/build-wheel.yml
     with:
       package-name: tilegym
+      version: ${{ needs.get-version.outputs.version }}  # Use dynamic dev version
+      # Vendor cuda-tile-experimental into the wheel so pip install wheel works without extra step
+      pre-build-script: scripts/vendor_cuda_tile_experimental.py
+      # Ensure the vendored package made it into the wheel
+      wheel-contents-check-script: scripts/check_wheel_contains_cuda_tile_experimental.py
       # Artifact naming: PR builds -> tilegym-pr-wheel-{sha}, Main -> tilegym-wheel-{sha}
       artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
       python-versions: '["3.10", "3.11", "3.12"]'  # Build for multiple Python versions
