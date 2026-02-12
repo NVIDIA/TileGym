@@ -195,6 +195,7 @@ jobs:
       architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
       retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
+      check-wheel-contents-ignore: 'W009'  # Multiple toplevel (cuda/ + tilegym/) intentional: vendored cuda.tile_experimental
       # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
       # runner-x86-64: [self-hosted, linux, x64, gpu]
 

@@ -46,8 +46,13 @@ WORKDIR /workspace/tilegym
 
 ####################
 # Stage 2: Wheel install (for CI)
+# CI must use: docker build --target wheel ...
 ####################
 FROM base AS wheel
+
+# Explicit marker so image and build logs show we used the wheel path (not source)
+LABEL tilegym.install=wheel
+RUN echo "TileGym Docker: installing from pre-built wheel (CI path)"
 
 # Copy and install pre-built wheel
 COPY wheel/*.whl /tmp/
