@@ -27,6 +27,28 @@ def relu(x: torch.Tensor) -> torch.Tensor:
 
 
 @dispatch(
+    "geglu",
+)
+def geglu(input: torch.Tensor, dim: int = -1, approximate: str = "none") -> torch.Tensor:
+    """
+    Applies the Gated GELU (GEGLU) activation function.
+
+    GEGLU(x) = a ⊗ GELU(b)
+    where a is the first half of the input and b is the second half,
+    split along the specified dimension.
+
+    Args:
+        input: Input tensor
+        dim: Dimension along which to split the input (default: -1)
+        approximate: The approximation type for GELU. Can be 'none' or 'tanh'
+
+    Returns:
+        Output tensor with GEGLU applied
+    """
+    raise NotImplementedError(f"geglu is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "gelu",
 )
 def gelu(x: torch.Tensor, approximate: str = "none") -> torch.Tensor:

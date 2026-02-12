@@ -221,7 +221,7 @@ def apply_rope_base(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 @register_impl("get_apply_rope_func", backend="cutile")
 def get_apply_rope_func(model="llama"):
-    if model == "llama" or model == "qwen2":
+    if model == "llama" or model == "qwen2" or model == "gemma3" or model == "gpt-oss":
         return apply_rope_base
     elif model == "deepseek":
 

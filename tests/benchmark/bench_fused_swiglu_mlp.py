@@ -17,7 +17,7 @@ import triton.testing
 
 import tilegym
 from tilegym.backend import is_backend_available
-from tilegym.ops.fused_swiglu import PartiallyFusedSwiGLUMLP
+from tilegym.ops.fused_mlp import PartiallyFusedSwiGLUMLP
 
 
 class MockConfig:

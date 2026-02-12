@@ -55,6 +55,22 @@ def standard_normal_cdf_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     return ct.mul(half, one_plus_erf)
 
 
+def standard_normal_pdf_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
+    # pdf = (1/√(2π)) * exp(-0.5 * x²)
+    inverse_sqrt_2_pi = 0.3989422804014327  # new var
+    half = ct.full((BLOCK_SIZE,), 0.5, dtype=x_val.dtype)  # new var
+    inverse_sqrt_2_pi_tensor = ct.full((BLOCK_SIZE,), inverse_sqrt_2_pi, dtype=x_val.dtype)  # new var
+
+    x_squared = ct.mul(x_val, x_val)  # new var
+    neg_half_x_squared = ct.negative(ct.mul(half, x_squared))  # new var
+    # Convert to float32 for exp computation, then back
+    neg_half_x_squared_f32 = ct.astype(neg_half_x_squared, ct.float32)  # new var
+    exp_val = ct.exp(neg_half_x_squared_f32)  # new var
+    exp_val = ct.astype(exp_val, x_val.dtype)  # new var
+
+    return ct.mul(inverse_sqrt_2_pi_tensor, exp_val)
+
+
 def gelu_tanh_fwd_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     # f(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
     sqrt_2_div_pi = 0.7978845608028654  # new var

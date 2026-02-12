@@ -13,6 +13,7 @@ End-to-end inference examples for transformer language models accelerated with T
 | LLaMA-3.1-8B | `meta-llama/Meta-Llama-3.1-8B` | RoPE, SwiGLU, RMSNorm, Attention*, Flash Decoding* |
 | DeepSeek-V2-Lite-Chat | `deepseek-ai/DeepSeek-V2-Lite-Chat` | RoPE, SwiGLU, RMSNorm, MoE, MLADecoding*, Attention* |
 | Qwen2-7B | `Qwen/Qwen2-7B` | RoPE, SwiGLU, RMSNorm, Attention* |
+| Gemma-3-4B-IT | `google/gemma-3-4b-it` | RoPE, GEGLU, RMSNorm, Attention* |
 
 *Optional: Enable with `--use_attn`, we can use attention provided in TileGym
 
@@ -101,6 +102,9 @@ Run benchmark scripts for automated comparison:
 
 # Qwen2-7B benchmark
 ./bench_qwen.sh
+
+# Gemma-3-4B-IT benchmark
+./bench_gemma3.sh
 ```
 
 ### Manual Benchmark
@@ -166,6 +170,26 @@ python infer.py \
     --profile \
     --sentence_file sample_inputs/input_prompt_small.txt \
     --batch_size 16 \
+    --output_length 100
+```
+
+#### Gemma-3-4B-IT Benchmark
+```bash
+# PyTorch baseline
+python infer.py \
+    --model_id google/gemma-3-4b-it \
+    --profile \
+    --sentence_file sample_inputs/input_prompt_small.txt \
+    --output_length 100
+
+# TileGym CUTILE backend
+python infer.py \
+    --model_id google/gemma-3-4b-it \
+    --use_tilegym \
+    --use_cutile \
+    --use_attn \
+    --profile \
+    --sentence_file sample_inputs/input_prompt_small.txt \
     --output_length 100
 ```
 

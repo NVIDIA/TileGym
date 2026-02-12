@@ -27,6 +27,7 @@ from . import moe_interface
 
 # Re-export key interfaces
 from .attn_interface import fmha_interface
+from .attn_interface import get_fmha_gemma3_interface
 from .attn_interface import get_fmha_interface
 from .attn_interface import mla_decoding_interface
 from .attn_interface import mla_interface
@@ -45,6 +46,7 @@ __all__ = [
     # Key interfaces
     "fmha_interface",
     "get_fmha_interface",
+    "get_fmha_gemma3_interface",
     "mla_interface",
     "mla_decoding_interface",
     "fused_moe_kernel_interface",
