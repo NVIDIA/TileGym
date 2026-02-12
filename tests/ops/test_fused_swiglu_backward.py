@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 import tilegym
 from tilegym import set_backend
-from tilegym.ops.fused_swiglu import PartiallyFusedSwiGLUMLP
+from tilegym.ops.fused_mlp import PartiallyFusedSwiGLUMLP
 
 from .. import common
 

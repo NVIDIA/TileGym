@@ -148,10 +148,68 @@ def apply_tilegym_kernel_to_qwen2(
         ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
 
 
+def apply_tilegym_kernel_to_gemma3(
+    rope: bool = True,
+    rms_norm: bool = True,
+    mlp: bool = True,
+    attn: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace Gemma3 models
+
+    Args:
+        rope (bool): Whether to apply TileGym's rotary position embedding. Default is True.
+        rms_norm (bool): Whether to apply TileGym's RMSNorm. Default is True.
+        mlp (bool): Whether to apply TileGym's MLP (GEGLU). Default is True.
+        attn (bool): Whether to apply TileGym's attention. Default is True.
+        model (PreTrainedModel): The model instance to apply TileGym kernels to, if the model has already been
+        loaded. Default is None.
+        use_cutile (bool): Whether to apply using cutile. Default is False.
+    """
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_gemma3")
+    logger.info("--------------------------------")
+    from transformers.models.gemma3 import modeling_gemma3 as modeling_gemma
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        modeling_gemma.apply_rotary_pos_emb = get_apply_rope_func(model="gemma3")
+    if rms_norm:
+        modeling_gemma.Gemma3RMSNorm = get_rms_norm_module(model="gemma3")
+    if mlp:
+        # Use PartiallyFusedGEGLUMLP for Gemma3 which uses GELU activation
+        from tilegym.ops.fused_mlp import PartiallyFusedGEGLUMLP
+
+        modeling_gemma.Gemma3MLP = PartiallyFusedGEGLUMLP
+        logger.info("✅ Replaced Gemma3MLP with PartiallyFusedGEGLUMLP (GEGLU fusion)")
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        from tilegym.ops import get_fmha_gemma3_interface
+
+        gemma3_interface = get_fmha_gemma3_interface()
+
+        ALL_ATTENTION_FUNCTIONS["eager"] = gemma3_interface
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = gemma3_interface
+
+        if hasattr(modeling_gemma, "eager_attention_forward"):
+            modeling_gemma.eager_attention_forward = gemma3_interface
+            logger.info("✅ Replaced Gemma3 attention with TileGym FMHA (soft cap + sliding window)")
+            logger.info("   Registered to: eager, sdpa, and replaced eager_attention_forward")
+        else:
+            logger.info("✅ Replaced Gemma3 attention with TileGym FMHA (soft cap + sliding window)")
+            logger.info("   Registered to: eager, sdpa")
+
+
 MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "llama": apply_tilegym_kernel_to_llama,
     "deepseek_v2": apply_tilegym_kernel_to_deepseek_v2,
     "qwen2": apply_tilegym_kernel_to_qwen2,
+    "gemma3": apply_tilegym_kernel_to_gemma3,
 }
 
 

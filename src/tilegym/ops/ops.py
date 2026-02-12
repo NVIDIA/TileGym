@@ -118,7 +118,7 @@ def get_fused_swiglu_module():
     Returns:
         PartiallyFusedSwiGLUMLP class
     """
-    from tilegym.ops.fused_swiglu import PartiallyFusedSwiGLUMLP
+    from tilegym.ops.fused_mlp import PartiallyFusedSwiGLUMLP
 
     return PartiallyFusedSwiGLUMLP
 
@@ -153,7 +153,7 @@ def rms_norm(
 @dispatch(
     "get_rms_norm_module",
 )
-def get_rms_norm_module():
+def get_rms_norm_module(model: str = "llama"):
     """
     Returns the RMSNorm module class.
     """
@@ -560,6 +560,53 @@ def mhc_sinkhorn(
         torch.Tensor: Output matrix (M, N)
     """
     raise NotImplementedError(f"mhc_sinkhorn is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "gemma_attention",
+)
+def gemma_attention(
+    q,
+    k,
+    v,
+    scaling=None,
+    window_size=0,
+    soft_cap=None,
+    is_causal=True,
+    **kwargs,
+):
+    raise NotImplementedError(f"gemma_attention is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "gemma_attention_decode",
+)
+def gemma_attention_decode(
+    q,
+    k,
+    v,
+    scaling=None,
+    window_size=0,
+    soft_cap=None,
+    **kwargs,
+):
+    """
+    Gemma-specific attention decode kernel optimized for seq_len_q=1.
+
+    Uses Split-K parallelization for efficient processing of long KV sequences.
+
+    Args:
+        q: Query tensor [B, H, 1, D]
+        k: Key tensor [B, H_kv, S, D]
+        v: Value tensor [B, H_kv, S, D]
+        scaling: Attention scaling (default: 1/sqrt(d))
+        window_size: Sliding window size (0 for global attention)
+        soft_cap: Soft cap value (None for no soft cap)
+
+    Returns:
+        Output tensor [B, H, 1, D]
+    """
+    raise NotImplementedError(f"gemma_attention_decode is not implemented for {get_current_backend()}")
 
 
 # ============================================================================

@@ -143,9 +143,15 @@ def rms_norm_kernel_gather(
     Rstd,
     N: ct.Constant[int],
     eps: ct.Constant[float],
+    offset: ct.Constant[float],
     TILE_SIZE: ct.Constant[int],
 ):
-    """Standard RMSNorm kernel for non-static persistent mode with ptr loads"""
+    """
+    Standard RMSNorm kernel for non-static persistent mode with ptr loads
+
+    Formula: y = norm(x) * (offset + w)
+    For Llama: offset=0.0, For Gemma3: offset=1.0
+    """
     row = ct.bid(0)
     _rms = ct.full((TILE_SIZE,), 0.0, dtype=ct.float32)
     num_tiles = ct.cdiv(N, TILE_SIZE)
@@ -167,7 +173,8 @@ def rms_norm_kernel_gather(
         wj = ct.astype(wj, ct.float32)
         xj = ct.gather(x, (row, offs), latency=1)
         xj = ct.astype(xj, ct.float32)
-        yj = xj * rms * wj
+        # Apply offset: y = x_normalized * (offset + w)
+        yj = xj * rms * (offset + wj)
         yj = ct.astype(yj, x.dtype)
         ct.scatter(out, (row, offs), yj, latency=1)
 
@@ -180,11 +187,15 @@ def rms_norm_kernel_static_persistent(
     TILE_SIZE_M: ct.Constant[int],  # rows per tile
     TILE_SIZE_N: ct.Constant[int],  # columns per tile
     eps: ct.Constant[float],  # Epsilon value
+    offset: ct.Constant[float],  # Offset value
 ):
     """
     CuTile static persistent RMSNorm kernel that uses a persistent approach,
     where NUM_SMS tile blocks are launched and each tile block processes multiple output tiles
     for better efficiency.
+
+    Formula: y = norm(x) * (offset + w)
+    For Llama: offset=0.0, For Gemma3: offset=1.0
     """
     # Get program ID
     bid = ct.bid(0)
@@ -230,14 +241,16 @@ def rms_norm_kernel_static_persistent(
         # Step 5: Apply normalization
         x_normalized = ct.mul(x, rsqrt_var)
 
-        # Step 6: Apply linear transformation
+        # Step 6: Apply linear transformation with offset
         # Broadcast weight to match input shape
         w_broadcasted = ct.reshape(w, (1, TILE_SIZE_N))
-        b_broadcasted = ct.full((1, TILE_SIZE_N), 0.0, dtype=ct.float32)
 
-        # Apply linear transformation: y = x_normalized * w + b
-        y = ct.mul(x_normalized, w_broadcasted)
-        y = ct.add(y, b_broadcasted)
+        # Apply offset to weight: (offset + w)
+        offset_tensor = ct.full((1, TILE_SIZE_N), offset, dtype=ct.float32)
+        w_with_offset = ct.add(offset_tensor, w_broadcasted)
+
+        # Apply linear transformation: y = x_normalized * (offset + w)
+        y = ct.mul(x_normalized, w_with_offset)
 
         # Convert back to original dtype
         y = ct.astype(y, X.dtype)
@@ -262,6 +275,7 @@ class RMSNorm(torch.autograd.Function):
         eps,
         bias=None,
         static_persistent=None,
+        offset=0.0,
     ):
         """
         Unified RMSNorm forward pass supporting both standard and static persistent modes.
@@ -273,6 +287,7 @@ class RMSNorm(torch.autograd.Function):
             eps: Epsilon value for numerical stability
             bias: Bias tensor of shape [N], default is None
             static_persistent: Whether to use static persistent kernel, default is False
+            offset: Offset to add to weight (default 0.0 for Llama, 1.0 for Gemma3)
 
         Returns:
             Normalized and transformed tensor of same shape as input
@@ -331,7 +346,7 @@ class RMSNorm(torch.autograd.Function):
                 torch.cuda.current_stream(),
                 grid,
                 kernel_sp,
-                (x_arg, y, weight, TILE_SIZE_M, TILE_SIZE_N, eps),
+                (x_arg, y, weight, TILE_SIZE_M, TILE_SIZE_N, eps, offset),
             )
         else:
             # Standard mode
@@ -354,6 +369,7 @@ class RMSNorm(torch.autograd.Function):
                     rstd,
                     N,
                     eps,
+                    offset,
                     TILE_SIZE,
                 ),
             )
@@ -362,6 +378,7 @@ class RMSNorm(torch.autograd.Function):
             ctx.save_for_backward(x, weight, rstd)
             ctx.TILE_SIZE = TILE_SIZE
             ctx.eps = eps
+            ctx.offset = offset
 
         return y.view(*x.shape)
 
@@ -371,17 +388,21 @@ class RMSNorm(torch.autograd.Function):
         Backward pass for RMSNorm.
         Retrieves saved tensors and delegates to rms_norm_backward().
         """
+        # Check if offset was used (backward not supported with non-zero offset)
+        if ctx.offset != 0.0:
+            raise NotImplementedError("Backward pass not implemented for CuTile RMSNorm with non-zero offset")
+
         x, weight, rstd = ctx.saved_tensors
 
         # Call the standalone backward function
         dx, dw = rms_norm_backward(x, dy, weight, rstd)
 
-        # Return gradients: (x, normalized_shape, weight, eps, bias, static_persistent)
-        return dx, None, dw, None, None, None
+        # Return gradients: (x, normalized_shape, weight, eps, bias, static_persistent, offset)
+        return dx, None, dw, None, None, None, None
 
 
 @register_impl("rms_norm", backend="cutile")
-def rms_norm(input, normalized_shape, weight, eps, bias=None, static_persistent=None, **kwargs):
+def rms_norm(input, normalized_shape, weight, eps, bias=None, static_persistent=None, offset=0.0, **kwargs):
     """
     Root mean square normalization implemented using CUDA Tile
 
@@ -392,27 +413,30 @@ def rms_norm(input, normalized_shape, weight, eps, bias=None, static_persistent=
         eps: Small constant added to variance calculation
         bias: Bias tensor of shape (N,), default is None (not supported in cutile)
         static_persistent: Whether to use static persistent kernel, default is False
+        offset: Offset to add to weight (default 0.0 for Llama, 1.0 for Gemma3)
         **kwargs: Additional arguments for backend-specific configurations
 
     Returns:
         Normalized tensor with same shape as input
     """
-    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, static_persistent)
+    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, static_persistent, offset)
 
 
 class TileRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, hidden_size, eps=1e-6, offset=0.0):
         """
         RMSNorm implementation using CUDA Tile
 
         Args:
             hidden_size: Size of the hidden dimension
             eps: Epsilon value for numerical stability
+            offset: Offset value (default: 0.0 for standard RMSNorm, 1.0 for Gemma3)
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
         self.hidden_size = hidden_size
+        self.offset = offset
 
     def forward(self, hidden_states, static_persistent=None):
         """
@@ -429,6 +453,7 @@ class TileRMSNorm(nn.Module):
             self.weight,
             self.variance_epsilon,
             static_persistent=static_persistent,
+            offset=self.offset,
         )
 
     def forward_torch(self, hidden_states):
@@ -437,7 +462,7 @@ class TileRMSNorm(nn.Module):
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return (self.offset + self.weight) * hidden_states.to(input_dtype)
 
     @staticmethod
     def compute_rstd_torch(x: torch.Tensor, eps: float) -> torch.Tensor:
@@ -496,9 +521,30 @@ class TileRMSNorm(nn.Module):
         return dx, dw
 
     def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}, offset={self.offset}"
+
+
+class RMSNormForGemma3(TileRMSNorm):
+    """
+    RMSNorm implementation for Gemma3 models using CuTile backend.
+
+    Gemma3 uses 'dim' parameter name instead of 'hidden_size', and initializes
+    weights with zeros instead of ones, with offset=1.0.
+    """
+
+    def __init__(self, dim, eps=0.000001, offset=1.0, casting_mode="gemma", init_fn="zeros", in_place=False):
+        # Initialize parent with offset
+        super().__init__(hidden_size=dim, eps=eps, offset=offset)
+        # Override weight initialization to zeros for Gemma3
+        self.weight = nn.Parameter(torch.zeros(dim))
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}, offset={self.offset}"
 
 
 @register_impl("get_rms_norm_module", backend="cutile")
-def get_rms_norm_module():
-    return TileRMSNorm
+def get_rms_norm_module(model: str = "llama"):
+    if model == "gemma3":
+        return RMSNormForGemma3
+    else:
+        return TileRMSNorm

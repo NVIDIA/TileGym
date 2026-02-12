@@ -17,6 +17,8 @@ if is_backend_available("cutile"):
     from . import bmm
     from . import dropout
     from . import flash_decode
+    from . import gemma_attention
+    from . import gemma_attention_decode
     from . import group_gemm
     from . import layer_norm_legacy
     from . import matmul
