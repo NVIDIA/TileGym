@@ -49,12 +49,13 @@ We have verified that `torch==2.9.1` works. You can also get `triton` packages w
 
 #### 2. Install TileGym
 
+**From source (recommended for development):**
 ```bash
 git clone <tilegym-repository-url>
 cd tilegym
 pip install .
 ```
-It will automatically install `cuda-tile`, see https://github.com/nvidia/cutile-python.
+This will install `cuda-tile` and `cuda-tile-experimental` (from git). See https://github.com/nvidia/cutile-python.
 
 If you want to use edit mode for `TileGym`, run `pip install -e .`
 

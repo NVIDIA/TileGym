@@ -56,10 +56,23 @@ on:
         required: false
         type: string
         default: ''
+      wheel-contents-check-script:
+        description: 'Optional path to a script (relative to repo root) to run after building to validate wheel contents (e.g. check bundled binaries). Run with: python <path>; script can take no args and find dist/*.whl itself, or receive wheel path. Exit 0 = pass.'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Optional version to override setup.py version (e.g., "1.0.0rc1", "1.0.0.dev20260211+abc123"). If not provided, uses version from setup.py.'
+        required: false
+        type: string
+        default: ''
     outputs:
       artifact-name:
         description: 'Name of the uploaded wheel artifact (base name, without version suffix)'
         value: ${{ jobs.build-wheel.outputs.artifact-name }}
+      version:
+        description: 'Version used to build the wheel'
+        value: ${{ jobs.build-wheel.outputs.version }}
 
 permissions:
   contents: read
@@ -74,6 +87,7 @@ jobs:
         arch: ${{ fromJSON(inputs.architectures) }}
     outputs:
       artifact-name: ${{ steps.artifact.outputs.base-name }}
+      version: ${{ steps.get-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,12 +100,32 @@ jobs:
         if: ${{ inputs.pre-build-script != '' }}
         run: python ${{ inputs.pre-build-script }}
 
+      - name: Override version in setup.py
+        if: ${{ inputs.version != '' }}
+        run: |
+          echo "Overriding version to: ${{ inputs.version }}"
+          sed -i.bak 's/version="[^"]*"/version="${{ inputs.version }}"/' setup.py
+          echo "Updated setup.py:"
+          grep 'version=' setup.py
+          rm setup.py.bak
+
+      - name: Get version from setup.py
+        id: get-version
+        run: |
+          VERSION=$(python -c "import re; content=open('setup.py').read(); match=re.search(r'version=\"([^\"]+)\"', content); print(match.group(1) if match else 'unknown')")
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "📦 Building wheel with version: ${VERSION}"
+
       - name: Build wheel
         run: |
           pip install build
           python -m build --wheel
           ls -lh dist/
           echo "Built wheel for Python ${{ matrix.python-version }}"
+
+      - name: Check wheel contents
+        if: ${{ inputs.wheel-contents-check-script != '' }}
+        run: python ${{ inputs.wheel-contents-check-script }}
 
       - name: Validate wheel
         run: |

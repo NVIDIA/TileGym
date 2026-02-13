@@ -8,6 +8,11 @@ import setuptools
 
 README = (pathlib.Path(__file__).parent / "README.md").read_text()
 
+# When building a wheel with vendored cuda-tile-experimental (see scripts/vendor_cuda_tile_experimental.py),
+# include only cuda.tile_experimental (the API we vendor), not the top-level cuda namespace.
+packages = list(setuptools.find_packages(where="src"))
+if pathlib.Path("src/cuda/tile_experimental").exists():
+    packages.append("cuda.tile_experimental")
 
 setuptools.setup(
     name="tilegym",
@@ -17,7 +22,7 @@ setuptools.setup(
     long_description=README,
     long_description_content_type="text/markdown",
     url="",
-    packages=setuptools.find_packages(where="src"),
+    packages=packages,
     package_dir={"": "src"},
     license="MIT",
     classifiers=[
@@ -38,8 +43,8 @@ setuptools.setup(
         "pytest",
         "numpy",
         "cuda-tile",
-        "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental",
-        # 'nvidia-ml-py', # optional
+        # cuda-tile-experimental: vendored into CI-built wheels; for source install see README.
+        # 'nvidia-ml-py',  # optional
     ],
     extras_require={
         "dev": [
