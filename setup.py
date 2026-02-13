@@ -16,7 +16,7 @@ setuptools.setup(
     description="TileGym",
     long_description=README,
     long_description_content_type="text/markdown",
-    url="",
+    url="https://github.com/NVIDIA/tilegym",
     packages=setuptools.find_packages(where="src"),
     package_dir={"": "src"},
     license="MIT",
