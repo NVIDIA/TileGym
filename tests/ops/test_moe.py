@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tilegym import set_backend
+from tilegym.ops.moe_interface import fused_moe
 
 from .. import common
 
@@ -156,12 +157,11 @@ class Test_MOE(common.PyTestCase):
         topk_weights = topk_weights.contiguous()
         topk_ids = topk_ids.contiguous()
 
-        # Define wrapper for fused_moe_kernel_interface
+        # Define wrapper for fused_moe
         from tilegym.ops.moe_interface import fused_experts_impl
-        from tilegym.ops.moe_interface import fused_moe_kernel_interface
 
         def moe_wrapper(hidden_states, w1, w2, topk_weights, topk_ids):
-            return fused_moe_kernel_interface(
+            return fused_moe(
                 hidden_states,
                 w1,
                 w2,
@@ -170,27 +170,12 @@ class Test_MOE(common.PyTestCase):
             )
 
         def moe_wrapper_fp8(hidden_states, w1, w2, topk_weights, topk_ids):
-            kernel_configs = {
-                "BLOCK_SIZE_M": 128,
-                "BLOCK_SIZE_N": quant_block,
-                "BLOCK_SIZE_K": quant_block,
-                "GROUP_SIZE_M": 32,
-                "num_warps": 8,
-                "num_stages": 4,
-            }
-
-            return fused_experts_impl(
-                hidden_states_fp8,
-                w1_fp8,
-                w2_fp8,
+            return fused_moe(
+                hidden_states,
+                w1,
+                w2,
                 topk_weights,
                 topk_ids,
-                inplace=False,
-                use_fp8_w8a8=True,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=hidden_states_scale,
-                config=kernel_configs,
             )
 
         # Set tolerances based on dtype

@@ -33,7 +33,7 @@ from .attn_interface import get_fmha_gemma3_interface
 from .attn_interface import get_fmha_interface
 from .attn_interface import mla_decoding_interface
 from .attn_interface import mla_interface
-from .moe_interface import fused_moe_kernel_interface
+from .moe_interface import fused_moe
 
 # Import all operation interfaces from the unified ops module
 from .ops import *
@@ -53,7 +53,7 @@ __all__ = [
     "get_fmha_gemma3_interface",
     "mla_interface",
     "mla_decoding_interface",
-    "fused_moe_kernel_interface",
+    "fused_moe",
 ]
 
 # Add cutile to exports only if successfully imported
