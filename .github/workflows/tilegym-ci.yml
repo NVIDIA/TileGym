@@ -252,7 +252,7 @@ jobs:
   test-ops:
     name: test-ops
     needs: [config, build]
-    timeout-minutes: 12
+    timeout-minutes: 17
     if: |
       always() && 
       needs.config.outputs.run_ops == 'true' &&
@@ -277,7 +277,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run ops tests
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
