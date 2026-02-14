@@ -21,7 +21,7 @@ if version.parse(current_version) < version.parse(REQUIRED_TRANSFORMERS_VERSION)
     raise ImportError("In new transformers version, past_key_value is named to past_key_values")
 
 from tilegym.logger import get_logger
-from tilegym.ops import fused_moe_kernel_interface
+from tilegym.ops import fused_moe
 from tilegym.ops import get_fused_swiglu_module
 from tilegym.ops import group_gemm
 from tilegym.ops import mla_interface
@@ -311,7 +311,7 @@ class DeepseekV2MoETileGym(nn.Module):
         self.init = True
 
     def moe_infer(self, x, topk_ids, topk_weight):
-        out = fused_moe_kernel_interface(
+        out = fused_moe(
             x,
             w1=self.w13_merged,
             w2=self.w2_merged,

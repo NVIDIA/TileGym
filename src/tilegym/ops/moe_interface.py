@@ -73,15 +73,31 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
-    config: Optional[dict] = None,
 ):
     """
+    Standard MoE implementation with chunked execution.
+
     hidden_states: [batch_size * seq_len, moe_intermediate_size] (9, 2048)
     w1: [n_experts, moe_intermediate_size, 2 * hidden_size] (64, 1408 * 2, 2048)
     w2: [n_experts, hidden_size, moe_intermediate_size] (64, 2048, 1408)
     topk_weights: [batch_size * seq_len, top_k] (9, 6)
     topk_ids: [batch_size * seq_len, top_k] (9, 6)
     """
+    _backend = get_current_backend()
+    if _backend == "cutile":
+        config = {
+            "TILE_SIZE_M": 128,
+            "TILE_SIZE_N": 128,
+            "TILE_SIZE_K": 64,
+            "GROUP_SIZE_M": 32,
+            "num_warps": 8,
+            "num_stages": 4,
+        }
+        # Override block sizes to match scale tensor shapes for FP8
+        if use_fp8_w8a8 and w1_scale is not None:
+            _, N, K = w1.shape
+            config["TILE_SIZE_N"] = N // w1_scale.shape[1]
+            config["TILE_SIZE_K"] = K // w1_scale.shape[2]
     device = hidden_states.device
     if not w1.is_cuda:
         w1 = w1.to(device)
@@ -238,38 +254,49 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-def fused_moe_kernel_interface(
+def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
-    activation: str = "silu",
-):
+) -> torch.Tensor:
     """
-    hidden_states: [batch_size, top_k, moe_intermediate_size]
-    topk_ids: [batch_size, top_k]
-    topk_weights: [batch_size, top_k]
-    """
-    backend = get_current_backend()
-    if backend == "cutile":
-        kernel_configs = {
-            "TILE_SIZE_M": 128,
-            "TILE_SIZE_N": 128,
-            "TILE_SIZE_K": 64,
-            "GROUP_SIZE_M": 32,
-            "num_warps": 8,
-            "num_stages": 4,
-        }
-    assert activation == "silu", "Only silu is supported for now"
+    Unified MoE kernel interface.
 
+    Args:
+        hidden_states: Input activations [batch_size * seq_len, hidden_size]
+        w1: Expert gate+up weights [n_experts, intermediate_size*2, hidden_size]
+        w2: Expert down weights [n_experts, hidden_size, intermediate_size]
+        topk_weights: Router weights [batch_size * seq_len, top_k]
+        topk_ids: Selected expert IDs [batch_size * seq_len, top_k]
+
+    Returns:
+        Output tensor [batch_size * seq_len, hidden_size]
+
+
+    Examples:
+        # Standard FP16/BF16 MoE
+        >>> out = fused_moe(hidden, w1, w2, topk_weights, topk_ids)
+    """
+    return _call_fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids)
+
+
+def _call_fused_experts_impl(
+    hidden_states,
+    w1,
+    w2,
+    topk_weights,
+    topk_ids,
+):
+    """Standard implementation (no quantization - FP16/BF16)."""
+    inplace = False
     return fused_experts_impl(
         hidden_states,
         w1,
         w2,
         topk_weights,
         topk_ids,
-        inplace,
-        config=kernel_configs,
+        inplace=inplace,
+        use_fp8_w8a8=False,
     )
