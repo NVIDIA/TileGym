@@ -116,9 +116,7 @@ def rms_norm_kernel_static_persistent(
         rsqrt_var = ct.rsqrt(variance_eps)
 
         # Store rstd for backward pass
-        ct.store(Rstd, index=(current_bid,),
-                 tile=ct.reshape(rsqrt_var, (TILE_SIZE_M,)),
-                 allow_tma=False)
+        ct.store(Rstd, index=(current_bid,), tile=ct.reshape(rsqrt_var, (TILE_SIZE_M,)), allow_tma=False)
 
         # Step 5: Apply normalization
         x_normalized = ct.mul(x, rsqrt_var)
@@ -148,8 +146,7 @@ def rms_norm_kernel_static_persistent(
 
 
 @ct.kernel(occupancy=1)
-def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial,
-             TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
+def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
     """
     Persistent RMSNorm backward — grid-stride loop with fused dw accumulation.
 
@@ -163,21 +160,18 @@ def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial,
     blocks = ct.num_blocks(0)
     upper = (M + TILE_M - 1) // TILE_M
 
-    w = ct.astype(ct.load(weight, index=(0,), shape=(TILE_N,),
-                          padding_mode=ct.PaddingMode.ZERO), ct.float32)
+    w = ct.astype(ct.load(weight, index=(0,), shape=(TILE_N,), padding_mode=ct.PaddingMode.ZERO), ct.float32)
     w = ct.reshape(w, (1, TILE_N))
     rcp = ct.full((TILE_M, 1), 1.0 / N, dtype=ct.float32)
     dw_acc = ct.full((1, TILE_N), 0.0, dtype=ct.float32)
 
     for i in range(bid, upper, blocks):
         xt = ct.astype(
-            ct.load(x, index=(i, 0), shape=(TILE_M, TILE_N),
-                    padding_mode=ct.PaddingMode.ZERO, latency=10),
+            ct.load(x, index=(i, 0), shape=(TILE_M, TILE_N), padding_mode=ct.PaddingMode.ZERO, latency=10),
             ct.float32,
         )
         dyt = ct.astype(
-            ct.load(dy, index=(i, 0), shape=(TILE_M, TILE_N),
-                    padding_mode=ct.PaddingMode.ZERO, latency=10),
+            ct.load(dy, index=(i, 0), shape=(TILE_M, TILE_N), padding_mode=ct.PaddingMode.ZERO, latency=10),
             ct.float32,
         )
         r = ct.reshape(
@@ -187,16 +181,13 @@ def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial,
         xhat = xt * r
         wdy = dyt * w
         c = ct.sum(xhat * wdy, axis=1, keepdims=True) * rcp
-        ct.store(dx, index=(i, 0),
-                 tile=ct.astype((wdy - xhat * c) * r, dx.dtype),
-                 allow_tma=False, latency=3)
+        ct.store(dx, index=(i, 0), tile=ct.astype((wdy - xhat * c) * r, dx.dtype), allow_tma=False, latency=3)
         dw_acc = dw_acc + ct.sum(dyt * xhat, axis=0, keepdims=True)
 
     ct.store(dw_partial, index=(bid, 0), tile=dw_acc, allow_tma=False)
 
 
-_bwd_cfg: dict = {}   # (M, N) → (tile_m, tile_n, grid, N)
-
+_bwd_cfg: dict = {}  # (M, N) → (tile_m, tile_n, grid, N)
 
 
 def _bwd_tiles(M, N):
@@ -378,8 +369,7 @@ class RMSNorm(torch.autograd.Function):
         # Check if offset was used (backward not supported with non-zero offset)
         if ctx.offset != 0.0:
             raise NotImplementedError(
-                "Backward pass not implemented for CuTile RMSNorm with "
-                f"non-zero offset ({ctx.offset})"
+                f"Backward pass not implemented for CuTile RMSNorm with non-zero offset ({ctx.offset})"
             )
 
         x, weight, rstd = ctx.saved_tensors
@@ -401,8 +391,7 @@ class RMSNorm(torch.autograd.Function):
 
         dx = torch.empty_like(x2)
         dwp = torch.empty((g, T), device=x.device, dtype=torch.float32)
-        ct.launch(stream, (g,), _rms_bwd,
-                  (dx, dy2, x2, weight, rstd, dwp, tm, T))
+        ct.launch(stream, (g,), _rms_bwd, (dx, dy2, x2, weight, rstd, dwp, tm, T))
 
         dw = dwp.sum(0)
         if T != No:
