@@ -512,18 +512,18 @@ class TileRMSNorm(nn.Module):
         # Reshape rstd for broadcasting: (M,) -> (M, 1)
         rstd = rstd.view(M, 1)
 
-        # Gradient w.r.t. weight: sum over batch dimension (accumulate in float32)
-        # Match kernel order: (x * dy) * rstd to match precision behavior
-        dw = ((x * dy) * rstd).sum(dim=0, dtype=torch.float32)
+        # Cast to fp32 up front so all intermediates are full precision
+        x_f = x.float()
+        dy_f = dy.float()
+        w_f = weight.float()
 
-        # Normalized x (before scaling by weight) - for dx computation
-        x_norm = x * rstd
+        # Gradient w.r.t. weight: dw = sum((x * rstd) * dy, dim=0)
+        x_norm = x_f * rstd
+        dw = (dy_f * x_norm).sum(dim=0)
 
-        # Gradient w.r.t. x (accumulate in float32)
-        dy_weighted = dy * weight
-        c1 = (dy_weighted * x_norm).sum(
-            dim=1, keepdim=True, dtype=torch.float32
-        )  # ensure accumulates are done in float32 to avoid precision issues
+        # Gradient w.r.t. x
+        dy_weighted = dy_f * w_f
+        c1 = (dy_weighted * x_norm).sum(dim=1, keepdim=True)
         dx = rstd * (dy_weighted - x_norm * c1 / N)
 
         dx = dx.view(x_shape).to(x.dtype)
