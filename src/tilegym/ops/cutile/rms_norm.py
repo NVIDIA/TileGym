@@ -363,7 +363,7 @@ class RMSNorm(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         """
-        Persistent backward pass using Bastile's grid-stride kernel.
+        Persistent backward pass using grid-stride kernel.
         Supports backward from both gather and static persistent forward modes.
         """
         # Check if offset was used (backward not supported with non-zero offset)
