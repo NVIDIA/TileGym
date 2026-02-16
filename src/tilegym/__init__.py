@@ -2,6 +2,24 @@
 #
 # SPDX-License-Identifier: MIT
 
+
+def _check_torch_dependencies():
+    """Verify that PyTorch is installed with helpful error message."""
+    try:
+        import torch
+    except ImportError:
+        raise ImportError(
+            "\n\n[TileGym] PyTorch is required to run this library.\n"
+            "Since CUDA versions vary significantly across devices, please "
+            "manually install the version that matches your hardware:\n"
+            "👉 https://pytorch.org/get-started/locally/\n"
+            "Alternatively, try: pip install tilegym[torch]\n"
+        ) from None
+
+
+# Check dependencies before any imports
+_check_torch_dependencies()
+
 # Import logging utilities
 from .logger import get_logger
 from .logger import set_env_log_level
