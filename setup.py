@@ -45,5 +45,8 @@ setuptools.setup(
         "dev": [
             "ruff==0.14.9",
         ],
+        "torch": [
+            "torch>=2.9.1",
+        ],
     },
 )
