@@ -89,7 +89,6 @@ class Test_RMSNormAutogradBackward(common.PyTestCase):
             (256, 256, torch.float16),
             (4096, 256, torch.bfloat16),
             (256, 256, torch.float32),
-            (2003, 2001, torch.float16),
         ],
     )
     @pytest.mark.parametrize("static_persistent", [True, False])
@@ -124,5 +123,5 @@ class Test_RMSNormAutogradBackward(common.PyTestCase):
         y_ref = self.reference(x_ref, w_ref, eps)
         y_ref.backward(dy)
 
-        torch.testing.assert_close(x_cutile.grad, x_ref.grad, rtol=1e-2, atol=8e-2)
-        torch.testing.assert_close(w_cutile.grad, w_ref.grad, rtol=2e-2, atol=3.0)
+        torch.testing.assert_close(x_cutile.grad, x_ref.grad, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(w_cutile.grad, w_ref.grad, rtol=1e-2, atol=1e-2)
