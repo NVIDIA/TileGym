@@ -36,7 +36,6 @@ def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     a_tile = ct.gather(a, (row, offsets), check_bounds=True, padding_value=0.0)
     b_tile = ct.gather(b, (row, offsets), check_bounds=True, padding_value=0.0)
 
-    # Forward uses fast math knobs for throughput on Blackwell.
     a_tile_f32 = a_tile.astype(ct.float32)
     c_tile = silu(a_tile_f32).astype(a.dtype) * b_tile
     ct.scatter(c, (row, offsets), c_tile, check_bounds=True)
