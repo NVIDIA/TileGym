@@ -6,6 +6,7 @@
 import cuda.tile as ct
 import torch
 import torch.nn as nn
+from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
@@ -13,13 +14,17 @@ from .utils import next_power_of_2
 
 PAD_ZERO = ct.PaddingMode.ZERO
 
-
 def sigmoid(x):
-    return 1.0 / (1.0 + ct.exp(-x))
+    denom = ct.add(1.0, ct.exp(-x), flush_to_zero=True)
+    return ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
 
 
 def silu(x):
     return x * sigmoid(x)
+
+
+def ceildiv(a, b):
+    return -(a // -b)
 
 
 @ct.kernel
@@ -27,16 +32,13 @@ def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
     col = ct.bid(1)
 
-    a_tile = ct.load(a, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
-    b_tile = ct.load(b, index=(row, col), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+    a_tile = ct.load(a, index=(row, col), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.ZERO)
+    b_tile = ct.load(b, index=(row, col), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.ZERO)
 
-    # Sigmoid requires type float32
-    c_tile = silu(a_tile.astype(ct.float32)).astype(a.dtype) * b_tile
+    # Forward uses fast math knobs for throughput on Blackwell.
+    a_tile_f32 = a_tile.astype(ct.float32)
+    c_tile = silu(a_tile_f32).astype(a.dtype) * b_tile
     ct.store(c, index=(row, col), tile=c_tile)
-
-
-def ceildiv(a, b):
-    return -(a // -b)
 
 
 def swiglu_forward(a, b):
@@ -60,9 +62,9 @@ def swiglu_forward(a, b):
         grid,
         swiglu_forward_kernel,
         (
-            a.data,
-            b.data,
-            c.data,
+            a,
+            b,
+            c,
             TILE_SIZE,
         ),
     )
@@ -89,7 +91,7 @@ def swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
     b_tile_f32 = b_tile.astype(ct.float32)
 
     # Compute sigmoid(a) and silu(a)
-    sigmoid_a = sigmoid(a_tile_f32)
+    sigmoid_a = 1.0 / (1.0 + ct.exp(-a_tile_f32))
     silu_a = a_tile_f32 * sigmoid_a
 
     # db = dc * silu(a)
