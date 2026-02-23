@@ -20,7 +20,7 @@ def sigmoid(x):
 
 
 def silu(x):
-    return x * sigmoid(x)
+    return ct.mul(x, sigmoid(x), flush_to_zero=True)
 
 
 def ceildiv(a, b):
