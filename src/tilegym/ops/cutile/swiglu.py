@@ -30,15 +30,15 @@ def ceildiv(a, b):
 @ct.kernel
 def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
-    col = ct.bid(1)
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
 
-    a_tile = ct.load(a, index=(row, col), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.ZERO)
-    b_tile = ct.load(b, index=(row, col), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.ZERO)
+    a_tile = ct.gather(a, (row, offsets), check_bounds=True, padding_value=0.0)
+    b_tile = ct.gather(b, (row, offsets), check_bounds=True, padding_value=0.0)
 
     # Forward uses fast math knobs for throughput on Blackwell.
     a_tile_f32 = a_tile.astype(ct.float32)
     c_tile = silu(a_tile_f32).astype(a.dtype) * b_tile
-    ct.store(c, index=(row, col), tile=c_tile)
+    ct.scatter(c, (row, offsets), c_tile, check_bounds=True)
 
 
 def swiglu_forward(a, b):
@@ -53,10 +53,8 @@ def swiglu_forward(a, b):
     c = torch.empty_like(a)
     n_rows = a.shape[0]
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    TILE_N = ceildiv(NUM_SMS, n_rows)
-    TILE_SIZE = next_power_of_2(int(n_cols / TILE_N))
-    grid = (n_rows, ceildiv(n_cols, TILE_SIZE), 1)
+    TILE_SIZE = next_power_of_2(n_cols)
+    grid = (n_rows,)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
