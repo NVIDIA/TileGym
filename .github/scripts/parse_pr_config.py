@@ -20,7 +20,7 @@ from utils import write_github_output
 
 def get_default_config():
     """Return default CI configuration."""
-    return {"build": True, "test": ["ops", "benchmark"]}
+    return {"build": True, "test": ["ops", "benchmark", "sanity"]}
 
 
 def extract_yaml_from_pr_body(pr_body):
@@ -77,6 +77,7 @@ def write_github_outputs(config):
         "build": str(config["build"]).lower(),
         "run_ops": str("ops" in test_list).lower(),
         "run_benchmark": str("benchmark" in test_list).lower(),
+        "run_sanity": str("sanity" in test_list).lower(),
     }
 
     # Write outputs
@@ -85,7 +86,7 @@ def write_github_outputs(config):
 
     # Log final config
     print(
-        f"Config: build={outputs['build']}, run_ops={outputs['run_ops']}, run_benchmark={outputs['run_benchmark']}",
+        f"Config: build={outputs['build']}, run_ops={outputs['run_ops']}, run_benchmark={outputs['run_benchmark']}, run_sanity={outputs['run_sanity']}",
         file=sys.stderr,
     )
 
