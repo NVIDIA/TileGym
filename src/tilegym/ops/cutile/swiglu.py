@@ -14,6 +14,7 @@ from .utils import next_power_of_2
 
 PAD_ZERO = ct.PaddingMode.ZERO
 
+
 def sigmoid(x):
     denom = ct.add(1.0, ct.exp(-x), flush_to_zero=True)
     return ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
