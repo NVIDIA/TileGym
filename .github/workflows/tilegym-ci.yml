@@ -168,6 +168,7 @@ jobs:
       architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
       retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
+      run-pip-audit: true
       # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
       # runner-x86-64: [self-hosted, linux, x64, gpu]
 
@@ -248,6 +249,29 @@ jobs:
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
             type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner_lower }}/tilegym:latest
           cache-to: type=gha,mode=max
+
+  sanity-check:
+    name: sanity-check
+    needs: [config, build]
+    if: needs.config.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        run: |
+          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
+          docker pull ${IMAGE}
+          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+
+      - name: pip check
+        run: docker run --rm ${IMAGE} pip check
 
   test-ops:
     name: test-ops
@@ -537,10 +561,11 @@ jobs:
 
   publish-wheel:
     name: publish-verified-wheel
-    needs: [config, build-wheel, test-ops, test-benchmark]
+    needs: [config, build-wheel, sanity-check, test-ops, test-benchmark]
     if: |
       always() &&
       needs.build-wheel.result == 'success' &&
+      needs.sanity-check.result == 'success' &&
       needs.test-ops.result == 'success' &&
       needs.test-benchmark.result == 'success'
     # Note: Only marks the py310-x86_64 wheel as "verified" because that's the wheel
@@ -555,11 +580,12 @@ jobs:
 
   promote-to-latest:
     name: promote-to-latest
-    needs: [config, build, test-ops, test-benchmark]
+    needs: [config, build, sanity-check, test-ops, test-benchmark]
     if: |
       always() &&
       needs.config.outputs.is_pr == 'false' &&
       needs.build.result == 'success' &&
+      needs.sanity-check.result == 'success' &&
       needs.test-ops.result == 'success' &&
       needs.test-benchmark.result == 'success'
     runs-on: ubuntu-latest

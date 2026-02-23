@@ -51,6 +51,11 @@ on:
         required: false
         type: string
         default: ''
+      run-pip-audit:
+        description: 'Run pip-audit to check for known CVEs in dependencies (disabled by default)'
+        required: false
+        type: boolean
+        default: false
       pre-build-script:
         description: 'Optional path to a script (relative to repo root) to run before building the wheel (e.g. copy deps). Run with: python <path>.'
         required: false
@@ -102,6 +107,31 @@ jobs:
             check-wheel-contents dist/*.whl
           fi
           twine check dist/*
+
+      - name: Audit dependencies for CVEs
+        if: ${{ inputs.run-pip-audit }}
+        run: |
+          pip install pip-audit
+          # Extract installable deps from wheel metadata.
+          # Skips git+ deps and extras-only deps which can't be resolved in a plain environment.
+          python - <<'EOF'
+          import zipfile, glob
+          whl = glob.glob('dist/*.whl')[0]
+          with zipfile.ZipFile(whl) as z:
+              meta = next(n for n in z.namelist() if n.endswith('/METADATA'))
+              lines = z.read(meta).decode().splitlines()
+          deps = [
+              l.split('Requires-Dist: ')[1].split(';')[0].strip()
+              for l in lines
+              if l.startswith('Requires-Dist:')
+              and 'extra ==' not in l
+              and '@' not in l.split('Requires-Dist: ')[1]
+          ]
+          with open('audit-requirements.txt', 'w') as f:
+              f.write('\n'.join(deps))
+          print('Auditing deps:\n' + '\n'.join(deps))
+          EOF
+          pip-audit -r audit-requirements.txt
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}
