@@ -32,6 +32,7 @@ jobs:
       build: ${{ steps.parse.outputs.build }}
       run_ops: ${{ steps.parse.outputs.run_ops }}
       run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
+      run_sanity: ${{ steps.parse.outputs.run_sanity }}
       image_tag: ${{ steps.parse.outputs.image_tag }}
       image_name: ${{ steps.parse.outputs.image_name }}
       is_pr: ${{ steps.context.outputs.is_pr }}
@@ -144,11 +145,13 @@ jobs:
               echo "build=false" >> $GITHUB_OUTPUT
               echo "run_ops=false" >> $GITHUB_OUTPUT
               echo "run_benchmark=false" >> $GITHUB_OUTPUT
+              echo "run_sanity=false" >> $GITHUB_OUTPUT
             else
               echo "🔨 Building new image and running tests"
               echo "build=true" >> $GITHUB_OUTPUT
               echo "run_ops=true" >> $GITHUB_OUTPUT
               echo "run_benchmark=true" >> $GITHUB_OUTPUT
+              echo "run_sanity=true" >> $GITHUB_OUTPUT
             fi
           fi
           
@@ -253,7 +256,10 @@ jobs:
   sanity-check:
     name: sanity-check
     needs: [config, build]
-    if: needs.config.outputs.build == 'true'
+    if: |
+      always() &&
+      needs.config.outputs.run_sanity == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Login to GHCR
