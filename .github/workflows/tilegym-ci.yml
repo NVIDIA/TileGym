@@ -255,29 +255,29 @@ jobs:
 
   sanity-check:
     name: sanity-check
-    needs: [config, build]
+    needs: [config, build-wheel]
     if: |
       always() &&
       needs.config.outputs.run_sanity == 'true' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      (needs.build-wheel.result == 'success' || needs.build-wheel.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python-version: "3.10"
 
-      - name: Pull image
-        run: |
-          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
-          docker pull ${IMAGE}
-          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+      - name: Download wheel (Python 3.10, x86_64)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact-name }}-py310-x86_64
+          path: ./wheel
 
       - name: pip check
-        run: docker run --rm ${IMAGE} pip check
+        run: |
+          python -m venv /tmp/sanity-env
+          /tmp/sanity-env/bin/pip install --quiet ./wheel/*.whl
+          /tmp/sanity-env/bin/pip check
 
   test-ops:
     name: test-ops
