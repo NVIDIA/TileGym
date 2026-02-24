@@ -38,7 +38,6 @@ Available benchmark scripts:
 - `bench_rmsnorm.py`
 - `bench_rmsnorm_backward.py`
 - `bench_rope.py`
-- `bench_rope_backward.py`
 - `bench_silu_and_mul.py`
 - `bench_softmax.py`
 - `bench_swiglu.py`
