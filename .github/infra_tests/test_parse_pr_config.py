@@ -20,7 +20,7 @@ class TestParsePRConfig:
         """Test default configuration."""
         config = parse_pr_config.get_default_config()
         assert config["build"] is True
-        assert config["test"] == ["ops", "benchmark"]
+        assert config["test"] == ["ops", "benchmark", "sanity"]
 
     def test_extract_yaml_from_pr_body(self):
         """Test YAML extraction from PR body."""
@@ -67,4 +67,4 @@ config:
         """Test config resolution with empty PR body."""
         config = parse_pr_config.resolve_config("")
         assert config["build"] is True  # defaults
-        assert config["test"] == ["ops", "benchmark"]
+        assert config["test"] == ["ops", "benchmark", "sanity"]
