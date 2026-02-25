@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: tilegym-release
+
+# Publishes tilegym wheels from the latest successful tilegym-ci run to a
+# GitHub pre-release.
+#
+# Usage:
+#   Trigger manually via "Run workflow".  By default it releases the wheels
+#   from the latest successful tilegym-ci run on main.  To release a specific
+#   commit, supply its SHA in commit-sha.
+#
+# The workflow downloads all tilegym-wheel-*-verified artifacts, extracts the
+# package version, and creates a tagged GitHub release.  If a release for that
+# version already exists it is overwritten.  The git tag points to the commit
+# that produced the artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit-sha:
+        description: 'Release wheels built from this commit (uses latest successful run on main when empty)'
+        required: false
+        type: string
+        default: ''
+      prerelease:
+        description: 'Mark the GitHub release as a pre-release'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release-tilegym:
+    name: Release tilegym wheels
+    uses: ./.github/workflows/release-wheel.yml
+    with:
+      artifact-workflow: tilegym-ci.yml
+      # Match only the verified tilegym wheel artifacts, e.g.:
+      #   tilegym-wheel-<sha>-py310-x86_64-verified
+      #   tilegym-wheel-<sha>-py311-arm64-verified
+      # Excludes tilegym-pr-wheel-* PR builds (leading tilegym-pr- won't match).
+      artifact-pattern: '^tilegym-wheel-[0-9a-f]+-py[0-9]+-[a-z0-9_]+-verified$'
+      commit-sha: ${{ inputs.commit-sha }}
+      branch: main
+      tag-prefix: 'v'
+      prerelease: ${{ inputs.prerelease }}
+    secrets: inherit
