@@ -112,3 +112,73 @@ class Test_RoPE(common.PyTestCase):
         tt_q, tt_k = tilegym.ops.apply_rope_base(q2, k2, cos, sin, pos_ids)
         torch.testing.assert_close(hf_q, tt_q, atol=atol, rtol=rtol)
         torch.testing.assert_close(hf_k, tt_k, atol=atol, rtol=rtol)
+
+    @pytest.mark.parametrize(
+        "bsz, seq_len, num_q_heads, num_kv_heads, head_dim",
+        [
+            (1, 128, 32, 32, 64),
+            (2, 128, 32, 8, 64),
+            (1, 512, 16, 16, 128),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "dtype, atol, rtol",
+        [
+            (torch.float32, 1e-5, 1e-5),
+            (torch.float16, 2e-2, 2e-2),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward(
+        self,
+        bsz,
+        seq_len,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        dtype,
+        atol,
+        rtol,
+        backend,
+    ):
+        self.setUp()
+        try:
+            tilegym.set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Failed to set backend {backend}: {e}")
+
+        device = torch.device("cuda")
+        q_base = (
+            torch.randn((bsz, seq_len, num_q_heads, head_dim), device=device)
+            .normal_(mean=0.0, std=1.0)
+            .transpose(1, 2)
+            .to(dtype)
+        )
+        k_base = (
+            torch.randn((bsz, seq_len, num_kv_heads, head_dim), device=device)
+            .normal_(mean=0.0, std=1.0)
+            .transpose(1, 2)
+            .to(dtype)
+        )
+
+        q_hf = q_base.clone().requires_grad_(True)
+        k_hf = k_base.clone().requires_grad_(True)
+        q_tt = q_base.clone().requires_grad_(True)
+        k_tt = k_base.clone().requires_grad_(True)
+
+        pos_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(bsz, -1)
+        rotary_emb = LlamaRotaryEmbedding(
+            config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=head_dim), device=device
+        )
+        cos, sin = rotary_emb(k_hf, pos_ids)
+
+        hf_q, hf_k = apply_rotary_pos_emb(q_hf, k_hf, cos, sin, pos_ids)
+        tt_q, tt_k = tilegym.ops.apply_rope_base(q_tt, k_tt, cos, sin, pos_ids)
+
+        grad_q = torch.randn_like(hf_q)
+        grad_k = torch.randn_like(hf_k)
+        ((hf_q * grad_q).sum() + (hf_k * grad_k).sum()).backward()
+        ((tt_q * grad_q).sum() + (tt_k * grad_k).sum()).backward()
+
+        torch.testing.assert_close(q_hf.grad, q_tt.grad, atol=atol, rtol=rtol)
+        torch.testing.assert_close(k_hf.grad, k_tt.grad, atol=atol, rtol=rtol)

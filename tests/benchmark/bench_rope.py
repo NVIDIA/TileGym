@@ -180,4 +180,5 @@ def bench_rope(
     return gb_per_s
 
 
-bench_rope.run(print_data=True)
+if __name__ == "__main__":
+    bench_rope.run(print_data=True)
