@@ -101,6 +101,7 @@ class PyTestCase:
         running each test case.
         """
         torch.manual_seed(Config.seed)
+        torch.cuda.manual_seed(Config.seed)
         random.seed(Config.seed)
 
     def __str__(self):
