@@ -797,3 +797,34 @@ def bmm(
         torch.Tensor: Matrix multiplication result
     """
     raise NotImplementedError(f"BMM is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
+    "fused_linear_cross_entropy",
+)
+def fused_linear_cross_entropy(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    chunk_size: int = 4096,
+    reduction: str = "mean",
+    **kwargs: Any,
+):
+    """Chunked fused linear + cross entropy loss.
+
+    Args:
+        hidden_states: Input activations of shape (BT, H) or (B, T, H)
+        weight: Output projection matrix of shape (V, H)
+        target: Target token ids of shape (BT,) or (B, T)
+        bias: Optional bias of shape (V,). If provided, backend may fall back.
+        ignore_index: Target value ignored in loss/gradient
+        chunk_size: Number of BT rows processed per chunk
+        reduction: "mean" or "sum"
+        **kwargs: Additional backend-specific arguments
+
+    Returns:
+        Scalar loss tensor.
+    """
+    raise NotImplementedError(f"fused_linear_cross_entropy is not implemented for {get_current_backend()}")

@@ -19,6 +19,7 @@ if is_backend_available("cutile"):
     from . import bmm
     from . import dropout
     from . import flash_decode
+    from . import fused_linear_cross_entropy
     from . import gemma_attention
     from . import gemma_attention_decode
     from . import group_gemm
@@ -44,6 +45,7 @@ if is_backend_available("cutile"):
     from .experimental.mhc import mhc_gemm_rms_scale
     from .experimental.mhc import mhc_sinkhorn
     from .flash_decode import fmha_decode
+    from .fused_linear_cross_entropy import fused_linear_cross_entropy
     from .moe import fused_moe_kernel as invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .rms_norm import get_rms_norm_module
@@ -60,6 +62,7 @@ if is_backend_available("cutile"):
         # NN operations
         "fmha_decode",
         "flash_decode",
+        "fused_linear_cross_entropy",
         "splitk_reduce",
         "invoke_fused_moe_kernel",
         "moe_align_block_size",
