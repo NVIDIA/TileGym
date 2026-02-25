@@ -12,14 +12,6 @@ from torch import Tensor
 ConstInt = ct.Constant[int]
 
 _ALIGN = 8
-_SM_COUNT = 0
-
-
-def _get_sm_count() -> int:
-    global _SM_COUNT
-    if _SM_COUNT == 0:
-        _SM_COUNT = torch.cuda.get_device_properties("cuda").multi_processor_count
-    return _SM_COUNT
 
 
 @ct.kernel(occupancy=1)
@@ -81,7 +73,8 @@ def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor, loss_chunk: Tensor, i
     target_logits[~valid] = 0.0
 
     tile_v = 4096
-    grid = (min(_get_sm_count() * 4, n_rows),)
+    sm_count = torch.cuda.get_device_properties("cuda").multi_processor_count
+    grid = (min(sm_count * 4, n_rows),)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
