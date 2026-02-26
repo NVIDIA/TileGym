@@ -7,4 +7,5 @@ from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_gemma3
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_gpt_oss
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_llama
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_mistral
+from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_phi3
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_qwen2
