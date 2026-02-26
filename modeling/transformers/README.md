@@ -16,6 +16,7 @@ End-to-end inference examples for transformer language models accelerated with T
 | Gemma-3-4B-IT | `google/gemma-3-4b-it` | RoPE, GEGLU, RMSNorm, Attention* |
 | GPT-OSS | `openai/gpt-oss-20b` | RoPE, RMSNorm, Attention Sink* |
 | Mistral-7B-Instruct-v0.3 | `mistralai/Mistral-7B-Instruct-v0.3` | RoPE, SwiGLU, RMSNorm, Attention* |
+| Phi-3-mini-4k-instruct | `microsoft/Phi-3-mini-4k-instruct` | RoPE, SwiGLU, RMSNorm, Attention* |
 
 *Optional: Enable with `--use_attn`, we can use attention provided in TileGym
 
@@ -113,6 +114,9 @@ Run benchmark scripts for automated comparison:
 
 # Mistral-7B benchmark
 ./bench_mistral.sh
+
+# Phi-3-mini-4k-instruct benchmark
+./bench_phi3.sh
 ```
 
 ### Manual Benchmark
