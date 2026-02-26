@@ -195,9 +195,13 @@ class TileRopeFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dq, dk):
         """
-        Backward pass not yet implemented
+        Backward pass via inverse rotation.
         """
-        raise NotImplementedError("Backward pass is not implemented for TileRopeFunction")
+        cos, sin = ctx.saved_tensors
+        dq = dq.contiguous()
+        dk = dk.contiguous()
+        dq_out, dk_out, _, _ = rope_forward(dq, dk, cos, -sin)
+        return dq_out, dk_out, None, None, None, None
 
 
 @register_impl("apply_rope_base", backend="cutile")
