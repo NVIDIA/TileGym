@@ -38,7 +38,7 @@ def get_supported_backends():
     return [p for p in ALL_BACKENDS if p is not None]
 
 
-def create_benchmark_config(batch_size, M):
+def create_benchmark_config(batch_size, M, dtype):
     """Create a benchmark configuration for given parameters"""
     available_backends = get_supported_backends()
     if not available_backends:
@@ -46,6 +46,7 @@ def create_benchmark_config(batch_size, M):
 
     backends, names, styles = zip(*available_backends)
 
+    dtype_name = str(dtype).split(".")[-1]
     return triton.testing.Benchmark(
         x_names=["N"],
         x_vals=[2**i for i in range(10, 15)],  # 1024 to 16384
@@ -54,19 +55,21 @@ def create_benchmark_config(batch_size, M):
         line_names=list(names),
         styles=list(styles),
         ylabel="GB/s",
-        plot_name=f"swiglu-batch{batch_size}-M{M}-GBps",
+        plot_name=f"swiglu-batch{batch_size}-M{M}-{dtype_name}-GBps",
         args={
             "batch_size": batch_size,
             "M": M,
+            "dtype": dtype,
         },
     )
 
 
 @triton.testing.perf_report(
     [
-        create_benchmark_config(batch_size, M)
-        for batch_size in [1, 8]  # Different batch sizes
+        create_benchmark_config(batch_size, M, dtype)
+        for batch_size in [1, 4, 8]  # Different batch sizes
         for M in [128, 4096]  # Different rows
+        for dtype in [torch.float16, torch.bfloat16, torch.float32]
     ]
 )
 def bench_swiglu(
@@ -74,18 +77,22 @@ def bench_swiglu(
     M,
     N,
     backend,
+    dtype,
     device=DEVICE,
 ):
-    dtype = torch.float16
-
     # Generate input data: two tensors for SwiGLU operation
     a = torch.randn(batch_size, M, N, device=device, dtype=dtype)
     b = torch.randn(batch_size, M, N, device=device, dtype=dtype)
 
     # Use unified dispatch system
     fn = lambda: tilegym.ops.get_swiglu(backend=backend)(a, b)
-    ref = lambda: reference_swiglu(a, b)
-    torch.testing.assert_close(fn(), ref(), atol=1e-2, rtol=1e-2)
+    if dtype is torch.float32:
+        ref = lambda: reference_swiglu(a, b)
+        atol, rtol = 1e-5, 1e-5
+    else:
+        ref = lambda: reference_swiglu(a, b)
+        atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(fn(), ref(), atol=atol, rtol=rtol)
 
     # Benchmark the function
     ms = triton.testing.do_bench_cudagraph(fn)
