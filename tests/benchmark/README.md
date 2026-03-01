@@ -30,6 +30,7 @@ Available benchmark scripts:
 - `bench_bmm.py`
 - `bench_dropout.py`
 - `bench_fused_attention.py`
+- `bench_fused_linear_cross_entropy.py`
 - `bench_matrix_multiplication.py`
 - `bench_mix_triton_cutile.py`
 - `bench_mla.py`
