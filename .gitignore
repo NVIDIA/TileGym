@@ -74,6 +74,8 @@ cover/
 *.csv
 *.ncu-rep
 local_settings.py
+*.local
+*.local.*
 db.sqlite3
 db.sqlite3-journal
 
