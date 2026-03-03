@@ -59,3 +59,18 @@ else
     echo "Summary file not found."
 fi
 echo "========================================"
+
+echo ""
+echo "========================================"
+echo "  TileGym Kernel Coverage"
+echo "========================================"
+python infer.py \
+    --model_id ${MODEL_ID} \
+    --use_tilegym \
+    --use_cutile \
+    --use_attn \
+    --report_kernel_coverage \
+    --sentence_file ${INPUT_FILE} \
+    --batch_size ${BATCH_SIZE} \
+    --output_length ${OUTPUT_LENGTH}
+echo "========================================"

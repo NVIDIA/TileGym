@@ -4,8 +4,14 @@
 
 import argparse
 import datetime
+import glob
 import os
+import shlex
+import sqlite3
+import subprocess
+import sys
 import zipfile
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -185,6 +191,11 @@ def parse_args():
     # If mock_input_len > 0, then the input length will be set to mock_input_len, this is used to mock the input length
     # If you use this, you may not get the correct answer of your sentence
     parser.add_argument("--mock_input_len", type=int, default=0, help="Mock input length")
+    parser.add_argument(
+        "--report_kernel_coverage",
+        action="store_true",
+        help="Run under nsys profiler and report cuTile kernel coverage (GPU time and launch count ratios)",
+    )
     return parser.parse_args()
 
 
@@ -278,8 +289,247 @@ class KernelFilter:
         return False
 
 
+class NsysKernelCoverageReporter:
+    """Runs nsys profiling and reports cuTile kernel coverage (GPU time and launch count ratios)."""
+
+    def __init__(self, args):
+        self.args = args
+        self.kernel_filter = KernelFilter()
+        self.log_dir = args.log_dir
+        self.model_name = args.model_id.split("/")[-1]
+
+    def run(self):
+        """Launch infer.py under nsys profile and report kernel coverage."""
+        inner_args = self._build_inner_args()
+        nsys_output_base = self._build_output_path()
+        nsys_cmd = self._build_nsys_command(inner_args, nsys_output_base)
+
+        print(f"Running nsys profile command:\n  {shlex.join(nsys_cmd)}\n")
+
+        proc = subprocess.Popen(nsys_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in proc.stdout:
+            print(line, end="")
+        proc.wait()
+
+        nsys_rep_path = self._find_nsys_report(nsys_output_base, proc.returncode)
+        self._compute_and_report_ratio(nsys_rep_path)
+
+    def _build_inner_args(self):
+        """Reconstruct inner CLI args: strip --report_kernel_coverage, ensure --profile."""
+        inner_args = []
+        skip_next = False
+        for arg in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--report_kernel_coverage":
+                continue
+            inner_args.append(arg)
+        if "--profile" not in inner_args:
+            inner_args.append("--profile")
+        return inner_args
+
+    def _build_output_path(self):
+        """Build the nsys output base path."""
+        os.makedirs(self.log_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(self.log_dir, f"nsys_{self.model_name}_{timestamp}")
+
+    def _build_nsys_command(self, inner_args, output_base):
+        """Build the nsys profile command."""
+        return [
+            "nsys",
+            "profile",
+            "-c",
+            "cudaProfilerApi",
+            "--capture-range-end=stop-shutdown",
+            "-o",
+            output_base,
+            "--trace=cuda",
+            "--force-overwrite=true",
+            "--",
+            sys.executable,
+            os.path.abspath(__file__),
+        ] + inner_args
+
+    def _find_nsys_report(self, output_base, returncode):
+        """Find the generated .nsys-rep file (nsys may add numeric suffixes)."""
+        pattern = f"{output_base}*.nsys-rep"
+        matches = sorted(glob.glob(pattern))
+
+        if returncode != 0 and not matches:
+            print(f"\nnsys profile exited with code {returncode} and no report was generated.")
+            sys.exit(returncode)
+        elif returncode != 0:
+            print(f"\nWarning: nsys exited with code {returncode}, but report was generated. Proceeding.")
+
+        if not matches:
+            print(f"Error: No .nsys-rep file found matching {pattern}")
+            sys.exit(1)
+
+        nsys_rep_path = matches[-1]
+        print(f"\nFound nsys report: {nsys_rep_path}")
+        return nsys_rep_path
+
+    @staticmethod
+    def _resolve_sqlite_path(path):
+        """Resolve an .nsys-rep or .sqlite path to a .sqlite file path."""
+        if path.endswith(".sqlite"):
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"SQLite file not found: {path}")
+            return path
+
+        if path.endswith(".nsys-rep"):
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"nsys-rep file not found: {path}")
+            sibling = path.replace(".nsys-rep", ".sqlite")
+            if os.path.isfile(sibling):
+                return sibling
+            # Export using nsys CLI
+            output_path = sibling
+            try:
+                subprocess.run(
+                    ["nsys", "export", "--type=sqlite", "-o", output_path, path],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                raise RuntimeError("nsys CLI not found. Install NVIDIA Nsight Systems or provide a .sqlite file.")
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"nsys export failed: {e.stderr}")
+            return output_path
+
+        raise ValueError(f"Unsupported file type: {path} (expected .nsys-rep or .sqlite)")
+
+    def _extract_kernel_durations(self, path):
+        """Extract GPU kernel durations from an NSight Systems report.
+
+        Args:
+            path: Path to an .nsys-rep or .sqlite file.
+
+        Returns:
+            Dict mapping (kernel_idx, kernel_name) to GPU duration in nanoseconds.
+        """
+        sqlite_path = self._resolve_sqlite_path(path)
+        conn = sqlite3.connect(sqlite_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT k.start, k.end, s.value AS name
+                FROM CUPTI_ACTIVITY_KIND_KERNEL k
+                JOIN StringIds s ON k.demangledName = s.id
+                ORDER BY k.start ASC
+                """
+            )
+            result = {}
+            for idx, (start, end, name) in enumerate(cursor):
+                duration_ns = float(end - start)
+                result[(idx, name)] = duration_ns
+            return result
+        finally:
+            conn.close()
+
+    def _classify_kernels(self, durations):
+        """Classify kernel durations into TileGym and other categories."""
+        tilegym_by_name = defaultdict(float)
+        tilegym_count_by_name = defaultdict(int)
+        other_by_name = defaultdict(float)
+        other_count_by_name = defaultdict(int)
+        for (_idx, name), dur_ns in durations.items():
+            if self.kernel_filter.contains(name):
+                tilegym_by_name[name] += dur_ns
+                tilegym_count_by_name[name] += 1
+            else:
+                other_by_name[name] += dur_ns
+                other_count_by_name[name] += 1
+        return tilegym_by_name, tilegym_count_by_name, other_by_name, other_count_by_name
+
+    def _compute_and_report_ratio(self, nsys_rep_path):
+        """Compute and print the TileGym kernel GPU time ratio from an nsys report."""
+        durations = self._extract_kernel_durations(nsys_rep_path)
+        if not durations:
+            print("No kernel durations found in the nsys report.")
+            return
+
+        tilegym_by_name, tilegym_count_by_name, other_by_name, other_count_by_name = self._classify_kernels(durations)
+
+        tilegym_total_ns = sum(tilegym_by_name.values())
+        other_total_ns = sum(other_by_name.values())
+        all_total_ns = tilegym_total_ns + other_total_ns
+        tilegym_total_count = sum(tilegym_count_by_name.values())
+        other_total_count = sum(other_count_by_name.values())
+        all_total_count = tilegym_total_count + other_total_count
+
+        self._print_report(
+            tilegym_by_name,
+            tilegym_count_by_name,
+            tilegym_total_ns,
+            tilegym_total_count,
+            all_total_ns,
+            all_total_count,
+        )
+
+        tilegym_time_pct = (tilegym_total_ns / all_total_ns * 100) if all_total_ns > 0 else 0
+        tilegym_count_pct = (tilegym_total_count / all_total_count * 100) if all_total_count > 0 else 0
+        time_ratio_str = f"{tilegym_time_pct:.1f}%"
+        count_ratio_str = f"{tilegym_count_pct:.1f}%"
+
+        if self.args.summary_file:
+            self._append_summary(time_ratio_str, count_ratio_str)
+
+    def _print_report(
+        self,
+        tilegym_by_name,
+        tilegym_count_by_name,
+        tilegym_total_ns,
+        tilegym_total_count,
+        all_total_ns,
+        all_total_count,
+    ):
+        """Print the formatted kernel coverage report table."""
+        print("\n===== NSYS KERNEL GPU TIME ANALYSIS =====\n")
+        header_fmt = "{:<60} {:>8} {:>15} {:>12}"
+        row_fmt = "{:<60} {:>8} {:>15.3f} {:>11.1f}%"
+        sep = "-" * 60
+        print(header_fmt.format("Kernel Name", "# Calls", "GPU Time (ms)", "% of Total"))
+        print(f"{sep}    {'--------':>8}    {'-------------':>15}    {'----------':>10}")
+
+        for name, dur_ns in sorted(tilegym_by_name.items(), key=lambda x: -x[1]):
+            dur_ms = dur_ns / 1e6
+            pct = (dur_ns / all_total_ns * 100) if all_total_ns > 0 else 0
+            count = tilegym_count_by_name[name]
+            print(row_fmt.format(name[:60], count, dur_ms, pct))
+
+        print(f"{sep}    {'--------':>8}    {'-------------':>15}    {'----------':>10}")
+        tilegym_ms = tilegym_total_ns / 1e6
+        all_ms = all_total_ns / 1e6
+        tilegym_time_pct = (tilegym_total_ns / all_total_ns * 100) if all_total_ns > 0 else 0
+        tilegym_count_pct = (tilegym_total_count / all_total_count * 100) if all_total_count > 0 else 0
+        print(row_fmt.format("TileGym Total", tilegym_total_count, tilegym_ms, tilegym_time_pct))
+        print(row_fmt.format("All Kernels Total", all_total_count, all_ms, 100.0))
+
+        time_ratio_str = f"{tilegym_time_pct:.1f}%"
+        count_ratio_str = f"{tilegym_count_pct:.1f}%"
+        print(f"\n>>> cuTile Kernel Coverage (GPU Time):    {time_ratio_str} <<<")
+        print(f">>> cuTile Kernel Coverage (# Launches):  {count_ratio_str} <<<\n")
+
+    def _append_summary(self, time_ratio_str, count_ratio_str):
+        """Append coverage ratio to the summary file."""
+        with open(self.args.summary_file, "a") as f:
+            f.write(
+                f"nsys_cutile_coverage | {self.model_name:<40} | time={time_ratio_str} | launches={count_ratio_str}\n"
+            )
+        print(f"Coverage ratio appended to {self.args.summary_file}")
+
+
 def main():
     args = parse_args()
+
+    if args.report_kernel_coverage:
+        NsysKernelCoverageReporter(args).run()
+        return
 
     # Check if GPU is available
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -426,6 +676,13 @@ def main():
             with record_function("model_inference"):
                 with torch.no_grad():
                     _ = forward_wrapper.forward()
+
+        # Also run a trace with cudaProfilerAPI.
+        with torch.no_grad():
+            torch.cuda.cudart().cudaProfilerStart()
+            _ = forward_wrapper.forward()
+            torch.cuda.cudart().cudaProfilerStop()
+
         # prof.export_chrome_trace("trace.json")
         filtered_results = []
         kernel_filter = KernelFilter()

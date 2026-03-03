@@ -21,8 +21,14 @@ ARG TORCH_VERSION=2.9.1
 
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies and NSight Systems CLI.
+RUN \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gnupg && \
+    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/nvidia.pub && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
     python3-pip \
     python3-dev \
     python-is-python3 \
@@ -30,7 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    nsight-systems-cli && \
+    rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN python -m pip install --upgrade pip setuptools wheel
