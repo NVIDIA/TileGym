@@ -24,23 +24,20 @@ def _layer_norm_fwd_kernel(
     B,
     Mean,
     Rstd,
-    stride: ct.Constant[int],
     N: ct.Constant[int],
     eps: ct.Constant[float],
     weight_shift: ct.Constant[float],
     BLOCK_SIZE: ct.Constant[int],
 ):
-    # Map the program id to the row of X and Y it should compute.
+    # X, Y are 2D (M, N); row index from grid. Bounds (row < M, cols < N) mask partial block.
     row = ct.bid(0)
+    row_tile = ct.full((BLOCK_SIZE,), row, dtype=ct.int32)
 
     # Compute mean
     _mean = ct.zeros((BLOCK_SIZE,), dtype=ct.float32)
     for off in range(0, N, BLOCK_SIZE):
         cols = off + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-        mask = ct.less(cols, N)
-        # Calculate the offset for the current row and column
-        offset = ct.add(ct.mul(row, stride), cols)
-        a = ct.gather(X, offset, padding_value=0)
+        a = ct.gather(X, (row_tile, cols), padding_value=0)
         a = ct.astype(a, ct.float32)
         _mean = ct.add(_mean, a)
     mean = ct.truediv(ct.sum(_mean, axis=0), N)
@@ -49,17 +46,15 @@ def _layer_norm_fwd_kernel(
     _var = ct.zeros((BLOCK_SIZE,), dtype=ct.float32)
     for off in range(0, N, BLOCK_SIZE):
         cols = off + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-        mask = ct.less(cols, N)
-        # Calculate the offset for the current row and column
-        offset = ct.add(ct.mul(row, stride), cols)
-        x = ct.gather(X, offset, padding_value=0)
+        x = ct.gather(X, (row_tile, cols), padding_value=0)
         x = ct.astype(x, ct.float32)
+        mask = ct.less(cols, N)
         x = ct.where(mask, ct.sub(x, mean), ct.zeros((BLOCK_SIZE,), dtype=ct.float32))
         _var = ct.add(_var, ct.mul(x, x))
     var = ct.truediv(ct.sum(_var, axis=0), N)
     rstd = ct.rsqrt(ct.add(var, eps))
 
-    # Write mean / rstd
+    # Write mean / rstd (1D arrays)
     mean_offset = ct.full((1,), row, dtype=ct.int32)
     mean_val_reshaped = ct.reshape(mean, (1,))
     ct.scatter(Mean, mean_offset, mean_val_reshaped)
@@ -68,23 +63,18 @@ def _layer_norm_fwd_kernel(
     rstd_val_reshaped = ct.reshape(rstd, (1,))
     ct.scatter(Rstd, rstd_offset, rstd_val_reshaped)
 
-    # Normalize and apply linear transformation
+    # Normalize and apply linear transformation; scatter to 2D Y so cols < N masks partial block
     for off in range(0, N, BLOCK_SIZE):
         cols = off + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-        mask = ct.less(cols, N)
         w = ct.gather(W, cols, padding_value=0)
         w = ct.add(w, weight_shift)
         b = ct.gather(B, cols, padding_value=0)
-        # Calculate the offset for the current row and column
-        offset = ct.add(ct.mul(row, stride), cols)
-        x = ct.gather(X, offset, padding_value=0)
+        x = ct.gather(X, (row_tile, cols), padding_value=0)
         x = ct.astype(x, ct.float32)
         x_hat = ct.mul(ct.sub(x, mean), rstd)
         y = ct.add(ct.mul(x_hat, w), b)
         y = ct.astype(y, X.dtype)
-        # Calculate the output offset
-        y_offset = ct.add(ct.mul(row, stride), cols)
-        ct.scatter(Y, y_offset, y)
+        ct.scatter(Y, (row_tile, cols), y)
 
 
 class LayerNorm(torch.autograd.Function):
@@ -99,33 +89,28 @@ class LayerNorm(torch.autograd.Function):
         rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
         # Less than 64KB per feature: enqueue fused kernel
         MAX_FUSED_SIZE = 65536 // x.element_size()
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, 1 << (N - 1).bit_length())
-        assert N % BLOCK_SIZE == 0, (
-            f"N % BLOCK_SIZE == {N % BLOCK_SIZE}, expected 0, otherwise the kernel is not supported yet"
-        )
-        if N > BLOCK_SIZE:
+        # Largest power-of-2 <= N so partial last block is handled by kernel masking (e.g. N=9 -> BLOCK_SIZE=8).
+        BLOCK_SIZE = min(MAX_FUSED_SIZE, 1 << (N.bit_length() - 1)) if N >= 1 else 1
+        if N > MAX_FUSED_SIZE:
             raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
         # heuristics for number of warps
         num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
 
-        # Flatten tensors to 1D for gather/scatter operations
-        x_arg_flat = x_arg.reshape(-1)
-        y_flat = y.reshape(-1)
-
-        # enqueue kernel
+        # Pass X, Y as 2D (M, N) so gather/scatter bounds (row < M, cols < N) mask partial block
+        # (e.g. N=9, BLOCK_SIZE=8) without writing into the next row.
+        y_arg = y.reshape(-1, y.shape[-1])
         grid = (M,)
         ct.launch(
             torch.cuda.current_stream(),
             grid,
             _layer_norm_fwd_kernel,
             (
-                x_arg_flat,
-                y_flat,
+                x_arg,
+                y_arg,
                 weight,
                 bias,
                 mean,
                 rstd,
-                x_arg.stride(0),
                 N,
                 eps,
                 weight_shift,

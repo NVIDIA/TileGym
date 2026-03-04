@@ -35,8 +35,6 @@ class Test_LayerNorm(common.PyTestCase):
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
         self.setUp()
-        if m == 9 and backend == "cutile":
-            pytest.skip("Skip due to cutile kernel can only support m % BLOCK == 0")
 
         device = torch.device("cuda")
         eps = 1e-5
