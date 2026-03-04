@@ -10,6 +10,8 @@ from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
+from .utils import next_power_of_2
+
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 
@@ -143,8 +145,6 @@ def silu_and_mul_backward(
     # Allocate output gradients
     grad_a = torch.empty_like(grad_output_flat)
     grad_b = torch.empty_like(grad_output_flat)
-
-    from .utils import next_power_of_2
 
     TILE_SIZE = next_power_of_2(hidden_size)
     grid = (batch_size,)
