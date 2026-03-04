@@ -62,6 +62,8 @@ If you are adding a **new kernel** (new `@ct.kernel` / new op implementation) th
 
 New cuTile kernel contributions should first be placed in the `experimental/` directories. Once the TileGym team has fully verified functional correctness and performance, kernels will be promoted from `experimental/` into the main source tree.
 
+We provide `adding-cutile-kernel` skill for AI agent to add new kernels in this repo.
+
 ##### Directory structure
 
 ```
