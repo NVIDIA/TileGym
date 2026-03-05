@@ -166,6 +166,9 @@ cython_debug/
 .cursorignore
 .vscode/
 
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
 # intermediate files
 **/temp/
 **/cuda-driver/
