@@ -21,6 +21,7 @@ from tilegym.transformers import apply_tilegym_kernel_to_gemma3
 from tilegym.transformers import apply_tilegym_kernel_to_gpt_oss
 from tilegym.transformers import apply_tilegym_kernel_to_llama
 from tilegym.transformers import apply_tilegym_kernel_to_mistral
+from tilegym.transformers import apply_tilegym_kernel_to_phi3
 from tilegym.transformers import apply_tilegym_kernel_to_qwen2
 
 
@@ -221,6 +222,8 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         apply_tilegym_kernel_to_qwen2(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     elif "gemma" in model_name:
         apply_tilegym_kernel_to_gemma3(rope=True, rms_norm=True, mlp=True, attn=use_attn, use_cutile=use_cutile)
+    elif "phi-3" in model_name or "phi3" in model_name:
+        apply_tilegym_kernel_to_phi3(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     else:
         print(f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied.")
 

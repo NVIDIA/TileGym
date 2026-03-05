@@ -172,6 +172,7 @@ jobs:
       retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
       run-pip-audit: true
+      check-wheel-contents-ignore: "W002"  # Ignore duplicate files from symlinks
       # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
       # runner-x86-64: [self-hosted, linux, x64, gpu]
 

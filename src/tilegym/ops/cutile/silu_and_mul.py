@@ -59,7 +59,7 @@ def silu_and_mul_kernel_row_wise(
     # Perform SiLU(a) * b
     silu_a = ct.mul(a_tile, sigmoid_a, flush_to_zero=True)
     result = ct.mul(silu_a, b_tile, flush_to_zero=True)
-    result = ct.astype(result, input.dtype)
+    result = ct.astype(result, output.dtype)
 
     # Store result using scatter with 2D indices
     # output is also 2D: (batch_size, hidden_size)
