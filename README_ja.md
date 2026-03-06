@@ -54,8 +54,12 @@ pip install --pre torch --index-url https://download.pytorch.org/whl/cu130
 ```bash
 git clone <tilegym-repository-url>
 cd tilegym
+pip install -r requirements.txt
 pip install .
 ```
+
+すべてのランタイム依存関係は [`requirements.txt`](requirements.txt) に宣言されています。`pip install .` でも自動的にインストールされますが、`pip install -r requirements.txt` で事前に明示的にインストールすることもできます。
+
 `cuda-tile` が自動的にインストールされます。詳細は https://github.com/nvidia/cutile-python をご覧ください。
 
 `TileGym` を編集モードで使用する場合は、`pip install -e .` を実行してください。

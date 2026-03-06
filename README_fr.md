@@ -54,8 +54,12 @@ Nous avons vérifié que `torch==2.9.1` fonctionne. Vous pouvez également obten
 ```bash
 git clone <tilegym-repository-url>
 cd tilegym
+pip install -r requirements.txt
 pip install .
 ```
+
+Toutes les dépendances d'exécution sont déclarées dans [`requirements.txt`](requirements.txt). L'exécution de `pip install .` les installe également automatiquement, mais vous pouvez les pré-installer explicitement avec `pip install -r requirements.txt`.
+
 Cela installera automatiquement `cuda-tile`, voir https://github.com/nvidia/cutile-python.
 
 Si vous souhaitez utiliser le mode édition pour `TileGym`, exécutez `pip install -e .`
