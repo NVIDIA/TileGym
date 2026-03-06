@@ -78,7 +78,17 @@ def should_skip_file(file_path: Path) -> bool:
         return True
 
     # Skip directories
-    dir_patterns = ["__pycache__", ".pytest_cache", "node_modules", "venv", "env", ".egg-info", "dist", "build", ".claude"]
+    dir_patterns = [
+        "__pycache__",
+        ".pytest_cache",
+        "node_modules",
+        "venv",
+        "env",
+        ".egg-info",
+        "dist",
+        "build",
+        ".claude",
+    ]
     for pattern in dir_patterns:
         if pattern in file_path.parts:
             return True
