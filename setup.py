@@ -6,7 +6,25 @@ import pathlib
 
 import setuptools
 
-README = (pathlib.Path(__file__).parent / "README.md").read_text()
+HERE = pathlib.Path(__file__).parent
+README = (HERE / "README.md").read_text(encoding="utf-8")
+
+
+def parse_requirements(filename: str) -> list[str]:
+    """Parse a requirements.txt file into a list of dependency strings."""
+    lines = (HERE / filename).read_text(encoding="utf-8").splitlines()
+    reqs = []
+    for line in lines:
+        line = line.strip()
+        # skip empty lines and full-line comments
+        if not line or line.startswith("#"):
+            continue
+        # strip inline comments (e.g. "pkg  # comment")
+        if " #" in line:
+            line = line[: line.index(" #")].strip()
+        if line:
+            reqs.append(line)
+    return reqs
 
 
 setuptools.setup(
@@ -29,24 +47,10 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     python_requires=">=3.10",
-    install_requires=[
-        # Note: torch and triton should be pre-installed in your environment
-        "transformers==4.56.2",
-        "tokenizers==0.22.0",
-        # 'accelerate', # Use `pip install accelerate --no-deps` to avoid reinstall torch
-        "huggingface_hub",
-        "matplotlib",
-        "pandas",
-        "pytest",
-        "numpy",
-        "cuda-tile",
-        "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental",
-        "filelock>=3.20.3",  # CVE fix: GHSA-w853-jp5j-5j7f, GHSA-qmgc-5h2g-mvrw
-        "pillow>=12.1.1",  # CVE fix: GHSA-cfh3-3jmp-rvhc
-        # 'nvidia-ml-py', # optional
-    ],
+    install_requires=parse_requirements("requirements.txt"),
     extras_require={
         "dev": [
+            "pytest",
             "ruff==0.14.9",
         ],
         "torch": [
