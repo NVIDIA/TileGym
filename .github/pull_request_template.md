@@ -10,7 +10,7 @@
 ```yaml
 config:
   build: true
-  # valid options are "ops" and "benchmark"
+  # valid options are "ops", "benchmark", and "sanity"
   test: []
 ```
 

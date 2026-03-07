@@ -32,6 +32,7 @@ jobs:
       build: ${{ steps.parse.outputs.build }}
       run_ops: ${{ steps.parse.outputs.run_ops }}
       run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
+      run_sanity: ${{ steps.parse.outputs.run_sanity }}
       image_tag: ${{ steps.parse.outputs.image_tag }}
       image_name: ${{ steps.parse.outputs.image_name }}
       is_pr: ${{ steps.context.outputs.is_pr }}
@@ -144,11 +145,13 @@ jobs:
               echo "build=false" >> $GITHUB_OUTPUT
               echo "run_ops=false" >> $GITHUB_OUTPUT
               echo "run_benchmark=false" >> $GITHUB_OUTPUT
+              echo "run_sanity=false" >> $GITHUB_OUTPUT
             else
               echo "🔨 Building new image and running tests"
               echo "build=true" >> $GITHUB_OUTPUT
               echo "run_ops=true" >> $GITHUB_OUTPUT
               echo "run_benchmark=true" >> $GITHUB_OUTPUT
+              echo "run_sanity=true" >> $GITHUB_OUTPUT
             fi
           fi
           
@@ -168,6 +171,7 @@ jobs:
       architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
       retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
+      run-pip-audit: true
       # Optional: Override default runners (ubuntu-latest for x86_64, ubuntu-24.04-arm for arm64)
       # runner-x86-64: [self-hosted, linux, x64, gpu]
 
@@ -248,6 +252,32 @@ jobs:
             type=registry,ref=${{ steps.vars.outputs.registry_image }}:${{ needs.config.outputs.image_tag }}
             type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner_lower }}/tilegym:latest
           cache-to: type=gha,mode=max
+
+  sanity-check:
+    name: sanity-check
+    needs: [config, build-wheel]
+    if: |
+      always() &&
+      needs.config.outputs.run_sanity == 'true' &&
+      (needs.build-wheel.result == 'success' || needs.build-wheel.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Download wheel (Python 3.10, x86_64)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact-name }}-py310-x86_64
+          path: ./wheel
+
+      - name: pip check
+        run: |
+          python -m venv /tmp/sanity-env
+          /tmp/sanity-env/bin/pip install --quiet ./wheel/*.whl
+          /tmp/sanity-env/bin/pip check
 
   test-ops:
     name: test-ops
@@ -537,10 +567,11 @@ jobs:
 
   publish-wheel:
     name: publish-verified-wheel
-    needs: [config, build-wheel, test-ops, test-benchmark]
+    needs: [config, build-wheel, sanity-check, test-ops, test-benchmark]
     if: |
       always() &&
       needs.build-wheel.result == 'success' &&
+      needs.sanity-check.result == 'success' &&
       needs.test-ops.result == 'success' &&
       needs.test-benchmark.result == 'success'
     # Note: Only marks the py310-x86_64 wheel as "verified" because that's the wheel
@@ -555,11 +586,12 @@ jobs:
 
   promote-to-latest:
     name: promote-to-latest
-    needs: [config, build, test-ops, test-benchmark]
+    needs: [config, build, sanity-check, test-ops, test-benchmark]
     if: |
       always() &&
       needs.config.outputs.is_pr == 'false' &&
       needs.build.result == 'success' &&
+      needs.sanity-check.result == 'success' &&
       needs.test-ops.result == 'success' &&
       needs.test-benchmark.result == 'success'
     runs-on: ubuntu-latest
