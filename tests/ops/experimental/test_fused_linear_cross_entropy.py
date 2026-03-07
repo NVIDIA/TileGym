@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from tests import common
 from tilegym.backend import is_backend_available
-from tilegym.ops.cutile.fused_linear_cross_entropy import fused_linear_cross_entropy_forward_only
+from tilegym.ops import fused_linear_cross_entropy
 
 
 class TestFusedLinearCrossEntropy(common.PyTestCase):
@@ -48,7 +48,7 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
         target = torch.randint(0, vocab_size, (batch, seq_len), device="cuda", dtype=torch.long)
         target[:, 0] = -100
 
-        loss = fused_linear_cross_entropy_forward_only(
+        loss = fused_linear_cross_entropy(
             x,
             w,
             target,
@@ -73,7 +73,7 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
         w = torch.randn(vocab_size, hidden_size, device="cuda", dtype=torch.float16)
         target = torch.randint(0, vocab_size, (batch, seq_len), device="cuda", dtype=torch.long)
 
-        loss_c64 = fused_linear_cross_entropy_forward_only(
+        loss_c64 = fused_linear_cross_entropy(
             x,
             w,
             target,
@@ -81,7 +81,7 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
             chunk_size=64,
             reduction="mean",
         )
-        loss_c512 = fused_linear_cross_entropy_forward_only(
+        loss_c512 = fused_linear_cross_entropy(
             x,
             w,
             target,
@@ -115,7 +115,7 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
         t = torch.randint(0, vocab_size, (batch, seq_len), device="cuda", dtype=torch.long)
 
         def run_fused():
-            _ = fused_linear_cross_entropy_forward_only(x, w, t, chunk_size=256, reduction="mean")
+            _ = fused_linear_cross_entropy(x, w, t, chunk_size=256, reduction="mean")
 
         def run_torch():
             logits = F.linear(x, w)

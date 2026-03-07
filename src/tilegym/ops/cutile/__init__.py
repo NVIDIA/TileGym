@@ -40,6 +40,7 @@ if is_backend_available("cutile"):
     from .attention_sink import attention_sink
     from .attention_sink_decode import attention_sink_decode
     from .experimental import mhc
+    from .experimental.fused_linear_cross_entropy import fused_linear_cross_entropy
     from .experimental.mhc import mhc_apply_residual
     from .experimental.mhc import mhc_gemm_rms_scale
     from .experimental.mhc import mhc_sinkhorn
@@ -76,6 +77,7 @@ if is_backend_available("cutile"):
         "mhc_gemm_rms_scale",
         "mhc_apply_residual",
         "mhc_sinkhorn",
+        "fused_linear_cross_entropy",
         "silu_and_mul",
         "dropout",
         "softmax",

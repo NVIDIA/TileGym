@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from tilegym.experimental import experimental_kernel
+
 ConstInt = ct.Constant[int]
 
 _ALIGN = 8
@@ -117,7 +119,8 @@ def _chunked_fwd_loss(
     return loss
 
 
-def fused_linear_cross_entropy_forward_only(
+@experimental_kernel
+def fused_linear_cross_entropy(
     hidden_states: Tensor,
     weight: Tensor,
     target: Tensor,
@@ -129,7 +132,6 @@ def fused_linear_cross_entropy_forward_only(
     """Forward-only chunked fused linear + cross entropy.
 
     Notes:
-    - Forward-only experimental API (not backend-registered in TileGym dispatch).
     - Main tradeoff: often higher latency than dense PyTorch CE, but much lower
       peak memory on large BT because full logits [BT, V] are not materialized.
     """
