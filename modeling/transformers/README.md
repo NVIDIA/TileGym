@@ -88,6 +88,38 @@ python infer.py \
     --num_runs 5
 ```
 
+### Kernel Coverage Report
+
+Report the fraction of GPU time and kernel launches covered by TileGym cuTile kernels. Runs the model under NSight Systems (`nsys profile`) and analyzes the trace automatically.
+
+```bash
+python infer.py \
+    --model_id meta-llama/Meta-Llama-3.1-8B \
+    --use_tilegym \
+    --use_cutile \
+    --use_attn \
+    --report_kernel_coverage \
+    --sentence_file sample_inputs/input_prompt_32K.txt \
+    --output_length 100
+```
+
+Example output:
+```text
+===== NSYS KERNEL GPU TIME ANALYSIS =====
+
+Kernel Name                                                   # Calls   GPU Time (ms)   % of Total
+------------------------------------------------------------  --------  -------------   ----------
+fmha_kernel                                                       ...          54.507        10.5%
+rms_norm_kernel_gather                                            ...           9.788         1.9%
+...
+------------------------------------------------------------  --------  -------------   ----------
+TileGym Total                                                    9676          95.147        18.3%
+All Kernels Total                                              104858         520.725       100.0%
+
+>>> cuTile Kernel Coverage (GPU Time):    18.3% <<<
+>>> cuTile Kernel Coverage (# Launches):  9.2% <<<
+```
+
 ## Performance Benchmark
 
 Benchmark TileGym's CUTILE-optimized kernels against standard PyTorch implementation. The `--profile` flag enables detailed performance metrics including throughput (tokens/sec) and generation latency.
@@ -241,6 +273,7 @@ python infer.py \
 | `--num_runs` | Benchmark iterations | `5` |
 | `--warmup_runs` | Warmup iterations | `2` |
 | `--profile` | Enable profiling | `False` |
+| `--report_kernel_coverage` | Report cuTile kernel GPU time and launch count coverage via nsys | `False` |
 | `--show_outputs` | Print generated text | `False` |
 
 

@@ -21,8 +21,14 @@ ARG TORCH_VERSION=2.9.1
 
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies and NSight Systems CLI.
+RUN \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gnupg && \
+    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/nvidia.pub && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
     python3-pip \
     python3-dev \
     python-is-python3 \
@@ -30,7 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    nsight-systems-cli && \
+    rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN python -m pip install --upgrade pip setuptools wheel
@@ -38,9 +45,8 @@ RUN python -m pip install --upgrade pip setuptools wheel
 # Install PyTorch with CUDA 13.0 support
 RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
 
-# Install cuda-tile and transformers models' dependencies.
-RUN pip install --no-cache-dir cuda-tile && \
-    pip install --no-cache-dir --no-deps accelerate && \
+# Install additional dependencies not covered by requirements.txt
+RUN pip install --no-cache-dir --no-deps accelerate && \
     pip install --no-cache-dir sentencepiece protobuf
 
 WORKDIR /workspace/tilegym
@@ -50,9 +56,13 @@ WORKDIR /workspace/tilegym
 ####################
 FROM base AS wheel
 
+# Install runtime dependencies from requirements.txt
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm -f /tmp/requirements.txt
+
 # Copy and install pre-built wheel
 COPY wheel/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl && \
+RUN pip install --no-cache-dir --no-deps /tmp/*.whl && \
     rm -f /tmp/*.whl
 
 # Copy modeling scripts for inference
@@ -90,8 +100,9 @@ COPY . /workspace/tilegym/
 # Verify repository structure
 RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
 
-# Install TileGym in editable mode for development
-RUN pip install --no-cache-dir -e .
+# Install runtime dependencies from requirements.txt, then TileGym in editable mode
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --no-deps -e .
 
 # Set up model cache directory
 ENV HF_HOME=/workspace/.cache/huggingface \

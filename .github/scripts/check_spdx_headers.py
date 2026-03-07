@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict
+from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
@@ -77,7 +78,17 @@ def should_skip_file(file_path: Path) -> bool:
         return True
 
     # Skip directories
-    dir_patterns = ["__pycache__", ".pytest_cache", "node_modules", "venv", "env", ".egg-info", "dist", "build"]
+    dir_patterns = [
+        "__pycache__",
+        ".pytest_cache",
+        "node_modules",
+        "venv",
+        "env",
+        ".egg-info",
+        "dist",
+        "build",
+        ".claude",
+    ]
     for pattern in dir_patterns:
         if pattern in file_path.parts:
             return True
@@ -218,6 +229,62 @@ def find_files(root_dir: Path) -> List[Path]:
     return files
 
 
+# License field to insert into SKILL.md frontmatter.
+SKILL_LICENSE_LINE = "license: MIT. Complete terms in LICENSE."
+
+
+def iter_skill_files(root_dir: Path) -> Iterator[Path]:
+    """Yield SKILL.md files under .claude/skills/."""
+    skills_dir = root_dir / ".claude" / "skills"
+    if not skills_dir.is_dir():
+        return
+    for skill_dir in sorted(skills_dir.iterdir()):
+        skill_md = skill_dir / "SKILL.md"
+        if skill_md.is_file():
+            yield skill_md
+
+
+def has_skill_license(content: str) -> bool:
+    """Check if a SKILL.md file has a 'license:' field in its YAML frontmatter."""
+    lines = content.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return False
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            frontmatter = "\n".join(lines[1:i])
+            return "license:" in frontmatter
+    return False
+
+
+def add_skill_license(file_path: Path) -> bool:
+    """Add license field to the YAML frontmatter of a SKILL.md file."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if has_skill_license(content):
+            return False
+
+        lines = content.split("\n")
+        if not lines or lines[0].strip() != "---":
+            return False
+
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                lines.insert(i, SKILL_LICENSE_LINE)
+                break
+        else:
+            return False
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return True
+
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}", file=sys.stderr)
+        return False
+
+
 def action_write(root_dir: Path) -> int:
     """Add SPDX headers to files that are missing them."""
     files = find_files(root_dir)
@@ -232,6 +299,12 @@ def action_write(root_dir: Path) -> int:
             print(f"Added header to: {file_path.relative_to(root_dir)}")
             modified_count += 1
 
+    # Also handle SKILL.md files under .claude/skills/
+    for skill_md in iter_skill_files(root_dir):
+        if add_skill_license(skill_md):
+            print(f"Added license to frontmatter: {skill_md.relative_to(root_dir)}")
+            modified_count += 1
+
     print(f"\nModified {modified_count} file(s)")
     return 0
 
@@ -244,6 +317,16 @@ def action_check(root_dir: Path) -> int:
     for file_path in files:
         if not check_file(file_path):
             missing_headers.append(file_path)
+
+    # Also check SKILL.md files under .claude/skills/
+    for skill_md in iter_skill_files(root_dir):
+        try:
+            with open(skill_md, "r", encoding="utf-8") as f:
+                content = f.read()
+            if not has_skill_license(content):
+                missing_headers.append(skill_md)
+        except Exception as e:
+            print(f"Error reading {skill_md}: {e}", file=sys.stderr)
 
     if missing_headers:
         print("❌ The following files are missing SPDX headers:\n")
