@@ -1,3 +1,7 @@
+<!--- SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. --->
+
+<!--- SPDX-License-Identifier: MIT --->
+
 # Report a Security Vulnerability
 
 To report a potential security vulnerability in any NVIDIA product, please use either:
