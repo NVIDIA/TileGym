@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 
 # Note: torch and triton should be pre-installed in your environment
-transformers==4.56.2
-tokenizers==0.22.0
+transformers==4.57.6
+tokenizers==0.22.2
 # accelerate  # Use `pip install accelerate --no-deps` to avoid reinstalling torch
 huggingface_hub
 matplotlib
