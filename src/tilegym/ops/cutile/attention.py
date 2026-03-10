@@ -35,9 +35,12 @@ def _should_disable_autotune():
     return os.environ.get("DISABLE_AUTOTUNE", "0") == "1"
 
 
-# --- FMHA Forward Kernel (for inference, no backward) ---
-@ct.kernel(occupancy=2)
-def fmha_kernel(
+# --- FMHA Kernel Implementation ---
+# The `_impl` suffix denotes the core kernel logic, separated from the
+# @ct.kernel() entry point so it can be reused by different kernels
+# (e.g. standalone prefill attention and fused POD attention) without
+# duplicating the attention computation code.
+def fmha_kernel_impl(
     Q,
     K,
     V,
@@ -51,14 +54,18 @@ def fmha_kernel(
     QUERY_GROUP_SIZE: ConstInt,
     CAUSAL: ConstBool,
     EVEN_K: ConstBool,
+    bid_x: int,
+    bid_y: int,
 ):
     """
-    cuTile kernel for Fused Multi-Head Attention (FMHA).
+    cuTile device function for Fused Multi-Head Attention (FMHA).
     Computes attention output for a specific batch item and head, using tiling and online softmax.
+
+    Args:
+        bid_x: Block ID in X dimension
+        bid_y: Block ID in Y dimension
     """
     # Map block IDs to batch and head indices
-    bid_x = ct.bid(0)
-    bid_y = ct.bid(1)
     batch_idx = bid_y // H
     head_idx = bid_y % H
     off_kv_h = head_idx // QUERY_GROUP_SIZE
@@ -637,6 +644,49 @@ def _fmha_autotune_configs(head_dim: int | None = None):
     yield from _iter_tile_configs(tile_ms, tile_ns)
 
 
+# --- FMHA Forward Kernel (for inference, no backward) ---
+@ct.kernel(occupancy=2)
+def fmha_kernel(
+    Q,
+    K,
+    V,
+    Out,
+    qk_scale: float,
+    input_pos: int,
+    TILE_D: ConstInt,
+    H: ConstInt,
+    TILE_M: ConstInt,
+    TILE_N: ConstInt,
+    QUERY_GROUP_SIZE: ConstInt,
+    CAUSAL: ConstBool,
+    EVEN_K: ConstBool,
+):
+    """
+    cuTile kernel wrapper for Fused Multi-Head Attention (FMHA).
+    This wrapper calls the impl function fmha_kernel_impl.
+    """
+    bid_x = ct.bid(0)
+    bid_y = ct.bid(1)
+
+    fmha_kernel_impl(
+        Q,
+        K,
+        V,
+        Out,
+        qk_scale,
+        input_pos,
+        TILE_D,
+        H,
+        TILE_M,
+        TILE_N,
+        QUERY_GROUP_SIZE,
+        CAUSAL,
+        EVEN_K,
+        bid_x,
+        bid_y,
+    )
+
+
 def cutile_autotune_fmha(
     stream,
     q,
@@ -723,7 +773,7 @@ def tile_prefill_fmha(q, k, v, sm_scale, is_causal=True, kernel_configs=None):
     v = v.contiguous() if not v.is_contiguous() else v
     o = torch.empty_like(q)
 
-    input_pos = 0  # prefill, causal
+    input_pos = k_len - q_len  # chunked prefill: prefix_kvlen = S_kv - S_qo (0 when S_qo == S_kv)
 
     max_tile_n = max(cfg.TILE_N for cfg in _fmha_autotune_configs(hidden_size))
     EVEN_K = (k_len % max_tile_n) == 0

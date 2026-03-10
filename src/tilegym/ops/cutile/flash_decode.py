@@ -19,8 +19,11 @@ ConstInt = ct.Constant[int]
 INV_LOG_2 = 1.0 / math.log(2)
 
 
-@ct.kernel
-def attention_decode_kernel_grouped(
+# The `_impl` suffix denotes the core kernel logic, separated from the
+# @ct.kernel() entry point so it can be reused by different kernels
+# (e.g. standalone decode attention and fused POD attention) without
+# duplicating the decode computation code.
+def attention_decode_kernel_grouped_impl(
     Q,
     K,
     V,  # query, key, value tensors
@@ -42,11 +45,19 @@ def attention_decode_kernel_grouped(
     NUM_Q_HEAD_PER_KV: ConstInt,
     QUERY_GROUP_TILE_SIZE: ConstInt,
     NUM_KV_SPLITS: ConstInt,
+    batch_id: int,
+    head_id: int,
+    tile_id: int,
 ):
-    # Get program IDs
-    batch_id = ct.bid(0)
-    head_id = ct.bid(1)
-    tile_id = ct.bid(2)
+    """
+    cuTile device function for Grouped Query Attention decode with split-K parallelization.
+
+    Args:
+        batch_id: Batch ID
+        head_id: Head ID
+        tile_id: Tile ID for split-K parallelization
+    """
+    # Use program IDs passed as parameters
 
     qk_scale = ct.mul(softmax_scale, INV_LOG_2)
 
@@ -173,6 +184,66 @@ def attention_decode_kernel_grouped(
         l,
         check_bounds=True,
         latency=1,
+    )
+
+
+@ct.kernel()
+def attention_decode_kernel_grouped(
+    Q,
+    K,
+    V,
+    Att_Out,
+    LSE_Out,
+    softmax_scale: float,
+    stride_mid_ob: int,
+    stride_mid_oh: int,
+    stride_mid_os: int,
+    stride_mid_lseb: int,
+    stride_mid_lsem: int,
+    B: int,
+    H_qo: int,
+    H_kv: int,
+    S_kv: int,
+    HEAD_DIM: ConstInt,
+    TILE_N: ConstInt,
+    KV_LEN_PER_SPLIT: ConstInt,
+    NUM_Q_HEAD_PER_KV: ConstInt,
+    QUERY_GROUP_TILE_SIZE: ConstInt,
+    NUM_KV_SPLITS: ConstInt,
+):
+    """
+    cuTile kernel wrapper for Grouped Query Attention decode.
+    This wrapper calls the impl function attention_decode_kernel_grouped_impl.
+    """
+    batch_id = ct.bid(0)
+    head_id = ct.bid(1)
+    tile_id = ct.bid(2)
+
+    attention_decode_kernel_grouped_impl(
+        Q,
+        K,
+        V,
+        Att_Out,
+        LSE_Out,
+        softmax_scale,
+        stride_mid_ob,
+        stride_mid_oh,
+        stride_mid_os,
+        stride_mid_lseb,
+        stride_mid_lsem,
+        B,
+        H_qo,
+        H_kv,
+        S_kv,
+        HEAD_DIM,
+        TILE_N,
+        KV_LEN_PER_SPLIT,
+        NUM_Q_HEAD_PER_KV,
+        QUERY_GROUP_TILE_SIZE,
+        NUM_KV_SPLITS,
+        batch_id,
+        head_id,
+        tile_id,
     )
 
 
