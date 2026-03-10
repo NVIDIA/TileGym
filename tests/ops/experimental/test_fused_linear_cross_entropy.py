@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from tests import common
 from tilegym.backend import is_backend_available
-from tilegym.ops import fused_linear_cross_entropy
+from tilegym.ops.cutile.experimental.fused_linear_cross_entropy import fused_linear_cross_entropy
 
 
 class TestFusedLinearCrossEntropy(common.PyTestCase):
