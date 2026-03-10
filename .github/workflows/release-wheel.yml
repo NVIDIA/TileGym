@@ -54,7 +54,7 @@ on:
         default: true
     secrets:
       RELEASE_TOKEN:
-        description: 'PAT with repo scope used to create releases and upload assets'
+        description: 'Token to create releases and upload assets'
         required: true
 
 permissions:
