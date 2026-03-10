@@ -207,29 +207,27 @@ jobs:
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------------
-      # 4. Remove any pre-existing release and git tag for this version so that
-      #    the re-created release always points to the correct commit.
+      # 4. Abort if a release or git tag for this version already exists.
+      #    This prevents accidentally overwriting a published release.
       # -----------------------------------------------------------------------
-      - name: Delete existing release and tag (if any)
+      - name: Fail if release or tag already exists
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           REPO="${{ github.repository }}"
 
-          # --cleanup-tag deletes both the GitHub release object and the git tag.
-          if gh release delete "${TAG}" --cleanup-tag --yes 2>/dev/null; then
-            echo "Deleted existing release and tag: ${TAG}"
-          else
-            echo "No release found for ${TAG}"
-            # A bare git tag might still exist from a previously interrupted run.
-            if gh api --method DELETE \
-                "repos/${REPO}/git/refs/tags/${TAG}" 2>/dev/null; then
-              echo "Deleted orphan git tag: ${TAG}"
-            else
-              echo "No existing tag to delete for: ${TAG}"
-            fi
+          if gh release view "${TAG}" --repo "${REPO}" &>/dev/null; then
+            echo "ERROR: GitHub release '${TAG}' already exists. Delete it manually before re-releasing." >&2
+            exit 1
           fi
+
+          if gh api "repos/${REPO}/git/refs/tags/${TAG}" &>/dev/null; then
+            echo "ERROR: Git tag '${TAG}' already exists. Delete it manually before re-releasing." >&2
+            exit 1
+          fi
+
+          echo "No existing release or tag found for ${TAG}, proceeding."
 
       # -----------------------------------------------------------------------
       # 5. Publish the release and upload all wheels as assets
