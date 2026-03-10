@@ -52,6 +52,10 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      RELEASE_TOKEN:
+        description: 'Token to create releases and upload assets'
+        required: true
 
 permissions:
   contents: write
@@ -76,7 +80,7 @@ jobs:
       - name: Resolve run ID and commit SHA
         id: resolve
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           ARTIFACT_WORKFLOW="${{ inputs.artifact-workflow }}"
           COMMIT_SHA="${{ inputs.commit-sha }}"
@@ -114,7 +118,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Download matching artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           RUN_ID="${{ steps.resolve.outputs.run-id }}"
           REPO="${{ github.repository }}"
@@ -212,7 +216,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Fail if release or tag already exists
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           REPO="${{ github.repository }}"
@@ -234,7 +238,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Create release and upload wheels
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           TARGET_SHA="${{ steps.resolve.outputs.sha }}"
