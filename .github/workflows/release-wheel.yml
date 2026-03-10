@@ -61,6 +61,11 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       # -----------------------------------------------------------------------
       # 1. Resolve the run ID and commit SHA
       #    - If commit-sha is provided: find the latest successful run of
