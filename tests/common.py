@@ -212,11 +212,16 @@ class PyTestCase:
                 assert isinstance(extra_ref_kwargs[k], torch.Tensor) and extra_ref_kwargs[k].requires_grad
                 tensor_args_with_grad[k] = v
         assert not (len(tensor_args_with_grad) and multiple_outputs)
+        # Deep-clone tensor kwargs BEFORE test_fn call.
+        # In-place kernels (e.g. rope_embedding, geglu/swiglu backward) modify
+        # input tensors during test_fn, so ref_fn would receive corrupted inputs
+        # if we share the same dict.
+        ref_kwargs = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in fn_kwargs.items()}
         test_out = test_fn(**fn_kwargs, **extra_test_kwargs)
         # Clear CUDA cache after test_fn to release memory reserved by autotuning
         # This prevents OOM during compare_tensors for large matrix operations
         torch.cuda.empty_cache()
-        ref_out = ref_fn(**fn_kwargs, **extra_ref_kwargs)
+        ref_out = ref_fn(**ref_kwargs, **extra_ref_kwargs)
 
         if test_index is not None:
             test_out = test_out[test_index]
