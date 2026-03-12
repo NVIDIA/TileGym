@@ -9,7 +9,11 @@ import torch.nn.functional as F
 from tests import common
 from tilegym import set_backend
 from tilegym.ops import get_swiglu
-from tilegym.ops.cutile.swiglu import SiLUMulFunction
+
+try:
+    from tilegym.ops.cutile.swiglu import SiLUMulFunction
+except (ImportError, ModuleNotFoundError):
+    SiLUMulFunction = None
 
 
 class Test_SwiGLU(common.PyTestCase):
@@ -105,6 +109,8 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward(self, batch_size, seq_len, hidden_size, dtype, backend, arch):
         """Test backward pass of SwiGLU (SiLUMulFunction)."""
+        if SiLUMulFunction is None:
+            pytest.skip("CuTile SiLUMulFunction not available (cuda.tile not installed)")
         self.setUp()
         try:
             set_backend(backend)
@@ -158,6 +164,8 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward_irregular(self, batch_size, seq_len, hidden_size, backend, arch):
         """Test backward pass with irregular (non-power-of-2) shapes."""
+        if SiLUMulFunction is None:
+            pytest.skip("CuTile SiLUMulFunction not available (cuda.tile not installed)")
         self.setUp()
         try:
             set_backend(backend)
