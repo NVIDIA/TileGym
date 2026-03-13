@@ -115,6 +115,7 @@ def ct_static_persistent_bmm_kernel(
                     shape=(1, TILE_K, TILE_M),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
+                    latency=3,
                 )
                 # Transpose to get (1, TILE_M, TILE_K)
                 a_tile_3d = ct.permute(a_tile_3d, (0, 2, 1))
@@ -126,6 +127,7 @@ def ct_static_persistent_bmm_kernel(
                     shape=(1, TILE_M, TILE_K),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
+                    latency=3,
                 )
             # Reshape to 2D for MMA
             a_tile = ct.reshape(a_tile_3d, (TILE_M, TILE_K))
@@ -139,6 +141,7 @@ def ct_static_persistent_bmm_kernel(
                     shape=(1, TILE_N, TILE_K),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
+                    latency=3,
                 )
                 # Transpose to get (1, TILE_K, TILE_N)
                 b_tile_3d = ct.permute(b_tile_3d, (0, 2, 1))
@@ -150,6 +153,7 @@ def ct_static_persistent_bmm_kernel(
                     shape=(1, TILE_K, TILE_N),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
+                    latency=3,
                 )
             # Reshape to 2D for MMA
             b_tile = ct.reshape(b_tile_3d, (TILE_K, TILE_N))
@@ -161,7 +165,7 @@ def ct_static_persistent_bmm_kernel(
         result = ct.astype(accumulator, C.dtype)
         # Reshape to 3D for store
         result_3d = ct.reshape(result, (1, TILE_M, TILE_N))
-        ct.store(C, index=(bid_q, bid_m, bid_n), tile=result_3d, order=(0, 1, 2))
+        ct.store(C, index=(bid_q, bid_m, bid_n), tile=result_3d, order=(0, 1, 2), latency=3)
 
 
 def _bmm_autotune_configs():
@@ -191,7 +195,7 @@ def _bmm_autotune_configs():
                             TILE_K=TILE_K,
                             GROUP_SIZE_M=8,
                             occupancy=occupancy,
-                            num_ctas=1,
+                            num_ctas=2,
                         )
     else:
         # Other GPUs (e.g., GB100): Larger tiles with num_ctas=2
