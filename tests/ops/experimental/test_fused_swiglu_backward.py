@@ -10,7 +10,7 @@ import tilegym
 from tilegym import set_backend
 from tilegym.ops.fused_mlp import PartiallyFusedSwiGLUMLP
 
-from .. import common
+from ... import common
 
 
 class MockConfig:

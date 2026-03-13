@@ -14,7 +14,7 @@ from tilegym.ops.cutile.attention import fmha_forward_with_lse
 from tilegym.ops.cutile.attention import tile_fmha_functional
 from tilegym.ops.cutile.attention import tile_fmha_with_backward
 
-from .. import common
+from ... import common
 
 
 def get_data(*shape, dtype, device, requires_grad=False, mean=0.0, std=0.5):

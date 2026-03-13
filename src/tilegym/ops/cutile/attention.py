@@ -12,6 +12,7 @@ import torch
 from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
+from tilegym.experimental import experimental_kernel
 from tilegym.logger import get_logger
 
 from .utils import next_power_of_2
@@ -164,6 +165,7 @@ def fmha_kernel_impl(
 
 
 # --- FMHA Forward Kernel with LSE (for training, with backward support) ---
+@experimental_kernel
 @ct.kernel(occupancy=2)
 def fmha_fwd_kernel_with_lse(
     Q,
@@ -281,6 +283,7 @@ def fmha_fwd_kernel_with_lse(
 # --- Backward Pass Kernels ---
 
 
+@experimental_kernel
 @ct.kernel(occupancy=2)
 def fmha_bwd_preprocess_kernel(
     O,
@@ -320,6 +323,7 @@ def fmha_bwd_preprocess_kernel(
     ct.scatter(Delta, delta_indices, delta)
 
 
+@experimental_kernel
 @ct.kernel(occupancy=2)
 def fmha_bwd_dkdv_kernel(
     Q,
@@ -473,6 +477,7 @@ def fmha_bwd_dkdv_kernel(
     ct.store(dV, index=(batch_idx, kv_head_idx, bid_n, 0), tile=dv_store)
 
 
+@experimental_kernel
 @ct.kernel(occupancy=2)
 def fmha_bwd_dq_kernel(
     Q,

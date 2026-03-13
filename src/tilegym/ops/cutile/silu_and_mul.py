@@ -9,6 +9,7 @@ import torch
 from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from tilegym.backend import register_impl
+from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
@@ -75,6 +76,7 @@ def silu_and_mul_kernel_row_wise(
 # da = dc * b * (sigmoid(a) + a * sigmoid(a) * (1 - sigmoid(a)))
 #    = dc * b * sigmoid(a) * (1 + a * (1 - sigmoid(a)))
 # db = dc * silu(a)
+@experimental_kernel
 @ct.kernel
 def silu_and_mul_backward_kernel_row_wise(
     grad_output,  # dc: (batch_size, hidden_size)

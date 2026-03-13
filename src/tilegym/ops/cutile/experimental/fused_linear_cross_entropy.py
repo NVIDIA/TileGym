@@ -16,6 +16,7 @@ ConstInt = ct.Constant[int]
 _ALIGN = 8
 
 
+@experimental_kernel
 @ct.kernel(occupancy=1)
 def _ce_online_kernel(
     logits,
@@ -119,7 +120,6 @@ def _chunked_fwd_loss(
     return loss
 
 
-@experimental_kernel
 def fused_linear_cross_entropy(
     hidden_states: Tensor,
     weight: Tensor,
