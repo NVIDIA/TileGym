@@ -52,8 +52,8 @@ We have verified that `torch==2.9.1` works. You can also get `triton` packages w
 #### 2. Install TileGym
 
 ```bash
-git clone <tilegym-repository-url>
-cd tilegym
+git clone https://github.com/NVIDIA/TileGym.git
+cd TileGym
 pip install -r requirements.txt
 pip install .
 ```
