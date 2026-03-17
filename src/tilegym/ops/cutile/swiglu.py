@@ -90,12 +90,7 @@ def swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
     a_tile_f32 = a_tile.astype(ct.float32)
     b_tile_f32 = b_tile.astype(ct.float32)
 
-    # NOTE: sigmoid is intentionally inlined here to preserve current backward
-    # kernel behavior and benchmark baselines. Forward already uses
-    # the shared `sigmoid()` helper; backward will switch to it in a follow-up
-    # optimization PR that re-benchmarks backward performance.
-    # Compute sigmoid(a) and silu(a)
-    sigmoid_a = 1.0 / (1.0 + ct.exp(-a_tile_f32))
+    sigmoid_a = sigmoid(a_tile_f32)
     silu_a = a_tile_f32 * sigmoid_a
 
     # db = dc * silu(a)
