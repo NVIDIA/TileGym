@@ -797,3 +797,69 @@ def bmm(
         torch.Tensor: Matrix multiplication result
     """
     raise NotImplementedError(f"BMM is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
+    "recurrent_gated_delta_rule",
+)
+def recurrent_gated_delta_rule(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    **kwargs: Any,
+):
+    """
+    Recurrent gated delta rule attention (per-timestep sequential).
+
+    Args:
+        query, key: (B, T, H, K)
+        value: (B, T, H, V)
+        g: (B, T, H) -- log-space decay
+        beta: (B, T, H) -- update gate
+        initial_state: (B, H, K, V) or None
+        output_final_state: bool
+        use_qk_l2norm_in_kernel: bool
+
+    Returns:
+        Tuple[torch.Tensor, Optional[torch.Tensor]]: output (B, T, H, V), final_state
+    """
+    raise NotImplementedError(f"recurrent_gated_delta_rule is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "chunk_gated_delta_rule",
+)
+def chunk_gated_delta_rule(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int = 64,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    **kwargs: Any,
+):
+    """
+    Chunked gated delta rule attention (intra-chunk prepare + inter-chunk recurrence).
+
+    Args:
+        query, key: (B, T, H, K)
+        value: (B, T, H, V)
+        g: (B, T, H) -- log-space decay
+        beta: (B, T, H) -- update gate
+        chunk_size: chunk size for blocking (default 64)
+        initial_state: (B, H, K, V) or None
+        output_final_state: bool
+        use_qk_l2norm_in_kernel: bool
+
+    Returns:
+        Tuple[torch.Tensor, Optional[torch.Tensor]]: output (B, T, H, V), final_state
+    """
+    raise NotImplementedError(f"chunk_gated_delta_rule is not implemented for {get_current_backend()}")

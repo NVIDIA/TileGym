@@ -39,6 +39,7 @@ if is_backend_available("cutile"):
     # Import specific functions for direct access
     from .attention_sink import attention_sink
     from .attention_sink_decode import attention_sink_decode
+    from .chunk_gated_delta_rule import chunk_gated_delta_rule
     from .experimental import mhc
     from .experimental.fused_linear_cross_entropy import fused_linear_cross_entropy
     from .experimental.mhc import mhc_apply_residual
@@ -47,6 +48,7 @@ if is_backend_available("cutile"):
     from .flash_decode import fmha_decode
     from .moe import fused_moe_kernel as invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
+    from .recurrent_gated_delta_rule import recurrent_gated_delta_rule
     from .rms_norm import get_rms_norm_module
     from .rms_norm import rms_norm
     from .rope import apply_rope_base
@@ -92,6 +94,8 @@ if is_backend_available("cutile"):
         "matmul",
         "group_gemm",
         "mhc",
+        "chunk_gated_delta_rule",
+        "recurrent_gated_delta_rule",
     ]
 else:
     __all__ = []
