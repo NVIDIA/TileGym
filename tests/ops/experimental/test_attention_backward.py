@@ -7,12 +7,21 @@ import math
 import pytest
 import torch
 
+from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
-from tilegym.ops.cutile.attention import FlashAttentionFunction
-from tilegym.ops.cutile.attention import fmha_backward
-from tilegym.ops.cutile.attention import fmha_forward_with_lse
-from tilegym.ops.cutile.attention import tile_fmha_functional
-from tilegym.ops.cutile.attention import tile_fmha_with_backward
+
+if is_backend_available("cutile"):
+    from tilegym.ops.cutile.attention import FlashAttentionFunction
+    from tilegym.ops.cutile.attention import fmha_backward
+    from tilegym.ops.cutile.attention import fmha_forward_with_lse
+    from tilegym.ops.cutile.attention import tile_fmha_functional
+    from tilegym.ops.cutile.attention import tile_fmha_with_backward
+else:
+    FlashAttentionFunction = None
+    fmha_backward = None
+    fmha_forward_with_lse = None
+    tile_fmha_functional = None
+    tile_fmha_with_backward = None
 
 from ... import common
 

@@ -6,9 +6,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from tests import common
-from tilegym.backend import is_backend_available
-from tilegym.ops.cutile.experimental.fused_linear_cross_entropy import fused_linear_cross_entropy
+from tilegym.backend import set_backend
+from tilegym.ops import fused_linear_cross_entropy
+
+from ... import common
 
 
 class TestFusedLinearCrossEntropy(common.PyTestCase):
@@ -20,6 +21,8 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
             target = target.reshape(-1)
         return F.cross_entropy(logits, target, ignore_index=ignore_index, reduction=reduction)
 
+    _backends = ["cutile"]
+
     @pytest.mark.parametrize(
         "batch,seq_len,hidden_size,vocab_size,dtype,reduction",
         [
@@ -28,7 +31,8 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
             (1, 256, 384, 4096, torch.float16, "sum"),
         ],
     )
-    def test_forward_matches_pytorch(
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_forward_matches_pytorch(
         self,
         batch,
         seq_len,
@@ -36,10 +40,13 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
         vocab_size,
         dtype,
         reduction,
+        backend,
         arch,
     ):
-        if not torch.cuda.is_available() or not is_backend_available("cutile"):
-            pytest.skip("CUDA + cuTile backend required")
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
 
         self.setUp()
 
@@ -62,9 +69,12 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
         rtol = 3e-2 if dtype in (torch.float16, torch.bfloat16) else 1e-4
         torch.testing.assert_close(loss.float(), ref_loss.float(), rtol=rtol, atol=atol)
 
-    def test_chunk_size_consistency(self, arch):
-        if not torch.cuda.is_available() or not is_backend_available("cutile"):
-            pytest.skip("CUDA + cuTile backend required")
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_chunk_size_consistency(self, backend, arch):
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
 
         self.setUp()
 
@@ -93,9 +103,12 @@ class TestFusedLinearCrossEntropy(common.PyTestCase):
         torch.testing.assert_close(loss_c64, loss_c512, rtol=2e-2, atol=2e-2)
 
     @pytest.mark.slow
-    def test_peak_memory_less_than_pytorch(self, arch):
-        if not torch.cuda.is_available() or not is_backend_available("cutile"):
-            pytest.skip("CUDA + cuTile backend required")
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_peak_memory_less_than_pytorch(self, backend, arch):
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
 
         self.setUp()
 

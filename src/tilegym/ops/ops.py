@@ -563,6 +563,40 @@ def mhc_sinkhorn(
 
 
 @dispatch(
+    "fused_linear_cross_entropy",
+)
+def fused_linear_cross_entropy(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    chunk_size: int = 4096,
+    reduction: str = "mean",
+    **kwargs: Any,
+):
+    """Forward-only chunked fused linear + cross entropy.
+
+    Lower peak memory than dense PyTorch CE on large BT because
+    full logits [BT, V] are never materialized.
+
+    Args:
+        hidden_states: Input tensor (B, S, H) or (BT, H)
+        weight: Vocab projection weight (V, H)
+        target: Target class indices (B, S) or (BT,)
+        bias: Optional bias tensor
+        ignore_index: Target value to ignore in loss (default: -100)
+        chunk_size: BT chunk size for memory-efficient computation
+        reduction: 'mean' or 'sum'
+        **kwargs: Additional backend-specific arguments
+
+    Returns:
+        Scalar loss tensor
+    """
+    raise NotImplementedError(f"fused_linear_cross_entropy is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "gemma_attention",
 )
 def gemma_attention(

@@ -13,7 +13,11 @@ from torch.nn.attention import SDPBackend
 from torch.nn.attention import sdpa_kernel
 
 from tilegym.backend import is_backend_available
-from tilegym.ops.cutile.attention import tile_fmha_with_backward
+
+if is_backend_available("cutile"):
+    from tilegym.ops.cutile.attention import tile_fmha_with_backward
+else:
+    tile_fmha_with_backward = None
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 

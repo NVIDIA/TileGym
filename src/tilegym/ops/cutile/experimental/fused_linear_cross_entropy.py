@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from tilegym.backend.dispatcher import register_impl
 from tilegym.experimental import experimental_kernel
 
 ConstInt = ct.Constant[int]
@@ -120,6 +121,7 @@ def _chunked_fwd_loss(
     return loss
 
 
+@register_impl("fused_linear_cross_entropy", backend="cutile")
 def fused_linear_cross_entropy(
     hidden_states: Tensor,
     weight: Tensor,

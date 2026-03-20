@@ -9,7 +9,11 @@ import torch.nn.functional as F
 import triton
 
 from tilegym.backend import is_backend_available
-from tilegym.ops.cutile import fused_linear_cross_entropy
+
+if is_backend_available("cutile"):
+    from tilegym.ops.cutile import fused_linear_cross_entropy
+else:
+    fused_linear_cross_entropy = None
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 

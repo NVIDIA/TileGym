@@ -14,18 +14,24 @@ import torch
 import triton
 
 from tilegym.backend import is_backend_available
-from tilegym.ops.cutile.rms_norm import TileRMSNorm
-from tilegym.ops.cutile.rms_norm import _bwd_tiles
-from tilegym.ops.cutile.rms_norm import rms_norm_backward
+
+if is_backend_available("cutile"):
+    from tilegym.ops.cutile.rms_norm import TileRMSNorm
+    from tilegym.ops.cutile.rms_norm import _bwd_tiles
+    from tilegym.ops.cutile.rms_norm import rms_norm_backward
+else:
+    TileRMSNorm = None
+    _bwd_tiles = None
+    rms_norm_backward = None
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
-# CuTile backward - imported from the actual implementation
+# CuTile backward
 rms_norm_backward_cutile = rms_norm_backward
 
-# Torch backward - static method on TileRMSNorm class
-rms_norm_backward_torch = TileRMSNorm.rms_norm_backward_torch
+# Torch backward
+rms_norm_backward_torch = TileRMSNorm.rms_norm_backward_torch if TileRMSNorm is not None else None
 
 
 # Backend dispatch
