@@ -104,6 +104,25 @@ docker run --gpus all -it tilegym-transformers bash
 
 詳細は [modeling/transformers/README.md](modeling/transformers/README.md) をご覧ください。
 
+### 4. Julia (cuTile.jl) カーネル (オプション)
+
+TileGym には、Julia による実験的な [cuTile.jl](https://github.com/JuliaGPU/cuTile.jl) カーネル実装も含まれています。これらは `julia/` ディレクトリに独立して収められており、Python の TileGym パッケージを必要としません。
+
+**前提条件**: [Julia 1.12+](https://julialang.org/downloads/)、CUDA 13.1、Blackwell GPU
+
+```bash
+# Julia のインストール（未インストールの場合）
+curl -fsSL https://install.julialang.org | sh
+
+# 依存関係のインストール
+julia --project=julia/ -e 'using Pkg; Pkg.instantiate()'
+
+# テストの実行
+julia --project=julia/ julia/test/runtests.jl
+```
+
+依存関係の詳細は `julia/Project.toml` を参照してください。
+
 ## コントリビューション
 
 あらゆる種類のコントリビューションを歓迎します。ガイドラインについては、コントリビューターライセンス契約（CLA）プロセスを含む [CONTRIBUTING.md](CONTRIBUTING.md) をお読みください。

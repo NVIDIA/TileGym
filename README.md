@@ -104,6 +104,25 @@ docker run --gpus all -it tilegym-transformers bash
 
 More details in [modeling/transformers/README.md](modeling/transformers/README.md)
 
+### 4. Julia (cuTile.jl) Kernels (Optional)
+
+TileGym also includes experimental [cuTile.jl](https://github.com/JuliaGPU/cuTile.jl) kernel implementations in Julia. These are self-contained in the `julia/` directory and do not require the Python TileGym package.
+
+**Prerequisites**: [Julia 1.12+](https://julialang.org/downloads/), CUDA 13.1, Blackwell GPU
+
+```bash
+# Install Julia (if not already installed)
+curl -fsSL https://install.julialang.org | sh
+
+# Install dependencies
+julia --project=julia/ -e 'using Pkg; Pkg.instantiate()'
+
+# Run tests
+julia --project=julia/ julia/test/runtests.jl
+```
+
+See `julia/Project.toml` for the full dependency list.
+
 ## Contributing
 
 We welcome contributions of all kinds. Please read our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, including the Contributor License Agreement (CLA) process.

@@ -104,6 +104,25 @@ docker run --gpus all -it tilegym-transformers bash
 
 更多詳情請參閱 [modeling/transformers/README.md](modeling/transformers/README.md)
 
+### 4. Julia (cuTile.jl) 核心 (選填)
+
+TileGym 還包含在 Julia 中實作的實驗性 [cuTile.jl](https://github.com/JuliaGPU/cuTile.jl) 核心。這些核心獨立存在於 `julia/` 目錄中，不需要安裝 Python 版 TileGym 套件。
+
+**前置需求**：[Julia 1.12+](https://julialang.org/downloads/)、CUDA 13.1、Blackwell 架構 GPU
+
+```bash
+# 安裝 Julia（若尚未安裝）
+curl -fsSL https://install.julialang.org | sh
+
+# 安裝依賴
+julia --project=julia/ -e 'using Pkg; Pkg.instantiate()'
+
+# 執行測試
+julia --project=julia/ julia/test/runtests.jl
+```
+
+完整依賴列表請參閱 `julia/Project.toml`。
+
 ## 貢獻
 
 我們歡迎各種形式的貢獻。請閱讀我們的 [CONTRIBUTING.md](CONTRIBUTING.md) 了解指南，包括貢獻者授權協議（CLA）流程。

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Julia sub-project for TileGym cuTile.jl kernels.
+#
+# Setup:
+#   julia --project=julia/ -e 'using Pkg; Pkg.instantiate()'
+#
+# Run tests:
+#   julia --project=julia/ julia/test/runtests.jl
+
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
+cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+CUDA = "5.9"
+NNlib = "0.9"
+julia = "1.12"
