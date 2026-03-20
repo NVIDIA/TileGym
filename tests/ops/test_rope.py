@@ -108,8 +108,8 @@ class Test_RoPE(common.PyTestCase):
             torch.randn_like(k1, device=device).to(dtype),
         )
 
-        hf_q, hf_k = apply_rotary_pos_emb(q1, k1, cos, sin, pos_ids)
-        tt_q, tt_k = tilegym.ops.apply_rope_base(q2, k2, cos, sin, pos_ids)
+        hf_q, hf_k = apply_rotary_pos_emb(q1, k1, cos, sin)
+        tt_q, tt_k = tilegym.ops.apply_rope_base(q2, k2, cos, sin)
         torch.testing.assert_close(hf_q, tt_q, atol=atol, rtol=rtol)
         torch.testing.assert_close(hf_k, tt_k, atol=atol, rtol=rtol)
 
@@ -172,8 +172,8 @@ class Test_RoPE(common.PyTestCase):
         )
         cos, sin = rotary_emb(k_hf, pos_ids)
 
-        hf_q, hf_k = apply_rotary_pos_emb(q_hf, k_hf, cos, sin, pos_ids)
-        tt_q, tt_k = tilegym.ops.apply_rope_base(q_tt, k_tt, cos, sin, pos_ids)
+        hf_q, hf_k = apply_rotary_pos_emb(q_hf, k_hf, cos, sin)
+        tt_q, tt_k = tilegym.ops.apply_rope_base(q_tt, k_tt, cos, sin)
 
         grad_q = torch.randn_like(hf_q)
         grad_k = torch.randn_like(hf_k)

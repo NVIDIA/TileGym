@@ -107,7 +107,12 @@ def apply_tilegym_kernel_to_deepseek_v2(
         # Replace attention forward with TileGym implementation
         modeling_deepseek.DeepseekV2Attention.forward = tilegym_deepseek_v2_forward
     if moe:
-        modeling_deepseek.DeepseekV2MoE = DeepseekV2MoETileGym
+        # In transformers >=5.x the class was renamed from DeepseekV2MoE to DeepseekV2Moe (lowercase 'e').
+        # Patch whichever name exists so the DecoderLayer picks it up.
+        if hasattr(modeling_deepseek, "DeepseekV2Moe"):
+            modeling_deepseek.DeepseekV2Moe = DeepseekV2MoETileGym
+        else:
+            modeling_deepseek.DeepseekV2MoE = DeepseekV2MoETileGym
 
 
 def apply_tilegym_kernel_to_qwen2(

@@ -92,7 +92,7 @@ Utilisez les noyaux TileGym dans des scénarios d'inférence de bout en bout. No
 Tout d'abord, installez la dépendance supplémentaire :
 
 ```bash
-pip install accelerate --no-deps
+pip install accelerate==1.13.0 --no-deps
 ```
 
 **Configuration conteneurisée (Docker)** :

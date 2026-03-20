@@ -92,7 +92,7 @@ bash run_all.sh
 首先，安装额外依赖：
 
 ```bash
-pip install accelerate --no-deps
+pip install accelerate==1.13.0 --no-deps
 ```
 
 **容器化部署（Docker）**：

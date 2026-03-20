@@ -46,7 +46,7 @@ RUN python -m pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
 
 # Install additional dependencies not covered by requirements.txt
-RUN pip install --no-cache-dir --no-deps accelerate && \
+RUN pip install --no-cache-dir --no-deps accelerate==1.13.0 && \
     pip install --no-cache-dir sentencepiece protobuf
 
 WORKDIR /workspace/tilegym

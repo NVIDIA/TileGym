@@ -92,7 +92,7 @@ bash run_all.sh
 まず、追加の依存関係をインストールします：
 
 ```bash
-pip install accelerate --no-deps
+pip install accelerate==1.13.0 --no-deps
 ```
 
 **コンテナ化セットアップ（Docker）**：

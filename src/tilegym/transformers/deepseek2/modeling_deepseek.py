@@ -12,13 +12,15 @@ from torch import nn
 from transformers.cache_utils import Cache
 from transformers.models.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config
 from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MLP
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MoEGate
 
-REQUIRED_TRANSFORMERS_VERSION = "4.55.2"
+REQUIRED_TRANSFORMERS_VERSION = "5.3.0"
 current_version = transformers.__version__
 
 if version.parse(current_version) < version.parse(REQUIRED_TRANSFORMERS_VERSION):
-    raise ImportError("In new transformers version, past_key_value is named to past_key_values")
+    raise ImportError(
+        f"transformers>={REQUIRED_TRANSFORMERS_VERSION} is required (got {current_version}). "
+        "transformers 5.x removed DeepseekV2MoEGate and renamed DeepseekV2MoE → DeepseekV2Moe."
+    )
 
 from tilegym.logger import get_logger
 from tilegym.ops import fused_moe
@@ -276,7 +278,15 @@ class DeepseekV2MoETileGym(nn.Module):
                 for _ in range(config.n_routed_experts)
             ]
         )
-        self.gate = DeepseekV2MoEGate(config)
+        # In transformers >=5.x, DeepseekV2MoEGate was removed; the gate is now a plain Linear
+        # and routing logic lives in DeepseekV2Moe.route_tokens_to_experts.
+        self.gate = nn.Linear(config.hidden_size, config.n_routed_experts, bias=False)
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.topk_method = config.topk_method
+        self.top_k = config.num_experts_per_tok
+        self.num_group = config.n_group
+        self.topk_group = config.topk_group
+        self.num_experts = config.n_routed_experts
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             # Use PartiallyFusedSwiGLUMLP for shared experts to eliminate PyTorch linear operations
@@ -320,11 +330,41 @@ class DeepseekV2MoETileGym(nn.Module):
         )
         return out
 
+    def route_tokens_to_experts(self, router_logits):
+        """Route tokens to experts using greedy or group_limited_greedy strategy."""
+        # Defensive reshape: gate output may arrive as [B*S, n_experts] (already flattened)
+        # or [B, S, n_experts] (batched). Normalise to 3-D so the shape unpack below is safe.
+        if router_logits.dim() == 2:
+            router_logits = router_logits.unsqueeze(0)  # [B*S, n_experts] -> [1, B*S, n_experts]
+        batch_size, seq_len, hidden_dim = router_logits.shape
+        router_logits = router_logits.view(-1, hidden_dim)
+        router_logits = router_logits.softmax(dim=-1, dtype=torch.float32)
+        if self.topk_method == "greedy":
+            topk_weight, topk_idx = torch.topk(router_logits, k=self.top_k, dim=-1, sorted=False)
+        elif self.topk_method == "group_limited_greedy":
+            group_scores = router_logits.view(batch_size * seq_len, self.num_group, -1).max(dim=-1).values
+            group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
+            group_mask = torch.zeros_like(group_scores)
+            group_mask.scatter_(1, group_idx, 1)
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand(batch_size * seq_len, self.num_group, self.num_experts // self.num_group)
+                .reshape(batch_size * seq_len, -1)
+            )
+            tmp_scores = router_logits.masked_fill(~score_mask.bool(), 0.0)
+            topk_weight, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
+        else:
+            raise ValueError(f"Unknown topk_method: {self.topk_method}")
+
+        topk_weight = topk_weight * self.routed_scaling_factor
+        return topk_idx, topk_weight
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         self.init_merged_expert_weights()
         residuals = hidden_states
         orig_shape = hidden_states.shape
-        topk_indices, topk_weights = self.gate(hidden_states)
+        router_logits = nn.functional.linear(hidden_states.type(torch.float32), self.gate.weight.type(torch.float32))
+        topk_indices, topk_weights = self.route_tokens_to_experts(router_logits)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = self.moe_infer(hidden_states, topk_indices, topk_weights).view(*orig_shape)
         hidden_states = hidden_states + self.shared_experts(residuals)

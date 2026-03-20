@@ -112,9 +112,47 @@ def load_model_with_cache(model_id, **kwargs):
     return _load_with_fallback(model_id, AutoModelForCausalLM, "model", **kwargs)
 
 
+def _fix_tokenizer_decoder_if_needed(tokenizer, model_id):
+    """Fix tokenizer decoder for models whose tokenizer.json uses ByteLevel BPE.
+
+    In transformers 5.3.0, LlamaTokenizer.convert_to_native_format() extracts vocab/merges
+    from tokenizer.json but hardcodes a ByteFallback decoder, discarding the original decoder.
+    For models like DeepSeek-V2 that use ByteLevel BPE (GPT-2 style), this causes garbled
+    output for non-ASCII characters (e.g., Chinese text appears as corrupted Latin-1).
+
+    Fix: when tokenizer.json specifies ByteLevel decoder, replace the backend decoder with
+    the correct one loaded directly from the file.
+    """
+    import json
+    from pathlib import Path
+
+    if not hasattr(tokenizer, "_tokenizer"):
+        return
+
+    tokenizer_json_path = Path(model_id) / "tokenizer.json"
+    if not tokenizer_json_path.exists():
+        return
+
+    with open(tokenizer_json_path) as f:
+        decoder_config = json.load(f).get("decoder", {})
+
+    if decoder_config.get("type") != "ByteLevel":
+        return
+
+    # Current decoder is ByteFallback but tokenizer.json requires ByteLevel.
+    # Load the correct decoder from the serialized tokenizer and apply it.
+    import tokenizers as hf_tokenizers
+
+    fast_tok = hf_tokenizers.Tokenizer.from_file(str(tokenizer_json_path))
+    tokenizer._tokenizer.decoder = fast_tok.decoder
+    print(f"Fixed tokenizer decoder: replaced ByteFallback with ByteLevel (from tokenizer.json)")
+
+
 def load_tokenizer_with_cache(model_id):
     """Load tokenizer with cache checking."""
-    return _load_with_fallback(model_id, AutoTokenizer, "tokenizer")
+    tokenizer = _load_with_fallback(model_id, AutoTokenizer, "tokenizer")
+    _fix_tokenizer_decoder_if_needed(tokenizer, model_id)
+    return tokenizer
 
 
 class NaiveForwardWrapper:

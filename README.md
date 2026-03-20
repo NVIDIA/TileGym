@@ -92,7 +92,7 @@ Use TileGym kernels in end-to-end inference scenarios. We provide runnable scrip
 First, install the additional dependency:
 
 ```bash
-pip install accelerate --no-deps
+pip install accelerate==1.13.0 --no-deps
 ```
 
 **Containerized Setup (Docker)**:
