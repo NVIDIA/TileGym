@@ -323,7 +323,7 @@ jobs:
             ${IMAGE} \
             bash -c "pip install --no-cache-dir pytest-xdist pytest-html && \
               pytest -s tests/ops -v -k test_op \
-                -n 10 \
+                -n 12 \
                 --junitxml=/test-results/ops-results.xml \
                 --html=/test-results/ops-report.html \
                 --self-contained-html"
