@@ -10,7 +10,7 @@
 #   Dev (source):   docker build --target source -f modeling/transformers/Dockerfile .
 #   Default:        docker build -f modeling/transformers/Dockerfile .  (uses source)
 
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.1.0-devel-ubuntu22.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu22.04
 
 ####################
 # Stage 1: Base dependencies

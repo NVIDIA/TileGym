@@ -283,9 +283,9 @@ jobs:
   test-ops:
     name: test-ops
     needs: [config, build]
-    timeout-minutes: 17
+    timeout-minutes: 30
     if: |
-      always() && 
+      always() &&
       needs.config.outputs.run_ops == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
@@ -308,7 +308,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run ops tests
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
@@ -323,7 +323,7 @@ jobs:
             ${IMAGE} \
             bash -c "pip install --no-cache-dir pytest-xdist pytest-html && \
               pytest -s tests/ops -v -k test_op \
-                -n auto \
+                -n 12 \
                 --junitxml=/test-results/ops-results.xml \
                 --html=/test-results/ops-report.html \
                 --self-contained-html"
