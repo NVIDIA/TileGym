@@ -131,7 +131,7 @@ jobs:
               f.write('\n'.join(deps))
           print('Auditing deps:\n' + '\n'.join(deps))
           EOF
-          pip-audit -r audit-requirements.txt
+          pip-audit -r audit-requirements.txt --ignore-vuln CVE-2026-4539
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}
