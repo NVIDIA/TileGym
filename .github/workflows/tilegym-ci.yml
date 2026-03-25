@@ -322,7 +322,7 @@ jobs:
             -w /workspace/tilegym \
             ${IMAGE} \
             bash -c "pip install --no-cache-dir pytest-xdist pytest-html && \
-              pytest -s tests/ops -v -k test_op \
+              pytest -s tests/ops tests/suites -v -k test_op \
                 -n auto \
                 --junitxml=/test-results/ops-results.xml \
                 --html=/test-results/ops-report.html \
