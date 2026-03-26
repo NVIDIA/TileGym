@@ -110,6 +110,8 @@ ALL_BACKENDS = [
 try:
     import deep_gemm
 
+    if not hasattr(deep_gemm, "tf32_hc_prenorm_gemm"):
+        raise ImportError("deep_gemm missing tf32_hc_prenorm_gemm")
     DEEPGEMM_BACKEND = ("deepgemm", "DeepGemm", ("blue", "-."))
     DEEPGEMM_AVAILABLE = True
 except ImportError:
