@@ -21,7 +21,7 @@ def reference_rms_norm(
     bias: torch.Tensor = None,  # Unused - kept for interface compatibility
     static_persistent: bool = False,  # Unused - kept for interface compatibility
 ):
-    """Fused PyTorch RMSNorm baseline using torch.nn.functional.rms_norm.
+    """Fused PyTorch RMSNorm baseline using F.rms_norm.
 
     This is the correct comparison target since it dispatches to a single
     fused kernel (the equivalent of what users would actually replace with a
