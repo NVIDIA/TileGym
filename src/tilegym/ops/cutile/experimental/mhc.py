@@ -255,7 +255,9 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
         )
         return y_acc, r_acc, cfg
 
-    configs = list(_mhc_split_gemm_rms_autotune_configs())
+    # Filter configs: skip SPLIT_K > k_tiles (empty splits are wasteful
+    # and can interact badly with the autotuner's shared buffer).
+    configs = [cfg for cfg in _mhc_split_gemm_rms_autotune_configs() if cfg.SPLIT_K <= ceil(K / cfg.TILE_SIZE_K)]
     max_split_k = max(cfg.SPLIT_K for cfg in configs)
     # Need max num_bid_n across all configs
     max_num_bid_n = max(ceil(N / cfg.TILE_SIZE_N) for cfg in configs)
@@ -286,6 +288,39 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
         search_space=configs,
     )
     best_cfg = tuned.tuned_config
+
+    # Re-run the winning config with fresh buffers.  The autotuner reuses
+    # a single y_acc/r_acc pair across all evaluated configs, so after
+    # tuning the buffer contains data from the *last* evaluated config
+    # which may differ from best_cfg.  A fresh launch guarantees the
+    # buffer layout matches best_cfg.
+    num_bid_n = ceil(N / best_cfg.TILE_SIZE_N)
+    y_acc = torch.empty((M * best_cfg.SPLIT_K, N), device=x.device, dtype=torch.float32)
+    r_acc = torch.empty((M * best_cfg.SPLIT_K, num_bid_n), device=x.device, dtype=torch.float32)
+    grid = (
+        ceil(M / best_cfg.TILE_SIZE_M) * ceil(N / best_cfg.TILE_SIZE_N),
+        best_cfg.SPLIT_K,
+        1,
+    )
+    ct.launch(
+        stream,
+        grid,
+        mhc_split_gemm_rms_kernel,
+        (
+            x,
+            w,
+            y_acc,
+            r_acc,
+            M,
+            N,
+            K,
+            best_cfg.TILE_SIZE_M,
+            best_cfg.TILE_SIZE_N,
+            best_cfg.TILE_SIZE_K,
+            best_cfg.SPLIT_K,
+            best_cfg.GROUP_SIZE_M,
+        ),
+    )
     return y_acc, r_acc, best_cfg
 
 
