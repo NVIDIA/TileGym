@@ -29,6 +29,7 @@ from tilegym.transformers import apply_tilegym_kernel_to_llama
 from tilegym.transformers import apply_tilegym_kernel_to_mistral
 from tilegym.transformers import apply_tilegym_kernel_to_phi3
 from tilegym.transformers import apply_tilegym_kernel_to_qwen2
+from tilegym.transformers import apply_tilegym_kernel_to_qwen3
 
 
 def check_and_setup_model_cache(model_id):
@@ -148,9 +149,9 @@ def _fix_tokenizer_decoder_if_needed(tokenizer, model_id):
     print(f"Fixed tokenizer decoder: replaced ByteFallback with ByteLevel (from tokenizer.json)")
 
 
-def load_tokenizer_with_cache(model_id):
+def load_tokenizer_with_cache(model_id, **kwargs):
     """Load tokenizer with cache checking."""
-    tokenizer = _load_with_fallback(model_id, AutoTokenizer, "tokenizer")
+    tokenizer = _load_with_fallback(model_id, AutoTokenizer, "tokenizer", **kwargs)
     _fix_tokenizer_decoder_if_needed(tokenizer, model_id)
     return tokenizer
 
@@ -267,6 +268,10 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         apply_tilegym_kernel_to_gpt_oss(rope=True, rms_norm=True, swiglu=False, attn=use_attn, use_cutile=use_cutile)
     elif "mistral" in model_name:
         apply_tilegym_kernel_to_mistral(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
+    elif "qwen3.5" in model_name or "qwen3_5" in model_name:
+        apply_tilegym_kernel_to_qwen3(
+            rope=True, rms_norm=True, swiglu=True, attn=use_attn, gated_delta_rule=True, use_cutile=use_cutile
+        )
     elif "qwen" in model_name:
         apply_tilegym_kernel_to_qwen2(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     elif "gemma" in model_name:
@@ -304,6 +309,13 @@ class KernelFilter:
             # MLA kernels
             "naive_absorb_mla",
             "_mla_decoding",
+            # Gated delta rule kernels (Qwen3.5 linear attention)
+            "recurrent_gated_delta_rule",
+            "chunk_gated_delta_rule",
+            "_ct_chunk_inter_recurrence_kernel",
+            "_ct_intra_chunk_prepare_kernel",
+            # Partial RoPE kernel (Qwen3.5)
+            "rope_partial_kernel",
             # Reduce kernels
             "splitk_reduce_kernel",
             # GEMM kernels
@@ -344,7 +356,11 @@ class NsysKernelCoverageReporter:
 
         print(f"Running nsys profile command:\n  {shlex.join(nsys_cmd)}\n")
 
-        proc = subprocess.Popen(nsys_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        env = os.environ.copy()
+        # nsys writes scratch files to TMPDIR (defaults to /tmp/nvidia/nsight_systems).
+        # Use log_dir as TMPDIR so nsys works in environments where /tmp is read-only.
+        env["TMPDIR"] = self.log_dir
+        proc = subprocess.Popen(nsys_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         for line in proc.stdout:
             print(line, end="")
         proc.wait()
@@ -578,7 +594,11 @@ def main():
 
     # Load tokenizer and model with cache support
     print(f"Loading model {args.model_id}...")
-    tokenizer = load_tokenizer_with_cache(args.model_id)
+    tokenizer_kwargs = {}
+    if "qwen3.5" in args.model_id.lower() or "qwen3_5" in args.model_id.lower():
+        # Qwen3.5 slow tokenizer produces empty outputs; use fast tokenizer
+        tokenizer_kwargs["use_fast"] = True
+    tokenizer = load_tokenizer_with_cache(args.model_id, **tokenizer_kwargs)
     backend = "base"
     if args.use_tilegym:
         if args.use_cutile:
