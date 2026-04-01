@@ -54,15 +54,25 @@ We have verified that `torch==2.9.1` works. You can also get `triton` packages w
 ```bash
 git clone https://github.com/NVIDIA/TileGym.git
 cd TileGym
-pip install -r requirements.txt
-pip install .
 ```
 
-All runtime dependencies are declared in [`requirements.txt`](requirements.txt). Running `pip install .` also installs them automatically, but you can pre-install with `pip install -r requirements.txt` if you prefer an explicit step.
+TileGym uses [`cuda-tile`](https://github.com/nvidia/cutile-python) for GPU kernel programming, which depends on the `tileiras` compiler at runtime. Choose one of the following options depending on your environment:
 
-It will automatically install `cuda-tile`, see https://github.com/nvidia/cutile-python.
+- **Option A — Bundled `tileiras` via pip (recommended for most users):**
+  ```bash
+  pip install .[tileiras]
+  ```
+  This installs TileGym along with `cuda-tile[tileiras]`, which bundles the `tileiras` compiler directly into your Python environment. No separate compiler installation is needed.
 
-If you want to use edit mode for `TileGym`, run `pip install -e .`
+- **Option B — System `tileiras`:**
+  ```bash
+  pip install .
+  ```
+  Use this if you already have `tileiras` available on your system (e.g., from [CUDA Toolkit 13.1+](https://developer.nvidia.com/cuda-downloads)).
+
+All runtime dependencies are declared in [`requirements.txt`](requirements.txt) and are installed automatically by `pip install .`. You can also pre-install them with `pip install -r requirements.txt` if you prefer an explicit step (this installs `cuda-tile` without the bundled `tileiras` compiler).
+
+For editable (development) mode, use `pip install -e .` or `pip install -e .[tileiras]`.
 
 We also provide Dockerfile, you can refer to [modeling/transformers/README.md](modeling/transformers/README.md).
 
