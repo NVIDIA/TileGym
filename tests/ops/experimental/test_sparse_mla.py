@@ -163,7 +163,7 @@ class Test_SparseMLA(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("backend", _backends)
-    def test_basic(self, B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch):
+    def test_op_basic(self, B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch):
         self._run_test(B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch)
 
     # ---- Core test 2: GQA with kv_group > 1 ----
@@ -176,7 +176,7 @@ class Test_SparseMLA(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("backend", _backends)
-    def test_gqa(self, B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch):
+    def test_op_gqa(self, B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch):
         """GQA: multiple query heads share one KV head."""
         self._run_test(B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch)
 
@@ -189,7 +189,7 @@ class Test_SparseMLA(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("backend", _backends)
-    def test_topk_equals_skv(self, B, H, S_kv, D, D_PE, H_kv, dtype, backend, arch):
+    def test_op_topk_equals_skv(self, B, H, S_kv, D, D_PE, H_kv, dtype, backend, arch):
         """When topk == S_kv and all indices present, should match dense MLA."""
         if not tilegym.is_backend_available(backend):
             pytest.skip(f"Backend {backend} is not available")
@@ -255,7 +255,7 @@ class Test_SparseMLA(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("backend", _backends)
-    def test_irregular_shapes(self, B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch):
+    def test_op_irregular_shapes(self, B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch):
         """Non-power-of-2 and edge case shapes."""
         self._run_test(B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, backend, arch)
 
@@ -325,14 +325,14 @@ class Test_SparseMLA(common.PyTestCase):
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("backend", _backends)
-    def test_tile_h_configs(self, H, H_kv, tile_h, tile_n, desc, dtype, backend, arch):
+    def test_op_tile_h_configs(self, H, H_kv, tile_h, tile_n, desc, dtype, backend, arch):
         """Forced-config correctness tests for TILE_H multi-head-per-block."""
         B, S, S_kv, D, D_PE, topk = 1, 16, 128, 128, 64, 64
         self._run_test_with_config(B, H, S, S_kv, D, D_PE, H_kv, topk, dtype, tile_h, tile_n, backend, arch)
 
     # ---- Core test 6: invalid kernel_configs rejection ----
     @pytest.mark.parametrize("backend", _backends)
-    def test_invalid_kernel_configs(self, backend, arch):
+    def test_op_invalid_kernel_configs(self, backend, arch):
         """Partial or invalid kernel_configs must raise immediately."""
         if not tilegym.is_backend_available(backend):
             pytest.skip(f"Backend {backend} is not available")
