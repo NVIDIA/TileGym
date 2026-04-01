@@ -88,10 +88,16 @@ def fmha_kernel_impl(
     l_i = ct.full((TILE_M, 1), 0.0, dtype=ct.float32)
     acc = ct.full((TILE_M, TILE_D), 0.0, dtype=ct.float32)
 
-    # Load query tile for this batch, head, and M-chunk
-    q = ct.load(Q, index=(batch_idx, head_idx, bid_x, 0), shape=(1, 1, TILE_M, TILE_D)).reshape(
-        (TILE_M, TILE_D)
-    )  # [TILE_M, TILE_D]
+    # Load query tile for this batch, head, and M-chunk.
+    # PaddingMode.ZERO ensures OOB rows (when TILE_M > q_len) read as
+    # zeros rather than stale memory, preventing NaN from softmax on
+    # recycled allocations.
+    q = ct.load(
+        Q,
+        index=(batch_idx, head_idx, bid_x, 0),
+        shape=(1, 1, TILE_M, TILE_D),
+        padding_mode=ct.PaddingMode.ZERO,
+    ).reshape((TILE_M, TILE_D))  # [TILE_M, TILE_D]
 
     # Loop over k, v and update accumulator
     m_end = input_pos + (bid_x + 1) * TILE_M
