@@ -56,5 +56,8 @@ setuptools.setup(
         "torch": [
             "torch>=2.9.1",
         ],
+        "tileiras": [
+            "cuda-tile[tileiras]",
+        ],
     },
 )
