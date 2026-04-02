@@ -20,6 +20,8 @@ bash run_all.sh
 ```
 > 💡 **Note**: All benchmarks are validated on **NVIDIA B200** GPUs. If you encounter Out-of-Memory (OOM) errors on other Blackwell GPUs (e.g., RTX 5080, RTX 5090), please reduce the test sizes in the benchmark scripts.
 
+> ⚠️ **Known Issue**: When upgrading from CUDA 13.1 to CUDA 13.2, some benchmarks may show performance regressions, which is a known issue.
+
 ## Run a single benchmark
 Execute the specific Python file, for example:
 ```bash
