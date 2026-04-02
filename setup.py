@@ -29,7 +29,7 @@ def parse_requirements(filename: str) -> list[str]:
 
 setuptools.setup(
     name="tilegym",
-    version="1.0.1",
+    version="1.1.0",
     author="NVIDIA Corporation",
     description="TileGym",
     long_description=README,
