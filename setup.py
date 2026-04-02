@@ -35,6 +35,11 @@ setuptools.setup(
     long_description=README,
     long_description_content_type="text/markdown",
     url="https://github.com/NVIDIA/TileGym",
+    project_urls={
+        "Homepage": "https://github.com/NVIDIA/TileGym",
+        "Repository": "https://github.com/NVIDIA/TileGym",
+        "Bug Tracker": "https://github.com/NVIDIA/TileGym/issues",
+    },
     packages=setuptools.find_packages(where="src"),
     package_dir={"": "src"},
     license="MIT",
