@@ -50,4 +50,5 @@ Available benchmark scripts:
 - `experimental/bench_mhc.py`
 - `experimental/bench_rmsnorm_backward.py`
 - `experimental/bench_silu_and_mul_backward.py`
+- `experimental/bench_sparse_mla.py`
 - `experimental/bench_swiglu_backward.py`

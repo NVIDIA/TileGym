@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import torch
+import torch.nn.functional as F
 import triton
 
 import tilegym
@@ -20,21 +21,16 @@ def reference_rms_norm(
     bias: torch.Tensor = None,  # Unused - kept for interface compatibility
     static_persistent: bool = False,  # Unused - kept for interface compatibility
 ):
-    """Reference implementation of RMSNorm"""
+    """Fused PyTorch RMSNorm baseline using F.rms_norm.
+
+    This is the correct comparison target since it dispatches to a single
+    fused kernel (the equivalent of what users would actually replace with a
+    custom kernel), rather than the unfused .pow(2).mean().rsqrt() sequence
+    that would artificially inflate the performance gap.
+    """
     if bias is not None:
         raise NotImplementedError("Bias is not supported in standard CuTile RMSNorm")
-    dims = tuple(i for i in range(-1, -len(normalized_shape) - 1, -1))
-    variance = input.to(torch.float32).pow(2).mean(dims, keepdim=True)
-    input = input * torch.rsqrt(variance + eps)
-
-    if weight is None:
-        return input
-
-    # Convert into half-precision if necessary
-    if weight.dtype in [torch.float16, torch.bfloat16]:
-        input = input.to(weight.dtype)
-
-    return weight * input
+    return F.rms_norm(input, normalized_shape, weight=weight, eps=eps)
 
 
 register_impl("rms_norm", "torch")(reference_rms_norm)

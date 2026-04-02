@@ -457,6 +457,58 @@ def mla_decoding_split_kv(
 
 
 @dispatch(
+    "sparse_mla",
+)
+def sparse_mla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: torch.Tensor,
+    qpe: torch.Tensor,
+    kpe: torch.Tensor,
+    is_causal: bool = True,
+    scaling: Optional[float] = None,
+    **kwargs: Any,
+):
+    """
+    Sparse Multi-Latent Attention (MLA) forward (prefill).
+
+    Same semantics as dense ``mla``, except each query position attends
+    only to the top-k KV entries specified by ``indices``, rather than
+    all S_kv positions.
+
+    Args:
+        q: Query tensor of shape (B, H, S, D)
+        k: Key tensor of shape (B, H_kv, S_kv, D)
+        v: Value tensor of shape (B, H_kv, S_kv, D)
+        indices: Top-k index tensor of shape (B, S, H_kv, topk), dtype int32.
+            Each entry indexes into the S_kv dimension of k/v/kpe.
+            All ``topk`` entries per row must be valid indices in ``[0, S_kv)``.
+            There is no sentinel value. When ``is_causal=True``, entries
+            where ``indices[b, s, g, j] > s`` are masked to ``-inf`` before
+            softmax, so they do not contribute to the output.
+            For early tokens where fewer than ``topk`` causal positions exist,
+            remaining slots should be filled with valid future indices in
+            ``[s + 1, S_kv)`` — these are masked out by causal masking.
+            Indices within a row are expected to be distinct; duplicate
+            indices are unsupported because they change the attention
+            distribution.
+            Constraints: ``topk <= S_kv`` and ``topk % TILE_N == 0`` (default 64).
+        qpe: Query positional embedding of shape (B, H, S, D_PE)
+        kpe: Key positional embedding of shape (B, 1, S_kv, D_PE)
+        is_causal: Whether to apply causal masking. An index entry is masked
+            if ``indices[b, s, g, j] > s``. Default True.
+        scaling: Scale factor for attention scores.
+            Default: 1/sqrt(D + D_PE).
+        **kwargs: Additional arguments including kernel_configs.
+
+    Returns:
+        Output tensor of shape (B, H, S, D)
+    """
+    raise NotImplementedError(f"sparse_mla is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "splitk_reduce",
 )
 def splitk_reduce(
