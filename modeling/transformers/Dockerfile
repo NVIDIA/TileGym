@@ -60,6 +60,9 @@ FROM base AS wheel
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm -f /tmp/requirements.txt
 
+# Install cuda-tile-experimental (not on PyPI, must be installed from source)
+RUN pip install --no-cache-dir "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"
+
 # Copy and install pre-built wheel
 COPY wheel/*.whl /tmp/
 RUN pip install --no-cache-dir --no-deps /tmp/*.whl && \
@@ -102,6 +105,7 @@ RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tile
 
 # Install runtime dependencies from requirements.txt, then TileGym in editable mode
 RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental" && \
     pip install --no-cache-dir --no-deps -e .
 
 # Set up model cache directory
