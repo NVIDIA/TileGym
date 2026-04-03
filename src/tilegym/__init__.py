@@ -17,8 +17,28 @@ def _check_torch_dependencies():
         ) from None
 
 
+def _check_optional_dependencies():
+    """Warn if recommended optional packages are missing."""
+    import warnings
+
+    try:
+        import cuda.tile_experimental  # noqa: F401
+    except (ImportError, ModuleNotFoundError):
+        warnings.warn(
+            "\n[TileGym] cuda-tile-experimental is not installed. "
+            "Most TileGym kernels require it for autotuning.\n"
+            "Install it from source:\n"
+            '  pip install "cuda-tile-experimental @ '
+            'git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"\n'
+            "See: https://github.com/NVIDIA/cutile-python?tab=readme-ov-file"
+            "#experimental-features-optional",
+            stacklevel=2,
+        )
+
+
 # Check dependencies before any imports
 _check_torch_dependencies()
+_check_optional_dependencies()
 
 # Import logging utilities
 from .logger import get_logger
