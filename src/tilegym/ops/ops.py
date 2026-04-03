@@ -32,7 +32,7 @@ def get_apply_rope_func(model: str = "llama"):
     Returns a callable that applies Rotary Position Embedding (RoPE) for a given model variant.
 
     Args:
-        model: Model name that determines the RoPE layout transformation. Supported: 'llama', 'qwen2', 'deepseek'
+        model: Model name that determines the RoPE layout transformation. Supported: 'llama', 'qwen2', 'qwen3_5', 'deepseek'
 
     Returns:
         Callable implementing RoPE application with signature similar to `apply_rope_base`
@@ -51,6 +51,7 @@ def apply_rope_base(
     position_ids: Optional[torch.Tensor] = None,
     unsqueeze_dim: int = 1,
     use_tma: bool = False,
+    partial_rotary_factor: float = 1.0,
 ):
     """
     Applies Rotary Position Embedding (RoPE) to query and key tensors.
@@ -58,11 +59,16 @@ def apply_rope_base(
     Args:
         q: Query tensor of shape (B, H_q, S, D)
         k: Key tensor of shape (B, H_kv, S, D)
-        cos: Cosine tensor of shape (1, S, D) or (B, S, D)
-        sin: Sine tensor with the same shape as `cos`
+        cos: Cosine tensor of shape (1, S, D) or (B, S, D).
+             When ``partial_rotary_factor < 1.0``, D equals ``int(head_dim * partial_rotary_factor)``
+             (i.e. ``rope_dim``), not ``head_dim``.
+        sin: Sine tensor with the same shape as ``cos``
         position_ids: Optional - Position IDs tensor, default None
         unsqueeze_dim: Optional - Dimension to unsqueeze, default 1
         use_tma: Whether to use TMA optimized path when available
+        partial_rotary_factor: Fraction of head dimensions to rotate (default 1.0 = full RoPE).
+            When < 1.0, only the first ``int(head_dim * partial_rotary_factor)`` dimensions
+            are rotated; the rest pass through unchanged.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Query and key tensor pair with RoPE applied

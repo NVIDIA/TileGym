@@ -190,9 +190,9 @@ def apply_tilegym_kernel_to_qwen3(
         set_backend("cutile")
 
     if rope:
-        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import apply_partial_rope
+        from tilegym.ops import get_apply_rope_func
 
-        modeling_qwen3_5.apply_rotary_pos_emb = apply_partial_rope
+        modeling_qwen3_5.apply_rotary_pos_emb = get_apply_rope_func(model="qwen3_5")
     if rms_norm:
         # Qwen3.5 uses Gemma-style RMSNorm: weights init to zeros, applied as (1 + w) * norm(x)
         modeling_qwen3_5.Qwen3_5RMSNorm = get_rms_norm_module(model="gemma3")
