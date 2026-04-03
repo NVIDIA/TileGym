@@ -11,7 +11,8 @@ matplotlib
 pandas
 numpy
 cuda-tile  # Or use: pip install cuda-tile[tileiras] for bundled tileiras compiler
-cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental
+# cuda-tile-experimental is NOT on PyPI and must be installed separately from source:
+#   pip install "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"
 filelock>=3.20.3  # CVE fix: GHSA-w853-jp5j-5j7f, GHSA-qmgc-5h2g-mvrw
 pillow>=12.1.1  # CVE fix: GHSA-cfh3-3jmp-rvhc
 # nvidia-ml-py  # optional

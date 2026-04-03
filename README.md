@@ -31,10 +31,10 @@ This repository aims to provide helpful kernel tutorials and examples for tile-b
 
 ### Prerequisites
 
-> ⚠️ **Important**: TileGym requires **CUDA 13.1** and **NVIDIA Blackwell architecture GPUs** (e.g., B200, RTX 5080, RTX 5090). We will support other GPU architectures in the future. Download CUDA from [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads).
+> ⚠️ **Important**: TileGym requires **CUDA 13.1+** and **NVIDIA Blackwell architecture GPUs** (e.g., B200, RTX 5080, RTX 5090). We will support other GPU architectures in the future. Download CUDA from [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads).
 
 - PyTorch (version 2.9.1 or compatible)
-- **[CUDA 13.1](https://developer.nvidia.com/cuda-downloads)** (Required - TileGym is built and tested exclusively on CUDA 13.1)
+- **[CUDA 13.1+](https://developer.nvidia.com/cuda-downloads)** (Required - TileGym is built and tested exclusively on CUDA 13.1+)
 - Triton (included with PyTorch installation)
 
 ### Setup Steps
@@ -70,7 +70,17 @@ TileGym uses [`cuda-tile`](https://github.com/nvidia/cutile-python) for GPU kern
   ```
   Use this if you already have `tileiras` available on your system (e.g., from [CUDA Toolkit 13.1+](https://developer.nvidia.com/cuda-downloads)).
 
-All runtime dependencies are declared in [`requirements.txt`](requirements.txt) and are installed automatically by `pip install .`. You can also pre-install them with `pip install -r requirements.txt` if you prefer an explicit step (this installs `cuda-tile` without the bundled `tileiras` compiler).
+Then, install [`cuda-tile-experimental`](https://github.com/NVIDIA/cutile-python/tree/main/experimental):
+
+> ⚠️ **Required**: TileGym kernels use features from `cuda-tile-experimental` (e.g., the autotuner). This package is *not* available on PyPI and must be installed separately from source:
+>
+> ```bash
+> pip install "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"
+> ```
+>
+> `cuda-tile-experimental` is maintained by the CUDA Tile team as a source-only experimental package. See more details in [experimental-features-optional](https://github.com/NVIDIA/cutile-python?tab=readme-ov-file#experimental-features-optional).
+
+All runtime dependencies (except `cuda-tile-experimental`) are declared in [`requirements.txt`](requirements.txt) and are installed automatically by `pip install .`. You can also pre-install them with `pip install -r requirements.txt` if you prefer an explicit step (this installs `cuda-tile` without the bundled `tileiras` compiler).
 
 For editable (development) mode, use `pip install -e .` or `pip install -e .[tileiras]`.
 
