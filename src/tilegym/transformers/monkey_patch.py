@@ -155,6 +155,65 @@ def apply_tilegym_kernel_to_qwen2(
         ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
 
 
+def apply_tilegym_kernel_to_qwen3(
+    rope: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+    attn: bool = True,
+    gated_delta_rule: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace Qwen3.5 models.
+
+    Qwen3.5 is a hybrid model with both standard attention layers and gated delta rule
+    linear attention layers. This function patches both types.
+
+    Args:
+        rope (bool): Whether to apply TileGym's rotary position embedding. Default is True.
+        rms_norm (bool): Whether to apply TileGym's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply TileGym's SwiGLU MLP. Default is True.
+        attn (bool): Whether to apply TileGym's attention for full attention layers. Default is True.
+        gated_delta_rule (bool): Whether to apply TileGym's gated delta rule kernels
+            for linear attention layers. Default is True.
+        model (PreTrainedModel): The model instance to apply TileGym kernels to, if the model has already been
+        loaded. Default is None.
+        use_cutile (bool): Whether to apply using cutile. Default is False.
+    """
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_qwen3")
+    logger.info("--------------------------------")
+    from transformers.models.qwen3_5 import modeling_qwen3_5
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import apply_partial_rope
+
+        modeling_qwen3_5.apply_rotary_pos_emb = apply_partial_rope
+    if rms_norm:
+        # Qwen3.5 uses Gemma-style RMSNorm: weights init to zeros, applied as (1 + w) * norm(x)
+        modeling_qwen3_5.Qwen3_5RMSNorm = get_rms_norm_module(model="gemma3")
+    if swiglu:
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import Qwen3_5MLPTileGym
+
+        modeling_qwen3_5.Qwen3_5MLP = Qwen3_5MLPTileGym
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import get_fmha_qwen3_5_interface
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_qwen3_5_interface()
+    if gated_delta_rule:
+        from tilegym.ops import chunk_gated_delta_rule as tilegym_chunk_gated_delta_rule
+        from tilegym.ops import recurrent_gated_delta_rule as tilegym_recurrent_gated_delta_rule
+
+        modeling_qwen3_5.chunk_gated_delta_rule = tilegym_chunk_gated_delta_rule
+        modeling_qwen3_5.fused_recurrent_gated_delta_rule = tilegym_recurrent_gated_delta_rule
+
+
 def apply_tilegym_kernel_to_gpt_oss(
     rope: bool = True,
     rms_norm: bool = True,
@@ -358,6 +417,7 @@ MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "gpt_oss": apply_tilegym_kernel_to_gpt_oss,
     "mistral": apply_tilegym_kernel_to_mistral,
     "qwen2": apply_tilegym_kernel_to_qwen2,
+    "qwen3_5": apply_tilegym_kernel_to_qwen3,
     "gemma3": apply_tilegym_kernel_to_gemma3,
     "phi3": apply_tilegym_kernel_to_phi3,
 }
