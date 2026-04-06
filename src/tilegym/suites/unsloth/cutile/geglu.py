@@ -34,8 +34,12 @@ from .ct_ops import erf_ct
 
 ConstInt = ct.Constant[int]
 
+# signed int32 max is 2**31-1 so num_elements cannot exceed 2**31
+NUM_INT32_ELEMENTS = 2**31
+SAFE_INT32_BUFFER_MULTIPLIER = 4
 BLOCK_SIZE_FWD = 1024  # Optimal per BLOCK_SIZE sweep benchmark on B200
 BLOCK_SIZE_BWD = 1024  # Optimal per BLOCK_SIZE sweep benchmark on B200
+INT32_SAFETY_BUFFER = NUM_INT32_ELEMENTS - max(BLOCK_SIZE_FWD, BLOCK_SIZE_BWD) * SAFE_INT32_BUFFER_MULTIPLIER
 
 
 # =============================================================================
@@ -44,10 +48,13 @@ BLOCK_SIZE_BWD = 1024  # Optimal per BLOCK_SIZE sweep benchmark on B200
 
 
 @ct.kernel
-def _exact_forward_ct(e, g, h, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
+def _exact_forward_ct(e, g, h, n_elements: ConstInt, BLOCK_SIZE: ConstInt, LONG_INDEXING: ConstInt):
     """Exact GEGLU forward: h = 0.5 * e * (1 + erf(e/sqrt(2))) * g"""
     bid = ct.bid(0)
-    offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    if LONG_INDEXING:
+        offsets = ct.astype(ct.arange(BLOCK_SIZE, dtype=ct.int32), ct.int64) + ct.astype(bid, ct.int64) * BLOCK_SIZE
+    else:
+        offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
 
     e_row = ct.gather(e, offsets, padding_value=0)
     e_f32 = ct.astype(e_row, ct.float32)
@@ -65,10 +72,13 @@ def _exact_forward_ct(e, g, h, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
 
 
 @ct.kernel
-def _exact_backward_ct(DW, e, g, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
+def _exact_backward_ct(DW, e, g, n_elements: ConstInt, BLOCK_SIZE: ConstInt, LONG_INDEXING: ConstInt):
     """Exact GEGLU backward (in-place): DW→h, e→df, g→de"""
     bid = ct.bid(0)
-    offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    if LONG_INDEXING:
+        offsets = ct.astype(ct.arange(BLOCK_SIZE, dtype=ct.int32), ct.int64) + ct.astype(bid, ct.int64) * BLOCK_SIZE
+    else:
+        offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
 
     DW_row = ct.gather(DW, offsets, padding_value=0)
     e_row = ct.gather(e, offsets, padding_value=0)
@@ -106,10 +116,13 @@ def _exact_backward_ct(DW, e, g, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
 
 
 @ct.kernel
-def _approx_forward_ct(e, g, h, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
+def _approx_forward_ct(e, g, h, n_elements: ConstInt, BLOCK_SIZE: ConstInt, LONG_INDEXING: ConstInt):
     """Approximate GEGLU forward using tanh approximation."""
     bid = ct.bid(0)
-    offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    if LONG_INDEXING:
+        offsets = ct.astype(ct.arange(BLOCK_SIZE, dtype=ct.int32), ct.int64) + ct.astype(bid, ct.int64) * BLOCK_SIZE
+    else:
+        offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
 
     e_row = ct.gather(e, offsets, padding_value=0)
     e_f32 = ct.astype(e_row, ct.float32)
@@ -125,10 +138,13 @@ def _approx_forward_ct(e, g, h, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
 
 
 @ct.kernel
-def _approx_backward_ct(DW, e, g, n_elements: ConstInt, BLOCK_SIZE: ConstInt):
+def _approx_backward_ct(DW, e, g, n_elements: ConstInt, BLOCK_SIZE: ConstInt, LONG_INDEXING: ConstInt):
     """Approximate GEGLU backward (in-place): DW→h, e→df, g→de"""
     bid = ct.bid(0)
-    offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    if LONG_INDEXING:
+        offsets = ct.astype(ct.arange(BLOCK_SIZE, dtype=ct.int32), ct.int64) + ct.astype(bid, ct.int64) * BLOCK_SIZE
+    else:
+        offsets = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
 
     DW_row = ct.gather(DW, offsets, padding_value=0)
     e_row = ct.gather(e, offsets, padding_value=0)
@@ -168,11 +184,19 @@ def geglu_exact_forward(gate, up):
     n_elements = gate.numel()
     out = torch.empty((batch, seq_len, hd), dtype=gate.dtype, device=gate.device)
     stream = torch.cuda.current_stream()
+    LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
     ct_experimental.autotune_launch(
         stream,
         grid_fn=lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
         kernel=_exact_forward_ct,
-        args_fn=lambda cfg: (gate.reshape(-1), up.reshape(-1), out.reshape(-1), n_elements, BLOCK_SIZE_FWD),
+        args_fn=lambda cfg: (
+            gate.reshape(-1),
+            up.reshape(-1),
+            out.reshape(-1),
+            n_elements,
+            BLOCK_SIZE_FWD,
+            LONG_INDEXING,
+        ),
         hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
         search_space=autotune_configs,
     )
@@ -182,10 +206,14 @@ def geglu_exact_forward(gate, up):
 @register_impl("unsloth.geglu_exact_backward", backend="cutile")
 def geglu_exact_backward(DW, e, g):
     n_elements = e.numel()
+    LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
     grid = (cdiv(n_elements, BLOCK_SIZE_BWD),)
     stream = torch.cuda.current_stream()
     ct.launch(
-        stream, grid, _exact_backward_ct, (DW.reshape(-1), e.reshape(-1), g.reshape(-1), n_elements, BLOCK_SIZE_BWD)
+        stream,
+        grid,
+        _exact_backward_ct,
+        (DW.reshape(-1), e.reshape(-1), g.reshape(-1), n_elements, BLOCK_SIZE_BWD, LONG_INDEXING),
     )
     return DW, e, g
 
@@ -196,11 +224,19 @@ def geglu_approx_forward(gate, up):
     n_elements = gate.numel()
     out = torch.empty((batch, seq_len, hd), dtype=gate.dtype, device=gate.device)
     stream = torch.cuda.current_stream()
+    LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
     ct_experimental.autotune_launch(
         stream,
         grid_fn=lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
         kernel=_approx_forward_ct,
-        args_fn=lambda cfg: (gate.reshape(-1), up.reshape(-1), out.reshape(-1), n_elements, BLOCK_SIZE_FWD),
+        args_fn=lambda cfg: (
+            gate.reshape(-1),
+            up.reshape(-1),
+            out.reshape(-1),
+            n_elements,
+            BLOCK_SIZE_FWD,
+            LONG_INDEXING,
+        ),
         hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
         search_space=autotune_configs,
     )
@@ -210,9 +246,13 @@ def geglu_approx_forward(gate, up):
 @register_impl("unsloth.geglu_approx_backward", backend="cutile")
 def geglu_approx_backward(DW, e, g):
     n_elements = e.numel()
+    LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
     grid = (cdiv(n_elements, BLOCK_SIZE_BWD),)
     stream = torch.cuda.current_stream()
     ct.launch(
-        stream, grid, _approx_backward_ct, (DW.reshape(-1), e.reshape(-1), g.reshape(-1), n_elements, BLOCK_SIZE_BWD)
+        stream,
+        grid,
+        _approx_backward_ct,
+        (DW.reshape(-1), e.reshape(-1), g.reshape(-1), n_elements, BLOCK_SIZE_BWD, LONG_INDEXING),
     )
     return DW, e, g

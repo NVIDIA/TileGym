@@ -118,6 +118,7 @@ def grouped_gemm(
     permute_y: bool = False,
     topk_weights: Optional[torch.Tensor] = None,
     fuse_mul_post: bool = False,
+    is_first_gemm: bool = True,
 ) -> torch.Tensor:
     """
     MoE grouped GEMM (autograd-capable forward + backward).
@@ -132,6 +133,9 @@ def grouped_gemm(
         permute_y: Whether output needs permutation
         topk_weights: Routing weights, shape (total_tokens,)
         fuse_mul_post: Fuse topk_weights multiplication into GEMM
+        is_first_gemm: Whether this is the first or second grouped GEMM in MoE MLP.
+            First GEMM: permute_x allowed, permute_y disallowed.
+            Second GEMM: permute_y allowed, permute_x disallowed.
 
     Returns:
         Output tensor, shape (total_tokens, N).

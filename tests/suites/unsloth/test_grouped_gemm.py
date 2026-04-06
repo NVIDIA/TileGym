@@ -114,16 +114,7 @@ class Test_Unsloth_GroupedGemm(common.PyTestCase):
     @pytest.mark.parametrize(
         "num_experts, tokens_per_expert, N, K, topk",
         [
-            pytest.param(
-                128,
-                8,
-                768,
-                512,
-                1,
-                marks=pytest.mark.skip(
-                    reason="CI memory limit; run locally: pytest -k 'test_op_forward_large' --no-header"
-                ),
-            ),
+            (128, 8, 768, 512, 1),
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -323,16 +314,7 @@ class Test_Unsloth_GroupedGemm(common.PyTestCase):
             # Llama4 MoE: 16 experts, hidden=5120, intermediate=8192 (~1.3GB W)
             (16, 64, 8192, 5120, 1),
             # Qwen3 MoE: 128 experts, hidden=2048, intermediate=768, topk=8
-            pytest.param(
-                128,
-                8,
-                768,
-                2048,
-                8,
-                marks=pytest.mark.skip(
-                    reason="E=128 slow compilation; run locally: pytest -k 'test_op_forward_upstream_model'"
-                ),
-            ),
+            (128, 8, 768, 2048, 8),
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -352,3 +334,99 @@ class Test_Unsloth_GroupedGemm(common.PyTestCase):
         expected = self.reference_forward(X, W, m_sizes, topk)
         atol, rtol = TOLERANCE[dtype]
         torch.testing.assert_close(result, expected, rtol=rtol, atol=atol)
+
+    # ------------------------------------------------------------------
+    # Forward + backward correctness: topk=4
+    # ------------------------------------------------------------------
+    @pytest.mark.parametrize(
+        "num_experts, tokens_per_expert, N, K, topk",
+        [
+            (4, 16, 128, 128, 4),
+            (8, 8, 256, 128, 4),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_forward_topk4(self, num_experts, tokens_per_expert, N, K, topk, dtype, backend):
+        """Test grouped GEMM forward with topk=4 (unsloth coverage)."""
+        _skip_if_unavailable(backend)
+
+        torch.manual_seed(42)
+        total_tokens = num_experts * tokens_per_expert * topk
+        X = torch.randn(total_tokens, K, dtype=dtype, device=DEVICE) * 0.1
+        W = torch.randn(num_experts, N, K, dtype=dtype, device=DEVICE) * 0.1
+        m_sizes = torch.full((num_experts,), tokens_per_expert * topk, dtype=torch.int32, device=DEVICE)
+        gather_indices = torch.arange(total_tokens, dtype=torch.int32, device=DEVICE)
+
+        result = _run_grouped_gemm(X, W, m_sizes, topk, gather_indices, backend)
+        expected = self.reference_forward(X, W, m_sizes, topk)
+        atol, rtol = TOLERANCE[dtype]
+        torch.testing.assert_close(result, expected, rtol=rtol, atol=atol)
+
+    @pytest.mark.parametrize(
+        "num_experts, tokens_per_expert, N, K, topk",
+        [
+            (4, 16, 128, 128, 4),
+            (8, 8, 256, 128, 4),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_X_grad_topk4(self, num_experts, tokens_per_expert, N, K, topk, dtype, backend):
+        """Test backward X gradient with topk=4."""
+        _skip_if_unavailable(backend)
+
+        torch.manual_seed(42)
+        total_tokens = num_experts * tokens_per_expert * topk
+        m_sizes = torch.full((num_experts,), tokens_per_expert * topk, dtype=torch.int32, device=DEVICE)
+        gather_indices = torch.arange(total_tokens, dtype=torch.int32, device=DEVICE)
+        dY = torch.randn(total_tokens, N, dtype=dtype, device=DEVICE) * 0.1
+
+        X_ref = (torch.randn(total_tokens, K, dtype=dtype, device=DEVICE) * 0.1).requires_grad_(True)
+        W_ref = torch.randn(num_experts, N, K, dtype=dtype, device=DEVICE) * 0.1
+        Y_ref = self.reference_forward(X_ref, W_ref, m_sizes, topk)
+        Y_ref.backward(dY)
+        X_grad_ref = X_ref.grad.clone()
+
+        X_test = X_ref.detach().clone().requires_grad_(True)
+        W_test = W_ref.detach().clone()
+        Y_test = _run_grouped_gemm(X_test, W_test, m_sizes, topk, gather_indices, backend)
+        Y_test.backward(dY)
+
+        assert X_test.grad is not None, "Gradient should flow back to X"
+        atol, rtol = TOLERANCE[dtype]
+        torch.testing.assert_close(X_test.grad, X_grad_ref, rtol=rtol, atol=atol, msg="X gradient mismatch (topk=4)")
+
+    @pytest.mark.parametrize(
+        "num_experts, tokens_per_expert, N, K, topk",
+        [
+            (4, 16, 128, 128, 4),
+            (8, 8, 256, 128, 4),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_W_grad_topk4(self, num_experts, tokens_per_expert, N, K, topk, dtype, backend):
+        """Test backward W gradient with topk=4."""
+        _skip_if_unavailable(backend)
+
+        torch.manual_seed(42)
+        total_tokens = num_experts * tokens_per_expert * topk
+        m_sizes = torch.full((num_experts,), tokens_per_expert * topk, dtype=torch.int32, device=DEVICE)
+        gather_indices = torch.arange(total_tokens, dtype=torch.int32, device=DEVICE)
+        dY = torch.randn(total_tokens, N, dtype=dtype, device=DEVICE) * 0.1
+
+        X_ref = torch.randn(total_tokens, K, dtype=dtype, device=DEVICE) * 0.1
+        W_ref = (torch.randn(num_experts, N, K, dtype=dtype, device=DEVICE) * 0.1).requires_grad_(True)
+        Y_ref = self.reference_forward(X_ref, W_ref, m_sizes, topk)
+        Y_ref.backward(dY)
+        W_grad_ref = W_ref.grad.clone()
+
+        X_test = X_ref.detach().clone()
+        W_test = W_ref.detach().clone().requires_grad_(True)
+        Y_test = _run_grouped_gemm(X_test, W_test, m_sizes, topk, gather_indices, backend)
+        Y_test.backward(dY)
+
+        assert W_test.grad is not None, "Gradient should flow back to W"
+        atol, rtol = TOLERANCE[dtype]
+        torch.testing.assert_close(W_test.grad, W_grad_ref, rtol=rtol, atol=atol, msg="W gradient mismatch (topk=4)")
