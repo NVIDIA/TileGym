@@ -122,10 +122,9 @@ def gelu_kernel_ct(
 
     # Create offset tile
     offsets = ct.add(ct.arange(BLOCK_SIZE, dtype=ct.int32), block_start)  # new var
-    mask = ct.less(offsets, n_elements)  # new var
 
-    # Load input data
-    x_tile = ct.gather(x, offsets)  # new var
+    # Load input data with padding_value to handle out-of-bounds reads safely
+    x_tile = ct.gather(x, offsets, padding_value=0)  # new var
 
     # Compute GELU based on approximation mode
     if approximate == GELU_TANH:
@@ -133,8 +132,8 @@ def gelu_kernel_ct(
     else:  # GELU_EXACT
         gelu_output = gelu_fwd_ct(x_tile, BLOCK_SIZE)
 
-    # Store result
-    ct.scatter(y, offsets, gelu_output)
+    # Store result with check_bounds to prevent out-of-bounds writes
+    ct.scatter(y, offsets, gelu_output, check_bounds=True)
 
 
 # Wrapper class for autograd integration
