@@ -197,7 +197,22 @@ def format_benchmark_summary(results_dir):
         summary += gpu_section
 
     for result_file in result_files:
-        benchmark_name = result_file.stem.replace("_results", "").replace("_", " ").title()
+        if file_format == "json":
+            # For JSON files, try to read the benchmark_file field (relative path)
+            # for a more informative display name
+            try:
+                with open(result_file) as f:
+                    header_data = json.load(f)
+                rel_path = header_data.get("benchmark_file", "")
+                if rel_path:
+                    benchmark_name = rel_path.replace(".py", "")
+                else:
+                    benchmark_name = result_file.stem.replace("_results", "").replace("_", " ").title()
+            except (json.JSONDecodeError, OSError):
+                benchmark_name = result_file.stem.replace("_results", "").replace("_", " ").title()
+        else:
+            benchmark_name = result_file.stem.replace("_results", "").replace("_", " ").title()
+
         summary += f"## {benchmark_name}\n\n"
 
         if file_format == "json":
