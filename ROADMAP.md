@@ -19,11 +19,11 @@ The following table tracks the support status for various operators.
 | Linear Algebra | Grouped GEMM | ✅ Available | N/A |
 | Linear Algebra | FP8 Quantized MatMul | 🚧 WIP (Internal) | N/A |
 | Linear Algebra | Split-K Reduction | ✅ Available | N/A |
-| Attention | Attention | ✅ Available | 📅 Planned |
+| Attention | Attention | ✅ Available | 🧪 Experimental |
 | Attention | Flash Decode | ✅ Available | N/A |
-| Attention | Attention Sink Decode | 🚧 WIP (Internal) | N/A |
-| Attention | Attention Sink | 📅 Planned | N/A |
-| Attention | Autoregressive Flash Attention | 📅 Planned | N/A |
+| Attention | Attention Sink Decode | ✅ Available | N/A |
+| Attention | Attention Sink | ✅ Available | N/A |
+| Attention | Autoregressive Flash Attention | 🚧 WIP (Internal) | N/A |
 | Attention | Flex Attention | 📅 Planned | N/A |
 | Attention | Multi-Head Compression (MHC) | ✅ Available | N/A |
 | Attention | Multi-Latent Attention (MLA) | ✅ Available | N/A |
@@ -33,8 +33,8 @@ The following table tracks the support status for various operators.
 | Normalization | Layer Normalization Legacy | ✅ Available | 📅 Planned |
 | Normalization | Cache Layer Normalization | 🚧 WIP (Internal) | 🚧 WIP (Internal) |
 | Normalization | Group Normalization | 📅 Planned | N/A |
-| Activation | SiLU and Mul | ✅ Available | 🙋 Help Wanted |
-| Activation | SwiGLU | ✅ Available | 📅 Planned |
+| Activation | SiLU and Mul | ✅ Available | 🧪 Experimental |
+| Activation | SwiGLU | ✅ Available | 🧪 Experimental |
 | Activation | Dropout | ✅ Available | N/A |
 | Activation | Softmax | ✅ Available | 🚧 WIP (Internal) |
 | Fused Operations | Linear + Activation + Linear | 🚧 WIP (Internal) | 🚧 WIP (Internal) |
@@ -43,13 +43,13 @@ The following table tracks the support status for various operators.
 | Fused Operations | Linear + GLU Activation + Linear | 🚧 WIP (Internal) | 📅 Planned |
 | Mixture of Experts | MoE | ✅ Available | N/A |
 | Mixture of Experts | MoE Align Block | ✅ Available | N/A |
-| Positional Encoding | Rotary Position Embedding (RoPE) | ✅ Available | 📅 Planned |
+| Positional Encoding | Rotary Position Embedding (RoPE) | ✅ Available | ✅ Available |
 | Tensor Manipulation | Concatenation | 🚧 WIP (Internal) | N/A |
 | Tensor Manipulation | Transpose | 🚧 WIP (Internal) | N/A |
 | Signal Processing | Fast Fourier Transform (FFT) | 🚧 WIP (Internal) | N/A |
 | Convolution | Convolution | 📅 Planned | 📅 Planned |
-| Loss Functions | Cross Entropy | 📅 Planned | 📅 Planned |
-| Embedding | BERT Embeddings | 📅 Planned | N/A |
+| Loss Functions | Cross Entropy | 🧪 Experimental | 📅 Planned |
+| Embedding | BERT Embeddings | 🚧 WIP (Internal) | N/A |
 | Optimizer | Fused Adam | 📅 Planned | N/A |
 | Pointwise | Squares | 📅 Planned | N/A |
 
@@ -59,10 +59,13 @@ The following table tracks the support status for various models.
 
 | Model | Status | Notes |
 |-------|--------|-------|
-| Llama 3.1 | ✅ Available | Tested in B200 |
-| DeepseekV2-Litechat | ✅ Available | Tested in B200 |
-| Qwen-2 | ✅ Available | Tested in B200 |
-| GPT-OSS Gemma-3 | 🚧 WIP (Internal) | |
+| LLaMA-3.1-8B | ✅ Available | Tested on B200 |
+| DeepSeek-V2-Lite-Chat | ✅ Available | Tested on B200 |
+| Qwen2-7B | ✅ Available | Tested on B200 |
+| Gemma-3-4B-IT | ✅ Available | Tested on B200 |
+| GPT-OSS | ✅ Available | Tested on B200 |
+| Mistral-7B-Instruct-v0.3 | ✅ Available | Tested on B200 |
+| Phi-3-mini-4k-instruct | ✅ Available | Tested on B200 |
 | More LLM models | 🙋 Help Wanted | |
 
 ### 1.3 Kernel Library Support
@@ -79,6 +82,7 @@ The following table tracks the support status for various kernel libraries.
 ### Status Definitions:
 
 - **✅ Available**: Fully tested, performance optimized, and ready for production use.
+- **🧪 Experimental**: Functional and available, but carries the `@experimental_kernel` tag — not yet fully performance-validated. Community feedback welcome.
 - **🚧 WIP (Internal)**: Currently being developed by the NVIDIA team. (Internal development is active; we recommend waiting for our PR to avoid conflicts).
 - **📅 Planned**: On our radar for future development. We are open to design discussions.
 - **🙋 Help Wanted**: We would love to have this, but don't have the bandwidth yet. Community contributions are highly encouraged!
