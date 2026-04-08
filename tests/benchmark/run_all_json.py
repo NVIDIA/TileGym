@@ -255,9 +255,9 @@ def setup_output_directory() -> Path:
 
 
 def find_benchmark_files() -> List[Path]:
-    """Find all benchmark files in the current directory."""
+    """Find all benchmark files recursively under the benchmark directory."""
     benchmark_dir = Path(__file__).parent
-    benchmark_files = sorted(benchmark_dir.glob("bench_*.py")) + sorted(benchmark_dir.glob("experimental/bench_*.py"))
+    benchmark_files = sorted(benchmark_dir.rglob("bench_*.py"))
 
     if not benchmark_files:
         logger.error("No benchmark files found")
