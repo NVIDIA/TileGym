@@ -97,7 +97,7 @@ todowrite([
 
 ### Static Validation (run BEFORE testing)
 ```bash
-# Checks for common anti-patterns (for loops, 0-based indexing, Python API leftovers)
+# Checks for common anti-patterns (0-based indexing, Python API leftovers)
 # The script is bundled with this skill at scripts/validate_cutile_jl.py
 python <skill-dir>/scripts/validate_cutile_jl.py <path_to_julia_file.jl>
 ```
@@ -130,7 +130,7 @@ grep "ct.permute\|ct.transpose" source.py     # → permutedims/transpose
 grep "ct.where" source.py                      # → ifelse.(cond, x, y)
 grep "\.astype(" source.py                     # → convert(ct.Tile{T}, tile)
 grep "ct.mma\|ct.matmul" source.py             # → muladd(a, b, acc) or a * b
-grep "for .* in range" source.py               # → while loop (for not supported)
+grep "for .* in range" source.py               # → for k in Int32(1):n (native for loops supported)
 grep "ct.sum\|ct.max\|ct.min" source.py        # → sum/maximum/minimum with dims+1
 grep "ct.maximum\|ct.minimum" source.py        # → max.(a, b) / min.(a, b)
 grep "ct.atomic" source.py                     # → ct.atomic_cas/xchg/add (kwarg syntax changes)
@@ -147,7 +147,7 @@ grep "ct.bitwise" source.py                    # → a .⊻ b, a .>> n, a .& mas
 | Finding | Action |
 |---------|--------|
 | `@ct.kernel` count | Each becomes a `function ... end` |
-| `for ... in range(...)` | Replace with `while` + `Int32` counter |
+| `for ... in range(...)` | Use `for k in Int32(1):n` (native for loops supported in 0.2) |
 | `ct.where` | Use `ifelse.(cond, x, y)` |
 | `.astype(ct.X)` | Use `convert(ct.Tile{X}, tile)` |
 | `ct.mma(a, b, acc=acc)` | Use `muladd(a, b, acc)` |
@@ -192,8 +192,9 @@ import cuTile as ct
 end
 
 # Kernel (typed TileArray parameters)
-function _my_kernel(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
-                    param::Int) where {T}
+function my_kernel(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
+                   param::Int) where {T}
+    ct.@compiler_options occupancy=2
     bid = ct.bid(1)
     # ... body ...
     return
@@ -205,8 +206,7 @@ function my_op(input::CuArray{T, 2}, output::CuArray{T, 2}) where {T}
     M, N = size(input)
 
     grid_size = M  # one block per row (example)
-    ct.launch(_my_kernel, grid_size, output, input,
-              ct.Constant(N); occupancy=2)
+    ct.launch(my_kernel, grid_size, output, input, ct.Constant(N))
 
     CUDA.synchronize()
     return nothing
@@ -256,12 +256,12 @@ Full critical rules (17) → [`references/critical-rules.md`](../references/crit
 | 2 | `ct.num_blocks(0)` | `ct.num_blocks(1)` | ☐ |
 | 3 | `ct.num_tiles(A, axis=1, shape=(...))` | `ct.num_tiles(A, 2, (...))` | ☐ |
 | 4 | `A.shape[0]` | `size(A, 1)` | ☐ |
-| 5 | `ct.arange(N, dtype=ct.int32)` | `ct.arange((N,), Int32)` | ☐ |
-| 6 | `ct.full((m,n), v, dtype=ct.float32)` | `ct.full((m,n), v, Float32)` | ☐ |
-| 7 | `ct.zeros((m,n), dtype=ct.float32)` | `ct.zeros((m,n), Float32)` | ☐ |
-| 8 | `ct.load(arr, index=(...), shape=(...))` | `ct.load(arr, (...), (...))` | ☐ |
+| 5 | `ct.arange(N, dtype=ct.int32)` | `ct.arange(N)` | ☐ |
+| 6 | `ct.full((m,n), v, dtype=ct.float32)` | `fill(v, (m, n))` — ct.full doesn't exist | ☐ |
+| 7 | `ct.zeros((m,n), dtype=ct.float32)` | `zeros(Float32, m, n)` — Base.zeros overlay | ☐ |
+| 8 | `ct.load(arr, index=(...), shape=(...))` | `ct.load(arr; index=(...), shape=(...))` — keyword preferred | ☐ |
 | 8b | `ct.load(... order=(...))` | `ct.load(... ; order=(...))` — **index positions must follow remapped dims** (Rule 16) | ☐ |
-| 9 | `ct.store(arr, index=(...), tile=t)` | `ct.store(arr, (...), t)` | ☐ |
+| 9 | `ct.store(arr, index=(...), tile=t)` | `ct.store(arr; index=(...), tile=t)` — keyword preferred | ☐ |
 | 10 | `ct.load(arr, index=bid, shape=())` (0-D tile) | `arr[bid]` | ☐ |
 | 11 | `tile.astype(ct.float32)` | `convert(ct.Tile{Float32}, tile)` | ☐ |
 | 12 | `ct.mma(a, b, acc=acc)` | `muladd(a, b, acc)` | ☐ |
@@ -280,7 +280,7 @@ Full critical rules (17) → [`references/critical-rules.md`](../references/crit
 | 25 | `ct.reshape(t, shape)` | `reshape(t, shape)` | ☐ |
 | 26 | `ct.extract(t, index=(...), shape=(...))` | `ct.extract(t, (...), (...))` | ☐ |
 | 27 | `ct.cat((a,b), axis=0)` | `ct.cat((a,b), 1)` | ☐ |
-| 28 | `for k in range(n):` | `k=Int32(1); while k<=n; ...; k+=Int32(1); end` | ☐ |
+| 28 | `for k in range(n):` | `for k in Int32(1):n` — native for loops supported | ☐ |
 | 29 | `a + b` (different shapes) | `a .+ b` | ☐ |
 | 30 | `a * b` (element-wise) | `a .* b` | ☐ |
 | 31 | `a / b` (element-wise) | `a ./ b` | ☐ |
@@ -314,7 +314,7 @@ python <skill-dir>/scripts/validate_cutile_jl.py <path_to_julia_file.jl>
 ```
 
 This checks for common anti-patterns:
-- `for` loops in kernel functions
+- `ct.full()` usage (doesn't exist — use fill/zeros/ones)
 - `.astype(` or `ct.where(` instead of Julia equivalents
 - Missing `return` at end of kernel
 - 0-based indexing in `ct.bid(0)`, `ct.num_blocks(0)`
@@ -323,7 +323,6 @@ This checks for common anti-patterns:
 - Lambda grids
 - `ct.cdiv(` instead of `cld(`
 - `ct.launch(stream, ...)` with Python-style stream argument
-- `ct.ones()` (not available in cuTile.jl)
 
 Fix any reported errors before proceeding.
 
@@ -347,15 +346,12 @@ include(joinpath(KERNEL_DIR, "<op>.jl"))
     @testset "basic correctness" begin
         M, N = 128, 256
         x_gpu = CUDA.rand(Float32, M, N)
-        out_gpu = CUDA.zeros(Float32, M, N)
+        out_gpu = similar(x_gpu)
 
-        # Call bridge function
-        julia_<op>(Int(pointer(x_gpu)), Int(pointer(out_gpu)), M, N)
+        my_op!(out_gpu, x_gpu)
 
-        # Compare against reference
         expected = reference_impl(Array(x_gpu))
-        result = Array(out_gpu)
-        @test result ≈ expected atol=1e-5
+        @test Array(out_gpu) ≈ expected atol=1e-5
     end
 end
 ```
@@ -391,7 +387,7 @@ If test fails → fix → re-validate → re-test (loop until green, max 5 attem
 Julia Kernel (julia/kernels/<op>.jl):
  [ ] File exists in correct location
  [ ] All indices converted from 0-based to 1-based
- [ ] for loops replaced with while loops
+ [ ] for loops use Int32 ranges (for k in Int32(1):n)
  [ ] Broadcasting uses .+ .* etc. for different-shape tiles
  [ ] cuTile-specific math (rsqrt) uses rsqrt.(tile) — cuTile.jl exports rsqrt
  [ ] ct.Constant parameters wrapped at launch site (not in signature)
@@ -399,14 +395,14 @@ Julia Kernel (julia/kernels/<op>.jl):
  [ ] ct.mma → muladd, ct.matmul → *
  [ ] .astype() → convert(ct.Tile{T}, tile)
  [ ] ct.where → ifelse.(cond, x, y)
- [ ] ct.full/ct.zeros use Julia types (Float32 not ct.float32)
+ [ ] fill/zeros/ones use Julia types (ct.full doesn't exist; use fill, zeros, ones)
  [ ] Kernel returns nothing
  [ ] Column-major layout considered
  [ ] ct.launch arg order matches kernel signature
  [ ] Element-wise max/min uses max.(a,b) not max(a,b)
  [ ] No Int32()/Float32() casts on runtime kernel values
  [ ] ct.arange/ct.full shape args use ct.Constant parameters (no @eval needed)
- [ ] Host harness uses unsafe_wrap(CuArray, ptr, shape; own=false) if bridging
+ [ ] Host harness accepts CuArray directly
  [ ] Host harness calls CUDA.synchronize() after launch
  [ ] validate_cutile_jl.py passes
 

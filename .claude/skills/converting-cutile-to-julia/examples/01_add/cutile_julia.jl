@@ -14,107 +14,77 @@ import cuTile as ct
 
 # ── Tensor + Tensor kernel: output = x + y * alpha ──────────────────────────
 
-function _add_kernel(x::ct.TileArray{T,1}, y::ct.TileArray{T,1},
-                     output::ct.TileArray{T,1},
-                     alpha::Float32, BLOCK_SIZE::Int) where {T}
+function add_kernel(x::ct.TileArray{T,1}, y::ct.TileArray{T,1},
+                    output::ct.TileArray{T,1},
+                    alpha::Float32, BLOCK_SIZE::Int) where {T}
     bid = ct.bid(1)
 
-    x_tile = ct.load(x, bid, (BLOCK_SIZE,))
-    y_tile = ct.load(y, bid, (BLOCK_SIZE,))
+    x_tile = ct.load(x; index=bid, shape=(BLOCK_SIZE,), padding_mode=ct.PaddingMode.Zero)
+    y_tile = ct.load(y; index=bid, shape=(BLOCK_SIZE,), padding_mode=ct.PaddingMode.Zero)
 
     x_f32 = convert(ct.Tile{Float32}, x_tile)
     y_f32 = convert(ct.Tile{Float32}, y_tile)
 
-    alpha_tile = ct.full((BLOCK_SIZE,), alpha, Float32)
-    y_scaled = y_f32 .* alpha_tile
-    output_f32 = x_f32 .+ y_scaled
-
-    ct.store(output, bid, convert(ct.Tile{T}, output_f32))
-    return nothing
+    # Scalar alpha broadcasts to tile shape automatically
+    output_f32 = x_f32 .+ y_f32 .* alpha
+    ct.store(output; index=bid, tile=convert(ct.Tile{T}, output_f32))
+    return
 end
 
 # ── Tensor + Scalar kernel: output = x + scalar_val * alpha ─────────────────
 
-function _add_scalar_kernel(x::ct.TileArray{T,1}, output::ct.TileArray{T,1},
-                            scalar_val::Float32, alpha::Float32,
-                            BLOCK_SIZE::Int) where {T}
+function add_scalar_kernel(x::ct.TileArray{T,1}, output::ct.TileArray{T,1},
+                           scalar_val::Float32, alpha::Float32,
+                           BLOCK_SIZE::Int) where {T}
     bid = ct.bid(1)
 
-    x_tile = ct.load(x, bid, (BLOCK_SIZE,))
+    x_tile = ct.load(x; index=bid, shape=(BLOCK_SIZE,), padding_mode=ct.PaddingMode.Zero)
     x_f32 = convert(ct.Tile{Float32}, x_tile)
 
-    scaled_scalar = scalar_val * alpha
-    scalar_tile = ct.full((BLOCK_SIZE,), scaled_scalar, Float32)
-    output_f32 = x_f32 .+ scalar_tile
-
-    ct.store(output, bid, convert(ct.Tile{T}, output_f32))
-    return nothing
+    output_f32 = x_f32 .+ (scalar_val * alpha)
+    ct.store(output; index=bid, tile=convert(ct.Tile{T}, output_f32))
+    return
 end
 
 # ── Host functions ───────────────────────────────────────────────────────────
 
-function add!(x_ptr::Int, y_ptr::Int, out_ptr::Int,
-              n_elements::Int, alpha::Float64)
-    BLOCK_SIZE = 1024
-    padded_n = cld(n_elements, BLOCK_SIZE) * BLOCK_SIZE
-
-    x_cu = unsafe_wrap(CuArray{Float32, 1}, CUDA.CuPtr{Float32}(UInt(x_ptr)),
-                       (padded_n,); own=false)
-    y_cu = unsafe_wrap(CuArray{Float32, 1}, CUDA.CuPtr{Float32}(UInt(y_ptr)),
-                       (padded_n,); own=false)
-    out_cu = unsafe_wrap(CuArray{Float32, 1}, CUDA.CuPtr{Float32}(UInt(out_ptr)),
-                         (padded_n,); own=false)
-
-    grid = cld(padded_n, BLOCK_SIZE)
-    ct.launch(_add_kernel, grid, x_cu, y_cu, out_cu,
-              ct.Constant(Float32(alpha)), ct.Constant(BLOCK_SIZE))
-
+function add!(output::CuVector{T}, x::CuVector{T}, y::CuVector{T};
+              alpha::Float32=1.0f0, block_size::Int=1024) where {T}
+    n = length(x)
+    grid = cld(n, block_size)
+    ct.launch(add_kernel, grid, x, y, output,
+              ct.Constant(alpha), ct.Constant(block_size))
     CUDA.synchronize()
-    return nothing
+    return
 end
 
-function add_scalar!(x_ptr::Int, out_ptr::Int,
-                     n_elements::Int, scalar_val::Float64, alpha::Float64)
-    BLOCK_SIZE = 1024
-    padded_n = cld(n_elements, BLOCK_SIZE) * BLOCK_SIZE
-
-    x_cu = unsafe_wrap(CuArray{Float32, 1}, CUDA.CuPtr{Float32}(UInt(x_ptr)),
-                       (padded_n,); own=false)
-    out_cu = unsafe_wrap(CuArray{Float32, 1}, CUDA.CuPtr{Float32}(UInt(out_ptr)),
-                         (padded_n,); own=false)
-
-    grid = cld(padded_n, BLOCK_SIZE)
-    ct.launch(_add_scalar_kernel, grid, x_cu, out_cu,
-              ct.Constant(Float32(scalar_val)), ct.Constant(Float32(alpha)),
-              ct.Constant(BLOCK_SIZE))
-
+function add_scalar!(output::CuVector{T}, x::CuVector{T}, scalar_val::Float32;
+                     alpha::Float32=1.0f0, block_size::Int=1024) where {T}
+    n = length(x)
+    grid = cld(n, block_size)
+    ct.launch(add_scalar_kernel, grid, x, output,
+              ct.Constant(scalar_val), ct.Constant(alpha), ct.Constant(block_size))
     CUDA.synchronize()
-    return nothing
+    return
 end
 
 # ── Verify ───────────────────────────────────────────────────────────────────
 
 function verify()
     for n in [128, 1024, 4096, 513]
-        BLOCK_SIZE = 1024
-        padded_n = cld(n, BLOCK_SIZE) * BLOCK_SIZE
-
         x = CUDA.rand(Float32, n)
         y = CUDA.rand(Float32, n)
+        out = CUDA.zeros(Float32, n)
 
-        x_padded = CUDA.zeros(Float32, padded_n)
-        y_padded = CUDA.zeros(Float32, padded_n)
-        out = CUDA.zeros(Float32, padded_n)
-        copyto!(view(x_padded, 1:n), x)
-        copyto!(view(y_padded, 1:n), y)
+        add!(out, x, y; alpha=1.0f0)
+        @assert Array(out) ≈ Array(x) .+ Array(y) atol=1e-5
 
-        add!(Int(pointer(x_padded)), Int(pointer(y_padded)),
-             Int(pointer(out)), padded_n, 1.0)
-        @assert Array(out[1:n]) ≈ Array(x) .+ Array(y) atol=1e-5
+        add!(out, x, y; alpha=0.5f0)
+        @assert Array(out) ≈ Array(x) .+ Array(y) .* 0.5f0 atol=1e-5
 
-        add!(Int(pointer(x_padded)), Int(pointer(y_padded)),
-             Int(pointer(out)), padded_n, 0.5)
-        @assert Array(out[1:n]) ≈ Array(x) .+ Array(y) .* 0.5f0 atol=1e-5
+        out_scalar = CUDA.zeros(Float32, n)
+        add_scalar!(out_scalar, x, 3.0f0; alpha=0.5f0)
+        @assert Array(out_scalar) ≈ Array(x) .+ (3.0f0 * 0.5f0) atol=1e-5
 
         println("  n=$n: passed")
     end

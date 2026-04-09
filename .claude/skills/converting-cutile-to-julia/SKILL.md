@@ -25,7 +25,7 @@ julia/                          # Self-contained Julia sub-project
 ├── Project.toml                # Dependencies: CUDA.jl, cuTile.jl, NNlib.jl, Test
 ├── kernels/                    # cuTile.jl kernel implementations
 │   ├── add.jl                  # ← Ground-truth: 1D element-wise with alpha scaling (tensor+tensor, tensor+scalar)
-│   ├── matmul.jl               # ← Ground-truth: 2D tiled MMA, column-major layout (K,M)×(N,K)→(N,M)
+│   ├── matmul.jl               # ← Ground-truth: 2D tiled MMA, standard Julia layout (M,K)×(K,N)→(M,N)
 │   └── softmax.jl              # ← Ground-truth: 3 strategies (TMA, online, chunked) using ct.load/ct.store
 └── test/                       # Julia-native tests (using Test stdlib)
     ├── runtests.jl             # Test runner entry point
@@ -55,9 +55,9 @@ The most dangerous translation errors. Full rules (17 total) in [`references/cri
 
 | # | Pitfall | One-line fix |
 |---|---------|-------------|
-| 1 | `for` loops crash the compiler | Use `while` + `Int32` counter |
+| 1 | `ct.full()` doesn't exist in Julia | Use `fill(val, shape)`, `zeros(T, dims...)`, or `ones(T, dims...)` |
 | 2 | `max(a, b)` on tiles → `IRError` | Use `max.(a, b)` (broadcast dot) |
-| 3 | `Int32(runtime_val)` → `MethodError` | Use `ct.full((N,), val, Int32)` instead |
+| 3 | `IRError` / `MethodError` mentioning `IRStructurizer` | Compiler bug — file upstream with minimal reproducer |
 | 4 | `ct.launch` arg order silently wrong | Args are positional — match kernel signature exactly |
 | 5 | `ct.load` with `order` — index positions wrong | `order` remaps BOTH shape AND index (Critical Rule 16) |
 
@@ -67,9 +67,9 @@ Side-by-side Python → Julia conversions matching the released Julia kernels in
 
 | # | Example | Key Patterns | When to Reference |
 |---|---------|-------------|-------------------|
-| 01 | [`add`](examples/01_add/) | 1D `ct.load`/`ct.store`, alpha scaling, `ct.full`, broadcast `.+`/`.*` | Starting point; basic TMA + element-wise patterns |
-| 02 | [`matmul`](examples/02_matmul/) | `muladd`, TF32 conversion, K-loop with `while`, column-major layout | MMA / tensor core operations |
-| 03 | [`softmax`](examples/03_softmax/) | Persistent scheduling, column-chunked `ct.load`/`ct.store`, multi-pass | Large-tensor reduction patterns |
+| 01 | [`add`](examples/01_add/) | 1D `ct.load`/`ct.store`, alpha scaling, scalar broadcast, `fill`/`zeros`, keyword load/store | Starting point; basic TMA + element-wise patterns |
+| 02 | [`matmul`](examples/02_matmul/) | `muladd`, TF32 conversion, K-loop with `for`, 2D swizzle, standard Julia layout, `ct.@compiler_options` | MMA / tensor core operations |
+| 03 | [`softmax`](examples/03_softmax/) | Persistent scheduling, `for` loops, `gather`/`scatter`, `padding_mode`, multi-pass | Large-tensor reduction patterns |
 
 These match the released kernels in `julia/kernels/` (`add.jl`, `matmul.jl`, `softmax.jl`). The examples are simplified teaching versions — always consult `julia/kernels/*.jl` for the canonical, tested implementations.
 

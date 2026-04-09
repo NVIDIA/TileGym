@@ -12,10 +12,9 @@
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `MethodError: no method matching Int32(::IRStructurizer.BlockArg)` | `Int32(runtime_val)` cast on a computed kernel value | Keep types consistent from the start; use `ct.full((N,), val, Int32)` to create a tile |
-| `IRError: Unsupported function call: max` | `max(a, b)` on two tiles (non-broadcast) | Use `max.(a, b)` — broadcast dot syntax |
+| `IRError: Unsupported function call: max` | `max(a, b)` on two tiles (non-broadcast) | Use `max.(a, b)` — broadcast dot syntax (same as regular Julia arrays) |
 | `IRError: Unsupported function call: min` | Same as above for `min` | Use `min.(a, b)` |
-| `IRError: Unsupported function call: for` | `for` loop in kernel body | Replace with `while` + explicit `Int32` counter |
+| `IRError` or `MethodError` mentioning `IRStructurizer` | Internal compiler bug | Do not work around — write a minimal reproducer and file upstream |
 | `TypeError: in typeassert, expected Tile{...}, got Tile{...}` | Type mismatch in tile operation | Check `convert(ct.Tile{T}, tile)` calls |
 | `BoundsError` at launch | Wrong number of args to `ct.launch` | Verify arg count matches kernel signature exactly |
 | `UndefVarError: X not defined` | Variable only defined in one `if` branch | Pre-define variable before the `if/else` |

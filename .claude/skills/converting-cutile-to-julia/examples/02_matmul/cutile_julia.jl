@@ -3,77 +3,86 @@
 
 # Matrix multiplication — cuTile.jl
 #
-#   C = A @ B
+#   C = A * B
 #
-# Column-major layout: A_jl(K,M), B_jl(N,K), C_jl(N,M)
-#   C_jl[n,m] = sum_k B_jl[n,k] * A_jl[k,m]
-#   acc = muladd(b_tile, a_tile, acc)
+# Standard Julia layout (column-major):
+#   A(M, K), B(K, N), C(M, N)
 #
-# Uses 2D grid, K-reduction while loop, TF32 for Float32 inputs.
+# Uses 1D grid with 2D swizzle for better L2 cache locality.
 # Matches julia/kernels/matmul.jl
 
 using CUDA
 import cuTile as ct
 
-function _matmul_kernel(A_jl::ct.TileArray{T, 2},
-                        B_jl::ct.TileArray{T, 2},
-                        C_jl::ct.TileArray{T, 2},
-                        num_k_tiles::Int,
-                        TM::Int, TN::Int, TK::Int) where {T}
-    bid_m = ct.bid(1)
-    bid_n = ct.bid(2)
+# 2D swizzle for better L2 cache locality.
+# Groups blocks to access nearby memory regions together.
+@inline function swizzle_2d(M, N, tm, tn, GROUP_SIZE_M, bid)
+    num_bid_m = cld(M, Int32(tm))
+    num_bid_n = cld(N, Int32(tn))
+    num_bid_in_group = Int32(GROUP_SIZE_M) * num_bid_n
+    group_id = fld(bid, num_bid_in_group)
+    first_bid_m = group_id * Int32(GROUP_SIZE_M)
+    group_size_m = min(num_bid_m - first_bid_m, Int32(GROUP_SIZE_M))
+    bid_m = first_bid_m + rem(bid, group_size_m)
+    bid_n = fld(rem(bid, num_bid_in_group), group_size_m)
+    return bid_m, bid_n
+end
 
-    acc = ct.full((TN, TM), zero(Float32), Float32)
+# ── Matmul Kernel: C = A * B ────────────────────────────────────────────────
+# Uses 1D grid with 2D swizzle for cache locality.
 
-    k = Int32(1)
-    while k <= num_k_tiles
-        a_tile = ct.load(A_jl, (k, bid_m), (TK, TM);
-                         padding_mode=ct.PaddingMode.Zero)
-        b_tile = ct.load(B_jl, (bid_n, k), (TN, TK);
-                         padding_mode=ct.PaddingMode.Zero)
+function matmul_kernel(A::ct.TileArray{T,2}, B::ct.TileArray{T,2},
+                       C::ct.TileArray{T,2},
+                       tm::Int, tn::Int, tk::Int) where {T}
+    ct.@compiler_options num_ctas=ct.ByTarget(v"10.0" => 2)
 
+    # 1D grid with 2D swizzle for better L2 cache locality
+    bid = ct.bid(1)
+    M = size(A, 1)
+    N = size(B, 2)
+    # swizzle_2d expects 0-indexed bid, returns 0-indexed tile coords
+    bid_m_0, bid_n_0 = swizzle_2d(M, N, tm, tn, 8, bid - Int32(1))
+    bid_m = bid_m_0 + Int32(1)
+    bid_n = bid_n_0 + Int32(1)
+
+    num_k = ct.num_tiles(A, 2, (tm, tk))
+
+    acc = zeros(Float32, tm, tn)
+
+    for k in Int32(1):num_k
+        a = ct.load(A; index=(bid_m, k), shape=(tm, tk), padding_mode=ct.PaddingMode.Zero)
+        b = ct.load(B; index=(k, bid_n), shape=(tk, tn), padding_mode=ct.PaddingMode.Zero)
+        # Convert to TF32 for tensor cores (Float32 inputs only)
         if T === Float32
-            a_tile = convert(ct.Tile{ct.TFloat32}, a_tile)
-            b_tile = convert(ct.Tile{ct.TFloat32}, b_tile)
+            a = convert(ct.Tile{ct.TFloat32}, a)
+            b = convert(ct.Tile{ct.TFloat32}, b)
         end
-
-        acc = muladd(b_tile, a_tile, acc)
-        k += Int32(1)
+        acc = muladd(a, b, acc)
     end
 
-    result = convert(ct.Tile{T}, acc)
-    ct.store(C_jl, (bid_n, bid_m), result)
-
-    return nothing
+    ct.store(C; index=(bid_m, bid_n), tile=convert(ct.Tile{T}, acc))
+    return
 end
 
 # ── Host function ────────────────────────────────────────────────────────────
 
-function matmul!(a_ptr::Int, b_ptr::Int, c_ptr::Int,
-                 K_dim::Int, M_dim::Int, N_dim::Int,
-                 tm::Int, tn::Int, tk::Int)
-    A_cu = unsafe_wrap(CuArray{Float32, 2},
-                       CUDA.CuPtr{Float32}(UInt(a_ptr)),
-                       (K_dim, M_dim); own=false)
-    B_cu = unsafe_wrap(CuArray{Float32, 2},
-                       CUDA.CuPtr{Float32}(UInt(b_ptr)),
-                       (N_dim, K_dim); own=false)
-    C_cu = unsafe_wrap(CuArray{Float32, 2},
-                       CUDA.CuPtr{Float32}(UInt(c_ptr)),
-                       (N_dim, M_dim); own=false)
+"""
+    matmul!(C, A, B; tm=128, tn=128, tk=64)
 
-    num_m_tiles = cld(M_dim, tm)
-    num_n_tiles = cld(N_dim, tn)
-    num_k_tiles = cld(K_dim, tk)
-    grid = (num_m_tiles, num_n_tiles)
+Launch matmul kernel: C = A * B.
 
-    ct.launch(_matmul_kernel, grid, A_cu, B_cu, C_cu,
-              ct.Constant(num_k_tiles),
-              ct.Constant(tm), ct.Constant(tn), ct.Constant(tk);
-              occupancy=2)
-
+Memory layout (column-major):
+  A shape: (M, K), B shape: (K, N), C shape: (M, N)
+"""
+function matmul!(C::CuMatrix{T}, A::CuMatrix{T}, B::CuMatrix{T};
+                 tm::Int=128, tn::Int=128, tk::Int=64) where {T}
+    M = size(A, 1)
+    N = size(B, 2)
+    grid = cld(M, tm) * cld(N, tn)
+    ct.launch(matmul_kernel, grid, A, B, C,
+              ct.Constant(tm), ct.Constant(tn), ct.Constant(tk))
     CUDA.synchronize()
-    return nothing
+    return
 end
 
 # ── Verify ───────────────────────────────────────────────────────────────────
@@ -87,18 +96,17 @@ function verify()
     ]
     tm, tn, tk = 128, 128, 64
     for tc in test_cases
-        A_jl = CUDA.rand(Float32, tc.K, tc.M)
-        B_jl = CUDA.rand(Float32, tc.N, tc.K)
-        C_jl = CUDA.zeros(Float32, tc.N, tc.M)
+        A = CUDA.rand(Float32, tc.M, tc.K)
+        B = CUDA.rand(Float32, tc.K, tc.N)
+        C = CUDA.zeros(Float32, tc.M, tc.N)
 
-        matmul!(Int(pointer(A_jl)), Int(pointer(B_jl)), Int(pointer(C_jl)),
-                tc.K, tc.M, tc.N, tm, tn, tk)
+        matmul!(C, A, B; tm, tn, tk)
 
-        expected = Array(B_jl) * Array(A_jl)
-        result = Array(C_jl)
+        expected = Array(A) * Array(B)
+        result = Array(C)
         @assert isapprox(result, expected; atol=1e-1, rtol=1e-2) (
-            "matmul failed ($(tc.M)x$(tc.K))@($(tc.K)x$(tc.N))")
-        println("  ($(tc.M)x$(tc.K)) @ ($(tc.K)x$(tc.N)): passed")
+            "matmul failed ($(tc.M)x$(tc.K)) * ($(tc.K)x$(tc.N))")
+        println("  ($(tc.M)x$(tc.K)) * ($(tc.K)x$(tc.N)): passed")
     end
 end
 

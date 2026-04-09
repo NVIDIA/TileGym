@@ -28,6 +28,7 @@
 | Python | Julia | Notes |
 |--------|-------|-------|
 | `ct.launch(stream, grid, kernel, (a, b, c, val))` | `ct.launch(kernel, grid, a, b, c, ct.Constant(val))` | No stream; args splatted; constants wrapped |
+| `@ct.kernel(occupancy=N)` | `ct.@compiler_options occupancy=N` (in kernel body) | Replaces launch kwargs |
 | `grid = (M, N, 1)` | `grid = (M, N)` or `grid = (M, N, K)` | Trailing 1s optional |
 | `cp.cuda.get_current_stream()` | (implicit) | Julia uses task-bound stream |
 | `cp.cuda.runtime.deviceSynchronize()` | `CUDA.synchronize()` | Explicit sync |
@@ -46,10 +47,10 @@
 
 | Python | Julia | Notes |
 |--------|-------|-------|
-| `ct.load(arr, index=(i,j), shape=(m,n))` | `ct.load(arr, (i,j), (m,n))` | Positional args |
-| `ct.load(arr, index=(i,j), shape=(m,n), padding_mode=ct.PaddingMode.ZERO)` | `ct.load(arr, (i,j), (m,n); padding_mode=ct.PaddingMode.Zero)` | Semicolon kwargs; `Zero` not `ZERO` |
-| `ct.load(arr, index=(b,h,0,j), shape=(1,1,D,N), order=(0,1,3,2))` | `ct.load(arr, (b,h,j,1), (N,D,1,1); order=(2,1,3,4))` | **⚠️ `order` remaps BOTH shape AND index positions** — see Critical Rule 16 |
-| `ct.store(arr, index=(i,j), tile=t)` | `ct.store(arr, (i,j), t)` | Positional args |
+| `ct.load(arr, index=(i,j), shape=(m,n))` | `ct.load(arr; index=(i,j), shape=(m,n))` | Keyword preferred |
+| `ct.load(arr, index=(i,j), shape=(m,n), padding_mode=ct.PaddingMode.ZERO)` | `ct.load(arr; index=(i,j), shape=(m,n), padding_mode=ct.PaddingMode.Zero)` | Semicolon kwargs; `Zero` not `ZERO` |
+| `ct.load(arr, index=(b,h,0,j), shape=(1,1,D,N), order=(0,1,3,2))` | `ct.load(arr; index=(b,h,j,1), shape=(N,D,1,1), order=(2,1,3,4))` | **⚠️ `order` remaps BOTH shape AND index positions** — see Critical Rule 16 |
+| `ct.store(arr, index=(i,j), tile=t)` | `ct.store(arr; index=(i,j), tile=t)` | Keyword preferred |
 | `ct.gather(arr, indices)` | `ct.gather(arr, indices)` | Same |
 | `ct.scatter(arr, indices, tile)` | `ct.scatter(arr, indices, tile)` | Same |
 | `ct.load(arr, index=bid, shape=())` | `arr[bid]` | 0-D tile → scalar indexing |
@@ -72,10 +73,10 @@
 
 | Python | Julia | Notes |
 |--------|-------|-------|
-| `ct.full((m,n), 0, dtype=ct.float32)` | `ct.full((m,n), 0.0f0, Float32)` | Julia types |
-| `ct.zeros((m,n), dtype=ct.float32)` | `ct.zeros((m,n), Float32)` | No keyword |
-| `ct.arange(N, dtype=ct.int32)` | `ct.arange((N,), Int32)` | Tuple shape |
-| `ct.ones((m,n), dtype=ct.float32)` | (not available) | Use `ct.full((m,n), 1.0f0, Float32)` |
+| `ct.full((m,n), 0, dtype=ct.float32)` | `fill(0.0f0, (m, n))` | Base.fill overlay |
+| `ct.zeros((m,n), dtype=ct.float32)` | `zeros(Float32, m, n)` | Base.zeros overlay |
+| `ct.arange(N, dtype=ct.int32)` | `ct.arange(N)` | Returns 1-indexed [1,...,N], Int32 |
+| `ct.ones((m,n), dtype=ct.float32)` | `ones(Float32, m, n)` | Base.ones overlay |
 
 ## Type Conversion
 
@@ -211,8 +212,8 @@
 
 | Python | Julia | Notes |
 |--------|-------|-------|
-| `for k in range(n):` | `k = Int32(1); while k <= n; ...; k += Int32(1); end` | **No for loops**; use 1-based when `k` is a tile index for `ct.load`/`ct.store` |
-| `for k in range(0, n):` | `k = Int32(0); while k < n; ...; k += Int32(1); end` | Use 0-based when `k` is used in arithmetic (e.g., `k * TILE_SIZE + offset`) |
+| `for k in range(n):` | `for k in Int32(1):n` | cuTile 0.2 supports native `for` loops; use 1-based when `k` is a tile index for `ct.load`/`ct.store` |
+| `for k in range(0, n):` | `for k in Int32(0):n - Int32(1)` | Use 0-based when `k` is used in arithmetic (e.g., `k * TILE_SIZE + offset`) |
 | `if cond:` | `if cond` | Same structure |
 | `if A.dtype == ct.float32:` | `if T === Float32` | Use `===` for type check |
 
@@ -266,12 +267,12 @@ For simple 1D element-wise ops (dropout, activations), use the TMA `ct.load`/`ct
 
 ```julia
 # 1D kernel using TMA block indexing
-function _my_1d_kernel(x::ct.TileArray{T,1}, output::ct.TileArray{T,1},
-                       BLOCK_SIZE::Int) where {T}
+function my_1d_kernel(x::ct.TileArray{T,1}, output::ct.TileArray{T,1},
+                      BLOCK_SIZE::Int) where {T}
     bid = ct.bid(1)
-    x_tile = ct.load(x, bid, (BLOCK_SIZE,))
+    x_tile = ct.load(x; index=bid, shape=(BLOCK_SIZE,))
     # ... process ...
-    ct.store(output, bid, result_tile)
+    ct.store(output; index=bid, tile=result_tile)
     return nothing
 end
 ```
@@ -283,22 +284,23 @@ Host harness: flatten input, pad to `BLOCK_SIZE` multiple, launch kernel, trim o
 For row-per-block kernels with many rows, use persistent scheduling with `ct.Constant` for tile sizes:
 
 ```julia
-function _my_kernel(data::ct.TileArray{T,2}, n_rows::Int, TILE_HD::Int) where {T}
+function my_kernel(data::ct.TileArray{T,2}, TILE_HD::Int) where {T}
+    ct.@compiler_options occupancy=2
     bid = ct.bid(1)
     num_programs = ct.num_blocks(1)
+    n_rows = size(data, 2)
     row_idx = bid
     while row_idx <= n_rows
-        tile = ct.load(data, (Int32(1), row_idx), (TILE_HD, 1))
+        tile = ct.load(data; index=(Int32(1), row_idx), shape=(TILE_HD, 1))
         # ... process row ...
-        ct.store(data, (Int32(1), row_idx), result)
+        ct.store(data; index=(Int32(1), row_idx), tile=result)
         row_idx += num_programs
     end
     return
 end
 
 # Launch with ct.Constant for tile size
-ct.launch(_my_kernel, num_blocks, data_cu,
-          ct.Constant(n_rows), ct.Constant(tile_hd); occupancy=2)
+ct.launch(my_kernel, num_blocks, data_cu, ct.Constant(tile_hd))
 ```
 
 ## Kernel Patterns for Large Tensors
@@ -308,108 +310,72 @@ When a single `ct.load` of the entire data exceeds hardware limits, use one of t
 ### Pattern A: Column-loop with `ct.load`/`ct.store` (Online Algorithm)
 
 Best for TMA-based kernels where each chunk is a contiguous tile along columns.
-Supports persistent scheduling (fewer blocks than rows) with nested while loops.
+Uses `for` loops for column iteration and `ct.num_tiles` for tile count.
 
 ```julia
-# Persistent scheduling: fewer blocks than rows, outer while distributes rows
 function online_kernel(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
-                       n_rows::Int, TILE_SIZE::Int, tile_num_per_row::Int) where {T}
-    pid = ct.bid(1)
-    num_blocks = ct.num_blocks(1)
+                       TILE_SIZE::Int) where {T}
+    row_idx = ct.bid(1)
+    num_col_tiles = ct.num_tiles(input, 2, (1, TILE_SIZE))
 
-    row_idx = pid
-    while row_idx <= n_rows                       # outer while: persistent scheduling
-        # Pass 1: streaming max + sum
-        m_prev = ct.full((1, 1), -Inf32, Float32)
-        l_prev = ct.full((1, 1), 0.0f0, Float32)
-        col_idx = Int32(1)
-        while col_idx <= tile_num_per_row         # inner while: iterate column chunks
-            tile = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
-            tile = convert(ct.Tile{Float32}, tile)
-            tile_max = maximum(tile; dims=2)
-            m_curr = max.(tile_max, m_prev)           # broadcast max!
-            l_prev = l_prev .* exp.(m_prev .- m_curr)
-            l_prev = l_prev .+ sum(exp.(tile .- m_curr); dims=2)
-            m_prev = m_curr
-            col_idx += Int32(1)
-        end
+    m_prev = fill(-Inf32, (1, 1))
+    l_prev = zeros(Float32, 1, 1)
 
-        # Pass 2: normalize
-        col_idx = Int32(1)
-        while col_idx <= tile_num_per_row
-            tile = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
-            tile = convert(ct.Tile{Float32}, tile)
-            result = exp.(tile .- m_prev) ./ l_prev
-            ct.store(output, (row_idx, col_idx), convert(ct.Tile{T}, result))
-            col_idx += Int32(1)
-        end
+    for col_idx in Int32(1):num_col_tiles
+        tile = ct.load(input; index=(row_idx, col_idx), shape=(1, TILE_SIZE),
+                      padding_mode=ct.PaddingMode.NegInf)
+        tile = convert(ct.Tile{Float32}, tile)
+        tile_max = maximum(tile; dims=2)
+        m_curr = max.(tile_max, m_prev)
+        l_prev = l_prev .* exp.(m_prev .- m_curr)
+        l_prev = sum(exp.(tile .- m_curr); dims=2) .+ l_prev
+        m_prev = m_curr
+    end
 
-        row_idx += num_blocks                     # advance to next row for this block
+    for col_idx in Int32(1):num_col_tiles
+        tile = ct.load(input; index=(row_idx, col_idx), shape=(1, TILE_SIZE),
+                      padding_mode=ct.PaddingMode.NegInf)
+        tile = convert(ct.Tile{Float32}, tile)
+        result = exp.(tile .- m_prev) ./ l_prev
+        ct.store(output; index=(row_idx, col_idx), tile=convert(ct.Tile{T}, result))
     end
     return
 end
 ```
 
-### Pattern B: Chunked with `ct.load`/`ct.store` and `ct.Constant` (Preferred)
+### Pattern B: Chunked with `ct.gather`/`ct.scatter` and `ct.Constant` (Preferred)
 
 Use when you need multiple passes over column chunks. Pass tile sizes as
 `ct.Constant` at launch — no `@eval` needed.
 
 ```julia
-function _chunked_kernel(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
-                         n_rows::Int, num_chunks::Int, TILE_SIZE::Int) where {T}
-    pid = ct.bid(1)
-    num_blocks = ct.num_blocks(1)
+function chunked_kernel(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
+                        n_cols::Int, TILE_SIZE::Int) where {T}
+    ct.@compiler_options occupancy=4
+    row_idx = ct.bid(1)
+    num_chunks = (n_cols + TILE_SIZE - Int32(1)) ÷ Int32(TILE_SIZE)
+    col_offsets_base = ct.arange(TILE_SIZE)
+    row_tile = ct.Tile(row_idx)
 
-    row_idx = pid
-    while row_idx <= n_rows                   # outer while: persistent scheduling
-        row_max = ct.full((1, 1), -Inf32, Float32)
-        denom = ct.full((1, 1), 0.0f0, Float32)
+    row_max = fill(-Inf32, (1,))
+    denominator = zeros(Float32, TILE_SIZE)
 
-        # Pass 1: max
-        col_idx = Int32(1)
-        while col_idx <= num_chunks
-            chunk = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
-            chunk = convert(ct.Tile{Float32}, chunk)
-            row_max = max.(row_max, maximum(chunk; dims=2))
-            col_idx += Int32(1)
-        end
-
-        # Pass 2: sum of exp
-        col_idx = Int32(1)
-        while col_idx <= num_chunks
-            chunk = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
-            chunk = convert(ct.Tile{Float32}, chunk)
-            denom = denom .+ sum(exp.(chunk .- row_max); dims=2)
-            col_idx += Int32(1)
-        end
-
-        # Pass 3: normalize and store
-        col_idx = Int32(1)
-        while col_idx <= num_chunks
-            chunk = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
-            chunk = convert(ct.Tile{Float32}, chunk)
-            result = exp.(chunk .- row_max) ./ denom
-            ct.store(output, (row_idx, col_idx), convert(ct.Tile{T}, result))
-            col_idx += Int32(1)
-        end
-
-        row_idx += num_blocks                 # advance to next row
+    for chunk_idx in Int32(0):num_chunks - Int32(1)
+        col_indices = ct.broadcast_to(ct.Tile(chunk_idx * Int32(TILE_SIZE)), (TILE_SIZE,)) .+ col_offsets_base
+        chunk = ct.gather(input, (row_tile, col_indices); check_bounds=true, padding_value=T(-Inf))
+        chunk = convert(ct.Tile{Float32}, chunk)
+        row_max = max.(row_max, ct.Tile(maximum(chunk)))
     end
-
+    # ... pass 2 and 3 similarly ...
     return
 end
 
-function julia_chunked_softmax(input_ptr::Int, output_ptr::Int, M::Int, N::Int, TILE_SIZE::Int)
-    num_chunks = cld(N, TILE_SIZE)
-    padded_N = num_chunks * TILE_SIZE
-    input_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(input_ptr)), (M, padded_N); own=false)
-    output_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(output_ptr)), (M, padded_N); own=false)
-    num_blocks = min(M, 128)
-    ct.launch(_chunked_kernel, num_blocks, output_cu, input_cu,
-              ct.Constant(M), ct.Constant(num_chunks), ct.Constant(TILE_SIZE); occupancy=4)
+function julia_chunked_softmax(output::CuMatrix{T}, input::CuMatrix{T};
+                               tile_size::Int=1024) where {T}
+    M, N = size(input)
+    ct.launch(chunked_kernel, M, output, input, ct.Constant(N), ct.Constant(tile_size))
     CUDA.synchronize()
-    return nothing
+    return
 end
 ```
 
@@ -422,8 +388,8 @@ end
 | `ct.num_blocks(0)` | `ct.num_blocks(1)` |
 | `ct.num_tiles(A, axis=1, shape=s)` | `ct.num_tiles(A, 2, s)` |
 | `A.shape[0]` | `size(A, 1)` |
-| `ct.load(arr, index=i, shape=s)` | `ct.load(arr, i, s)` |
-| `ct.store(arr, index=i, tile=t)` | `ct.store(arr, i, t)` |
+| `ct.load(arr, index=i, shape=s)` | `ct.load(arr; index=i, shape=s)` |
+| `ct.store(arr, index=i, tile=t)` | `ct.store(arr; index=i, tile=t)` |
 | `.astype(ct.float32)` | `convert(ct.Tile{Float32}, tile)` |
 | `ct.mma(a, b, acc=acc)` | `muladd(a, b, acc)` |
 | `ct.where(m, x, y)` | `ifelse.(m, x, y)` |
@@ -431,7 +397,7 @@ end
 | `ct.maximum(a, b)` | `max.(a, b)` |
 | `ct.exp(t)` | `exp.(t)` |
 | `ct.rsqrt(t)` | `rsqrt.(t)` (cuTile.jl exports `rsqrt`; `map(ct.rsqrt, t)` also works) |
-| `for k in range(n):` | `k=Int32(1); while k<=n; ...; k+=Int32(1); end` |
+| `for k in range(n):` | `for k in Int32(1):n` |
 | `ct.launch(stream, grid, kernel, (args))` | `ct.launch(kernel, grid, args...)` |
 | `ct.Constant[int]` in sig | `::Int` in sig, `ct.Constant(val)` at launch |
 | `ct.cdiv(a, b)` | `cld(a, b)` |

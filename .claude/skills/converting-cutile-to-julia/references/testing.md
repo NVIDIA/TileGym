@@ -55,26 +55,16 @@ const KERNEL_DIR = joinpath(@__DIR__, "..", "kernels")
 include(joinpath(KERNEL_DIR, "<op>.jl"))
 
 @testset "<Op> Kernel" begin
-
     @testset "basic correctness" begin
         M, N = 128, 256
         x_gpu = CUDA.rand(Float32, M, N)
+        out_gpu = similar(x_gpu)
 
-        out_gpu = CUDA.zeros(Float32, M, N)
+        my_op!(out_gpu, x_gpu)
 
-        # Call bridge function
-        julia_<op>(
-            Int(pointer(x_gpu)),
-            Int(pointer(out_gpu)),
-            M, N
-        )
-
-        # Compare against reference
         expected = reference_impl(Array(x_gpu))
-        result = Array(out_gpu)
-        @test result ≈ expected atol=1e-5
+        @test Array(out_gpu) ≈ expected atol=1e-5
     end
-
 end
 ```
 
@@ -129,8 +119,8 @@ For complex ops (attention, softmax), prefer NNlib.jl.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `MethodError: no method matching Int32(::IRStructurizer.BlockArg)` | `Int32()` cast on runtime value | Use `ct.full((N,), val, Int32)` |
 | `IRError: Unsupported function call: max` | `max(a, b)` on tiles | Use `max.(a, b)` (broadcast dot) |
+| `IRError` or `MethodError` mentioning `IRStructurizer` | Internal compiler bug | Do not work around — file upstream with minimal reproducer |
 | All zeros in output | `ct.launch` arg order wrong | Verify args map positionally to kernel params |
 | Slight numerical drift | Reduction order differs | Increase tolerance to 2x default |
 | Transposed results | Column-major layout mismatch | Verify data is created in col-major for Julia |
@@ -143,7 +133,7 @@ For complex ops (attention, softmax), prefer NNlib.jl.
 Before marking a Julia kernel conversion complete:
 
 - [ ] `julia --project=julia/ julia/test/runtests.jl` passes
-- [ ] `validate_cutile_jl.py` passes on the `.jl` kernel file
+- [ ] `validate_cutile_jl.py` passes on the `.jl` kernel file (no longer flags `for` loops)
 - [ ] No NaN/Inf in output
 - [ ] Tested at least one non-power-of-2 shape
 - [ ] Tested at least one non-tile-aligned dimension

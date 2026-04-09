@@ -93,10 +93,6 @@ def validate(filepath: str) -> list[str]:
 
         # --- Checks that apply inside kernel bodies ---
         if in_kernel:
-            # for loop (forbidden in kernels)
-            if re.match(r"^\s*for\s+\w+\s+(in|=)\s+", line):
-                errors.append(f"ERROR (line {i}): 'for' loop in kernel — use 'while' with Int32 counter")
-
             # 0-based ct.bid / ct.num_blocks
             if re.search(r"ct\.bid\(0\)", line):
                 errors.append(f"ERROR (line {i}): ct.bid(0) — Julia is 1-indexed, use ct.bid(1)")
@@ -154,13 +150,6 @@ def validate(filepath: str) -> list[str]:
         if re.search(r"ct\.Constant\[", line):
             errors.append(f"ERROR (line {i}): ct.Constant[...] in signature — use ::Int and ct.Constant(val) at launch")
 
-        # Keyword args with = instead of ;
-        # ct.load with keyword index= or shape=
-        if re.search(r"ct\.load\([^)]*index\s*=", line):
-            errors.append(f"WARNING (line {i}): ct.load with index= keyword — use positional args in Julia")
-        if re.search(r"ct\.store\([^)]*tile\s*=", line):
-            errors.append(f"WARNING (line {i}): ct.store with tile= keyword — use positional args in Julia")
-
         # PaddingMode case
         if re.search(r"ct\.PaddingMode\.ZERO\b", line):
             errors.append(f"ERROR (line {i}): ct.PaddingMode.ZERO — use ct.PaddingMode.Zero")
@@ -180,9 +169,17 @@ def validate(filepath: str) -> list[str]:
         if re.search(r"ct\.launch\([^,]+,\s*stream", line) or re.search(r"ct\.launch\(\s*stream", line):
             errors.append(f"ERROR (line {i}): ct.launch(stream, ...) — Julia ct.launch does not take a stream argument")
 
-        # ct.ones (not available in cuTile.jl)
+        # ct.ones (wrong namespace — use Base overlay ones(T, dims...))
         if re.search(r"\bct\.ones\(", line):
-            errors.append(f"ERROR (line {i}): ct.ones() not available — use ct.full(shape, 1.0f0, Float32)")
+            errors.append(f"ERROR (line {i}): ct.ones() not available — use ones(T, dims...)")
+
+        # ct.full (not available in cuTile.jl)
+        if re.search(r"\bct\.full\(", line):
+            errors.append(f"ERROR (line {i}): ct.full() not available — use fill(val, shape), zeros(T, dims...), or ones(T, dims...)")
+
+        # ct.zeros (wrong namespace — use Base overlay zeros(T, dims...))
+        if re.search(r"\bct\.zeros\(", line):
+            errors.append(f"ERROR (line {i}): ct.zeros() not available — use zeros(T, dims...)")
 
     return errors
 
