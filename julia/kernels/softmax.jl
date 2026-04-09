@@ -7,7 +7,7 @@
 # Three strategies:
 # 1. TMA single-tile: loads entire row in one ct.load (small N)
 # 2. Online softmax: 2-pass column-loop with running max/sum (large N)
-# 3. Chunked softmax: 3-pass with gather/scatter (explicit chunking)
+# 3. Chunked softmax: 3-pass with explicit chunking (large N)
 
 using CUDA
 import cuTile as ct
@@ -15,33 +15,31 @@ import cuTile as ct
 #=============================================================================
  Strategy 1: TMA Single-Tile (for small N where TILE_SIZE >= N)
  Loads entire row in one ct.load call with NegInf padding.
+ Uses persistent scheduling: each block processes multiple rows.
 =============================================================================#
-function _softmax_kernel_tma(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
-                             n_rows::Int, n_cols::Int,
-                             TILE_SIZE::Int) where {T}
+function softmax_kernel_tma(output::ct.TileArray{T,2}, input::ct.TileArray{T,2},
+                            TILE_SIZE::Int) where {T}
+    ct.@compiler_options occupancy=2
+
     pid = ct.bid(1)
     num_programs = ct.num_blocks(1)
+    n_rows = size(input, 1)
 
     row_idx = pid
     while row_idx <= n_rows
-        row = ct.load(input, (row_idx, Int32(1)), (1, TILE_SIZE);
+        row = ct.load(input; index=(row_idx, Int32(1)), shape=(1, TILE_SIZE),
                       padding_mode=ct.PaddingMode.NegInf)
-
         row = convert(ct.Tile{Float32}, row)
 
         row_max = maximum(row; dims=2)
-        row_minus_max = row .- row_max
-
-        numerator = exp.(row_minus_max)
+        numerator = exp.(row .- row_max)
         denominator = sum(numerator; dims=2)
         softmax_output = numerator ./ denominator
 
-        softmax_output = convert(ct.Tile{T}, softmax_output)
-        ct.store(output, (row_idx, Int32(1)), softmax_output)
-
+        ct.store(output; index=(row_idx, Int32(1)),
+                 tile=convert(ct.Tile{T}, softmax_output))
         row_idx += num_programs
     end
-
     return
 end
 
@@ -50,110 +48,97 @@ end
  Pass 1: streaming max + sum via numerically stable online algorithm
  Pass 2: normalize each tile chunk using final max and sum
 =============================================================================#
-function _softmax_kernel_online(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
-                                n_cols::Int, TILE_SIZE::Int,
-                                tile_num_per_row::Int) where {T}
-    # One block per row
+function softmax_kernel_online(output::ct.TileArray{T,2}, input::ct.TileArray{T,2},
+                               TILE_SIZE::Int) where {T}
     row_idx = ct.bid(1)
+    num_col_tiles = ct.num_tiles(input, 2, (1, TILE_SIZE))
 
-    # Initialize running max and sum
-    m_prev = ct.full((1, 1), -Inf32, Float32)
-    l_prev = ct.full((1, 1), 0.0f0, Float32)
+    m_prev = fill(-Inf32, (1, 1))
+    l_prev = zeros(Float32, 1, 1)
 
     # Pass 1: compute running max and sum
-    col_idx = Int32(1)
-    while col_idx <= tile_num_per_row
-        row_tile = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
+    for col_idx in Int32(1):num_col_tiles
+        row_tile = ct.load(input; index=(row_idx, col_idx), shape=(1, TILE_SIZE),
+                          padding_mode=ct.PaddingMode.NegInf)
         row_tile = convert(ct.Tile{Float32}, row_tile)
 
         tile_max = maximum(row_tile; dims=2)
         m_curr = max.(tile_max, m_prev)
 
-        # Correct old l_prev: l_prev *= exp(m_prev - m_curr)
-        exp_diff = exp.(m_prev .- m_curr)
-        l_prev = l_prev .* exp_diff
+        # Correct old sum: l_prev *= exp(m_prev - m_curr)
+        l_prev = l_prev .* exp.(m_prev .- m_curr)
 
-        # Update with current tile: p = exp(row - m_curr)
+        # Update with current tile
         p = exp.(row_tile .- m_curr)
-        l_curr = sum(p; dims=2)
-
-        l_prev = l_curr .+ l_prev
+        l_prev = sum(p; dims=2) .+ l_prev
         m_prev = m_curr
-
-        col_idx += Int32(1)
     end
 
     # Pass 2: compute actual softmax values
-    col_idx = Int32(1)
-    while col_idx <= tile_num_per_row
-        row_tile = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
+    for col_idx in Int32(1):num_col_tiles
+        row_tile = ct.load(input; index=(row_idx, col_idx), shape=(1, TILE_SIZE),
+                          padding_mode=ct.PaddingMode.NegInf)
         row_tile = convert(ct.Tile{Float32}, row_tile)
 
-        row_minus_max = row_tile .- m_prev
-        numerator = exp.(row_minus_max)
+        numerator = exp.(row_tile .- m_prev)
         softmax_output = numerator ./ l_prev
 
-        softmax_output = convert(ct.Tile{T}, softmax_output)
-        ct.store(output, (row_idx, col_idx), softmax_output)
-
-        col_idx += Int32(1)
+        ct.store(output; index=(row_idx, col_idx),
+                 tile=convert(ct.Tile{T}, softmax_output))
     end
-
     return
 end
 
 #=============================================================================
- Strategy 3: Chunked Softmax (3-pass with ct.load/ct.store)
+ Strategy 3: Chunked Softmax (3-pass with gather/scatter)
+ Uses index-based access with bounds checking (matches Python TileGym).
  Pass 1: find row maximum across all chunks
  Pass 2: compute sum of exp(x - max) across all chunks
- Pass 3: compute final softmax = exp(x - max) / sum and store back
-
- Tile size passed as ct.Constant (no @eval needed).
+ Pass 3: compute final softmax = exp(x - max) / sum and scatter back
 =============================================================================#
+function softmax_kernel_chunked(output::ct.TileArray{T,2}, input::ct.TileArray{T,2},
+                                n_cols::Int, TILE_SIZE::Int) where {T}
+    ct.@compiler_options occupancy=4
 
-function _softmax_kernel_chunked(output::ct.TileArray{T, 2}, input::ct.TileArray{T, 2},
-                                 num_chunks::Int, TILE_SIZE::Int) where {T}
-    # One block per row
     row_idx = ct.bid(1)
+    num_chunks = (n_cols + TILE_SIZE - Int32(1)) ÷ Int32(TILE_SIZE)
+    col_offsets_base = ct.arange(TILE_SIZE)
+    row_tile = ct.Tile(row_idx)
 
-    row_max = ct.full((1, 1), -Inf32, Float32)
-    denominator = ct.full((1, 1), 0.0f0, Float32)
+    row_max = fill(-Inf32, (1,))
+    denominator = zeros(Float32, TILE_SIZE)
 
     # Pass 1: Find maximum across all chunks
-    col_idx = Int32(1)
-    while col_idx <= num_chunks
-        chunk = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
+    for chunk_idx in Int32(0):num_chunks - Int32(1)
+        col_indices = ct.broadcast_to(ct.Tile(chunk_idx * Int32(TILE_SIZE)), (TILE_SIZE,)) .+ col_offsets_base
+        chunk = ct.gather(input, (row_tile, col_indices);
+                         check_bounds=true, padding_value=T(-Inf))
         chunk = convert(ct.Tile{Float32}, chunk)
-        chunk_max = maximum(chunk; dims=2)
-        row_max = max.(row_max, chunk_max)
-        col_idx += Int32(1)
+        chunk_max = maximum(chunk)
+        row_max = max.(row_max, ct.Tile(chunk_max))
     end
 
     # Pass 2: Compute denominator (sum of all exp values)
-    col_idx = Int32(1)
-    while col_idx <= num_chunks
-        chunk = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
+    for chunk_idx in Int32(0):num_chunks - Int32(1)
+        col_indices = ct.broadcast_to(ct.Tile(chunk_idx * Int32(TILE_SIZE)), (TILE_SIZE,)) .+ col_offsets_base
+        chunk = ct.gather(input, (row_tile, col_indices);
+                         check_bounds=true, padding_value=T(-Inf))
         chunk = convert(ct.Tile{Float32}, chunk)
-        row_minus_max = chunk .- row_max
-        numerator = exp.(row_minus_max)
-        exponentials_sum = sum(numerator; dims=2)
-        denominator = denominator .+ exponentials_sum
-        col_idx += Int32(1)
+        numerator = exp.(chunk .- row_max)
+        denominator = denominator .+ numerator
     end
+    denom_sum = ct.Tile(sum(denominator))
 
-    # Pass 3: Compute final softmax and store
-    col_idx = Int32(1)
-    while col_idx <= num_chunks
-        chunk = ct.load(input, (row_idx, col_idx), (1, TILE_SIZE))
+    # Pass 3: Compute final softmax and scatter
+    for chunk_idx in Int32(0):num_chunks - Int32(1)
+        col_indices = ct.broadcast_to(ct.Tile(chunk_idx * Int32(TILE_SIZE)), (TILE_SIZE,)) .+ col_offsets_base
+        chunk = ct.gather(input, (row_tile, col_indices);
+                         check_bounds=true, padding_value=T(-Inf))
         chunk = convert(ct.Tile{Float32}, chunk)
-        row_minus_max = chunk .- row_max
-        numerator = exp.(row_minus_max)
-        softmax_output = numerator ./ denominator
-        softmax_output = convert(ct.Tile{T}, softmax_output)
-        ct.store(output, (row_idx, col_idx), softmax_output)
-        col_idx += Int32(1)
+        softmax_output = exp.(chunk .- row_max) ./ denom_sum
+        ct.scatter(output, (row_tile, col_indices), convert(ct.Tile{T}, softmax_output);
+                  check_bounds=true)
     end
-
     return
 end
 
@@ -162,62 +147,43 @@ end
 =============================================================================#
 
 """
-    softmax_tma!(input_ptr, output_ptr, M, N, TILE_SIZE)
+    softmax_tma!(output, input; tile_size)
 
-TMA single-tile strategy. TILE_SIZE must be >= N.
+TMA single-tile strategy. tile_size must be >= size(input, 2).
 """
-function softmax_tma!(input_ptr::Int, output_ptr::Int, M::Int, N::Int, TILE_SIZE::Int)
-    input_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(input_ptr)), (M, N); own=false)
-    output_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(output_ptr)), (M, N); own=false)
-
-    ct.launch(_softmax_kernel_tma, M, output_cu, input_cu,
-              ct.Constant(M), ct.Constant(N), ct.Constant(TILE_SIZE);
-              occupancy=2)
-
+function softmax_tma!(output::CuMatrix{T}, input::CuMatrix{T};
+                      tile_size::Int=1024) where {T}
+    M = size(input, 1)
+    ct.launch(softmax_kernel_tma, M, output, input, ct.Constant(tile_size))
     CUDA.synchronize()
-    return nothing
+    return
 end
 
 """
-    softmax_online!(input_ptr, output_ptr, M, N, TILE_SIZE, tile_num_per_row)
+    softmax_online!(output, input; tile_size)
 
-Online softmax strategy. Processes row in TILE_SIZE chunks.
-Input must be padded to tile_num_per_row * TILE_SIZE columns.
+Online softmax strategy. Processes row in tile_size chunks.
 """
-function softmax_online!(input_ptr::Int, output_ptr::Int,
-                         M::Int, N::Int, TILE_SIZE::Int, tile_num_per_row::Int)
-    # N here is the padded column count (tile_num_per_row * TILE_SIZE)
-    padded_N = tile_num_per_row * TILE_SIZE
-    input_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(input_ptr)), (M, padded_N); own=false)
-    output_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(output_ptr)), (M, padded_N); own=false)
-
-    # One block per row for online variant
-    ct.launch(_softmax_kernel_online, M, output_cu, input_cu,
-              ct.Constant(N), ct.Constant(TILE_SIZE), ct.Constant(tile_num_per_row);
-              occupancy=2)
-
+function softmax_online!(output::CuMatrix{T}, input::CuMatrix{T};
+                         tile_size::Int=1024) where {T}
+    M = size(input, 1)
+    ct.launch(softmax_kernel_online, M, output, input, ct.Constant(tile_size))
     CUDA.synchronize()
-    return nothing
+    return
 end
 
 """
-    softmax_chunked!(input_ptr, output_ptr, M, N, TILE_SIZE)
+    softmax_chunked!(output, input; tile_size)
 
-Chunked softmax strategy. TILE_SIZE is passed as ct.Constant.
+Chunked softmax strategy (3-pass, gather/scatter).
 """
-function softmax_chunked!(input_ptr::Int, output_ptr::Int, M::Int, N::Int, TILE_SIZE::Int)
-    num_chunks = cld(N, TILE_SIZE)
-    # Pad N to multiple of TILE_SIZE for ct.load alignment
-    padded_N = num_chunks * TILE_SIZE
-    input_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(input_ptr)), (M, padded_N); own=false)
-    output_cu = unsafe_wrap(CuArray{Float32, 2}, CUDA.CuPtr{Float32}(UInt(output_ptr)), (M, padded_N); own=false)
-
-    ct.launch(_softmax_kernel_chunked, M, output_cu, input_cu,
-              ct.Constant(num_chunks), ct.Constant(TILE_SIZE);
-              occupancy=4)
-
+function softmax_chunked!(output::CuMatrix{T}, input::CuMatrix{T};
+                          tile_size::Int=1024) where {T}
+    M, N = size(input)
+    ct.launch(softmax_kernel_chunked, M, output, input,
+              ct.Constant(N), ct.Constant(tile_size))
     CUDA.synchronize()
-    return nothing
+    return
 end
 
 const softmax! = softmax_tma!

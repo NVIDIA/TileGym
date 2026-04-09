@@ -2,9 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Tests for cuTile.jl softmax kernels (softmax_tma!, softmax_online!, softmax_chunked!).
-#
-# Tests create column-major data directly.
+# Tests for cuTile.jl softmax kernels
 
 using Test
 using CUDA
@@ -13,12 +11,9 @@ const KERNEL_DIR = joinpath(@__DIR__, "..", "kernels")
 include(joinpath(KERNEL_DIR, "softmax.jl"))
 
 """
-    reference_softmax(x::Matrix{Float32}) -> Matrix{Float32}
-
-CPU reference softmax. Input is (M, N) col-major; softmax is computed over dim 2 (columns).
+CPU reference softmax. Input is (M, N) col-major; softmax over dim 2 (columns).
 """
 function reference_softmax(x::Matrix{Float32})
-    # x is (M, N) — softmax over N (dim 2)
     M, N = size(x)
     out = similar(x)
     for i in 1:M
@@ -28,16 +23,6 @@ function reference_softmax(x::Matrix{Float32})
         out[i, :] = exps ./ sum(exps)
     end
     return out
-end
-
-"""
-Helper to create col-major test data on GPU and return both CPU & GPU versions.
-The bridge functions expect col-major (M, N) CuArrays.
-"""
-function make_test_data(M::Int, N::Int)
-    x_cpu = randn(Float32, M, N)
-    x_gpu = CuArray(x_cpu)
-    return x_cpu, x_gpu
 end
 
 function next_power_of_2(n::Int)
@@ -62,20 +47,14 @@ end
         ]
         for (M, N) in test_cases
             TILE_SIZE = next_power_of_2(N)
-            x_cpu, x_gpu = make_test_data(M, N)
+            x_cpu = randn(Float32, M, N)
+            x_gpu = CuArray(x_cpu)
+            out_gpu = similar(x_gpu)
 
-            # Pad to TILE_SIZE columns if needed (NegInf padding is handled by kernel)
-            out_gpu = CUDA.zeros(Float32, M, N)
-
-            softmax_tma!(
-                Int(pointer(x_gpu)),
-                Int(pointer(out_gpu)),
-                M, N, TILE_SIZE
-            )
+            softmax_tma!(out_gpu, x_gpu; tile_size=TILE_SIZE)
 
             expected = reference_softmax(x_cpu)
-            result = Array(out_gpu)
-            @test result ≈ expected atol=1e-5 rtol=1e-4
+            @test Array(out_gpu) ≈ expected atol=1e-5 rtol=1e-4
         end
     end
 
@@ -86,25 +65,14 @@ end
             (M=2,  N=8192,  TILE_SIZE=1024),
         ]
         for (M, N, TILE_SIZE) in test_cases
-            tile_num_per_row = cld(N, TILE_SIZE)
-            padded_N = tile_num_per_row * TILE_SIZE
-
             x_cpu = randn(Float32, M, N)
-            # Pad with -Inf for unused columns
-            x_padded_cpu = fill(-Inf32, M, padded_N)
-            x_padded_cpu[:, 1:N] .= x_cpu
-            x_padded_gpu = CuArray(x_padded_cpu)
-            out_padded_gpu = CUDA.zeros(Float32, M, padded_N)
+            x_gpu = CuArray(x_cpu)
+            out_gpu = similar(x_gpu)
 
-            softmax_online!(
-                Int(pointer(x_padded_gpu)),
-                Int(pointer(out_padded_gpu)),
-                M, N, TILE_SIZE, tile_num_per_row
-            )
+            softmax_online!(out_gpu, x_gpu; tile_size=TILE_SIZE)
 
             expected = reference_softmax(x_cpu)
-            result = Array(out_padded_gpu[:, 1:N])
-            @test result ≈ expected atol=1e-4 rtol=1e-3
+            @test Array(out_gpu) ≈ expected atol=1e-4 rtol=1e-3
         end
     end
 
@@ -115,47 +83,29 @@ end
             (M=2,  N=1000,  TILE_SIZE=512),
         ]
         for (M, N, TILE_SIZE) in test_cases
-            num_chunks = cld(N, TILE_SIZE)
-            padded_N = num_chunks * TILE_SIZE
-
             x_cpu = randn(Float32, M, N)
-            x_padded_cpu = fill(-Inf32, M, padded_N)
-            x_padded_cpu[:, 1:N] .= x_cpu
-            x_padded_gpu = CuArray(x_padded_cpu)
-            out_padded_gpu = CUDA.zeros(Float32, M, padded_N)
+            x_gpu = CuArray(x_cpu)
+            out_gpu = similar(x_gpu)
 
-            softmax_chunked!(
-                Int(pointer(x_padded_gpu)),
-                Int(pointer(out_padded_gpu)),
-                M, N, TILE_SIZE
-            )
+            softmax_chunked!(out_gpu, x_gpu; tile_size=TILE_SIZE)
 
             expected = reference_softmax(x_cpu)
-            result = Array(out_padded_gpu[:, 1:N])
-            @test result ≈ expected atol=1e-4 rtol=1e-3
+            @test Array(out_gpu) ≈ expected atol=1e-4 rtol=1e-3
         end
     end
 
     @testset "Numerical stability (large values)" begin
         M, N = 4, 128
         TILE_SIZE = 128
-        # Large values that would overflow naive exp()
         x_cpu = randn(Float32, M, N) .* 100f0
         x_gpu = CuArray(x_cpu)
-        out_gpu = CUDA.zeros(Float32, M, N)
+        out_gpu = similar(x_gpu)
 
-        softmax_tma!(
-            Int(pointer(x_gpu)),
-            Int(pointer(out_gpu)),
-            M, N, TILE_SIZE
-        )
+        softmax_tma!(out_gpu, x_gpu; tile_size=TILE_SIZE)
 
         result = Array(out_gpu)
-
-        # Softmax output must be valid probabilities
         @test all(isfinite, result)
         @test all(x -> x >= 0, result)
-        # Each row should sum to ~1
         for i in 1:M
             @test sum(result[i, :]) ≈ 1.0f0 atol=1e-4
         end
@@ -167,19 +117,14 @@ end
     @testset "Single row" begin
         M, N = 1, 512
         TILE_SIZE = 512
+        x_cpu = randn(Float32, M, N)
+        x_gpu = CuArray(x_cpu)
+        out_gpu = similar(x_gpu)
 
-        x_cpu, x_gpu = make_test_data(M, N)
-        out_gpu = CUDA.zeros(Float32, M, N)
-
-        softmax_tma!(
-            Int(pointer(x_gpu)),
-            Int(pointer(out_gpu)),
-            M, N, TILE_SIZE
-        )
+        softmax_tma!(out_gpu, x_gpu; tile_size=TILE_SIZE)
 
         expected = reference_softmax(x_cpu)
-        result = Array(out_gpu)
-        @test result ≈ expected atol=1e-5
+        @test Array(out_gpu) ≈ expected atol=1e-5
     end
 
 end
