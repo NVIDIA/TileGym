@@ -34,7 +34,6 @@ def _check_ct_experimental_dependency():
 
 # Check dependencies before any imports
 _check_torch_dependencies()
-_check_ct_experimental_dependency()
 
 # Import logging utilities
 from .logger import get_logger
@@ -55,6 +54,7 @@ from .backend import set_backend
 
 # Setup cutile integration
 if is_backend_available("cutile"):
+    _check_ct_experimental_dependency()
     # Apply experimental kernel tracking patch
     from .experimental import _apply_patch as _apply_experimental_patch
 
