@@ -175,7 +175,9 @@ def validate(filepath: str) -> list[str]:
 
         # ct.full (not available in cuTile.jl)
         if re.search(r"\bct\.full\(", line):
-            errors.append(f"ERROR (line {i}): ct.full() not available — use fill(val, shape), zeros(T, dims...), or ones(T, dims...)")
+            errors.append(
+                f"ERROR (line {i}): ct.full() not available — use fill(val, shape), zeros(T, dims...), or ones(T, dims...)"
+            )
 
         # ct.zeros (wrong namespace — use Base overlay zeros(T, dims...))
         if re.search(r"\bct\.zeros\(", line):
