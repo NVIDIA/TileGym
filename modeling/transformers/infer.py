@@ -316,6 +316,14 @@ class KernelFilter:
             "_ct_intra_chunk_prepare_kernel",
             # Partial RoPE kernel (Qwen3.5)
             "rope_partial_kernel",
+            # Fused Qwen3.5 cuTile kernels
+            "_sigmoid_mul_kernel",
+            "_gdr_preprocess_kernel",
+            "_rms_norm_gated_silu_kernel",
+            "_causal_conv1d_update_silu_kernel",
+            "_silu_and_mul_separate_kernel",
+            "_causal_conv1d_prefill_silu_kernel",
+            "_residual_add_rms_norm_kernel",
             # Reduce kernels
             "splitk_reduce_kernel",
             # GEMM kernels
@@ -527,8 +535,8 @@ class NsysKernelCoverageReporter:
 
         tilegym_time_pct = (tilegym_total_ns / all_total_ns * 100) if all_total_ns > 0 else 0
         tilegym_count_pct = (tilegym_total_count / all_total_count * 100) if all_total_count > 0 else 0
-        time_ratio_str = f"{tilegym_time_pct:.1f}%"
-        count_ratio_str = f"{tilegym_count_pct:.1f}%"
+        time_ratio_str = f"{tilegym_time_pct:.2f}%"
+        count_ratio_str = f"{tilegym_count_pct:.2f}%"
 
         if self.args.summary_file:
             self._append_summary(time_ratio_str, count_ratio_str)
@@ -564,8 +572,8 @@ class NsysKernelCoverageReporter:
         print(row_fmt.format("TileGym Total", tilegym_total_count, tilegym_ms, tilegym_time_pct))
         print(row_fmt.format("All Kernels Total", all_total_count, all_ms, 100.0))
 
-        time_ratio_str = f"{tilegym_time_pct:.1f}%"
-        count_ratio_str = f"{tilegym_count_pct:.1f}%"
+        time_ratio_str = f"{tilegym_time_pct:.2f}%"
+        count_ratio_str = f"{tilegym_count_pct:.2f}%"
         print(f"\n>>> cuTile Kernel Coverage (GPU Time):    {time_ratio_str} <<<")
         print(f">>> cuTile Kernel Coverage (# Launches):  {count_ratio_str} <<<\n")
 
@@ -698,7 +706,7 @@ def main():
         print("\n===== GENERATED OUTPUTS =====")
         for batch_idx, outputs in enumerate(outputs_list):
             for i in range(outputs.shape[0]):
-                decoded_output = tokenizer.decode(outputs[i], skip_special_tokens=True)
+                decoded_output = tokenizer.decode(outputs[i][input_length:], skip_special_tokens=True)
                 print(f"\nBatch {batch_idx + 1}, Output {i + 1}:")
                 print(decoded_output)
                 print("-" * 50)

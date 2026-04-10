@@ -213,6 +213,29 @@ def apply_tilegym_kernel_to_qwen3(
         modeling_qwen3_5.chunk_gated_delta_rule = tilegym_chunk_gated_delta_rule
         modeling_qwen3_5.fused_recurrent_gated_delta_rule = tilegym_recurrent_gated_delta_rule
 
+    if use_cutile:
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import Qwen3_5RMSNormGatedTileGym
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import _attention_forward_tilegym
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import _gated_delta_net_forward_tilegym
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import causal_conv1d_update_silu_cutile
+
+        # Fused causal conv1d: set module-level so GatedDeltaNet.__init__ picks it up
+        modeling_qwen3_5.causal_conv1d_update = causal_conv1d_update_silu_cutile
+
+        # Fused RMSNormGated with SiLU gate
+        modeling_qwen3_5.Qwen3_5RMSNormGated = Qwen3_5RMSNormGatedTileGym
+
+        # Patch GatedDeltaNet forward for fused gate preprocessing
+        modeling_qwen3_5.Qwen3_5GatedDeltaNet.forward = _gated_delta_net_forward_tilegym
+
+        # Patch Attention forward for fused sigmoid gate
+        modeling_qwen3_5.Qwen3_5Attention.forward = _attention_forward_tilegym
+
+        # Patch DecoderLayer forward for fused residual add + RMSNorm
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import _decoder_layer_forward_tilegym
+
+        modeling_qwen3_5.Qwen3_5DecoderLayer.forward = _decoder_layer_forward_tilegym
+
 
 def apply_tilegym_kernel_to_gpt_oss(
     rope: bool = True,
