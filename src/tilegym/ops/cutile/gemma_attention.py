@@ -102,9 +102,7 @@ def _gemma_attn_fwd_inner(
         if HAS_SOFT_CAP:
             qk = ct.mul(qk, sm_scale, flush_to_zero=True)
             qk = ct.truediv(qk, SOFT_CAP, flush_to_zero=True, rounding_mode=RMd.APPROX)
-            # TODO: Performance will be ready once tanh approx is supported
-            # Currently using exact tanh which may impact performance
-            qk = ct.tanh(qk)
+            qk = ct.tanh(qk, rounding_mode=RMd.APPROX)
             qk = ct.mul(qk, SOFT_CAP, flush_to_zero=True)
 
             if STAGE == 2:
