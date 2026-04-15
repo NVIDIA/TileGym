@@ -101,6 +101,7 @@ def attention_decode_kernel_grouped_impl(
                 index=(batch_id, head_id, cnt, 0),
                 shape=(1, 1, TILE_N, HEAD_DIM),
                 order=(0, 1, 2, 3),
+                padding_mode=ct.PaddingMode.ZERO,
                 allow_tma=True,
             )
             k = ct.reshape(k, (TILE_N, HEAD_DIM))
@@ -135,6 +136,7 @@ def attention_decode_kernel_grouped_impl(
                 index=(batch_id, head_id, cnt, 0),
                 shape=(1, 1, TILE_N, HEAD_DIM),
                 order=(0, 1, 2, 3),
+                padding_mode=ct.PaddingMode.ZERO,
                 allow_tma=True,
             )
             v = ct.reshape(v, (TILE_N, HEAD_DIM))

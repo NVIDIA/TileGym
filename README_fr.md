@@ -31,7 +31,7 @@ Ce dépôt vise à fournir des tutoriels et des exemples de noyaux utiles pour l
 
 ### Prérequis
 
-> ⚠️ **Important** : TileGym nécessite **CUDA 13.1+** et des **GPU d'architecture NVIDIA Blackwell** (par ex. B200, RTX 5080, RTX 5090). Nous prendrons en charge d'autres architectures GPU à l'avenir. Téléchargez CUDA depuis [Téléchargements NVIDIA CUDA](https://developer.nvidia.com/cuda-downloads).
+> **Support GPU** : TileGym nécessite **CUDA 13.1+** et un **GPU NVIDIA Ampere** (ex. A100) ou **Blackwell** (ex. B200, RTX 5080, RTX 5090). Tous les noyaux cuTile publiés sont validés sur les deux architectures. La performance sur Ampere est encore en cours d'optimisation active. Téléchargez CUDA depuis [Téléchargements NVIDIA CUDA](https://developer.nvidia.com/cuda-downloads).
 
 - PyTorch (version 2.9.1 ou compatible)
 - **[CUDA 13.1+](https://developer.nvidia.com/cuda-downloads)** (Requis - TileGym est construit et testé exclusivement sur CUDA 13.1+)
