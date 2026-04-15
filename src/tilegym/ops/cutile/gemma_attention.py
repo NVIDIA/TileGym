@@ -274,8 +274,13 @@ def gemma_fmha_kernel(
 
 def _gemma_fmha_autotune_configs():
     """Iterator of autotune configurations for gemma FMHA kernel."""
-    yield SimpleNamespace(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1)
-    yield SimpleNamespace(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2)
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability[0] < 9:
+        yield SimpleNamespace(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=64, num_ctas=1, occupancy=2)
+    else:
+        yield SimpleNamespace(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2)
 
 
 def _cutile_autotune_gemma_fmha(

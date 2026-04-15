@@ -194,6 +194,13 @@ def _matmul_autotune_configs():
         # sm120, sm121
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, num_ctas=1, occupancy=1)
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
+    elif gpu_capability[0] < 9:
+        # sm80 (A100)
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
     else:
         # sm100+ (Blackwell)
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1)
@@ -237,6 +244,13 @@ def _static_persistent_matmul_autotune_configs():
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4)
         yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
+    elif gpu_capability[0] < 9:
+        # sm80 (A100)
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
     else:
         # sm100+ (Blackwell)
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1)

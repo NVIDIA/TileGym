@@ -206,7 +206,11 @@ def tile_mla(q, k, v, qpe, kpe, is_causal, scaling, **kwargs):
     if scaling is None:
         scaling = 1.0 / math.sqrt(q.size(-1) + qpe.size(-1))
 
-    defaults = {"TILE_M": 256, "TILE_N": 128}
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability[0] < 9:
+        defaults = {"TILE_M": 64, "TILE_N": 64}
+    else:
+        defaults = {"TILE_M": 256, "TILE_N": 128}
     user_cfg = kwargs.get("kernel_configs")
     if user_cfg is None:
         kernel_configs = defaults

@@ -163,10 +163,16 @@ def _attention_sink_autotune_configs():
     """
     gpu_capability = torch.cuda.get_device_capability()
 
-    for TILE_M in [256, 128, 64]:
-        for TILE_N in [128, 64]:
-            for occupancy in [1, 2, 4]:
-                yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
+    if gpu_capability[0] < 9:
+        for TILE_M in [128, 64]:
+            for TILE_N in [64]:
+                for occupancy in [1, 2]:
+                    yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
+    else:
+        for TILE_M in [256, 128, 64]:
+            for TILE_N in [128, 64]:
+                for occupancy in [1, 2, 4]:
+                    yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
 
 
 def _cutile_autotune_attention_sink(

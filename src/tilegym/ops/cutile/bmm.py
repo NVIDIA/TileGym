@@ -183,6 +183,20 @@ def _bmm_autotune_configs():
                             occupancy=occupancy,
                             num_ctas=1,
                         )
+    elif torch.cuda.get_device_capability()[0] < 9:
+        # SM80 (A100): avoid 256×256 tiles and num_ctas=2 (not supported).
+        for TILE_M in [64, 128]:
+            for TILE_N in [64, 128]:
+                for TILE_K in [32, 64, 128]:
+                    for occupancy in [1, 2]:
+                        yield SimpleNamespace(
+                            TILE_M=TILE_M,
+                            TILE_N=TILE_N,
+                            TILE_K=TILE_K,
+                            GROUP_SIZE_M=8,
+                            occupancy=occupancy,
+                            num_ctas=1,
+                        )
     elif torch.cuda.get_device_capability() == (9, 0):
         # H100 (sm_90): Medium tiles with occupancy tuning
         for TILE_M in [64, 128, 256]:
