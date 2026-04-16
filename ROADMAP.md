@@ -62,10 +62,12 @@ The following table tracks the support status for various models.
 | LLaMA-3.1-8B | ✅ Available | Tested on B200 |
 | DeepSeek-V2-Lite-Chat | ✅ Available | Tested on B200 |
 | Qwen2-7B | ✅ Available | Tested on B200 |
+| Qwen3.5-7B | ✅ Available | Tested on B200 |
 | Gemma-3-4B-IT | ✅ Available | Tested on B200 |
 | GPT-OSS | ✅ Available | Tested on B200 |
 | Mistral-7B-Instruct-v0.3 | ✅ Available | Tested on B200 |
 | Phi-3-mini-4k-instruct | ✅ Available | Tested on B200 |
+| OLMo-3-1025-7B | ✅ Available | Tested on B200 |
 | More LLM models | 🙋 Help Wanted | |
 
 ### 1.3 Kernel Library Support

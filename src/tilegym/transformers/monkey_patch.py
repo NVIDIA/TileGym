@@ -434,6 +434,66 @@ def apply_tilegym_kernel_to_phi3(
         ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_phi3_interface()
 
 
+def apply_tilegym_kernel_to_olmo3(
+    rope: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+    attn: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace OLMo-3 models.
+
+    OLMo-3 uses a Llama-like architecture with:
+    - Post-normalization (RMSNorm after residual addition)
+    - Q/K normalization (RMSNorm on projected Q and K before attention)
+    - SwiGLU MLP (separate gate/up/down projections with SiLU)
+    - YARN RoPE for extended context
+    - Mixed sliding window + full attention (3:1 pattern)
+
+    Args:
+        rope (bool): Whether to apply TileGym's rotary position embedding. Default is True.
+        rms_norm (bool): Whether to apply TileGym's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply TileGym's SwiGLU MLP. Default is True.
+        attn (bool): Whether to apply TileGym's attention. Default is True.
+        model (PreTrainedModel): The model instance to apply TileGym kernels to, if the model has already been
+        loaded. Default is None.
+        use_cutile (bool): Whether to apply using cutile. Default is False.
+    """
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_olmo3")
+    logger.info("--------------------------------")
+    from transformers.models.olmo3 import modeling_olmo3
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        modeling_olmo3.apply_rotary_pos_emb = get_apply_rope_func(model="llama")
+    if rms_norm:
+        modeling_olmo3.Olmo3RMSNorm = get_rms_norm_module()
+    if swiglu:
+        modeling_olmo3.Olmo3MLP = get_fused_swiglu_module()
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
+
+    if use_cutile:
+        from tilegym.transformers.olmo3.modeling_olmo3 import FusedOlmo3MLP
+        from tilegym.transformers.olmo3.modeling_olmo3 import _attention_forward_tilegym
+        from tilegym.transformers.olmo3.modeling_olmo3 import _decoder_layer_forward_tilegym
+
+        if swiglu:
+            modeling_olmo3.Olmo3MLP = FusedOlmo3MLP
+            logger.info("Replaced Olmo3MLP with FusedOlmo3MLP (linear_gluact_linear)")
+        modeling_olmo3.Olmo3Attention.forward = _attention_forward_tilegym
+        logger.info("Patched Olmo3Attention.forward with fused dual Q/K RMSNorm")
+        modeling_olmo3.Olmo3DecoderLayer.forward = _decoder_layer_forward_tilegym
+        logger.info("Patched Olmo3DecoderLayer.forward with fused residual_add+RMSNorm")
+
+
 MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "llama": apply_tilegym_kernel_to_llama,
     "deepseek_v2": apply_tilegym_kernel_to_deepseek_v2,
@@ -443,6 +503,7 @@ MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "qwen3_5": apply_tilegym_kernel_to_qwen3,
     "gemma3": apply_tilegym_kernel_to_gemma3,
     "phi3": apply_tilegym_kernel_to_phi3,
+    "olmo3": apply_tilegym_kernel_to_olmo3,
 }
 
 
