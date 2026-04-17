@@ -88,6 +88,41 @@ class Test_Unsloth_RoPE_Embedding(common.PyTestCase):
     @pytest.mark.parametrize(
         "batch, seq_len, n_heads, head_dim",
         [
+            (2, 64, 8, 96),  # half=48, TILE_HD=64 — 16 OOB lanes
+            (1, 128, 4, 160),  # half=80, TILE_HD=128 — 48 OOB lanes
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("framework", _backends)
+    def test_non_power_of_2_head_dim(self, batch, seq_len, n_heads, head_dim, dtype, framework):
+        """Test RoPE with non-power-of-2 head_dim (e.g. Phi-3 head_dim=96).
+
+        When half_head_dim is not a power of 2, TILE_HD is rounded up and
+        out-of-range lanes must be masked to avoid corrupting adjacent heads.
+        """
+        if tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+        else:
+            pytest.skip(f"Backend {framework} is not available")
+
+        torch.manual_seed(42)
+        Q = torch.randn(batch, seq_len, n_heads, head_dim, dtype=dtype, device=DEVICE)
+        half = head_dim // 2
+        cos = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+        sin = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+
+        self.assertCorrectness(
+            rope_embedding,
+            self.reference,
+            {"Q": Q.clone(), "cos": cos, "sin": sin},
+            rtol=5e-2,
+            atol=2e-2,
+            check_stride=False,
+        )
+
+    @pytest.mark.parametrize(
+        "batch, seq_len, n_heads, head_dim",
+        [
             (2, 64, 8, 64),
             (1, 128, 4, 128),
         ],
@@ -164,6 +199,125 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("framework", _backends)
     def test_op(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
+        if tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+        else:
+            pytest.skip(f"Backend {framework} is not available")
+
+        torch.manual_seed(42)
+        Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        K = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        half = head_dim // 2
+        cos = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+        sin = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+
+        self.assertCorrectness(
+            rope_embedding_qk,
+            self.reference,
+            {"Q": Q.clone(), "K": K.clone(), "cos": cos, "sin": sin},
+            rtol=5e-2,
+            atol=2e-2,
+            multiple_outputs=True,
+            check_stride=False,
+        )
+
+    @pytest.mark.parametrize(
+        "batch, n_heads_Q, n_heads_K, seq_len, head_dim",
+        [
+            (2, 8, 8, 64, 64),
+            (1, 32, 8, 128, 128),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("framework", _backends)
+    def test_nonstandard_cos_stride(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
+        """Test QK RoPE with cos shape (seq_len, head_dim) instead of (seq_len, head_dim//2).
+
+        HuggingFace LLaMA uses cos shape (seq_len, head_dim) where the second half
+        duplicates the first. This test verifies the kernel correctly uses cos_row_stride
+        (= head_dim) rather than hardcoding half_head_dim for cos/sin row indexing.
+        """
+        if tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+        else:
+            pytest.skip(f"Backend {framework} is not available")
+
+        torch.manual_seed(42)
+        Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        K = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        half = head_dim // 2
+
+        # Base cos/sin values: (seq_len, half_head_dim)
+        cos_half = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+        sin_half = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+
+        # Full cos/sin: (seq_len, head_dim) — cos.stride(0) = head_dim, not half
+        # Second half is garbage; kernel should only read first half_head_dim columns.
+        cos_full = torch.cat([cos_half, torch.randn_like(cos_half)], dim=-1)
+        sin_full = torch.cat([sin_half, torch.randn_like(sin_half)], dim=-1)
+
+        # Reference uses cos[:, :half], so pass cos_half directly
+        Q_ref, K_ref = self.reference(Q.clone(), K.clone(), cos_half, sin_half)
+
+        # Kernel receives full cos with stride(0) = head_dim
+        Q_out, K_out = rope_embedding_qk(Q.clone(), K.clone(), cos_full, sin_full)
+
+        torch.testing.assert_close(Q_out, Q_ref, rtol=5e-2, atol=2e-2, msg="Q mismatch with non-standard cos stride")
+        torch.testing.assert_close(K_out, K_ref, rtol=5e-2, atol=2e-2, msg="K mismatch with non-standard cos stride")
+
+    @pytest.mark.parametrize(
+        "batch, n_heads_Q, n_heads_K, seq_len, head_dim",
+        [
+            (2, 8, 8, 64, 64),
+            (1, 32, 8, 128, 128),
+        ],
+    )
+    @pytest.mark.parametrize("q_dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("framework", _backends)
+    def test_mixed_precision(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, q_dtype, framework):
+        """Test QK RoPE with bf16/fp16 Q/K + fp32 cos/sin (Gemma configuration).
+
+        Gemma models force RoPE math in fp32 while Q/K stay in bf16.
+        The kernel must upcast Q/K to fp32 before rotation, then downcast back.
+        """
+        if tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+        else:
+            pytest.skip(f"Backend {framework} is not available")
+
+        torch.manual_seed(42)
+        half = head_dim // 2
+        Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=q_dtype, device=DEVICE)
+        K = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=q_dtype, device=DEVICE)
+        # fp32 cos/sin — different dtype from Q/K
+        cos = torch.randn(seq_len, half, dtype=torch.float32, device=DEVICE)
+        sin = torch.randn(seq_len, half, dtype=torch.float32, device=DEVICE)
+
+        # Reference: compute rotation in fp32 (matching Gemma behavior)
+        Q_ref, K_ref = self.reference(Q.clone().float(), K.clone().float(), cos, sin)
+        Q_ref = Q_ref.to(q_dtype)
+        K_ref = K_ref.to(q_dtype)
+
+        Q_out, K_out = rope_embedding_qk(Q.clone(), K.clone(), cos, sin)
+
+        torch.testing.assert_close(Q_out, Q_ref, rtol=5e-2, atol=2e-2, msg="Q mismatch in mixed-precision RoPE")
+        torch.testing.assert_close(K_out, K_ref, rtol=5e-2, atol=2e-2, msg="K mismatch in mixed-precision RoPE")
+
+    @pytest.mark.parametrize(
+        "batch, n_heads_Q, n_heads_K, seq_len, head_dim",
+        [
+            (2, 8, 8, 64, 96),  # half=48, TILE_HD=64 — 16 OOB lanes
+            (1, 32, 8, 128, 160),  # half=80, TILE_HD=128 — 48 OOB lanes
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("framework", _backends)
+    def test_non_power_of_2_head_dim(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
+        """Test QK RoPE with non-power-of-2 head_dim (e.g. Phi-3 head_dim=96).
+
+        When half_head_dim is not a power of 2, TILE_HD is rounded up and
+        out-of-range lanes must be masked to avoid corrupting adjacent heads.
+        """
         if tilegym.is_backend_available(framework):
             tilegym.set_backend(framework)
         else:
