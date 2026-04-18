@@ -61,7 +61,7 @@ Every experiment iteration applies ONE optimization to the target kernel, verifi
 
 #### Correctness test:
 ```bash
-python -m pytest tests/suites/.../test_<kernel_name>.py -k "test_op and cutile" -v
+python -m pytest tests/suites/.../test_<kernel_name>.py -k "test_ and cutile and not test_perf" -v
 ```
 
 #### Performance benchmark:
