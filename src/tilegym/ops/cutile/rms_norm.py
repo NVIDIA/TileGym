@@ -313,6 +313,23 @@ class RMSNorm(torch.autograd.Function):
             TILE_SIZE_M = 4  # Default value, could be made configurable
             TILE_SIZE_N = next_power_of_2(N)
 
+            # Pre-SM90: TILE_SIZE_N as a ct.Constant causes per-N recompilation.
+            # Gather kernel avoids this by treating N as a runtime variable.
+            if torch.cuda.get_device_capability(x.device)[0] < 9:
+                MAX_FUSED_SIZE = 4096 // x.element_size()
+                _tile = min(MAX_FUSED_SIZE, next_power_of_2(N))
+                ct.launch(
+                    torch.cuda.current_stream(),
+                    (M,),
+                    rms_norm_kernel_gather,
+                    (x_arg, weight, y, rstd, N, eps, offset, _tile),
+                )
+                ctx.save_for_backward(x, weight, rstd)
+                ctx.TILE_SIZE = _tile
+                ctx.eps = eps
+                ctx.offset = offset
+                return y.view(*x.shape)
+
             # Other block sizes are more optimal when other dimension is too large/too small
             if TILE_SIZE_N <= 1024:
                 TILE_SIZE_M = 16

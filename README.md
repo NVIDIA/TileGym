@@ -31,7 +31,7 @@ This repository aims to provide helpful kernel tutorials and examples for tile-b
 
 ### Prerequisites
 
-> **GPU Support**: TileGym requires **CUDA 13.1+** and an **NVIDIA Ampere** (e.g., A100) or **Blackwell GPU** (e.g., B200, RTX 5080, RTX 5090). All released cuTile kernels are validated on both architectures. Note that Ampere performance is still being actively optimized. Download CUDA from [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads).
+> **GPU Support**: TileGym requires **CUDA 13.1+** and a **Blackwell GPU** (e.g., B200, RTX 5080, RTX 5090). **NVIDIA Ampere** (e.g., A100) is also supported with **CUDA 13.2+**. All released cuTile kernels are validated on both architectures. Download CUDA from [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads).
 
 - PyTorch (version 2.9.1 or compatible)
 - **[CUDA 13.1+](https://developer.nvidia.com/cuda-downloads)** (Required - TileGym is built and tested exclusively on CUDA 13.1+)

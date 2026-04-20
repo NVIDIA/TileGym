@@ -69,10 +69,15 @@ def create_benchmark_config(datatype, num_groups, transpose_b):
     )
 
 
+# FP8 requires SM90+; skip on pre-SM90 (checked at module load, not at import time)
+_gpu_cap = torch.cuda.get_device_capability()
+_dtypes = [torch.float16] if _gpu_cap[0] < 9 else [torch.float16, torch.float8_e5m2]
+
+
 @triton.testing.perf_report(
     [
         create_benchmark_config(datatype, num_groups, transpose_b)
-        for datatype in [torch.float16, torch.float8_e5m2]
+        for datatype in _dtypes
         for num_groups in [4, 16]
         for transpose_b in [False, True]
     ]

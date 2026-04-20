@@ -396,8 +396,9 @@ class _gemma_attention(torch.autograd.Function):
                 has_soft_cap,
             )
 
-        BLOCK_M = 128
-        BLOCK_N = 128
+        _gemma_cap = torch.cuda.get_device_capability()
+        BLOCK_M = 64 if _gemma_cap[0] < 9 else 128
+        BLOCK_N = 64 if _gemma_cap[0] < 9 else 128
         EVEN_K = (S_kv % BLOCK_N) == 0
         grid = ((S_qo + BLOCK_M - 1) // BLOCK_M, B * H, 1)
 
