@@ -33,6 +33,8 @@ def swa_reference(q, k, v, window_size, is_causal=True, scaling=None):
 
 class TestSWAAttention(common.PyTestCase):
     def _run_test(self, B, H, S, D, W, dtype, backend):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
         if not tilegym.is_backend_available(backend):
             pytest.skip(f"Backend {backend} is not available")
         try:
@@ -60,38 +62,71 @@ class TestSWAAttention(common.PyTestCase):
     # -- basic correctness --
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_window_equals_seq(self, backend):
+    def test_op_window_equals_seq(self, backend):
         self._run_test(B=1, H=1, S=128, D=128, W=128, dtype=torch.float16, backend=backend)
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_small_window(self, backend):
+    def test_op_small_window(self, backend):
         self._run_test(B=1, H=1, S=256, D=128, W=128, dtype=torch.float16, backend=backend)
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_window_of_one(self, backend):
+    def test_op_window_of_one(self, backend):
         self._run_test(B=1, H=1, S=128, D=128, W=1, dtype=torch.float16, backend=backend)
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_multi_head(self, backend):
+    def test_op_multi_head(self, backend):
         self._run_test(B=2, H=8, S=256, D=128, W=128, dtype=torch.float16, backend=backend)
 
     # -- edge cases --
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_seq_not_divisible_by_tile(self, backend):
+    def test_op_seq_not_divisible_by_tile(self, backend):
         self._run_test(B=1, H=1, S=100, D=128, W=64, dtype=torch.float16, backend=backend)
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_window_equals_tile(self, backend):
+    def test_op_window_equals_tile(self, backend):
         self._run_test(B=1, H=1, S=256, D=128, W=64, dtype=torch.float16, backend=backend)
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_first_tokens(self, backend):
+    def test_op_first_tokens(self, backend):
         self._run_test(B=1, H=1, S=64, D=128, W=128, dtype=torch.float16, backend=backend)
 
     @pytest.mark.parametrize("backend", _backends)
-    def test_very_small_seq(self, backend):
+    def test_op_very_small_seq(self, backend):
         self._run_test(B=1, H=1, S=16, D=128, W=8, dtype=torch.float16, backend=backend)
+
+    # -- GQA (Grouped-Query Attention) --
+
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_gqa(self, backend):
+        """Mistral-style GQA: 32 Q heads, 8 KV heads (4:1 ratio)."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        if not tilegym.is_backend_available(backend):
+            pytest.skip(f"Backend {backend} is not available")
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+        self.setUp()
+
+        B, H, H_K, S, D, W = 1, 32, 8, 256, 128, 128
+        dtype = torch.float16
+        device = torch.device("cuda")
+
+        q = torch.empty(B, H, S, D, device=device, dtype=dtype).normal_(mean=0.0, std=0.5)
+        k = torch.empty(B, H_K, S, D, device=device, dtype=dtype).normal_(mean=0.0, std=0.5)
+        v = torch.empty(B, H_K, S, D, device=device, dtype=dtype).normal_(mean=0.0, std=0.5)
+
+        # the kernel handles GQA expansion internally
+        out = tilegym.ops.swa_attention(q, k, v, window_size=W, is_causal=True, backend=backend)
+
+        # reference uses pre-expanded KV so it operates on matched head counts
+        k_exp = k.repeat_interleave(H // H_K, dim=1)
+        v_exp = v.repeat_interleave(H // H_K, dim=1)
+        ref = swa_reference(q, k_exp, v_exp, window_size=W, is_causal=True)
+
+        self.assertAllClose(out, ref, rtol=1e-2, atol=5e-2)
 
     # -- various shapes --
 
@@ -99,10 +134,12 @@ class TestSWAAttention(common.PyTestCase):
         "backend,S,W",
         [(b, s, w) for b in _backends for s, w in [(512, 256), (1024, 512), (2048, 1024), (4096, 2048), (4096, 4096)]],
     )
-    def test_various_configs(self, backend, S, W):
+    def test_op_various_configs(self, backend, S, W):
         self._run_test(B=1, H=1, S=S, D=128, W=W, dtype=torch.float16, backend=backend)
 
+    @pytest.mark.slow
     @pytest.mark.parametrize("backend", _backends)
-    def test_long_context_mistral(self, backend):
-        # Mistral-style: 8K context, 4K window
+    def test_op_long_context_mistral(self, backend):
+        # Mistral-style: 8K context, 4K window.
+        # Marked slow: materializes an 8192x8192 fp32 reference matrix.
         self._run_test(B=1, H=1, S=8192, D=128, W=4096, dtype=torch.float16, backend=backend)

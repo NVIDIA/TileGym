@@ -23,6 +23,7 @@ from tilegym.experimental import experimental_kernel
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 INV_LOG_2 = 1.0 / math.log(2)  # pre-computed for exp2-based softmax
+_NEG_INF = -1e30  # sentinel for masked-out attention positions
 
 
 def _cdiv(a, b):
@@ -61,7 +62,7 @@ def swa_fwd_kernel(
     q_tile = ct.load(Q, index=(q_offset, 0), shape=(TILE_M, TILE_D), padding_mode=ct.PaddingMode.ZERO)
 
     # online softmax running state: max, log-sum-exp, accumulator
-    m_i = ct.full((TILE_M,), -1e30, dtype=ct.float32)
+    m_i = ct.full((TILE_M,), _NEG_INF, dtype=ct.float32)
     l_i = ct.zeros((TILE_M,), dtype=ct.float32)
     acc = ct.zeros((TILE_M, TILE_D), dtype=ct.float32)
 
@@ -96,7 +97,7 @@ def swa_fwd_kernel(
             mask = mask & (offs_n_2d <= offs_m_2d)  # causal (no future keys)
         mask = mask & (offs_n_2d < seq_k)  # don't read past actual seq len
 
-        qk = ct.where(mask, qk, ct.full((TILE_M, TILE_N), -1e30, dtype=ct.float32))
+        qk = ct.where(mask, qk, ct.full((TILE_M, TILE_N), _NEG_INF, dtype=ct.float32))
 
         # online softmax: rescale running state by exp2(old_max - new_max).
         # exp2 + flush_to_zero maps directly to the GPU SFU hardware.
@@ -110,7 +111,10 @@ def swa_fwd_kernel(
         acc = ct.expand_dims(alpha, axis=1) * acc + ct.mma(p_fp16, v_tile, ct.zeros((TILE_M, TILE_D), dtype=ct.float32))
         m_i = m_new
 
-    # final normalization: divide accumulated values by softmax denominator
+    # final normalization: divide accumulated values by softmax denominator.
+    # clamp l_i away from zero so a fully-masked row (all keys outside the
+    # window) produces zeros rather than NaN.
+    l_i = ct.maximum(l_i, ct.full((TILE_M,), 1e-6, dtype=ct.float32))
     out = acc / ct.expand_dims(l_i, axis=1)
     ct.store(Out, index=(q_offset, 0), tile=ct.astype(out, ct.float16))
 
@@ -123,6 +127,9 @@ _DEFAULT_TILE_N = 128  # autotuned: 1.9x faster than N=64 on B300
 
 def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwargs):
     # q: (B, H, S_Q, D), k/v: (B, H_K, S_K, D) -- fp16
+    if q.dtype not in (torch.float16,):
+        raise ValueError(f"SWA kernel requires fp16 input, got {q.dtype}")
+
     B, H, S_Q, D = q.shape
     _, H_K, S_K, _ = k.shape
 
@@ -133,8 +140,14 @@ def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwa
 
     # expand KV heads for GQA (Mistral uses 8 KV heads for 32 Q heads)
     if H_K != H:
-        k = k.repeat_interleave(H // H_K, dim=1)
-        v = v.repeat_interleave(H // H_K, dim=1)
+        if H_K > H or H % H_K != 0:
+            raise ValueError(
+                f"Invalid GQA head configuration: query heads H={H} must be "
+                f"an integer multiple of KV heads H_K={H_K}."
+            )
+        kv_repeat = H // H_K
+        k = k.repeat_interleave(kv_repeat, dim=1)
+        v = v.repeat_interleave(kv_repeat, dim=1)
 
     TILE_M = _DEFAULT_TILE_M
     TILE_N = _DEFAULT_TILE_N
@@ -214,7 +227,14 @@ def get_swa_fmha_interface(window_size=4096, backend=None):
         # also need to expand KV heads for GQA since SDPA expects matched dims.
         if q.size(-2) == 1:
             if k.size(1) != q.size(1):
-                n_rep = q.size(1) // k.size(1)
+                q_heads = q.size(1)
+                kv_heads = k.size(1)
+                if kv_heads > q_heads or q_heads % kv_heads != 0:
+                    raise ValueError(
+                        f"decode path requires q head count to be a multiple of k/v head count, "
+                        f"got q_heads={q_heads}, kv_heads={kv_heads}"
+                    )
+                n_rep = q_heads // kv_heads
                 k = k.repeat_interleave(n_rep, dim=1)
                 v = v.repeat_interleave(n_rep, dim=1)
             # cuDNN backend can fail on some GPUs (e.g. B300), try flash then math
@@ -227,7 +247,14 @@ def get_swa_fmha_interface(window_size=4096, backend=None):
                     continue
             raise RuntimeError("no working SDPA backend for decode")
 
-        # prefill -- try to read window size from the model's config (e.g.
+        # prefill -- fall back to SDPA for unsupported cases (padded batches
+        # or training with dropout) since our kernel doesn't handle them.
+        if attention_mask is not None or dropout != 0.0:
+            return F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_mask, dropout_p=dropout, is_causal=is_causal
+            ).transpose(1, 2).contiguous(), None
+
+        # try to read window size from the model's config (e.g.
         # MistralConfig.sliding_window), fall back to the user-supplied default
         w = getattr(getattr(module, "config", None), "sliding_window", None)
         if w is None or w is False:
@@ -270,5 +297,7 @@ def apply_tilegym_swa_to_mistral(window_size=4096, use_cutile=True):
         modeling_mistral.apply_rotary_pos_emb = get_apply_rope_func(model="llama")
         modeling_mistral.MistralRMSNorm = get_rms_norm_module()
         modeling_mistral.MistralMLP = get_swiglu_module()
-    except Exception:
+    except ImportError:
         pass
+    except Exception:
+        raise
