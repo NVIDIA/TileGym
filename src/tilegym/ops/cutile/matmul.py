@@ -195,12 +195,18 @@ def _matmul_autotune_configs():
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, num_ctas=1, occupancy=1)
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
     elif gpu_capability[0] < 9:
-        # sm80 (A100)
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=2)
+        # Pre-SM90: num_ctas=1 (CGA unsupported); sweep TILE_K in [32, 64, 128]
+        for TILE_M in [64, 128]:
+            for TILE_N in [64, 128]:
+                for TILE_K in [32, 64, 128]:
+                    for occ in [1, 2]:
+                        yield SimpleNamespace(
+                            TILE_SIZE_M=TILE_M,
+                            TILE_SIZE_N=TILE_N,
+                            TILE_SIZE_K=TILE_K,
+                            num_ctas=1,
+                            occupancy=occ,
+                        )
     else:
         # sm100+ (Blackwell)
         yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1)

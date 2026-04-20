@@ -284,6 +284,17 @@ class Softmax(torch.autograd.Function):
         use_chunked=False,
     ):
         assert not (use_tma and use_chunked), "Cannot use both TMA and chunked softmax at the same time"
+        # TMA may be emulated on this arch; redirect to non-TMA path with a warning.
+        if use_tma and torch.cuda.get_device_capability(x.device)[0] < 9:
+            import warnings
+
+            warnings.warn(
+                "softmax: use_tma=True has no effect on this GPU (TMA is emulated). "
+                "Falling back to use_tma=False. Pass use_tma=False to suppress this.",
+                UserWarning,
+                stacklevel=3,
+            )
+            use_tma = False
         n_rows, n_cols = x.shape
         TILE_SIZE = next_power_of_2(n_cols)
         MAX_TILE_SIZE = 8192

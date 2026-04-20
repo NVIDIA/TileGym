@@ -3,12 +3,29 @@
 # SPDX-License-Identifier: MIT
 
 import math
+import os
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
 from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from tilegym.backend import register_impl
+
+
+def _mla_sm80_autotune_configs():
+    """Pre-SM90 autotune search space for MLA prefill — num_ctas=1 only."""
+    for tm in [64, 128]:
+        for tn in [64, 128]:
+            yield SimpleNamespace(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=2)
+
+
+def _mla_sm90_autotune_configs():
+    """SM90+ autotune search space for MLA prefill."""
+    for tm in [64, 128, 256]:
+        for tn in [64, 128]:
+            yield SimpleNamespace(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=1)
+
 
 # Type aliases for constants
 ConstInt = ct.Constant[int]
@@ -149,30 +166,49 @@ class _attention(torch.autograd.Function):
         else:
             assert H % num_head_kv == 0
             query_group_size = int(H / num_head_kv)
-        # Launch fmha fwd kernel
-        grid = (math.ceil(S_qo / kernel_configs.get("TILE_M", 256)), B * H, 1)
-        TILE_M = kernel_configs.get("TILE_M", 256)
-        TILE_N = kernel_configs.get("TILE_N", 128)
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            prefill_mla,
-            (
-                q,
-                qpe,
-                k,
-                kpe,
-                v,
-                o,
-                sm_scale,
-                TILE_D,
-                TILE_KPE,
-                H,
-                TILE_M,
-                TILE_N,
-                query_group_size,
-            ),
+        # Launch fmha fwd kernel.
+        # Autotune runs when ENABLE_CUTILE_TUNE=1 AND caller did not supply explicit
+        # kernel_configs. Explicit kernel_configs always bypasses autotune so callers
+        # can pin a fixed config for controlled A/B comparisons.
+        _gpu_cap = torch.cuda.get_device_capability(q.device)
+        _use_autotune = os.environ.get("ENABLE_CUTILE_TUNE", "0") == "1" and not kernel_configs.get(
+            "_user_explicit", False
         )
+        if _use_autotune:
+            import cuda.tile_experimental as ct_experimental  # lazy — may not be installed
+
+            ct_experimental.autotune_launch(
+                torch.cuda.current_stream(),
+                grid_fn=lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
+                kernel=prefill_mla,
+                args_fn=lambda cfg: (
+                    q,
+                    qpe,
+                    k,
+                    kpe,
+                    v,
+                    o,
+                    sm_scale,
+                    TILE_D,
+                    TILE_KPE,
+                    H,
+                    cfg.TILE_M,
+                    cfg.TILE_N,
+                    query_group_size,
+                ),
+                hints_fn=lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+                search_space=list(_mla_sm80_autotune_configs() if _gpu_cap[0] < 9 else _mla_sm90_autotune_configs()),
+            )
+        else:
+            TILE_M = kernel_configs.get("TILE_M", 64 if _gpu_cap[0] < 9 else 256)
+            TILE_N = kernel_configs.get("TILE_N", 64 if _gpu_cap[0] < 9 else 128)
+            grid = (math.ceil(S_qo / TILE_M), B * H, 1)
+            ct.launch(
+                torch.cuda.current_stream(),
+                grid,
+                prefill_mla,
+                (q, qpe, k, kpe, v, o, sm_scale, TILE_D, TILE_KPE, H, TILE_M, TILE_N, query_group_size),
+            )
         ctx.save_for_backward(q, k, v, o)
         ctx.sm_scale = sm_scale
         ctx.shapes = (B, H, S_qo, S_kv)
@@ -215,7 +251,8 @@ def tile_mla(q, k, v, qpe, kpe, is_causal, scaling, **kwargs):
     if user_cfg is None:
         kernel_configs = defaults
     else:
-        kernel_configs = {**defaults, **user_cfg}
+        # Tag so forward() knows to bypass autotune and use the explicit config.
+        kernel_configs = {**defaults, **user_cfg, "_user_explicit": True}
     attention = Attention(is_causal, kernel_configs)
     o = attention(q, k, v, scaling, qpe, kpe)
     return o
