@@ -35,6 +35,8 @@ class Test_RMSNorm(common.PyTestCase):
         "m, n, dtype",
         [
             (256, 256, torch.float16),
+            (256, 768, torch.float16),  # non-pow2
+            (256, 18432, torch.float16),  # non-pow2
             (4096, 2**8, torch.bfloat16),
             (31072, 4096, torch.bfloat16),
             (256, 256, torch.float32),

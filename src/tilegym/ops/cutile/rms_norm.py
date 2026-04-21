@@ -34,9 +34,11 @@ def rms_norm_kernel_gather(
     num_tiles = ct.cdiv(N, TILE_SIZE)
     offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
 
+    check_bound = num_tiles * TILE_SIZE != N
+
     for j in range(0, num_tiles):
         offs = j * TILE_SIZE + offsets
-        xj = ct.gather(x, (row, offs), latency=1)
+        xj = ct.gather(x, (row, offs), check_bounds=check_bound, latency=1)
         xj = ct.astype(xj, ct.float32)
         _rms += xj * xj
 
@@ -46,9 +48,9 @@ def rms_norm_kernel_gather(
 
     for j in range(0, num_tiles):
         offs = j * TILE_SIZE + offsets
-        wj = ct.gather(w, offs, latency=1)
+        wj = ct.gather(w, offs, check_bounds=check_bound, latency=1)
         wj = ct.astype(wj, ct.float32)
-        xj = ct.gather(x, (row, offs), latency=1)
+        xj = ct.gather(x, (row, offs), check_bounds=check_bound, latency=1)
         xj = ct.astype(xj, ct.float32)
         # Apply offset: y = x_normalized * (offset + w)
         yj = xj * rms * (offset + wj)
