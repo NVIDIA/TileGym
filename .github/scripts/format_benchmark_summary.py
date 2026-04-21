@@ -101,28 +101,25 @@ def json_benchmark_to_markdown(benchmark_data):
     if not configs:
         return ""
 
-    # Determine columns: parameter name + all backend names
-    param_name = None
-    backends = []
-
-    for key in configs[0].keys():
-        if key not in ["CuTile", "PyTorch", "Triton", "TorchCompile"]:
-            param_name = key
-        else:
-            backends.append(key)
-
-    if not param_name:
+    # Render every key as its own column, preserving the insertion order that
+    # run_all_json.py emits (Triton's perf_report convention: x-axis params
+    # first, then one column per backend). Avoids the previous hardcoded
+    # backend allowlist {CuTile, PyTorch, Triton, TorchCompile} that silently
+    # dropped any other backend (e.g. SDPA-Flash, SDPA-MemEff, SDPA-Math,
+    # DeepGemm, Triton+CuTile) and collapsed multiple x-axis params into a
+    # single surviving param_name.
+    columns = list(configs[0].keys())
+    if not columns:
         return ""
 
     # Build markdown table
-    headers = [param_name] + backends
-    md = "| " + " | ".join(headers) + " |\n"
-    md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+    md = "| " + " | ".join(columns) + " |\n"
+    md += "| " + " | ".join(["---"] * len(columns)) + " |\n"
 
     for config in configs:
-        row = [str(config.get(param_name, ""))]
-        for backend in backends:
-            value = config.get(backend, "")
+        row = []
+        for col in columns:
+            value = config.get(col, "")
             if isinstance(value, float):
                 row.append(f"{value:.2f}")
             else:
