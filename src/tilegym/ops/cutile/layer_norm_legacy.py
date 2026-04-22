@@ -6,12 +6,15 @@ import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
+
+# Module-level tune cache: (N, D, BLOCK_D, IS_SWISH, TRAINING, COMPUTE_MEAN_AND_RSTD, dtype, device) -> (best_cfg, tuned_kernel)
+_layer_norm_legacy_tune_cache: dict = {}
 
 PAD_ZERO = ct.PaddingMode.ZERO
 
@@ -328,16 +331,26 @@ def _persistent_layer_norm_autotune_base(
         grid_size = min(NUM_SM, num_row_blocks)
         return (grid_size, 1, 1)
 
-    ct_experimental.autotune_launch(
-        stream,
-        grid_fn=grid_fn,
-        kernel=_persistent_layer_norm_fwd_kernel,
-        args_fn=args_fn,
-        hints_fn=lambda cfg: {
-            "num_ctas": cfg.num_ctas,
-        },
-        search_space=search_space,
-    )
+    cache_key = (N, D, BLOCK_D, IS_SWISH, TRAINING, COMPUTE_MEAN_AND_RSTD, x.dtype, str(x.device))
+    if cache_key not in _layer_norm_legacy_tune_cache:
+        result = exhaustive_search(
+            pruned_configs,
+            stream,
+            grid_fn,
+            _persistent_layer_norm_fwd_kernel,
+            args_fn,
+            lambda cfg: {"num_ctas": cfg.num_ctas},
+        )
+        best_cfg = result.best.config
+        _layer_norm_legacy_tune_cache[cache_key] = (
+            best_cfg,
+            ct.kernel(
+                _persistent_layer_norm_fwd_kernel._pyfunc,
+                num_ctas=best_cfg.num_ctas,
+            ),
+        )
+    best_cfg, tuned_kernel = _layer_norm_legacy_tune_cache[cache_key]
+    ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
 
 
 def cutile_persistent_layer_norm_fwd(

@@ -23,8 +23,8 @@ Conversion notes:
 """
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
@@ -33,6 +33,10 @@ from .ct_ops import cdiv
 from .ct_ops import erf_ct
 
 ConstInt = ct.Constant[int]
+
+# Module-level tune caches: (n_elements, LONG_INDEXING, dtype, device) -> tuned_kernel
+_geglu_exact_fwd_tune_cache: dict = {}
+_geglu_approx_fwd_tune_cache: dict = {}
 
 # signed int32 max is 2**31-1 so num_elements cannot exceed 2**31
 NUM_INT32_ELEMENTS = 2**31
@@ -185,11 +189,34 @@ def geglu_exact_forward(gate, up):
     out = torch.empty((batch, seq_len, hd), dtype=gate.dtype, device=gate.device)
     stream = torch.cuda.current_stream()
     LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
-    ct_experimental.autotune_launch(
+    cache_key = (n_elements, LONG_INDEXING, gate.dtype, str(gate.device))
+    if cache_key not in _geglu_exact_fwd_tune_cache:
+        result = exhaustive_search(
+            list(autotune_configs()),
+            stream,
+            lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
+            _exact_forward_ct,
+            lambda cfg: (
+                gate.reshape(-1),
+                up.reshape(-1),
+                out.reshape(-1),
+                n_elements,
+                BLOCK_SIZE_FWD,
+                LONG_INDEXING,
+            ),
+            lambda cfg: {"occupancy": cfg.occupancy},
+        )
+        best_cfg = result.best.config
+        _geglu_exact_fwd_tune_cache[cache_key] = ct.kernel(
+            _exact_forward_ct._pyfunc,
+            occupancy=best_cfg.occupancy,
+        )
+    tuned_kernel = _geglu_exact_fwd_tune_cache[cache_key]
+    ct.launch(
         stream,
-        grid_fn=lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
-        kernel=_exact_forward_ct,
-        args_fn=lambda cfg: (
+        (cdiv(n_elements, BLOCK_SIZE_FWD),),
+        tuned_kernel,
+        (
             gate.reshape(-1),
             up.reshape(-1),
             out.reshape(-1),
@@ -197,8 +224,6 @@ def geglu_exact_forward(gate, up):
             BLOCK_SIZE_FWD,
             LONG_INDEXING,
         ),
-        hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-        search_space=autotune_configs,
     )
     return out
 
@@ -225,11 +250,34 @@ def geglu_approx_forward(gate, up):
     out = torch.empty((batch, seq_len, hd), dtype=gate.dtype, device=gate.device)
     stream = torch.cuda.current_stream()
     LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
-    ct_experimental.autotune_launch(
+    cache_key = (n_elements, LONG_INDEXING, gate.dtype, str(gate.device))
+    if cache_key not in _geglu_approx_fwd_tune_cache:
+        result = exhaustive_search(
+            list(autotune_configs()),
+            stream,
+            lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
+            _approx_forward_ct,
+            lambda cfg: (
+                gate.reshape(-1),
+                up.reshape(-1),
+                out.reshape(-1),
+                n_elements,
+                BLOCK_SIZE_FWD,
+                LONG_INDEXING,
+            ),
+            lambda cfg: {"occupancy": cfg.occupancy},
+        )
+        best_cfg = result.best.config
+        _geglu_approx_fwd_tune_cache[cache_key] = ct.kernel(
+            _approx_forward_ct._pyfunc,
+            occupancy=best_cfg.occupancy,
+        )
+    tuned_kernel = _geglu_approx_fwd_tune_cache[cache_key]
+    ct.launch(
         stream,
-        grid_fn=lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
-        kernel=_approx_forward_ct,
-        args_fn=lambda cfg: (
+        (cdiv(n_elements, BLOCK_SIZE_FWD),),
+        tuned_kernel,
+        (
             gate.reshape(-1),
             up.reshape(-1),
             out.reshape(-1),
@@ -237,8 +285,6 @@ def geglu_approx_forward(gate, up):
             BLOCK_SIZE_FWD,
             LONG_INDEXING,
         ),
-        hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-        search_space=autotune_configs,
     )
     return out
 

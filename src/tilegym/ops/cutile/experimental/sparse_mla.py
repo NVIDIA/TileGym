@@ -7,9 +7,9 @@ import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
 from cuda.tile import RoundingMode as RMd
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
@@ -18,6 +18,9 @@ from tilegym.logger import get_logger
 from ..utils import next_power_of_2
 
 logger = get_logger(__name__)
+
+# Module-level tune cache: (B, H, S, topk, D, D_PE, query_group_size, dtype, device) -> (best_cfg, tuned_kernel)
+_sparse_mla_tune_cache: dict = {}
 
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
@@ -232,7 +235,7 @@ def _launch_sparse_mla_fwd(
     Three mutually exclusive config selection modes (no fallback between paths):
       Path 1: Explicit kernel_configs — validated and launched directly.
       Path 2: DISABLE_AUTOTUNE=1 — first valid config from search space.
-      Path 3: Autotune — ct_experimental.autotune_launch over search space.
+      Path 3: Autotune — exhaustive_search over search space.
     """
     B = q.shape[0]
 
@@ -283,31 +286,39 @@ def _launch_sparse_mla_fwd(
 
     # Path 3: Autotune — search over all valid (TILE_H, TILE_N) pairs.
     else:
-        ct_experimental.autotune_launch(
-            stream,
-            grid_fn=lambda cfg: (S, B * (H // cfg.TILE_H), 1),
-            kernel=sparse_mla_fwd_kernel,
-            args_fn=lambda cfg: (
-                q,
-                k,
-                v,
-                indices,
-                qpe,
-                kpe,
-                o,
-                sm_scale,
-                D,
-                D_PE,
-                H,
-                cfg.TILE_N,
-                topk // cfg.TILE_N,
-                query_group_size,
-                cfg.TILE_H,
-                H // cfg.TILE_H,
-            ),
-            search_space=lambda: _sparse_mla_autotune_configs(topk, H, query_group_size),
-            max_iter=20,
-        )
+        cache_key = (B, H, S, topk, D, D_PE, query_group_size, q.dtype, str(q.device))
+        if cache_key not in _sparse_mla_tune_cache:
+            result = exhaustive_search(
+                list(_sparse_mla_autotune_configs(topk, H, query_group_size)),
+                stream,
+                lambda cfg: (S, B * (H // cfg.TILE_H), 1),
+                sparse_mla_fwd_kernel,
+                lambda cfg: (
+                    q,
+                    k,
+                    v,
+                    indices,
+                    qpe,
+                    kpe,
+                    o,
+                    sm_scale,
+                    D,
+                    D_PE,
+                    H,
+                    cfg.TILE_N,
+                    topk // cfg.TILE_N,
+                    query_group_size,
+                    cfg.TILE_H,
+                    H // cfg.TILE_H,
+                ),
+            )
+            best_cfg = result.best.config
+            _sparse_mla_tune_cache[cache_key] = (
+                best_cfg,
+                ct.kernel(sparse_mla_fwd_kernel._pyfunc),
+            )
+        best_cfg, tuned_kernel = _sparse_mla_tune_cache[cache_key]
+        _launch_with_cfg(best_cfg)
     return o
 
 

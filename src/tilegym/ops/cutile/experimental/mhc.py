@@ -6,8 +6,8 @@ from math import ceil
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
@@ -263,15 +263,16 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     max_num_bid_n = max(ceil(N / cfg.TILE_SIZE_N) for cfg in configs)
     y_acc = torch.empty((M * max_split_k, N), device=x.device, dtype=torch.float32)
     r_acc = torch.empty((M * max_split_k, max_num_bid_n), device=x.device, dtype=torch.float32)
-    tuned = ct_experimental.autotune_launch(
+    result = exhaustive_search(
+        configs,
         stream,
-        grid_fn=lambda cfg: (
+        lambda cfg: (
             ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N),
             cfg.SPLIT_K,
             1,
         ),
-        kernel=mhc_split_gemm_rms_kernel,
-        args_fn=lambda cfg: (
+        mhc_split_gemm_rms_kernel,
+        lambda cfg: (
             x,
             w,
             y_acc,
@@ -285,9 +286,8 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
             cfg.SPLIT_K,
             cfg.GROUP_SIZE_M,
         ),
-        search_space=configs,
     )
-    best_cfg = tuned.tuned_config
+    best_cfg = result.best.config
 
     # Re-run the winning config with fresh buffers.  The autotuner reuses
     # a single y_acc/r_acc pair across all evaluated configs, so after

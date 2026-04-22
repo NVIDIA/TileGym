@@ -23,7 +23,7 @@ CuTile kernels:
   - _rope_embedding_QK_ct: joint Q+K RoPE for (batch, heads, seq, 2, half_dim)
 
 Performance notes:
-  - Autotune over occupancy=[1,2,4,8] via ct_experimental.autotune_launch.
+  - Autotune over occupancy=[1,2,4,8] via cuda.tile.tune.exhaustive_search.
   - Split-buffer pattern: kernel reads from Q_in and writes to Q_out.
     This allows autotune to re-run the kernel without corrupting input data
     (no clone needed). For backward (ct.launch, no autotune), Q_in=Q_out
@@ -35,8 +35,8 @@ Performance notes:
 """
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
@@ -45,6 +45,10 @@ from .ct_ops import calculate_settings
 
 ConstInt = ct.Constant[int]
 PAD_ZERO = ct.PaddingMode.ZERO
+
+# Module-level tune caches: (n_rows, n_heads, seq_len, head_dim, TILE_HD, dtype, device) -> tuned_kernel
+_rope_embedding_single_tune_cache: dict = {}
+_rope_embedding_qk_tune_cache: dict = {}
 
 
 # ---- CuTile kernel: joint Q+K RoPE (1D gather/scatter) ----
@@ -259,11 +263,39 @@ class _Fast_RoPE_Embedding_CT(torch.autograd.Function):
         # Autotune over occupancy=[1,2,4,8] (matching layernorm.py pattern).
         # Split-buffer: Q_flat_1d is read-only, Q_result is write-only.
         stream = torch.cuda.current_stream()
-        ct_experimental.autotune_launch(
+        single_cache_key = (n_rows, n_heads, seq_len, head_dim, TILE_HD, cos_row_stride, Q.dtype, str(Q.device))
+        if single_cache_key not in _rope_embedding_single_tune_cache:
+            result = exhaustive_search(
+                list(autotune_configs()),
+                stream,
+                lambda cfg: (n_rows, n_heads, 1),
+                _rope_embedding_ct,
+                lambda cfg: (
+                    Q_flat_1d,
+                    Q_result,
+                    cos_flat,
+                    sin_flat,
+                    seq_len,
+                    n_heads,
+                    head_dim,
+                    cos_row_stride,
+                    0,
+                    TILE_HD,
+                    no_padding,
+                ),
+                lambda cfg: {"occupancy": cfg.occupancy},
+            )
+            best_cfg = result.best.config
+            _rope_embedding_single_tune_cache[single_cache_key] = ct.kernel(
+                _rope_embedding_ct._pyfunc,
+                occupancy=best_cfg.occupancy,
+            )
+        tuned_kernel = _rope_embedding_single_tune_cache[single_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (n_rows, n_heads, 1),
-            kernel=_rope_embedding_ct,
-            args_fn=lambda cfg: (
+            (n_rows, n_heads, 1),
+            tuned_kernel,
+            (
                 Q_flat_1d,
                 Q_result,
                 cos_flat,
@@ -272,12 +304,10 @@ class _Fast_RoPE_Embedding_CT(torch.autograd.Function):
                 n_heads,
                 head_dim,
                 cos_row_stride,
-                0,  # BACKWARD_PASS = False
+                0,
                 TILE_HD,
                 no_padding,
             ),
-            hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-            search_space=autotune_configs,
         )
 
         ctx.TILE_HD = TILE_HD
@@ -370,11 +400,54 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
         sin_flat = sin.reshape(-1)
 
         stream = torch.cuda.current_stream()
-        ct_experimental.autotune_launch(
+        qk_cache_key = (
+            n_rows,
+            n_heads_Q,
+            n_heads_K,
+            seq_len,
+            head_dim,
+            TILE_HD,
+            has_indices_int,
+            Q.dtype,
+            str(Q.device),
+        )
+        if qk_cache_key not in _rope_embedding_qk_tune_cache:
+            result = exhaustive_search(
+                list(autotune_configs()),
+                stream,
+                lambda cfg: (n_rows, n_heads_Q, 1),
+                _rope_embedding_QK_ct,
+                lambda cfg: (
+                    Q_flat,
+                    Q_result,
+                    K_flat,
+                    K_result,
+                    cos_flat,
+                    sin_flat,
+                    rope_ptr,
+                    seq_len,
+                    head_dim,
+                    n_heads_Q,
+                    n_heads_K,
+                    cos_row_stride,
+                    0,
+                    has_indices_int,
+                    TILE_HD,
+                    no_padding,
+                ),
+                lambda cfg: {"occupancy": cfg.occupancy},
+            )
+            best_cfg = result.best.config
+            _rope_embedding_qk_tune_cache[qk_cache_key] = ct.kernel(
+                _rope_embedding_QK_ct._pyfunc,
+                occupancy=best_cfg.occupancy,
+            )
+        tuned_qk_kernel = _rope_embedding_qk_tune_cache[qk_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (n_rows, n_heads_Q, 1),
-            kernel=_rope_embedding_QK_ct,
-            args_fn=lambda cfg: (
+            (n_rows, n_heads_Q, 1),
+            tuned_qk_kernel,
+            (
                 Q_flat,
                 Q_result,
                 K_flat,
@@ -392,8 +465,6 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
                 TILE_HD,
                 no_padding,
             ),
-            hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-            search_space=autotune_configs,
         )
 
         ctx.TILE_HD = TILE_HD

@@ -6,11 +6,15 @@ from math import ceil
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
+
+# Module-level tune caches: (M, N, K, dtype, device) -> (best_cfg, tuned_kernel)
+_matmul_tune_cache: dict = {}
+_static_persistent_matmul_tune_cache: dict = {}
 
 logger = get_logger(__name__)
 
@@ -217,20 +221,32 @@ def _matmul_autotune_configs():
 
 def cutile_autotune_matmul(stream, a, b, c):
     M, N = c.shape
-    ct_experimental.autotune_launch(
+    K = a.shape[1]
+    cache_key = (M, N, K, a.dtype, str(a.device))
+    if cache_key not in _matmul_tune_cache:
+        result = exhaustive_search(
+            list(_matmul_autotune_configs()),
+            stream,
+            lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
+            matmul_kernel,
+            lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
+            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+        )
+        best_cfg = result.best.config
+        _matmul_tune_cache[cache_key] = (
+            best_cfg,
+            ct.kernel(
+                matmul_kernel._pyfunc,
+                num_ctas=best_cfg.num_ctas,
+                occupancy=best_cfg.occupancy,
+            ),
+        )
+    best_cfg, tuned_kernel = _matmul_tune_cache[cache_key]
+    ct.launch(
         stream,
-        grid_fn=lambda cfg: (
-            ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N),
-            1,
-            1,
-        ),
-        kernel=matmul_kernel,
-        args_fn=lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
-        hints_fn=lambda cfg: {
-            "num_ctas": cfg.num_ctas,
-            "occupancy": cfg.occupancy,
-        },
-        search_space=_matmul_autotune_configs,
+        (ceil(M / best_cfg.TILE_SIZE_M) * ceil(N / best_cfg.TILE_SIZE_N), 1, 1),
+        tuned_kernel,
+        (a, b, c, best_cfg.TILE_SIZE_M, best_cfg.TILE_SIZE_N, best_cfg.TILE_SIZE_K),
     )
     return c
 
@@ -269,33 +285,66 @@ def _static_persistent_matmul_autotune_configs():
 
 def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    ct_experimental.autotune_launch(
+    cache_key = (M, N, K, trans_a, trans_b, a.dtype, str(a.device))
+    if cache_key not in _static_persistent_matmul_tune_cache:
+        result = exhaustive_search(
+            list(_static_persistent_matmul_autotune_configs()),
+            stream,
+            lambda cfg: (
+                min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
+                1,
+                1,
+            ),
+            static_persistent_matmul_kernel,
+            lambda cfg: (
+                a,
+                b,
+                c,
+                M,
+                N,
+                K,
+                cfg.TILE_SIZE_M,
+                cfg.TILE_SIZE_N,
+                cfg.TILE_SIZE_K,
+                trans_a,
+                trans_b,
+                cfg.GROUP_SIZE_M,
+            ),
+            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+        )
+        best_cfg = result.best.config
+        _static_persistent_matmul_tune_cache[cache_key] = (
+            best_cfg,
+            ct.kernel(
+                static_persistent_matmul_kernel._pyfunc,
+                num_ctas=best_cfg.num_ctas,
+                occupancy=best_cfg.occupancy,
+            ),
+        )
+    best_cfg, tuned_kernel = _static_persistent_matmul_tune_cache[cache_key]
+    ct.launch(
         stream,
-        grid_fn=lambda cfg: (
-            min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
+        (
+            min(NUM_SMS // best_cfg.num_ctas, ceil(M / best_cfg.TILE_SIZE_M) * ceil(N / best_cfg.TILE_SIZE_N))
+            * best_cfg.occupancy,
             1,
             1,
         ),
-        kernel=static_persistent_matmul_kernel,
-        args_fn=lambda cfg: (
+        tuned_kernel,
+        (
             a,
             b,
             c,
             M,
             N,
             K,
-            cfg.TILE_SIZE_M,
-            cfg.TILE_SIZE_N,
-            cfg.TILE_SIZE_K,
+            best_cfg.TILE_SIZE_M,
+            best_cfg.TILE_SIZE_N,
+            best_cfg.TILE_SIZE_K,
             trans_a,
             trans_b,
-            cfg.GROUP_SIZE_M,
+            best_cfg.GROUP_SIZE_M,
         ),
-        hints_fn=lambda cfg: {
-            "num_ctas": cfg.num_ctas,
-            "occupancy": cfg.occupancy,
-        },
-        search_space=_static_persistent_matmul_autotune_configs,
     )
     return c
 
