@@ -54,6 +54,11 @@ class Test_RMSNorm(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
+        # skip static_persistent tests when n > 16384 to avoid excessive memory usage
+        # Avoid tileiras hangs on RTX PRO 6000 which has 100 KB shared memory per SM
+        if static_persistent and n > 16384:
+            pytest.skip("Skipping static_persistent test for large n to avoid excessive memory usage")
+
         self.setUp()
         device = torch.device("cuda")
         eps = 1e-5
