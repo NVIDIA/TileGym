@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import itertools
-import os
 
 import pytest
 import torch

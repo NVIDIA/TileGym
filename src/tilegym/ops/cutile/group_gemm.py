@@ -196,7 +196,6 @@ def group_gemm(
         C = torch.empty((M, N), device=device, dtype=dtype)
         group_C.append(C)
 
-    # Autotune mode
     stream = torch.cuda.current_stream()
     cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device)
     return group_C

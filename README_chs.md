@@ -51,7 +51,7 @@ pip install --pre torch --index-url https://download.pytorch.org/whl/cu130
 
 #### 2. 安装 TileGym
 
-TileGym 使用 [`cuda-tile`](https://github.com/nvidia/cutile-python) 进行 GPU 内核编程，运行时依赖 `tileiras` 编译器。
+TileGym 使用 [`cuda-tile`](https://github.com/nvidia/cutile-python)（≥ 1.3.0）进行 GPU 内核编程，运行时依赖 `tileiras` 编译器。
 
 ##### 从 PyPI 安装（推荐）
 
@@ -77,17 +77,7 @@ pip install .[tileiras]   # 或者: pip install .  (如果您已有系统级 til
 
 如需可编辑（开发）模式，请使用 `pip install -e .` 或 `pip install -e .[tileiras]`。
 
-##### 安装 `cuda-tile-experimental`
-
-> ⚠️ **必需**：TileGym 内核使用了 [`cuda-tile-experimental`](https://github.com/NVIDIA/cutile-python/tree/main/experimental) 中的功能（如自动调优器）。此包*不*在 PyPI 上提供，必须从源码单独安装：
->
-> ```bash
-> pip install "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"
-> ```
->
-> `cuda-tile-experimental` 由 CUDA Tile 团队维护，仅提供源码安装。更多详情请参阅 [experimental-features-optional](https://github.com/NVIDIA/cutile-python?tab=readme-ov-file#experimental-features-optional)。
-
-所有运行时依赖（`cuda-tile-experimental` 除外）均声明在 [`requirements.txt`](requirements.txt) 中，通过 `pip install tilegym` 和 `pip install .` 都会自动安装。
+所有运行时依赖均声明在 [`requirements.txt`](requirements.txt) 中，通过 `pip install tilegym` 和 `pip install .` 都会自动安装。
 
 我们还提供了 Dockerfile，您可以参考 [modeling/transformers/README.md](modeling/transformers/README.md)。
 

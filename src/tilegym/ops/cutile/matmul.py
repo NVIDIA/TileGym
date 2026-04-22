@@ -375,7 +375,6 @@ def matmul(
     # Create output tensor
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
 
-    # Grid calculation
     stream = torch.cuda.current_stream()
     if static_persistent:
         cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b)

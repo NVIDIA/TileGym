@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
 from math import ceil
 from types import SimpleNamespace
 
