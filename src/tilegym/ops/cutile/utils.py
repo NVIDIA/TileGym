@@ -14,3 +14,8 @@ def next_power_of_2(n: int):
     n |= n >> 32
     n += 1
     return n
+
+
+def is_power_of_2(n: int):
+    """Check if n is a power of 2"""
+    return n > 0 and (n & (n - 1)) == 0
