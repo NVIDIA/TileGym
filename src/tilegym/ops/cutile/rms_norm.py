@@ -34,9 +34,11 @@ def rms_norm_kernel_gather(
     num_tiles = ct.cdiv(N, TILE_SIZE)
     offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
 
+    check_bound = num_tiles * TILE_SIZE != N
+
     for j in range(0, num_tiles):
         offs = j * TILE_SIZE + offsets
-        xj = ct.gather(x, (row, offs), latency=1)
+        xj = ct.gather(x, (row, offs), check_bounds=check_bound, latency=1)
         xj = ct.astype(xj, ct.float32)
         _rms += xj * xj
 
@@ -46,9 +48,9 @@ def rms_norm_kernel_gather(
 
     for j in range(0, num_tiles):
         offs = j * TILE_SIZE + offsets
-        wj = ct.gather(w, offs, latency=1)
+        wj = ct.gather(w, offs, check_bounds=check_bound, latency=1)
         wj = ct.astype(wj, ct.float32)
-        xj = ct.gather(x, (row, offs), latency=1)
+        xj = ct.gather(x, (row, offs), check_bounds=check_bound, latency=1)
         xj = ct.astype(xj, ct.float32)
         # Apply offset: y = x_normalized * (offset + w)
         yj = xj * rms * (offset + wj)
@@ -312,6 +314,23 @@ class RMSNorm(torch.autograd.Function):
 
             TILE_SIZE_M = 4  # Default value, could be made configurable
             TILE_SIZE_N = next_power_of_2(N)
+
+            # Pre-SM90: TILE_SIZE_N as a ct.Constant causes per-N recompilation.
+            # Gather kernel avoids this by treating N as a runtime variable.
+            if torch.cuda.get_device_capability(x.device)[0] < 9:
+                MAX_FUSED_SIZE = 4096 // x.element_size()
+                _tile = min(MAX_FUSED_SIZE, next_power_of_2(N))
+                ct.launch(
+                    torch.cuda.current_stream(),
+                    (M,),
+                    rms_norm_kernel_gather,
+                    (x_arg, weight, y, rstd, N, eps, offset, _tile),
+                )
+                ctx.save_for_backward(x, weight, rstd)
+                ctx.TILE_SIZE = _tile
+                ctx.eps = eps
+                ctx.offset = offset
+                return y.view(*x.shape)
 
             # Other block sizes are more optimal when other dimension is too large/too small
             if TILE_SIZE_N <= 1024:

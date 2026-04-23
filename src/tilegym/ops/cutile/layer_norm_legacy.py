@@ -162,26 +162,17 @@ def _persistent_layer_norm_autotune_configs():
     - BLOCK_N: [2, 4, 8, 16, 32] - number of rows per block
     - num_ctas: [1] - single CTA for this kernel
     """
-    # BLOCK_N options
-    block_n_options = [2, 4, 8, 16, 32]
-
-    # num_ctas options
-    num_ctas_options = [1]
-
-    for block_n in block_n_options:
-        for num_ctas in num_ctas_options:
-            yield SimpleNamespace(
-                BLOCK_N=block_n,
-                num_ctas=num_ctas,
-            )
+    for block_n in [2, 4, 8, 16, 32]:
+        yield SimpleNamespace(BLOCK_N=block_n, num_ctas=1)
 
 
 def _get_default_persistent_layer_norm_configs():
     """GPU-specific defaults when autotune is disabled."""
-    return {
-        "BLOCK_N": 8,
-        "num_ctas": 1,
-    }
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability[0] < 9:
+        # Smaller BLOCK_N reduces shared memory pressure on pre-SM90 GPUs.
+        return {"BLOCK_N": 4, "num_ctas": 1}
+    return {"BLOCK_N": 8, "num_ctas": 1}
 
 
 def _persistent_layer_norm_early_config_prune(configs, N, D, BLOCK_D):
@@ -390,8 +381,23 @@ def cutile_persistent_layer_norm_fwd(
     # Calculate block sizes
     BLOCK_D = next_power_of_2(D)
 
-    # Check if autotune is enabled (default: enabled)
-    enable_autotune = os.environ.get("DISABLE_CUTILE_TUNE", "0") != "1"
+    # BLOCK_D is a ct.Constant; tileiras compile time grows super-linearly with it.
+    # This kernel cannot use a smaller tile because LayerNorm statistics are global
+    # over all columns. Fall back to torch.nn.functional for large D on pre-SM90.
+    gpu_capability = torch.cuda.get_device_capability(x.device)
+    _sm80_max_block_d = 1024
+    if gpu_capability[0] < 9 and BLOCK_D > _sm80_max_block_d:
+        import torch.nn.functional as F
+
+        y_out = F.layer_norm(x, (D,), weight, bias, eps)
+        if compute_mean_and_rstd:
+            x_fp32 = x.float()
+            mean.copy_(x_fp32.mean(dim=-1))
+            rstd.copy_((1.0 / (x_fp32.var(dim=-1, unbiased=False) + eps).sqrt()))
+        return y_out, mean, rstd, BLOCK_D, 8
+
+    # Autotune disabled on pre-SM90: per-constant compilation is too slow per config.
+    enable_autotune = os.environ.get("DISABLE_CUTILE_TUNE", "0") != "1" and gpu_capability[0] >= 9
 
     if enable_autotune:
         _persistent_layer_norm_autotune_base(

@@ -13,7 +13,9 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict
 from typing import Iterator
@@ -21,9 +23,20 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-# SPDX header content
-SPDX_COPYRIGHT = "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+# Year constants for copyright validation
+MIN_COPYRIGHT_YEAR = 2025  # TileGym project inception year
+CURRENT_YEAR = datetime.now().year
+
+# SPDX header content — uses the current year for newly added headers
+SPDX_COPYRIGHT = (
+    f"SPDX-FileCopyrightText: Copyright (c) {CURRENT_YEAR} NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+)
 SPDX_LICENSE = "SPDX-License-Identifier: MIT"
+
+# Regex pattern to validate SPDX copyright lines with any valid year or year range
+SPDX_COPYRIGHT_PATTERN = re.compile(
+    r"SPDX-FileCopyrightText: Copyright \(c\) (\d{4})(?:-(\d{4}))? NVIDIA CORPORATION & AFFILIATES\. All rights reserved\."
+)
 
 
 # Comment styles for different file types
@@ -156,10 +169,26 @@ def create_header(prefix: str, middle: str, suffix: str) -> List[str]:
 
 
 def has_spdx_header(content: str) -> bool:
-    """Check if content already has SPDX headers."""
-    # Check for both required strings within the first 10 lines
+    """Check if content already has SPDX headers.
+
+    Validates that:
+    - An SPDX copyright line exists in the first 10 lines
+    - The copyright year (or year range) is between MIN_COPYRIGHT_YEAR and CURRENT_YEAR
+    - An SPDX license identifier line exists in the first 10 lines
+    """
     first_lines = "\n".join(content.split("\n")[:10])
-    return SPDX_COPYRIGHT in first_lines and SPDX_LICENSE in first_lines
+    if SPDX_LICENSE not in first_lines:
+        return False
+    match = SPDX_COPYRIGHT_PATTERN.search(first_lines)
+    if not match:
+        return False
+    start_year = int(match.group(1))
+    end_year = int(match.group(2)) if match.group(2) else start_year
+    return (
+        MIN_COPYRIGHT_YEAR <= start_year <= CURRENT_YEAR
+        and MIN_COPYRIGHT_YEAR <= end_year <= CURRENT_YEAR
+        and start_year <= end_year
+    )
 
 
 def add_header_to_file(file_path: Path, comment_style: Tuple[str, str, str]) -> bool:

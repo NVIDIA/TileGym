@@ -35,6 +35,8 @@ class Test_RMSNorm(common.PyTestCase):
         "m, n, dtype",
         [
             (256, 256, torch.float16),
+            (256, 768, torch.float16),  # non-pow2
+            (256, 18432, torch.float16),  # non-pow2
             (4096, 2**8, torch.bfloat16),
             (31072, 4096, torch.bfloat16),
             (256, 256, torch.float32),
@@ -51,6 +53,11 @@ class Test_RMSNorm(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
+
+        # skip static_persistent tests when n > 16384 to avoid excessive memory usage
+        # Avoid tileiras hangs on RTX PRO 6000 which has 100 KB shared memory per SM
+        if static_persistent and n > 16384:
+            pytest.skip("Skipping static_persistent test for large n to avoid excessive memory usage")
 
         self.setUp()
         device = torch.device("cuda")

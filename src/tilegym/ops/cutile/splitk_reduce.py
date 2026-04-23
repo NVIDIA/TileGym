@@ -16,7 +16,7 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 
 
-@ct.kernel(occupancy=4)
+@ct.kernel(occupancy=ct.ByTarget(sm_80=2, default=4))
 def splitk_reduce_kernel(
     attn_splitk_out,
     lse_splitk_out,
@@ -112,13 +112,14 @@ def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
     TILE_D = min(128, next_power_of_2(head_dim))
     NUM_KV_SPLITS_POW2 = next_power_of_2(NUM_KV_SPLITS)
 
-    # Determine if we should use dot product based on conditions
-    USE_DOT = NUM_KV_SPLITS_POW2 >= 16
+    # MMA is efficient once NUM_KV_SPLITS is large enough to amortize launch overhead.
+    _split_cap = torch.cuda.get_device_capability()
+    _dot_threshold = 4 if _split_cap[0] < 9 else 16
+    USE_DOT = NUM_KV_SPLITS_POW2 >= _dot_threshold
 
     # Calculate grid dimensions
     grid = (B, num_heads, (head_dim + TILE_D - 1) // TILE_D)
 
-    # Launch kernel
     ct.launch(
         torch.cuda.current_stream(),
         grid,

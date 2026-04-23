@@ -74,7 +74,9 @@ def create_benchmark_config(datatype, HEAD_DIM, mode, causal):
     )
 
 
-_dtypes = [torch.float16, torch.float8_e5m2]
+# FP8 requires SM90+ (Hopper/Blackwell); skip on SM80 (A100)
+_gpu_cap = torch.cuda.get_device_capability()
+_dtypes = [torch.float16] if _gpu_cap[0] < 9 else [torch.float16, torch.float8_e5m2]
 
 
 @triton.testing.perf_report(

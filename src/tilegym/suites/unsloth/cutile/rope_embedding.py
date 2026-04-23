@@ -10,8 +10,13 @@
 Rotary Position Embedding (RoPE) CuTile kernels.
 
 Includes two autograd Functions:
-  - _Fast_RoPE_Embedding_CT: single-tensor RoPE (Q only)
-  - _Fast_RoPE_Embedding_QK_CT: joint Q+K RoPE in one kernel launch
+  - _Fast_RoPE_Embedding_CT: single-tensor RoPE (Q only), registered as
+    ``unsloth.rope_embedding``. Serves the general-purpose ``rope_embedding(Q,
+    cos, sin)`` API for scenarios where only Q needs rotation (e.g. inference
+    Q-projection, or architectures where K does not use RoPE).
+  - _Fast_RoPE_Embedding_QK_CT: joint Q+K RoPE in one kernel launch,
+    registered as ``unsloth.rope_embedding_qk``. This is the path used by
+    Unsloth's ``fast_rope_embedding`` integration.
 
 CuTile kernels:
   - _rope_embedding_ct: per-head grouped RoPE for (n_rows, n_heads, 2, half_dim)
@@ -23,8 +28,9 @@ Performance notes:
     This allows autotune to re-run the kernel without corrupting input data
     (no clone needed). For backward (ct.launch, no autotune), Q_in=Q_out
     (same buffer, inplace).
-  - Bounds-check elimination: when TILE_HD == half_head_dim, all gather/scatter
-    use check_bounds=False, saving ~44 ISETP instructions (~5% speedup).
+  - Lane masking: all gather/scatter use ``mask = col_offsets < half_head_dim``
+    to prevent out-of-range writes when TILE_HD > half_head_dim (non-power-of-2
+    dims). When TILE_HD == half_head_dim the mask is all-True (no overhead).
   - Native bf16 computation: RoPE rotation stays in bf16 (cos/sin ∈ [-1,1]),
 """
 
@@ -50,13 +56,14 @@ def _rope_embedding_QK_ct(
     Q_out,  # flattened: (total_Q_elements,) — write output
     K_in,  # flattened: (total_K_elements,) — read-only input
     K_out,  # flattened: (total_K_elements,) — write output
-    cos,  # flattened: (seq_len * half_head_dim,) — 1D gather access
+    cos,  # flattened: (seq_len * cos_row_stride,) — 1D gather access
     sin,  # same shape as cos, flattened
     rope_embedding_indices,  # (batch * seq_len,) int32, or dummy (1,)
     seqlen: ConstInt,
     head_dim: ConstInt,
     n_heads_Q: ConstInt,
     n_heads_K: ConstInt,
+    cos_row_stride: ConstInt,
     BACKWARD_PASS: ConstInt,
     HAS_ROPE_INDICES: ConstInt,
     TILE_HD: ConstInt,
@@ -65,8 +72,10 @@ def _rope_embedding_QK_ct(
     """Joint Q+K RoPE using gather/scatter with split input/output buffers.
 
     Occupancy is injected at runtime by autotune_launch via hints_fn.
-    When NO_PADDING=1 (TILE_HD == half_head_dim), check_bounds=False eliminates
-    boundary check instructions (~5% speedup, cf. layernorm.py optimization).
+    All gather/scatter use ``mask = col_offsets < half_head_dim`` to prevent
+    out-of-range lanes from corrupting adjacent heads when TILE_HD >
+    half_head_dim (non-power-of-2 dims like head_dim=96,160).  When TILE_HD ==
+    half_head_dim the mask is all-True and adds no overhead.
     Split-buffer: reads from Q_in/K_in, writes to Q_out/K_out. For backward
     (inplace, no autotune), Q_in=Q_out and K_in=K_out.
     """
@@ -77,6 +86,10 @@ def _rope_embedding_QK_ct(
     seq_idx = bid_row % seqlen
     half_head_dim = head_dim // 2
     col_offsets = ct.arange(TILE_HD, dtype=ct.int32)
+    # Mask out-of-range lanes when TILE_HD > half_head_dim (non-power-of-2 dims
+    # like head_dim=96,160). Prevents writing into adjacent heads' slots.
+    # When TILE_HD == half_head_dim, mask is all-True (no functional change).
+    mask = col_offsets < half_head_dim
 
     # Determine rotation position
     rot_position = seq_idx
@@ -84,35 +97,55 @@ def _rope_embedding_QK_ct(
         rot_position = ct.gather(rope_embedding_indices, (bid_row,), padding_value=0).item()
 
     # Load cos/sin via 1D gather (matching single-tensor kernel pattern)
-    cs_base = rot_position * half_head_dim
-    cos_row = ct.gather(cos, cs_base + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
-    sin_row = ct.gather(sin, cs_base + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
+    cs_base = rot_position * cos_row_stride
+    cos_row = ct.gather(cos, cs_base + col_offsets, mask=mask, check_bounds=False, padding_value=0)
+    sin_row = ct.gather(sin, cs_base + col_offsets, mask=mask, check_bounds=False, padding_value=0)
 
     if BACKWARD_PASS:
         sin_row = -sin_row
 
+    # Cast to cos/sin dtype only when needed (e.g., float32 cos with bf16 Q for Gemma).
+    # When dtypes match (common bf16 case), skip cast to avoid extra instructions.
+    # Matches single-tensor kernel (_rope_embedding_ct) behavior.
+
     # Q strides (contiguous layout: batch, n_heads_Q, seq_len, head_dim)
     q_base = batch_idx * n_heads_Q * seqlen * head_dim + head_position * seqlen * head_dim + seq_idx * head_dim
-    q0 = ct.gather(Q_in, q_base + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
-    q1 = ct.gather(Q_in, q_base + half_head_dim + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
+    q0 = ct.gather(Q_in, q_base + col_offsets, mask=mask, check_bounds=False, padding_value=0)
+    q1 = ct.gather(Q_in, q_base + half_head_dim + col_offsets, mask=mask, check_bounds=False, padding_value=0)
+
+    if Q_in.dtype != cos.dtype:
+        q0 = ct.astype(q0, cos.dtype)
+        q1 = ct.astype(q1, cos.dtype)
 
     new_q0 = q0 * cos_row - q1 * sin_row
     new_q1 = q1 * cos_row + q0 * sin_row
 
-    ct.scatter(Q_out, q_base + col_offsets, new_q0, check_bounds=not NO_PADDING)
-    ct.scatter(Q_out, q_base + half_head_dim + col_offsets, new_q1, check_bounds=not NO_PADDING)
+    if Q_in.dtype != cos.dtype:
+        new_q0 = ct.astype(new_q0, Q_in.dtype)
+        new_q1 = ct.astype(new_q1, Q_in.dtype)
+
+    ct.scatter(Q_out, q_base + col_offsets, new_q0, mask=mask, check_bounds=False)
+    ct.scatter(Q_out, q_base + half_head_dim + col_offsets, new_q1, mask=mask, check_bounds=False)
 
     # ---- Process K (only if this head exists in K) ----
     if head_position < n_heads_K:
         k_base = batch_idx * n_heads_K * seqlen * head_dim + head_position * seqlen * head_dim + seq_idx * head_dim
-        k0 = ct.gather(K_in, k_base + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
-        k1 = ct.gather(K_in, k_base + half_head_dim + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
+        k0 = ct.gather(K_in, k_base + col_offsets, mask=mask, check_bounds=False, padding_value=0)
+        k1 = ct.gather(K_in, k_base + half_head_dim + col_offsets, mask=mask, check_bounds=False, padding_value=0)
+
+        if K_in.dtype != cos.dtype:
+            k0 = ct.astype(k0, cos.dtype)
+            k1 = ct.astype(k1, cos.dtype)
 
         new_k0 = k0 * cos_row - k1 * sin_row
         new_k1 = k1 * cos_row + k0 * sin_row
 
-        ct.scatter(K_out, k_base + col_offsets, new_k0, check_bounds=not NO_PADDING)
-        ct.scatter(K_out, k_base + half_head_dim + col_offsets, new_k1, check_bounds=not NO_PADDING)
+        if K_in.dtype != cos.dtype:
+            new_k0 = ct.astype(new_k0, K_in.dtype)
+            new_k1 = ct.astype(new_k1, K_in.dtype)
+
+        ct.scatter(K_out, k_base + col_offsets, new_k0, mask=mask, check_bounds=False)
+        ct.scatter(K_out, k_base + half_head_dim + col_offsets, new_k1, mask=mask, check_bounds=False)
 
 
 # ---- CuTile kernel: single-tensor RoPE (1D gather/scatter) ----
@@ -138,8 +171,8 @@ def _rope_embedding_ct(
     parallelism and matches the QK kernel's 1-head-per-block pattern.
 
     Occupancy is injected at runtime by autotune_launch via hints_fn.
-    When NO_PADDING=1 (TILE_HD == half_head_dim), check_bounds=False eliminates
-    boundary check instructions (~5% speedup, cf. layernorm.py optimization).
+    All gather/scatter use ``mask = col_offsets < half_head_dim`` (see QK kernel
+    docstring for rationale).
     Split-buffer: reads from Q_in, writes to Q_out. For backward (inplace, no
     autotune), Q_in=Q_out (same buffer).
     """
@@ -149,10 +182,12 @@ def _rope_embedding_ct(
     rot_idx = row_position % seqlen
     col_offsets = ct.arange(TILE_HD, dtype=ct.int32)
     half_head_dim = head_dim // 2
+    # Mask out-of-range lanes (see QK kernel comment for rationale).
+    mask = col_offsets < half_head_dim
 
     cs_base = rot_idx * cos_row_stride
-    cos_row = ct.gather(cos, cs_base + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
-    sin_row = ct.gather(sin, cs_base + col_offsets, check_bounds=not NO_PADDING, padding_value=0)
+    cos_row = ct.gather(cos, cs_base + col_offsets, mask=mask, check_bounds=False, padding_value=0)
+    sin_row = ct.gather(sin, cs_base + col_offsets, mask=mask, check_bounds=False, padding_value=0)
 
     if BACKWARD_PASS:
         sin_row = -sin_row
@@ -161,8 +196,8 @@ def _rope_embedding_ct(
     offs_q0 = row_base + head_idx * head_dim + col_offsets
     offs_q1 = row_base + head_idx * head_dim + half_head_dim + col_offsets
 
-    q0 = ct.gather(Q_in, offs_q0, check_bounds=not NO_PADDING, padding_value=0)
-    q1 = ct.gather(Q_in, offs_q1, check_bounds=not NO_PADDING, padding_value=0)
+    q0 = ct.gather(Q_in, offs_q0, mask=mask, check_bounds=False, padding_value=0)
+    q1 = ct.gather(Q_in, offs_q1, mask=mask, check_bounds=False, padding_value=0)
 
     # Cast to cos/sin dtype only when needed (e.g., float32 cos with bf16 Q for Gemma).
     # When dtypes match (common bf16 case), skip cast to avoid extra instructions.
@@ -177,8 +212,8 @@ def _rope_embedding_ct(
         new_q0 = ct.astype(new_q0, Q_in.dtype)
         new_q1 = ct.astype(new_q1, Q_in.dtype)
 
-    ct.scatter(Q_out, offs_q0, new_q0, check_bounds=not NO_PADDING)
-    ct.scatter(Q_out, offs_q1, new_q1, check_bounds=not NO_PADDING)
+    ct.scatter(Q_out, offs_q0, new_q0, mask=mask, check_bounds=False)
+    ct.scatter(Q_out, offs_q1, new_q1, mask=mask, check_bounds=False)
 
 
 # ---- Autograd Function: single-tensor RoPE ----
@@ -191,8 +226,13 @@ class _Fast_RoPE_Embedding_CT(torch.autograd.Function):
         batch, seq_len, n_heads, head_dim = Q.shape
         half_head_dim = head_dim // 2
 
+        assert seq_len <= cos.shape[0], f"seq_len ({seq_len}) > cos.shape[0] ({cos.shape[0]})"
+
         n_rows = batch * seq_len
-        Q_flat = Q.reshape(n_rows, n_heads * head_dim).contiguous()
+        # Q is 4D contiguous from typical callers; reshape to 2D is a view.
+        # Non-contiguous Q would be copied by reshape (4D→2D flat requires
+        # contiguous strides for a view). No separate .contiguous() needed.
+        Q_flat = Q.reshape(n_rows, n_heads * head_dim)
 
         # Ensure cos/sin are 2D contiguous
         if cos.dim() == 1:
@@ -206,7 +246,11 @@ class _Fast_RoPE_Embedding_CT(torch.autograd.Function):
         no_padding = int(TILE_HD == half_head_dim)
 
         Q_flat_1d = Q_flat.reshape(-1)
-        # Split-buffer: separate output so autotune doesn't corrupt input
+        # Split-buffer: autotune_launch re-runs the kernel across configs, so
+        # in-place writes would corrupt input on retries. We allocate a separate
+        # output buffer, doubling peak memory.
+        # No public API exists to check for cached autotune results and switch
+        # to ct.launch (in-place) after the first run.
         Q_result = torch.empty_like(Q_flat_1d)
         cos_flat = cos.reshape(-1)
         sin_flat = sin.reshape(-1)
@@ -248,7 +292,7 @@ class _Fast_RoPE_Embedding_CT(torch.autograd.Function):
         batch, seq_len, n_heads, head_dim = dY.shape
         half_head_dim = head_dim // 2
         n_rows = batch * seq_len
-        dY_flat = dY.reshape(n_rows, n_heads * head_dim).contiguous()
+        dY_flat = dY.reshape(n_rows, n_heads * head_dim)
 
         # Backward: inplace (Q_in=Q_out), no autotune needed
         # Grid: one block per (row, head) — matching forward.
@@ -288,8 +332,13 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
         _, n_heads_K, _, _ = K.shape
         half_head_dim = head_dim // 2
 
-        Q_flat = Q.reshape(-1).contiguous()
-        K_flat = K.reshape(-1).contiguous()
+        assert seq_len <= cos.shape[0], f"seq_len ({seq_len}) > cos.shape[0] ({cos.shape[0]})"
+
+        # Q/K are 4D contiguous from typical callers; reshape(-1) is a view.
+        # Non-contiguous inputs are copied (a flat 1D view of non-contiguous
+        # 4D data is impossible). No separate .contiguous() needed.
+        Q_flat = Q.reshape(-1)
+        K_flat = K.reshape(-1)
 
         if has_indices:
             rope_ptr = rope_indices.reshape(-1).to(dtype=torch.int32, device=Q.device)
@@ -302,6 +351,7 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
             sin = sin.unsqueeze(0)
         cos = cos.contiguous()
         sin = sin.contiguous()
+        cos_row_stride = cos.stride(0)
 
         TILE_HD = calculate_settings(half_head_dim)
         no_padding = int(TILE_HD == half_head_dim)
@@ -309,7 +359,9 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
         n_rows = batch * seq_len
         has_indices_int = int(has_indices)
 
-        # Split-buffer: separate output buffers for autotune safety
+        # Split-buffer: autotune_launch re-runs the kernel across configs, so
+        # in-place writes would corrupt input on retries. Separate output
+        # buffers double peak memory — a known CuTile autotune tradeoff.
         Q_result = torch.empty_like(Q_flat)
         K_result = torch.empty_like(K_flat)
 
@@ -334,6 +386,7 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
                 head_dim,
                 n_heads_Q,
                 n_heads_K,
+                cos_row_stride,
                 0,  # BACKWARD_PASS = False
                 has_indices_int,
                 TILE_HD,
@@ -348,6 +401,7 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
         ctx.has_indices = has_indices
         ctx.cos = cos
         ctx.sin = sin
+        ctx.cos_row_stride = cos_row_stride
         ctx.rope_indices = rope_ptr if has_indices else None
         ctx.seq_len = seq_len
         ctx.n_heads_Q = n_heads_Q
@@ -389,6 +443,7 @@ class _Fast_RoPE_Embedding_QK_CT(torch.autograd.Function):
                 head_dim,
                 ctx.n_heads_Q,
                 ctx.n_heads_K,
+                ctx.cos_row_stride,
                 1,  # BACKWARD_PASS = True
                 int(ctx.has_indices),
                 ctx.TILE_HD,

@@ -31,7 +31,7 @@ TileGym 是一個 CUDA Tile 核心函式庫，提供了豐富的基於 Tile 的 
 
 ### 前置需求
 
-> **GPU 支援**：TileGym 需要 **CUDA 13.1+** 和 **NVIDIA Ampere**（如 A100）或 **Blackwell GPU**（如 B200、RTX 5080、RTX 5090）。所有已發布的 cuTile 核心均在兩種架構上經過驗證。注意，Ampere 效能仍在積極優化中。請從 [NVIDIA CUDA 下載頁面](https://developer.nvidia.com/cuda-downloads) 下載 CUDA。
+> **GPU 支援**：TileGym 需要 **CUDA 13.1+** 和 **Blackwell GPU**（如 B200、RTX 5080、RTX 5090）。**NVIDIA Ampere**（如 A100）也受支援，但需要 **CUDA 13.2+**。所有已發布的 cuTile 核心均在兩種架構上經過驗證。請從 [NVIDIA CUDA 下載頁面](https://developer.nvidia.com/cuda-downloads) 下載 CUDA。
 
 - PyTorch（版本 2.9.1 或相容版本）
 - **[CUDA 13.1+](https://developer.nvidia.com/cuda-downloads)**（必需 - TileGym 僅在 CUDA 13.1+ 上建構和測試）
