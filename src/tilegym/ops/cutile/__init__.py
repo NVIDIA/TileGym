@@ -42,11 +42,13 @@ if is_backend_available("cutile"):
     from .chunk_gated_delta_rule import chunk_gated_delta_rule
     from .experimental import mhc
     from .experimental import sparse_mla
+    from .experimental import swa_attention
     from .experimental.fused_linear_cross_entropy import fused_linear_cross_entropy
     from .experimental.mhc import mhc_apply_residual
     from .experimental.mhc import mhc_gemm_rms_scale
     from .experimental.mhc import mhc_sinkhorn
     from .experimental.sparse_mla import tile_sparse_mla
+    from .experimental.swa_attention import tile_swa_attention
     from .flash_decode import fmha_decode
     from .moe import fused_moe_kernel as invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
@@ -99,6 +101,8 @@ if is_backend_available("cutile"):
         "chunk_gated_delta_rule",
         "recurrent_gated_delta_rule",
         "sparse_mla",
+        "swa_attention",
+        "tile_swa_attention",
     ]
 else:
     __all__ = []

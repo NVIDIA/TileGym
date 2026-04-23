@@ -955,3 +955,41 @@ def chunk_gated_delta_rule(
         Tuple[torch.Tensor, Optional[torch.Tensor]]: output (B, T, H, V), final_state
     """
     raise NotImplementedError(f"chunk_gated_delta_rule is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "swa_attention",
+)
+def swa_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window_size: int,
+    scaling: Optional[float] = None,
+    is_causal: bool = True,
+    **kwargs: Any,
+):
+    """
+    Sliding window attention (SWA) forward pass.
+
+    Computes causal attention where each query attends to at most ``window_size``
+    preceding keys. Uses online softmax with exp2 + flush-to-zero for efficient
+    SFU utilization on NVIDIA GPUs.
+
+    Supports grouped-query attention (GQA): when ``k``/``v`` have fewer heads than
+    ``q``, KV heads are expanded automatically via ``repeat_interleave``.
+
+    Args:
+        q: Query tensor of shape (B, H, S_Q, D), fp16
+        k: Key tensor of shape (B, H_K, S_K, D), fp16
+        v: Value tensor of shape (B, H_K, S_K, D), fp16
+        window_size: Number of preceding keys each query can attend to.
+            When window_size >= S_K, equivalent to full causal attention.
+        scaling: QK scaling factor, defaults to 1/sqrt(D)
+        is_causal: Whether to apply causal masking (default: True)
+        **kwargs: Additional backend-specific arguments
+
+    Returns:
+        Output tensor of shape (B, H, S_Q, D), fp16
+    """
+    raise NotImplementedError(f"swa_attention is not implemented for {get_current_backend()}")
