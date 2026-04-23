@@ -142,8 +142,7 @@ def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwa
     if H_K != H:
         if H_K > H or H % H_K != 0:
             raise ValueError(
-                f"Invalid GQA head configuration: query heads H={H} must be "
-                f"an integer multiple of KV heads H_K={H_K}."
+                f"Invalid GQA head configuration: query heads H={H} must be an integer multiple of KV heads H_K={H_K}."
             )
         kv_repeat = H // H_K
         k = k.repeat_interleave(kv_repeat, dim=1)

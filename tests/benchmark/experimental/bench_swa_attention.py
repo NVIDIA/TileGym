@@ -34,8 +34,8 @@ register_impl("swa_attention", "torch")(reference_swa)
 
 
 ALL_BACKENDS = [
-    ("cutile", "CuTile SWA", ("blue", "-")) if is_backend_available("cutile") else None,
-    ("torch", "PyTorch ref", ("green", "-")),
+    ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
+    ("torch", "PyTorch", ("green", "-")),
 ]
 
 
