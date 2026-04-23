@@ -779,14 +779,8 @@ def cutile_autotune_fmha(
                 ),
             )
             best_cfg = result.best.config
-            _fmha_fwd_tune_cache[fwd_cache_key] = (
-                best_cfg,
-                ct.kernel(
-                    fmha_kernel._pyfunc,
-                    num_ctas=best_cfg.num_ctas,
-                    occupancy=best_cfg.occupancy,
-                ),
-            )
+            tuned_kernel = fmha_kernel
+            _fmha_fwd_tune_cache[fwd_cache_key] = (best_cfg, tuned_kernel)
         best_cfg, tuned_kernel = _fmha_fwd_tune_cache[fwd_cache_key]
         ct.launch(
             stream,
