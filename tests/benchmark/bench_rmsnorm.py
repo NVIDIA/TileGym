@@ -2,6 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import Any
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -15,11 +18,12 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 def reference_rms_norm(
     input: torch.Tensor,
-    normalized_shape: tuple,
+    normalized_shape: Any,
     weight: torch.Tensor,
     eps: float,
-    bias: torch.Tensor = None,  # Unused - kept for interface compatibility
-    **kwargs,  # Unused - kept for interface compatibility
+    bias: Optional[torch.Tensor] = None,
+    mode: Optional[str] = None,
+    **kwargs: Any,
 ):
     """Fused PyTorch RMSNorm baseline using F.rms_norm.
 
