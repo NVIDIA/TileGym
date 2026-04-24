@@ -60,6 +60,21 @@ def kernel(X, block_table, Y, BLOCK: ct.Constant[int]):
 
 **Decision**: Use TMA whenever data is contiguous or block-aligned. Use gather only for truly sparse random access.
 
+**Ampere (sm80/sm86) note**: Hardware TMA is not available on this generation. `ct.load`/`ct.store` with `allow_tma=True` falls back to `cp.async` emulation, adding ~8-15% overhead. When running on Ampere, redirect to the non-TMA path and emit a `UserWarning` rather than adding TMA:
+
+```python
+if use_tma and torch.cuda.get_device_capability()[0] < 9:
+    import warnings
+    warnings.warn(
+        "use_tma=True has no effect on this GPU — TMA is emulated via cp.async. "
+        "Falling back to use_tma=False.",
+        UserWarning, stacklevel=3,
+    )
+    use_tma = False
+```
+
+> **⚠️ Ampere (sm80/sm86) correctness (silent-corruption risk)**: if you keep `allow_tma=True` on a code path that may load out-of-bounds (e.g. ragged tails, partial tiles), you **must** pass `padding_mode=ct.PaddingMode.ZERO`. Hardware TMA on SM90+ auto-zero-fills OOB addresses, but the `cp.async` emulation used on Ampere does **not** — OOB lanes read undefined memory and produce wrong results with no error. Either set `padding_mode=ct.PaddingMode.ZERO` on the load, or route Ampere through the non-TMA path as shown above.
+
 ---
 
 ## Optimization B: Add Persistent Scheduling
@@ -126,7 +141,7 @@ def _my_kernel_autotune_configs():
         tile_sizes = [64, 128, 256, 512]
         occupancies = [1, 2, 4, 8]
         num_ctas_list = [1]
-    else:                    # Ampere (A100) and earlier
+    else:                    # Ampere (sm80/sm86)
         tile_sizes = [64, 128, 256]
         occupancies = [1, 2, 4]
         num_ctas_list = [1]
@@ -242,6 +257,8 @@ ct.store(Y, index=(bid, 0), tile=result, allow_tma=False)  # +30% in rms_norm!
 
 **Impact**: +5-50% depending on mismatch
 **When**: Current tile sizes are suboptimal for the workload or GPU architecture.
+
+For per-architecture tile size constraints and recommended search spaces, see `cutile-autotuning` skill.
 
 ---
 
