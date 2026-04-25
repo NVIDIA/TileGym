@@ -347,7 +347,7 @@ jobs:
   test-benchmark:
     name: test-benchmark
     needs: [config, build]
-    timeout-minutes: 40
+    timeout-minutes: 70
     if: |
       always() && 
       needs.config.outputs.run_benchmark == 'true' &&
@@ -409,7 +409,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run benchmarks
-        timeout-minutes: 35
+        timeout-minutes: 60
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"

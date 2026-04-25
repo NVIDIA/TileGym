@@ -263,30 +263,31 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     max_num_bid_n = max(ceil(N / cfg.TILE_SIZE_N) for cfg in configs)
     y_acc = torch.empty((M * max_split_k, N), device=x.device, dtype=torch.float32)
     r_acc = torch.empty((M * max_split_k, max_num_bid_n), device=x.device, dtype=torch.float32)
-    result = exhaustive_search(
-        configs,
-        stream,
-        lambda cfg: (
-            ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N),
-            cfg.SPLIT_K,
-            1,
-        ),
-        mhc_split_gemm_rms_kernel,
-        lambda cfg: (
-            x,
-            w,
-            y_acc,
-            r_acc,
-            M,
-            N,
-            K,
-            cfg.TILE_SIZE_M,
-            cfg.TILE_SIZE_N,
-            cfg.TILE_SIZE_K,
-            cfg.SPLIT_K,
-            cfg.GROUP_SIZE_M,
-        ),
-    )
+    with ct.compiler_timeout(5):
+        result = exhaustive_search(
+            configs,
+            stream,
+            lambda cfg: (
+                ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N),
+                cfg.SPLIT_K,
+                1,
+            ),
+            mhc_split_gemm_rms_kernel,
+            lambda cfg: (
+                x,
+                w,
+                y_acc,
+                r_acc,
+                M,
+                N,
+                K,
+                cfg.TILE_SIZE_M,
+                cfg.TILE_SIZE_N,
+                cfg.TILE_SIZE_K,
+                cfg.SPLIT_K,
+                cfg.GROUP_SIZE_M,
+            ),
+        )
     best_cfg = result.best.config
 
     # Re-run the winning config with fresh buffers.  The autotuner reuses

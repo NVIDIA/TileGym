@@ -176,28 +176,29 @@ class _attention(torch.autograd.Function):
         stream = torch.cuda.current_stream()
         cache_key = (S_qo, TILE_D, TILE_KPE, H, query_group_size, q.dtype, str(q.device))
         if cache_key not in _mla_tune_cache:
-            result = exhaustive_search(
-                list(_configs_fn()),
-                stream,
-                lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
-                prefill_mla,
-                lambda cfg: (
-                    q,
-                    qpe,
-                    k,
-                    kpe,
-                    v,
-                    o,
-                    sm_scale,
-                    TILE_D,
-                    TILE_KPE,
-                    H,
-                    cfg.TILE_M,
-                    cfg.TILE_N,
-                    query_group_size,
-                ),
-                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-            )
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_configs_fn()),
+                    stream,
+                    lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
+                    prefill_mla,
+                    lambda cfg: (
+                        q,
+                        qpe,
+                        k,
+                        kpe,
+                        v,
+                        o,
+                        sm_scale,
+                        TILE_D,
+                        TILE_KPE,
+                        H,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                    ),
+                    lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+                )
             best_cfg = result.best.config
             _mla_tune_cache[cache_key] = (
                 best_cfg,
@@ -258,14 +259,29 @@ def cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_s
         return
 
     if cache_key not in _mla_tune_cache:
-        result = exhaustive_search(
-            list(_configs_fn()),
-            stream,
-            lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
-            prefill_mla,
-            lambda cfg: (q, qpe, k, kpe, v, o, sm_scale, TILE_D, TILE_KPE, H, cfg.TILE_M, cfg.TILE_N, query_group_size),
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_configs_fn()),
+                stream,
+                lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
+                prefill_mla,
+                lambda cfg: (
+                    q,
+                    qpe,
+                    k,
+                    kpe,
+                    v,
+                    o,
+                    sm_scale,
+                    TILE_D,
+                    TILE_KPE,
+                    H,
+                    cfg.TILE_M,
+                    cfg.TILE_N,
+                    query_group_size,
+                ),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
         best_cfg = result.best.config
         _mla_tune_cache[cache_key] = (
             best_cfg,

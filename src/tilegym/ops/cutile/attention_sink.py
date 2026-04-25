@@ -198,29 +198,30 @@ def _cutile_autotune_attention_sink(
 
     cache_key = (batch_size, n_heads, n_ctx, head_dim, n_kv_ctx, bandwidth, q.dtype, str(q.device))
     if cache_key not in _attention_sink_tune_cache:
-        result = exhaustive_search(
-            list(_attention_sink_autotune_configs()),
-            stream,
-            lambda cfg: (math.ceil(n_ctx / cfg.TILE_M), batch_size * n_heads, 1),
-            attention_sink_kernel,
-            lambda cfg: (
-                q,
-                k,
-                v,
-                sinks,
-                o,
-                start_q,
-                sm_scale,
-                head_dim,
-                n_heads,
-                n_kv_ctx,
-                cfg.TILE_M,
-                cfg.TILE_N,
-                repeat_kv,
-                bandwidth,
-            ),
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_attention_sink_autotune_configs()),
+                stream,
+                lambda cfg: (math.ceil(n_ctx / cfg.TILE_M), batch_size * n_heads, 1),
+                attention_sink_kernel,
+                lambda cfg: (
+                    q,
+                    k,
+                    v,
+                    sinks,
+                    o,
+                    start_q,
+                    sm_scale,
+                    head_dim,
+                    n_heads,
+                    n_kv_ctx,
+                    cfg.TILE_M,
+                    cfg.TILE_N,
+                    repeat_kv,
+                    bandwidth,
+                ),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
         best_cfg = result.best.config
         _attention_sink_tune_cache[cache_key] = (
             best_cfg,

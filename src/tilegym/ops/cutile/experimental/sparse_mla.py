@@ -288,30 +288,31 @@ def _launch_sparse_mla_fwd(
     else:
         cache_key = (B, H, S, topk, D, D_PE, query_group_size, q.dtype, str(q.device))
         if cache_key not in _sparse_mla_tune_cache:
-            result = exhaustive_search(
-                list(_sparse_mla_autotune_configs(topk, H, query_group_size)),
-                stream,
-                lambda cfg: (S, B * (H // cfg.TILE_H), 1),
-                sparse_mla_fwd_kernel,
-                lambda cfg: (
-                    q,
-                    k,
-                    v,
-                    indices,
-                    qpe,
-                    kpe,
-                    o,
-                    sm_scale,
-                    D,
-                    D_PE,
-                    H,
-                    cfg.TILE_N,
-                    topk // cfg.TILE_N,
-                    query_group_size,
-                    cfg.TILE_H,
-                    H // cfg.TILE_H,
-                ),
-            )
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_sparse_mla_autotune_configs(topk, H, query_group_size)),
+                    stream,
+                    lambda cfg: (S, B * (H // cfg.TILE_H), 1),
+                    sparse_mla_fwd_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        indices,
+                        qpe,
+                        kpe,
+                        o,
+                        sm_scale,
+                        D,
+                        D_PE,
+                        H,
+                        cfg.TILE_N,
+                        topk // cfg.TILE_N,
+                        query_group_size,
+                        cfg.TILE_H,
+                        H // cfg.TILE_H,
+                    ),
+                )
             best_cfg = result.best.config
             _sparse_mla_tune_cache[cache_key] = (
                 best_cfg,

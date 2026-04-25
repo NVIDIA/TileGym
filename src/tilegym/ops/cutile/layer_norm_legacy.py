@@ -333,14 +333,15 @@ def _persistent_layer_norm_autotune_base(
 
     cache_key = (N, D, BLOCK_D, IS_SWISH, TRAINING, COMPUTE_MEAN_AND_RSTD, x.dtype, str(x.device))
     if cache_key not in _layer_norm_legacy_tune_cache:
-        result = exhaustive_search(
-            pruned_configs,
-            stream,
-            grid_fn,
-            _persistent_layer_norm_fwd_kernel,
-            args_fn,
-            lambda cfg: {"num_ctas": cfg.num_ctas},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                pruned_configs,
+                stream,
+                grid_fn,
+                _persistent_layer_norm_fwd_kernel,
+                args_fn,
+                lambda cfg: {"num_ctas": cfg.num_ctas},
+            )
         best_cfg = result.best.config
         _layer_norm_legacy_tune_cache[cache_key] = (
             best_cfg,

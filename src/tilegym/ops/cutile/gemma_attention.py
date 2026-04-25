@@ -320,33 +320,34 @@ def _cutile_autotune_gemma_fmha(
         str(q.device),
     )
     if cache_key not in _gemma_fmha_tune_cache:
-        result = exhaustive_search(
-            list(_gemma_fmha_autotune_configs()),
-            stream,
-            lambda cfg: (math.ceil(S_qo / cfg.BLOCK_M), B * H, 1),
-            gemma_fmha_kernel,
-            lambda cfg: (
-                q,
-                k,
-                v,
-                o,
-                sm_scale,
-                B,
-                H,
-                S_qo,
-                S_kv,
-                BLOCK_D,
-                cfg.BLOCK_M,
-                cfg.BLOCK_N,
-                query_group_size,
-                stage,
-                window_size,
-                soft_cap_val,
-                has_soft_cap,
-                (S_kv % cfg.BLOCK_N) == 0,
-            ),
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_gemma_fmha_autotune_configs()),
+                stream,
+                lambda cfg: (math.ceil(S_qo / cfg.BLOCK_M), B * H, 1),
+                gemma_fmha_kernel,
+                lambda cfg: (
+                    q,
+                    k,
+                    v,
+                    o,
+                    sm_scale,
+                    B,
+                    H,
+                    S_qo,
+                    S_kv,
+                    BLOCK_D,
+                    cfg.BLOCK_M,
+                    cfg.BLOCK_N,
+                    query_group_size,
+                    stage,
+                    window_size,
+                    soft_cap_val,
+                    has_soft_cap,
+                    (S_kv % cfg.BLOCK_N) == 0,
+                ),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
         best_cfg = result.best.config
         _gemma_fmha_tune_cache[cache_key] = (
             best_cfg,

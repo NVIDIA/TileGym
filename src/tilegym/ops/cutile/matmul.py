@@ -224,14 +224,15 @@ def cutile_autotune_matmul(stream, a, b, c):
     K = a.shape[1]
     cache_key = (M, N, K, a.dtype, str(a.device))
     if cache_key not in _matmul_tune_cache:
-        result = exhaustive_search(
-            list(_matmul_autotune_configs()),
-            stream,
-            lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
-            matmul_kernel,
-            lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_matmul_autotune_configs()),
+                stream,
+                lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
+                matmul_kernel,
+                lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
         best_cfg = result.best.config
         _matmul_tune_cache[cache_key] = (
             best_cfg,
@@ -287,31 +288,32 @@ def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     cache_key = (M, N, K, trans_a, trans_b, a.dtype, str(a.device))
     if cache_key not in _static_persistent_matmul_tune_cache:
-        result = exhaustive_search(
-            list(_static_persistent_matmul_autotune_configs()),
-            stream,
-            lambda cfg: (
-                min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
-                1,
-                1,
-            ),
-            static_persistent_matmul_kernel,
-            lambda cfg: (
-                a,
-                b,
-                c,
-                M,
-                N,
-                K,
-                cfg.TILE_SIZE_M,
-                cfg.TILE_SIZE_N,
-                cfg.TILE_SIZE_K,
-                trans_a,
-                trans_b,
-                cfg.GROUP_SIZE_M,
-            ),
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_static_persistent_matmul_autotune_configs()),
+                stream,
+                lambda cfg: (
+                    min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
+                    1,
+                    1,
+                ),
+                static_persistent_matmul_kernel,
+                lambda cfg: (
+                    a,
+                    b,
+                    c,
+                    M,
+                    N,
+                    K,
+                    cfg.TILE_SIZE_M,
+                    cfg.TILE_SIZE_N,
+                    cfg.TILE_SIZE_K,
+                    trans_a,
+                    trans_b,
+                    cfg.GROUP_SIZE_M,
+                ),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
         best_cfg = result.best.config
         _static_persistent_matmul_tune_cache[cache_key] = (
             best_cfg,

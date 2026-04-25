@@ -127,23 +127,24 @@ def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, d
     group_shapes = tuple((tuple(A.shape), tuple(B.shape)) for A, B in zip(group_A, group_B))
     cache_key = (group_shapes, transpose_b, group_A[0].dtype, str(group_A[0].device))
     if cache_key not in _group_gemm_tune_cache:
-        result = exhaustive_search(
-            list(_group_gemm_autotune_configs()),
-            stream,
-            lambda cfg: (NUM_SMS // cfg.num_ctas * cfg.occupancy, 1, 1),
-            group_gemm_kernel,
-            lambda cfg: (
-                group_A,
-                group_B,
-                group_C,
-                cfg.TILE_M,
-                cfg.TILE_N,
-                cfg.TILE_K,
-                NUM_SMS // cfg.num_ctas * cfg.occupancy,
-                transpose_b,
-            ),
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
-        )
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_group_gemm_autotune_configs()),
+                stream,
+                lambda cfg: (NUM_SMS // cfg.num_ctas * cfg.occupancy, 1, 1),
+                group_gemm_kernel,
+                lambda cfg: (
+                    group_A,
+                    group_B,
+                    group_C,
+                    cfg.TILE_M,
+                    cfg.TILE_N,
+                    cfg.TILE_K,
+                    NUM_SMS // cfg.num_ctas * cfg.occupancy,
+                    transpose_b,
+                ),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
         best_cfg = result.best.config
         _group_gemm_tune_cache[cache_key] = (
             best_cfg,

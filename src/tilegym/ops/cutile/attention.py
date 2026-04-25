@@ -757,27 +757,28 @@ def cutile_autotune_fmha(
             str(q.device),
         )
         if fwd_cache_key not in _fmha_fwd_tune_cache:
-            result = exhaustive_search(
-                list(_fmha_autotune_configs(hidden_size)),
-                stream,
-                lambda cfg: (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1),
-                fmha_kernel,
-                lambda cfg: (
-                    q,
-                    k,
-                    v,
-                    o,
-                    sm_scale,
-                    input_pos,
-                    hidden_size,
-                    num_heads,
-                    cfg.TILE_M,
-                    cfg.TILE_N,
-                    query_group_size,
-                    is_causal,
-                    EVEN_K,
-                ),
-            )
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_fmha_autotune_configs(hidden_size)),
+                    stream,
+                    lambda cfg: (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1),
+                    fmha_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        o,
+                        sm_scale,
+                        input_pos,
+                        hidden_size,
+                        num_heads,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                        is_causal,
+                        EVEN_K,
+                    ),
+                )
             best_cfg = result.best.config
             tuned_kernel = fmha_kernel
             _fmha_fwd_tune_cache[fwd_cache_key] = (best_cfg, tuned_kernel)
@@ -1108,31 +1109,32 @@ def fmha_backward(
             str(q.device),
         )
         if dkdv_cache_key not in _fmha_bwd_dkdv_tune_cache:
-            result = exhaustive_search(
-                list(_fmha_bwd_dkdv_autotune_configs(hidden_size)),
-                stream,
-                lambda cfg: (math.ceil(k_len / cfg.TILE_N), batch_size * num_head_kv, 1),
-                fmha_bwd_dkdv_kernel,
-                lambda cfg: (
-                    q,
-                    k,
-                    v,
-                    do,
-                    dk,
-                    dv,
-                    lse_flat,
-                    delta_flat,
-                    sm_scale,
-                    TILE_D,
-                    num_heads,
-                    num_head_kv,
-                    padded_q_len,
-                    cfg.TILE_M,
-                    cfg.TILE_N,
-                    query_group_size,
-                    is_causal,
-                ),
-            )
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_fmha_bwd_dkdv_autotune_configs(hidden_size)),
+                    stream,
+                    lambda cfg: (math.ceil(k_len / cfg.TILE_N), batch_size * num_head_kv, 1),
+                    fmha_bwd_dkdv_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        do,
+                        dk,
+                        dv,
+                        lse_flat,
+                        delta_flat,
+                        sm_scale,
+                        TILE_D,
+                        num_heads,
+                        num_head_kv,
+                        padded_q_len,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                        is_causal,
+                    ),
+                )
             best_cfg = result.best.config
             _fmha_bwd_dkdv_tune_cache[dkdv_cache_key] = (
                 best_cfg,
@@ -1205,29 +1207,30 @@ def fmha_backward(
             str(q.device),
         )
         if dq_cache_key not in _fmha_bwd_dq_tune_cache:
-            result = exhaustive_search(
-                list(_fmha_bwd_dq_autotune_configs(hidden_size)),
-                stream,
-                lambda cfg: (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1),
-                fmha_bwd_dq_kernel,
-                lambda cfg: (
-                    q,
-                    k,
-                    v,
-                    do,
-                    dq,
-                    lse_flat,
-                    delta_flat,
-                    sm_scale,
-                    TILE_D,
-                    num_heads,
-                    padded_q_len,
-                    cfg.TILE_M,
-                    cfg.TILE_N,
-                    query_group_size,
-                    is_causal,
-                ),
-            )
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_fmha_bwd_dq_autotune_configs(hidden_size)),
+                    stream,
+                    lambda cfg: (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1),
+                    fmha_bwd_dq_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        do,
+                        dq,
+                        lse_flat,
+                        delta_flat,
+                        sm_scale,
+                        TILE_D,
+                        num_heads,
+                        padded_q_len,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                        is_causal,
+                    ),
+                )
             best_cfg = result.best.config
             _fmha_bwd_dq_tune_cache[dq_cache_key] = (
                 best_cfg,
