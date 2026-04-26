@@ -87,18 +87,27 @@ def rms_norm_kernel_static_persistent(
     # Calculate upper bound
     upper_bound = (M + TILE_SIZE_M - 1) // TILE_SIZE_M
 
-    # Load weight vector once (shared across all tiles processed by this program)
-    w = ct.load(W, index=(0,), shape=(TILE_SIZE_N,))
+    # Load weight vector once (shared across all tiles processed by this program).
+    # padding_mode=ZERO keeps out-of-range columns (when N is not a power of two
+    # and TILE_SIZE_N = next_power_of_2(N) > N) from pulling in uninitialized
+    # memory; combined with the same mode on X, OOB contributions to y are zero
+    # and never reach the stored output columns [0, N).
+    w = ct.load(W, index=(0,), shape=(TILE_SIZE_N,), padding_mode=ct.PaddingMode.ZERO)
     w = ct.astype(w, ct.float32)
 
     # Static persistent loop: each  processes multiple tiles
     num_tile_blocks = ct.num_blocks(0)
     for current_bid in range(bid, upper_bound, num_tile_blocks):
-        # Load input tile
+        # Load input tile.
+        # padding_mode=ZERO is required when N is not a power of two so that
+        # the out-of-range columns [N, TILE_SIZE_N) contribute 0 to the
+        # sum-of-squares reduction below; otherwise uninitialized memory
+        # inflates the variance and compresses the normalized output.
         x = ct.load(
             X,
             index=(current_bid, 0),
             shape=(TILE_SIZE_M, TILE_SIZE_N),
+            padding_mode=ct.PaddingMode.ZERO,
             latency=10,  # +2% perf from this hint
         )
         x = ct.astype(x, ct.float32)

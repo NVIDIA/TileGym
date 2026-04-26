@@ -47,7 +47,6 @@ def fused_moe_kernel(
     use_int8_w8a16: ct.Constant[int],
     even_Ks: ct.Constant[int],
     a_stride_1: ct.Constant[int],  # Original A shape[1] before flatten
-    c_stride_1: ct.Constant[int],  # Original C shape[1] before flatten
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -125,12 +124,19 @@ def fused_moe_kernel(
             moe_weight = ct.expand_dims(moe_weight, axis=1)
             accumulator = accumulator * moe_weight
         # -----------------------------------------------------------
-        # Write back the tile of the output
+        # Write back the tile of the output.
+        # Use 2D indexing so cuTile bounds-checks the N dimension. Otherwise,
+        # with TILE_SIZE_N > N (e.g. down-projection GEMM where N=hidden_size),
+        # out-of-range column offsets silently alias into the next row of a
+        # flattened C buffer and corrupt neighbouring outputs.
         offs_cn = bid_n * TILE_SIZE_N + ct.arange(TILE_SIZE_N, dtype=ct.int32)
-        c_offset = c_stride_1 * offs_token[:, None] + offs_cn[None, :]
-        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
         accumulator = ct.astype(accumulator, c_ptr.dtype)
-        ct.scatter(c_ptr, c_offset, accumulator)
+        ct.scatter(
+            c_ptr,
+            (offs_token[:, None], offs_cn[None, :]),
+            accumulator,
+            check_bounds=True,
+        )
 
 
 @register_impl("invoke_fused_moe_kernel", "cutile")
@@ -179,15 +185,17 @@ def invoke_fused_moe_kernel(
     if B_scale is None:
         B_scale = torch.empty(0, device=B.device, dtype=B.dtype)
     topk_weights = topk_weights.view(-1)
+    # Keep C as 2D (M*top_k, N) so the kernel's 2D scatter can bounds-check
+    # the N dimension. Do NOT flatten -- flattening lets a scatter with
+    # TILE_SIZE_N > N silently overwrite the next row.
     C = C.view(-1, C.shape[2])
 
-    # Save original strides before flattening
+    # Save original stride of A before flattening (A is still gathered via a
+    # 1D index; out-of-range padded tokens rely on gather's padding_value=0).
     a_stride_1 = A.shape[1]
-    c_stride_1 = C.shape[1]
 
-    # Flatten tensors to 1D for gather/scatter operations
+    # Flatten A to 1D for gather operations
     A_flat = A.reshape(-1)
-    C_flat = C.reshape(-1)
 
     ct.launch(
         torch.cuda.current_stream(),
@@ -196,7 +204,7 @@ def invoke_fused_moe_kernel(
         (
             A_flat,
             B,
-            C_flat,
+            C,
             A_scale,
             B_scale,
             topk_weights,
@@ -219,6 +227,5 @@ def invoke_fused_moe_kernel(
             int(use_int8_w8a16),  # use_int8_w8a16 (convert bool to int)
             int(even_Ks),  # even_Ks (convert bool to int)
             a_stride_1,  # Original A.shape[1]
-            c_stride_1,  # Original C.shape[1]
         ),
     )
