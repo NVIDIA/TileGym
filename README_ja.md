@@ -51,7 +51,7 @@ pip install --pre torch --index-url https://download.pytorch.org/whl/cu130
 
 #### 2. TileGym のインストール
 
-TileGym は GPU カーネルプログラミングに [`cuda-tile`](https://github.com/nvidia/cutile-python) を使用しており、実行時に `tileiras` コンパイラに依存しています。
+TileGym は GPU カーネルプログラミングに [`cuda-tile`](https://github.com/nvidia/cutile-python)（≥ 1.3.0）を使用しており、実行時に `tileiras` コンパイラに依存しています。
 
 ##### PyPI からインストール（推奨）
 
@@ -77,17 +77,7 @@ pip install .[tileiras]   # または: pip install .  (システムに tileiras 
 
 編集可能（開発）モードの場合は、`pip install -e .` または `pip install -e .[tileiras]` を使用してください。
 
-##### `cuda-tile-experimental` のインストール
-
-> ⚠️ **必須**：TileGym カーネルは [`cuda-tile-experimental`](https://github.com/NVIDIA/cutile-python/tree/main/experimental) の機能（例：オートチューナー）を使用しています。このパッケージは PyPI では提供されて*おらず*、ソースから個別にインストールする必要があります：
->
-> ```bash
-> pip install "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"
-> ```
->
-> `cuda-tile-experimental` は CUDA Tile チームによってソースのみの実験的パッケージとして管理されています。詳細は [experimental-features-optional](https://github.com/NVIDIA/cutile-python?tab=readme-ov-file#experimental-features-optional) をご覧ください。
-
-すべてのランタイム依存関係（`cuda-tile-experimental` を除く）は [`requirements.txt`](requirements.txt) に宣言されており、`pip install tilegym` と `pip install .` の両方で自動的にインストールされます。
+すべてのランタイム依存関係は [`requirements.txt`](requirements.txt) に宣言されており、`pip install tilegym` と `pip install .` の両方で自動的にインストールされます。
 
 Dockerfile も提供しています。[modeling/transformers/README.md](modeling/transformers/README.md) を参照してください。
 

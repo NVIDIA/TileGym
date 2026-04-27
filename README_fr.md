@@ -51,7 +51,7 @@ Nous avons vérifié que `torch==2.9.1` fonctionne. Vous pouvez également obten
 
 #### 2. Installer TileGym
 
-TileGym utilise [`cuda-tile`](https://github.com/nvidia/cutile-python) pour la programmation de noyaux GPU, qui dépend du compilateur `tileiras` à l'exécution.
+TileGym utilise [`cuda-tile`](https://github.com/nvidia/cutile-python) (≥ 1.3.0) pour la programmation de noyaux GPU, qui dépend du compilateur `tileiras` à l'exécution.
 
 ##### Installer depuis PyPI (recommandé)
 
@@ -77,17 +77,7 @@ pip install .[tileiras]   # ou : pip install .  (si vous avez tileiras sur votre
 
 Pour le mode éditable (développement), utilisez `pip install -e .` ou `pip install -e .[tileiras]`.
 
-##### Installer `cuda-tile-experimental`
-
-> ⚠️ **Requis** : Les noyaux TileGym utilisent des fonctionnalités de [`cuda-tile-experimental`](https://github.com/NVIDIA/cutile-python/tree/main/experimental) (par ex. l'auto-tuner). Ce paquet n'est *pas* disponible sur PyPI et doit être installé séparément depuis les sources :
->
-> ```bash
-> pip install "cuda-tile-experimental @ git+https://github.com/NVIDIA/cutile-python.git#subdirectory=experimental"
-> ```
->
-> `cuda-tile-experimental` est maintenu par l'équipe CUDA Tile comme un paquet expérimental disponible uniquement depuis les sources. Voir plus de détails dans [experimental-features-optional](https://github.com/NVIDIA/cutile-python?tab=readme-ov-file#experimental-features-optional).
-
-Toutes les dépendances d'exécution (sauf `cuda-tile-experimental`) sont déclarées dans [`requirements.txt`](requirements.txt) et sont installées automatiquement par `pip install tilegym` et `pip install .`.
+Toutes les dépendances d'exécution sont déclarées dans [`requirements.txt`](requirements.txt) et sont installées automatiquement par `pip install tilegym` et `pip install .`.
 
 Nous fournissons également un Dockerfile, vous pouvez consulter [modeling/transformers/README.md](modeling/transformers/README.md).
 

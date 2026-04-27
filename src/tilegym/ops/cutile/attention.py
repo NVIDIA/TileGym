@@ -7,15 +7,20 @@ import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
 from cuda.tile import RoundingMode as RMd
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
 from tilegym.logger import get_logger
 
 from .utils import next_power_of_2
+
+# Module-level tune caches for fmha forward, dkdv backward, and dq backward
+_fmha_fwd_tune_cache: dict = {}
+_fmha_bwd_dkdv_tune_cache: dict = {}
+_fmha_bwd_dq_tune_cache: dict = {}
 
 logger = get_logger(__name__)
 
@@ -740,15 +745,49 @@ def cutile_autotune_fmha(
             ),
         )
     else:
-        ct_experimental.autotune_launch(
+        fwd_cache_key = (
+            batch_size,
+            num_heads,
+            q_len,
+            hidden_size,
+            query_group_size,
+            is_causal,
+            EVEN_K,
+            q.dtype,
+            str(q.device),
+        )
+        if fwd_cache_key not in _fmha_fwd_tune_cache:
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_fmha_autotune_configs(hidden_size)),
+                    stream,
+                    lambda cfg: (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1),
+                    fmha_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        o,
+                        sm_scale,
+                        input_pos,
+                        hidden_size,
+                        num_heads,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                        is_causal,
+                        EVEN_K,
+                    ),
+                )
+            best_cfg = result.best.config
+            tuned_kernel = fmha_kernel
+            _fmha_fwd_tune_cache[fwd_cache_key] = (best_cfg, tuned_kernel)
+        best_cfg, tuned_kernel = _fmha_fwd_tune_cache[fwd_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (
-                math.ceil(q_len / cfg.TILE_M),
-                batch_size * num_heads,
-                1,
-            ),
-            kernel=fmha_kernel,
-            args_fn=lambda cfg: (
+            (math.ceil(q_len / best_cfg.TILE_M), batch_size * num_heads, 1),
+            tuned_kernel,
+            (
                 q,
                 k,
                 v,
@@ -757,14 +796,12 @@ def cutile_autotune_fmha(
                 input_pos,
                 hidden_size,
                 num_heads,
-                cfg.TILE_M,
-                cfg.TILE_N,
+                best_cfg.TILE_M,
+                best_cfg.TILE_N,
                 query_group_size,
                 is_causal,
                 EVEN_K,
             ),
-            search_space=lambda: _fmha_autotune_configs(hidden_size),
-            max_iter=20,
         )
     return o
 
@@ -1059,15 +1096,56 @@ def fmha_backward(
             ),
         )
     else:
-        ct_experimental.autotune_launch(
+        dkdv_cache_key = (
+            batch_size,
+            num_heads,
+            num_head_kv,
+            q_len,
+            k_len,
+            hidden_size,
+            query_group_size,
+            is_causal,
+            q.dtype,
+            str(q.device),
+        )
+        if dkdv_cache_key not in _fmha_bwd_dkdv_tune_cache:
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_fmha_bwd_dkdv_autotune_configs(hidden_size)),
+                    stream,
+                    lambda cfg: (math.ceil(k_len / cfg.TILE_N), batch_size * num_head_kv, 1),
+                    fmha_bwd_dkdv_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        do,
+                        dk,
+                        dv,
+                        lse_flat,
+                        delta_flat,
+                        sm_scale,
+                        TILE_D,
+                        num_heads,
+                        num_head_kv,
+                        padded_q_len,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                        is_causal,
+                    ),
+                )
+            best_cfg = result.best.config
+            _fmha_bwd_dkdv_tune_cache[dkdv_cache_key] = (
+                best_cfg,
+                ct.kernel(fmha_bwd_dkdv_kernel._pyfunc),
+            )
+        best_cfg, tuned_kernel = _fmha_bwd_dkdv_tune_cache[dkdv_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (
-                math.ceil(k_len / cfg.TILE_N),
-                batch_size * num_head_kv,
-                1,
-            ),
-            kernel=fmha_bwd_dkdv_kernel,
-            args_fn=lambda cfg: (
+            (math.ceil(k_len / best_cfg.TILE_N), batch_size * num_head_kv, 1),
+            tuned_kernel,
+            (
                 q,
                 k,
                 v,
@@ -1081,13 +1159,11 @@ def fmha_backward(
                 num_heads,
                 num_head_kv,
                 padded_q_len,
-                cfg.TILE_M,
-                cfg.TILE_N,
+                best_cfg.TILE_M,
+                best_cfg.TILE_N,
                 query_group_size,
                 is_causal,
             ),
-            search_space=lambda: _fmha_bwd_dkdv_autotune_configs(hidden_size),
-            max_iter=20,
         )
 
     # Step 3: Compute dQ
@@ -1119,15 +1195,53 @@ def fmha_backward(
             ),
         )
     else:
-        ct_experimental.autotune_launch(
+        dq_cache_key = (
+            batch_size,
+            num_heads,
+            q_len,
+            k_len,
+            hidden_size,
+            query_group_size,
+            is_causal,
+            q.dtype,
+            str(q.device),
+        )
+        if dq_cache_key not in _fmha_bwd_dq_tune_cache:
+            with ct.compiler_timeout(5):
+                result = exhaustive_search(
+                    list(_fmha_bwd_dq_autotune_configs(hidden_size)),
+                    stream,
+                    lambda cfg: (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1),
+                    fmha_bwd_dq_kernel,
+                    lambda cfg: (
+                        q,
+                        k,
+                        v,
+                        do,
+                        dq,
+                        lse_flat,
+                        delta_flat,
+                        sm_scale,
+                        TILE_D,
+                        num_heads,
+                        padded_q_len,
+                        cfg.TILE_M,
+                        cfg.TILE_N,
+                        query_group_size,
+                        is_causal,
+                    ),
+                )
+            best_cfg = result.best.config
+            _fmha_bwd_dq_tune_cache[dq_cache_key] = (
+                best_cfg,
+                ct.kernel(fmha_bwd_dq_kernel._pyfunc),
+            )
+        best_cfg, tuned_kernel = _fmha_bwd_dq_tune_cache[dq_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (
-                math.ceil(q_len / cfg.TILE_M),
-                batch_size * num_heads,
-                1,
-            ),
-            kernel=fmha_bwd_dq_kernel,
-            args_fn=lambda cfg: (
+            (math.ceil(q_len / best_cfg.TILE_M), batch_size * num_heads, 1),
+            tuned_kernel,
+            (
                 q,
                 k,
                 v,
@@ -1139,13 +1253,11 @@ def fmha_backward(
                 TILE_D,
                 num_heads,
                 padded_q_len,
-                cfg.TILE_M,
-                cfg.TILE_N,
+                best_cfg.TILE_M,
+                best_cfg.TILE_N,
                 query_group_size,
                 is_causal,
             ),
-            search_space=lambda: _fmha_bwd_dq_autotune_configs(hidden_size),
-            max_iter=20,
         )
 
     return dq, dk, dv

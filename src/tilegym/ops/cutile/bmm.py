@@ -2,15 +2,17 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
 from math import ceil
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
+
+# Module-level tune cache: (batch_size, M, N, K, transpose_a, transpose_b, dtype, device) -> (best_cfg, tuned_kernel)
+_bmm_tune_cache: dict = {}
 
 
 # CuTile implementation of BMM kernel
@@ -279,18 +281,28 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
         return (grid_size,)
 
     # Call autotuner to find the best config and execute the kernel
-    ct_experimental.autotune_launch(
-        stream,
-        grid_fn=grid_fn,
-        kernel=ct_static_persistent_bmm_kernel,
-        args_fn=args_fn,
-        hints_fn=lambda cfg: {
-            "num_ctas": cfg.num_ctas,
-            "occupancy": cfg.occupancy,
-        },
-        search_space=_bmm_autotune_configs,
-        compiler_time_limit_sec=30,
-    )
+    cache_key = (batch_size, M, N, K, transpose_a, transpose_b, a.dtype, str(a.device))
+    if cache_key not in _bmm_tune_cache:
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_bmm_autotune_configs()),
+                stream,
+                grid_fn,
+                ct_static_persistent_bmm_kernel,
+                args_fn,
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
+        best_cfg = result.best.config
+        _bmm_tune_cache[cache_key] = (
+            best_cfg,
+            ct.kernel(
+                ct_static_persistent_bmm_kernel._pyfunc,
+                num_ctas=best_cfg.num_ctas,
+                occupancy=best_cfg.occupancy,
+            ),
+        )
+    best_cfg, tuned_kernel = _bmm_tune_cache[cache_key]
+    ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
 
     return output
 

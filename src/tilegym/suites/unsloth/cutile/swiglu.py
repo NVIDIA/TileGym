@@ -15,8 +15,8 @@ Kernels:
 """
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
@@ -24,6 +24,9 @@ from .ct_ops import autotune_configs
 from .ct_ops import cdiv
 
 ConstInt = ct.Constant[int]
+
+# Module-level tune cache: (n_elements, LONG_INDEXING, dtype, device) -> tuned_kernel
+_swiglu_fg_tune_cache: dict = {}
 
 # signed int32 max is 2**31-1 so num_elements cannot exceed 2**31
 NUM_INT32_ELEMENTS = 2**31
@@ -97,13 +100,27 @@ def swiglu_fg(e, g):
     h = torch.empty((batch, seq_len, hd), dtype=e.dtype, device=e.device)
     stream = torch.cuda.current_stream()
     LONG_INDEXING = 0 if n_elements <= INT32_SAFETY_BUFFER else 1
-    ct_experimental.autotune_launch(
+    cache_key = (n_elements, LONG_INDEXING, e.dtype, str(e.device))
+    if cache_key not in _swiglu_fg_tune_cache:
+        result = exhaustive_search(
+            list(autotune_configs()),
+            stream,
+            lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
+            _fg_kernel_ct,
+            lambda cfg: (e.reshape(-1), g.reshape(-1), h.reshape(-1), n_elements, BLOCK_SIZE_FWD, LONG_INDEXING),
+            lambda cfg: {"occupancy": cfg.occupancy},
+        )
+        best_cfg = result.best.config
+        _swiglu_fg_tune_cache[cache_key] = ct.kernel(
+            _fg_kernel_ct._pyfunc,
+            occupancy=best_cfg.occupancy,
+        )
+    tuned_kernel = _swiglu_fg_tune_cache[cache_key]
+    ct.launch(
         stream,
-        grid_fn=lambda cfg: (cdiv(n_elements, BLOCK_SIZE_FWD),),
-        kernel=_fg_kernel_ct,
-        args_fn=lambda cfg: (e.reshape(-1), g.reshape(-1), h.reshape(-1), n_elements, BLOCK_SIZE_FWD, LONG_INDEXING),
-        hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-        search_space=autotune_configs,
+        (cdiv(n_elements, BLOCK_SIZE_FWD),),
+        tuned_kernel,
+        (e.reshape(-1), g.reshape(-1), h.reshape(-1), n_elements, BLOCK_SIZE_FWD, LONG_INDEXING),
     )
     return h
 

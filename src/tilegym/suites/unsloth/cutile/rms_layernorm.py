@@ -28,13 +28,16 @@ Performance notes:
 """
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
 from .ct_ops import autotune_configs
 from .ct_ops import calculate_settings
+
+# Module-level tune cache: (direction, n_rows, n_cols, dtype, TILE_N, OFFSET, device) -> tuned_kernel
+_rms_layernorm_tune_cache: dict = {}
 
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
@@ -192,13 +195,27 @@ class _Fast_RMS_Layernorm_CT(torch.autograd.Function):
         r = torch.empty(n_rows, dtype=torch.float32, device=X.device)
 
         stream = torch.cuda.current_stream()
-        ct_experimental.autotune_launch(
+        fwd_cache_key = ("fwd", n_rows, n_cols, X.dtype, TILE_N, OFFSET, str(X.device))
+        if fwd_cache_key not in _rms_layernorm_tune_cache:
+            result = exhaustive_search(
+                list(autotune_configs()),
+                stream,
+                lambda cfg: (n_rows,),
+                _rms_layernorm_forward_ct_1d,
+                lambda cfg: (Y, X, W, r, n_cols, eps, OFFSET, TILE_N),
+                lambda cfg: {"occupancy": cfg.occupancy},
+            )
+            best_cfg = result.best.config
+            _rms_layernorm_tune_cache[fwd_cache_key] = ct.kernel(
+                _rms_layernorm_forward_ct_1d._pyfunc,
+                occupancy=best_cfg.occupancy,
+            )
+        tuned_fwd_kernel = _rms_layernorm_tune_cache[fwd_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (n_rows,),
-            kernel=_rms_layernorm_forward_ct_1d,
-            args_fn=lambda cfg: (Y, X, W, r, n_cols, eps, OFFSET, TILE_N),
-            hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-            search_space=autotune_configs,
+            (n_rows,),
+            tuned_fwd_kernel,
+            (Y, X, W, r, n_cols, eps, OFFSET, TILE_N),
         )
 
         ctx.eps = eps
@@ -222,13 +239,27 @@ class _Fast_RMS_Layernorm_CT(torch.autograd.Function):
         dX = torch.empty_like(dY)
 
         stream = torch.cuda.current_stream()
-        ct_experimental.autotune_launch(
+        bwd_cache_key = ("bwd", n_rows, n_cols, dY.dtype, ctx.TILE_N, ctx.OFFSET, str(dY.device))
+        if bwd_cache_key not in _rms_layernorm_tune_cache:
+            result = exhaustive_search(
+                list(autotune_configs()),
+                stream,
+                lambda cfg: (n_rows,),
+                _rms_layernorm_backward_ct_1d,
+                lambda cfg: (dX, dY, X, W, r, n_cols, ctx.OFFSET, ctx.TILE_N),
+                lambda cfg: {"occupancy": cfg.occupancy},
+            )
+            best_cfg = result.best.config
+            _rms_layernorm_tune_cache[bwd_cache_key] = ct.kernel(
+                _rms_layernorm_backward_ct_1d._pyfunc,
+                occupancy=best_cfg.occupancy,
+            )
+        tuned_bwd_kernel = _rms_layernorm_tune_cache[bwd_cache_key]
+        ct.launch(
             stream,
-            grid_fn=lambda cfg: (n_rows,),
-            kernel=_rms_layernorm_backward_ct_1d,
-            args_fn=lambda cfg: (dX, dY, X, W, r, n_cols, ctx.OFFSET, ctx.TILE_N),
-            hints_fn=lambda cfg: {"occupancy": cfg.occupancy},
-            search_space=autotune_configs,
+            (n_rows,),
+            tuned_bwd_kernel,
+            (dX, dY, X, W, r, n_cols, ctx.OFFSET, ctx.TILE_N),
         )
 
         return dX.view(*shape), None, None, None

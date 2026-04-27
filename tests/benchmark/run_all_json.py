@@ -199,7 +199,7 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
             [sys.executable, str(benchmark_file)],
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minute timeout per benchmark
+            timeout=1200,  # 20 minute timeout per benchmark
             cwd=benchmark_file.parent,
         )
 
@@ -232,8 +232,8 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
             "benchmark_file": benchmark_file.name,
             "status": "TIMEOUT",
             "error_type": "TimeoutError",
-            "error_message": "Benchmark exceeded 10 minute timeout",
-            "error": "Benchmark exceeded 10 minute timeout",
+            "error_message": "Benchmark exceeded 20 minute timeout",
+            "error": "Benchmark exceeded 20 minute timeout",
             "benchmarks": [],
         }
     except Exception as e:

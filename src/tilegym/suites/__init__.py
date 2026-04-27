@@ -6,6 +6,9 @@
 TileGym Suites - cutile implementations for external kernel libraries
 
 Usage:
+    # Import flashinfer suite
+    from tilegym.suites import flashinfer
+    output = flashinfer.ops.decode_attention_kv_paged(q, k_cache, v_cache, ...)
 
     # Import unsloth suite
     from tilegym.suites import unsloth
@@ -19,8 +22,10 @@ def list_available() -> List[str]:
     """List all available suites"""
     available = []
     try:
+        from . import flashinfer
         from . import unsloth
 
+        available.append("flashinfer")
         available.append("unsloth")
     except ImportError:
         pass

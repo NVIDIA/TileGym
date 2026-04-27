@@ -5,13 +5,16 @@
 from types import SimpleNamespace
 
 import cuda.tile as ct
-import cuda.tile_experimental as ct_experimental
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Module-level tune cache: (group_shapes, transpose_b, dtype, device) -> (best_cfg, tuned_kernel)
+_group_gemm_tune_cache: dict = {}
 
 # Type aliases for constants
 ConstInt = ct.Constant[int]
@@ -121,26 +124,51 @@ def _group_gemm_autotune_configs():
 def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device):
     """Autotune group GEMM kernel."""
     NUM_SMS = torch.cuda.get_device_properties(device).multi_processor_count
-
-    ct_experimental.autotune_launch(
+    group_shapes = tuple((tuple(A.shape), tuple(B.shape)) for A, B in zip(group_A, group_B))
+    cache_key = (group_shapes, transpose_b, group_A[0].dtype, str(group_A[0].device))
+    if cache_key not in _group_gemm_tune_cache:
+        with ct.compiler_timeout(5):
+            result = exhaustive_search(
+                list(_group_gemm_autotune_configs()),
+                stream,
+                lambda cfg: (NUM_SMS // cfg.num_ctas * cfg.occupancy, 1, 1),
+                group_gemm_kernel,
+                lambda cfg: (
+                    group_A,
+                    group_B,
+                    group_C,
+                    cfg.TILE_M,
+                    cfg.TILE_N,
+                    cfg.TILE_K,
+                    NUM_SMS // cfg.num_ctas * cfg.occupancy,
+                    transpose_b,
+                ),
+                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            )
+        best_cfg = result.best.config
+        _group_gemm_tune_cache[cache_key] = (
+            best_cfg,
+            ct.kernel(
+                group_gemm_kernel._pyfunc,
+                num_ctas=best_cfg.num_ctas,
+                occupancy=best_cfg.occupancy,
+            ),
+        )
+    best_cfg, tuned_kernel = _group_gemm_tune_cache[cache_key]
+    ct.launch(
         stream,
-        grid_fn=lambda cfg: (NUM_SMS // cfg.num_ctas * cfg.occupancy, 1, 1),
-        kernel=group_gemm_kernel,
-        args_fn=lambda cfg: (
+        (NUM_SMS // best_cfg.num_ctas * best_cfg.occupancy, 1, 1),
+        tuned_kernel,
+        (
             group_A,
             group_B,
             group_C,
-            cfg.TILE_M,
-            cfg.TILE_N,
-            cfg.TILE_K,
-            NUM_SMS // cfg.num_ctas * cfg.occupancy,
+            best_cfg.TILE_M,
+            best_cfg.TILE_N,
+            best_cfg.TILE_K,
+            NUM_SMS // best_cfg.num_ctas * best_cfg.occupancy,
             transpose_b,
         ),
-        hints_fn=lambda cfg: {
-            "num_ctas": cfg.num_ctas,
-            "occupancy": cfg.occupancy,
-        },
-        search_space=_group_gemm_autotune_configs,
     )
     return group_C
 
@@ -169,7 +197,6 @@ def group_gemm(
         C = torch.empty((M, N), device=device, dtype=dtype)
         group_C.append(C)
 
-    # Autotune mode
     stream = torch.cuda.current_stream()
     cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device)
     return group_C

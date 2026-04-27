@@ -20,6 +20,8 @@ class FromEnvironment(argparse.Action):
             default = os.environ[envvar]
             if nargs in ["+", "*"]:
                 default = default.split(",")
+            elif "type" in kwargs and kwargs["type"] is bool:
+                default = default.lower() not in ("0", "false", "no", "")
         if required and default is not None:
             required = False
         if "choices" in kwargs:
