@@ -283,7 +283,7 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
     # Call autotuner to find the best config and execute the kernel
     cache_key = (batch_size, M, N, K, transpose_a, transpose_b, a.dtype, str(a.device))
     if cache_key not in _bmm_tune_cache:
-        with ct.compiler_timeout(5):
+        with ct.compiler_timeout(10):
             result = exhaustive_search(
                 list(_bmm_autotune_configs()),
                 stream,
