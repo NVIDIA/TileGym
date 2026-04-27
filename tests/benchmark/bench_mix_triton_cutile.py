@@ -131,7 +131,7 @@ def bench_mix_triton_cutile(N, backend, dtype, M, device=DEVICE):
             # Step 1: Triton vector add
             added = triton_vector_add(x, y)
             # Step 2: CuTile rmsnorm
-            return tilegym.ops.cutile.rms_norm(added, w_shape, weight, eps, static_persistent=True)
+            return tilegym.ops.cutile.rms_norm(added, w_shape, weight, eps, mode="static_persistent")
 
         fn = mixed_fn
 

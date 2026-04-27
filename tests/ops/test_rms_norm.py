@@ -42,13 +42,13 @@ class Test_RMSNorm(common.PyTestCase):
             (256, 256, torch.float32),
         ],
     )
-    @pytest.mark.parametrize("static_persistent", [True, False])
+    @pytest.mark.parametrize("mode", [None, "static_persistent", "multi_wave_reload", "multi_wave_cached"])
     @pytest.mark.parametrize("backend", _backends)
     @markif(
         lambda arch, m, n: arch in ["sm120", "sm121"] and m == 31072 and n == 4096,
         mark=pytest.mark.slow,
     )
-    def test_op(self, m, n, dtype, static_persistent, backend, arch):
+    def test_op(self, m, n, dtype, mode, backend, arch):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:
@@ -56,7 +56,8 @@ class Test_RMSNorm(common.PyTestCase):
 
         # skip static_persistent tests when n > 16384 to avoid excessive memory usage
         # Avoid tileiras hangs on RTX PRO 6000 which has 100 KB shared memory per SM
-        if static_persistent and n > 16384:
+        # mode=None can also select static_persistent via heuristic when M > NUM_SMS * 2
+        if mode in ("static_persistent", None) and n > 16384:
             pytest.skip("Skipping static_persistent test for large n to avoid excessive memory usage")
 
         self.setUp()
@@ -81,7 +82,7 @@ class Test_RMSNorm(common.PyTestCase):
                     "eps": eps,
                 },
                 extra_test_kwargs={
-                    "static_persistent": static_persistent,
+                    "mode": mode,
                 },
                 rtol=0.0,
                 atol=5e-2,

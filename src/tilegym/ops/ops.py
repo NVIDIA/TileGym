@@ -138,7 +138,7 @@ def rms_norm(
     weight: torch.Tensor,
     eps: float,
     bias: Optional[torch.Tensor] = None,
-    static_persistent: bool = False,
+    mode: Optional[str] = None,
     **kwargs: Any,
 ):
     """
@@ -150,7 +150,7 @@ def rms_norm(
         weight: Tensor of shape (N,)
         eps: small scaler to be added to variance calculation prior to division.
         bias: Bias tensor of shape (N,), default is None
-        static_persistent: Whether to use static persistent kernel, default is False
+        mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload", "multi_wave_cached")
         **kwargs: Additional arguments for backend-specific configurations
     """
     raise NotImplementedError(f"rms_norm is not implemented for {get_current_backend()}")

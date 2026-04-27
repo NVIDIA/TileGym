@@ -13,6 +13,46 @@ from .utils import next_power_of_2
 
 
 @ct.kernel
+def rms_norm_kernel_multi_wave_cached(
+    x,
+    w,
+    out,
+    Rstd,
+    N: ct.Constant[int],
+    eps: ct.Constant[float],
+    offset: ct.Constant[float],
+    TILE_SIZE: ct.Constant[int],
+):
+    """
+    Multi-wave RMSNorm kernel that caches inputs in registers (single tile).
+
+    Formula: y = norm(x) * (offset + w)
+    For Llama: offset=0.0, For Gemma3: offset=1.0
+    """
+    row = ct.bid(0)
+    _rms = ct.full((TILE_SIZE,), 0.0, dtype=ct.float32)
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+    check_bound = TILE_SIZE != N
+
+    # cache inputs in registers
+    xj = ct.gather(x, (row, offsets), check_bounds=check_bound, latency=1)
+    xj = ct.astype(xj, ct.float32)
+    _rms += xj * xj
+
+    # Calculate RMS Norm
+    rms = ct.rsqrt(ct.sum(_rms, axis=0, keepdims=False) / N + eps)
+    ct.scatter(Rstd, row, rms)
+
+    wj = ct.gather(w, offsets, check_bounds=check_bound, latency=1)
+    wj = ct.astype(wj, ct.float32)
+
+    # Apply offset: y = x_normalized * (offset + w)
+    yj = xj * rms * (offset + wj)
+    yj = ct.astype(yj, x.dtype)
+    ct.scatter(out, (row, offsets), yj, latency=1)
+
+
+@ct.kernel
 def rms_norm_kernel_gather(
     x,
     w,
@@ -256,7 +296,7 @@ class RMSNorm(torch.autograd.Function):
         weight,
         eps,
         bias=None,
-        static_persistent=None,
+        mode=None,
         offset=0.0,
     ):
         """
@@ -268,7 +308,7 @@ class RMSNorm(torch.autograd.Function):
             weight: Weight tensor of shape [N]
             eps: Epsilon value for numerical stability
             bias: Bias tensor of shape [N], default is None
-            static_persistent: Whether to use static persistent kernel, default is False
+            mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload", "multi_wave_cached")
             offset: Offset to add to weight (default 0.0 for Llama, 1.0 for Gemma3)
 
         Returns:
@@ -294,17 +334,17 @@ class RMSNorm(torch.autograd.Function):
 
         NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
-        if static_persistent is None:
+        if mode is None:
             if M > NUM_SMS * 2:
                 # Heuristic for static persistent mode: if we need run over 2 waves, use static persistent mode
-                static_persistent = True
+                mode = "static_persistent"
             else:
-                static_persistent = False
+                mode = "multi_wave_reload"
 
         # Allocate rstd for backward (both paths now store it)
         rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
 
-        if static_persistent:
+        if mode == "static_persistent":
             # Static persistent mode
             if bias is not None:
                 raise NotImplementedError("Bias is not supported in static persistent CuTile RMSNorm")
@@ -349,8 +389,21 @@ class RMSNorm(torch.autograd.Function):
                 rms_norm_kernel_static_persistent,
                 (x_arg, y, weight, rstd, TILE_SIZE_M, TILE_SIZE_N, eps, offset),
             )
-        else:
-            # Standard mode
+        elif mode == "multi_wave_cached":
+            # Multi-wave cached mode (single tile, inputs cached in registers)
+            if bias is not None:
+                raise NotImplementedError("Bias is not supported in multi_wave_cached CuTile RMSNorm")
+
+            TILE_SIZE = next_power_of_2(N)
+            grid = (M,)
+            ct.launch(
+                torch.cuda.current_stream(),
+                grid,
+                rms_norm_kernel_multi_wave_cached,
+                (x_arg, weight, y, rstd, N, eps, offset, TILE_SIZE),
+            )
+        elif mode == "multi_wave_reload":
+            # Standard multi-wave reload mode
             if bias is not None:
                 raise NotImplementedError("Bias is not supported in standard CuTile RMSNorm")
 
@@ -371,6 +424,11 @@ class RMSNorm(torch.autograd.Function):
                     offset,
                     TILE_SIZE,
                 ),
+            )
+        else:
+            raise ValueError(
+                f"Unknown mode '{mode}'. Supported modes: None, 'static_persistent', "
+                f"'multi_wave_reload', 'multi_wave_cached'"
             )
 
         # Always save for backward (both paths now produce rstd)
@@ -396,12 +454,12 @@ class RMSNorm(torch.autograd.Function):
         x, weight, rstd = ctx.saved_tensors
         dx, dw = rms_norm_backward(x, dy, weight, rstd)
 
-        # Gradients: (x, normalized_shape, weight, eps, bias, static_persistent, offset)
+        # Gradients: (x, normalized_shape, weight, eps, bias, mode, offset)
         return dx, None, dw, None, None, None, None
 
 
 @register_impl("rms_norm", backend="cutile")
-def rms_norm(input, normalized_shape, weight, eps, bias=None, static_persistent=None, offset=0.0, **kwargs):
+def rms_norm(input, normalized_shape, weight, eps, bias=None, mode=None, offset=0.0, **kwargs):
     """
     Root mean square normalization implemented using CUDA Tile
 
@@ -411,14 +469,14 @@ def rms_norm(input, normalized_shape, weight, eps, bias=None, static_persistent=
         weight: Tensor of shape (N,)
         eps: Small constant added to variance calculation
         bias: Bias tensor of shape (N,), default is None (not supported in cutile)
-        static_persistent: Whether to use static persistent kernel, default is False
+        mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload", "multi_wave_cached")
         offset: Offset to add to weight (default 0.0 for Llama, 1.0 for Gemma3)
         **kwargs: Additional arguments for backend-specific configurations
 
     Returns:
         Normalized tensor with same shape as input
     """
-    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, static_persistent, offset)
+    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, mode, offset)
 
 
 class TileRMSNorm(nn.Module):
@@ -437,21 +495,21 @@ class TileRMSNorm(nn.Module):
         self.hidden_size = hidden_size
         self.offset = offset
 
-    def forward(self, hidden_states, static_persistent=None):
+    def forward(self, hidden_states, mode=None):
         """
-        Forward pass with optional static_persistent override
+        Forward pass with optional mode override
 
         Args:
             hidden_states: Input tensor
-            static_persistent: Default is None, which means use heuristic to
-                               decide whether to use static persistent mode for better performance
+            mode: Default is None, which means use heuristic to
+                               decide which kernel mode to use for better performance
         """
         return rms_norm(
             hidden_states,
             None,
             self.weight,
             self.variance_epsilon,
-            static_persistent=static_persistent,
+            mode=mode,
             offset=self.offset,
         )
 

@@ -91,9 +91,9 @@ class Test_RMSNormAutogradBackward(common.PyTestCase):
             (256, 256, torch.float32),
         ],
     )
-    @pytest.mark.parametrize("static_persistent", [True, False])
+    @pytest.mark.parametrize("mode", [None, "static_persistent", "multi_wave_reload", "multi_wave_cached"])
     @pytest.mark.parametrize("backend", _backends)
-    def test_op(self, m, n, dtype, static_persistent, backend, arch):
+    def test_op(self, m, n, dtype, mode, backend, arch):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:
@@ -114,7 +114,7 @@ class Test_RMSNormAutogradBackward(common.PyTestCase):
             (n,),
             w_cutile,
             eps,
-            static_persistent=static_persistent,
+            mode=mode,
         )
         y_cutile.backward(dy)
 
