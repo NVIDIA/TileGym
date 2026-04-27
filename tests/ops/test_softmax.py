@@ -40,6 +40,7 @@ class Test_Softmax(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
+        self.setUp()
         device = torch.device("cuda")
         x = torch.rand(
             m,
