@@ -618,12 +618,6 @@ def fmha_bwd_dq_kernel(
     ct.store(dQ, index=(batch_idx, head_idx, bid_m, 0), tile=dq_store)
 
 
-_FMHA_FWD_TILE_CONFIGS_BY_D = {
-    64: ([64, 128, 256], [32, 64, 128]),
-    128: ([64, 128, 256], [32, 64, 128]),
-    256: ([64, 128], [32, 64]),
-}
-
 _FMHA_BWD_DKDV_TILE_CONFIGS_BY_D = {
     64: ([32, 64, 128], [64, 128]),
     128: ([16, 32, 64], [32, 64]),
@@ -652,12 +646,22 @@ def _iter_tile_configs(tile_ms: list[int], tile_ns: list[int]):
 def _fmha_autotune_configs(head_dim: int | None = None):
     """
     Iterator of autotune configurations for FMHA forward kernel.
-
-    Only tunes tile sizes; num_ctas and occupancy are left to the compiler.
     """
-    key = _head_dim_key(head_dim)
-    tile_ms, tile_ns = _FMHA_FWD_TILE_CONFIGS_BY_D.get(key, ([64, 128, 256], [32, 64, 128]))
-    yield from _iter_tile_configs(tile_ms, tile_ns)
+    gpu_capability = torch.cuda.get_device_capability()
+
+    if gpu_capability in [(12, 0), (12, 1)]:
+        # sm120, sm121
+        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
+    elif gpu_capability[0] < 9:
+        # GPU capability < 9.0 (A100, etc.)
+        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=128, TILE_N=64, num_ctas=1, occupancy=2)
+    else:
+        # sm100+ (Blackwell and newer)
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=2, occupancy=2)
 
 
 # --- FMHA Forward Kernel (for inference, no backward) ---
@@ -778,10 +782,17 @@ def cutile_autotune_fmha(
                         is_causal,
                         EVEN_K,
                     ),
+                    lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
                 )
             best_cfg = result.best.config
-            tuned_kernel = fmha_kernel
-            _fmha_fwd_tune_cache[fwd_cache_key] = (best_cfg, tuned_kernel)
+            _fmha_fwd_tune_cache[fwd_cache_key] = (
+                best_cfg,
+                ct.kernel(
+                    fmha_kernel._pyfunc,
+                    num_ctas=best_cfg.num_ctas,
+                    occupancy=best_cfg.occupancy,
+                ),
+            )
         best_cfg, tuned_kernel = _fmha_fwd_tune_cache[fwd_cache_key]
         ct.launch(
             stream,
