@@ -17,7 +17,7 @@ def _check_torch_dependencies():
         ) from None
 
 
-def _check_ct_experimental_dependency():
+def _check_ct_tune_dependency():
     """Verify that cuda-tile with tune support is installed with helpful error message."""
     try:
         import cuda.tile.tune  # noqa: F401
@@ -32,6 +32,8 @@ def _check_ct_experimental_dependency():
 
 # Check dependencies before any imports
 _check_torch_dependencies()
+
+import torch
 
 # Import logging utilities
 from .logger import get_logger
@@ -52,7 +54,7 @@ from .backend import set_backend
 
 # Setup cutile integration
 if is_backend_available("cutile"):
-    _check_ct_experimental_dependency()
+    _check_ct_tune_dependency()
     # Apply experimental kernel tracking patch
     from .experimental import _apply_patch as _apply_experimental_patch
 

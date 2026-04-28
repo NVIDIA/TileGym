@@ -29,17 +29,17 @@ def experimental_kernel(message_or_kernel=None):
 
     Usage:
         @experimental_kernel
-        @ct.kernel(occupancy=2)
+        @ct.kernel
         def my_kernel(...):
             ...
 
         @experimental_kernel()
-        @ct.kernel(occupancy=2)
+        @ct.kernel
         def my_kernel(...):
             ...
 
         @experimental_kernel("Custom warning message.")
-        @ct.kernel(occupancy=2)
+        @ct.kernel
         def my_kernel(...):
             ...
     """
