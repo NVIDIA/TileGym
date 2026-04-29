@@ -5,7 +5,6 @@
 """Tests for Gemma attention decode implementation with soft cap and sliding window support"""
 
 import math
-import os
 from typing import Optional
 from typing import Tuple
 
@@ -132,6 +131,7 @@ def einsum_reference_decode(
 
 class TestGemmaAttentionDecode(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_size, num_heads, num_kv_heads, seq_len_kv, head_dim, window_size, soft_cap, dtype",
@@ -178,6 +178,8 @@ class TestGemmaAttentionDecode(common.PyTestCase):
         """Test Gemma attention decode correctness against pure PyTorch reference"""
         if arch in ["sm120", "sm121"]:
             pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+        if arch in ["sm80"]:
+            pytest.skip("Skip on sm80: Gemma attention decode requires SM90+")
         self.setUp()
         set_backend(framework)
         device = torch.device("cuda")
@@ -209,3 +211,93 @@ class TestGemmaAttentionDecode(common.PyTestCase):
             rtol=1e-2,
             check_stride=False,
         )
+
+    @pytest.mark.parametrize(
+        "batch_size, num_heads, num_kv_heads, seq_len_kv, head_dim, window_size, soft_cap, dtype",
+        [
+            # Performance benchmarks
+            (1, 16, 8, 4096, 128, 0, 50.0, torch.bfloat16),
+            (1, 16, 8, 8192, 128, 4096, 50.0, torch.bfloat16),
+            # Long sequence decode
+            (1, 32, 8, 16384, 128, 0, 50.0, torch.bfloat16),
+        ],
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(
+        self,
+        batch_size,
+        num_heads,
+        num_kv_heads,
+        seq_len_kv,
+        head_dim,
+        window_size,
+        soft_cap,
+        dtype,
+        framework: str,
+        record_property,
+        arch,
+    ):
+        """Benchmark Gemma attention decode performance"""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA support required")
+        if arch in ["sm120", "sm121"]:
+            pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+        if arch in ["sm80"]:
+            pytest.skip("Skip on sm80: Gemma attention decode requires SM90+")
+        self.setUp()
+        device = torch.device("cuda")
+
+        # Create test data
+        q, k, v = _get_qkv_decode(batch_size, num_heads, num_kv_heads, seq_len_kv, head_dim, device, dtype)
+        scaling = 1.0 / math.sqrt(head_dim)
+
+        if framework == "pytorch":
+            framework_fn = lambda: einsum_reference_decode(
+                q=q,
+                k=k,
+                v=v,
+                scaling=scaling,
+                window_size=window_size,
+                soft_cap=soft_cap,
+            )
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: gemma_attention_decode(
+                q=q,
+                k=k,
+                v=v,
+                scaling=scaling,
+                window_size=window_size,
+                soft_cap=soft_cap,
+            )
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        # Verify correctness before benchmarking
+        if framework != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: einsum_reference_decode(
+                    q=q,
+                    k=k,
+                    v=v,
+                    scaling=scaling,
+                    window_size=window_size,
+                    soft_cap=soft_cap,
+                ),
+                kwargs={},
+                atol=1e-2,
+                rtol=1e-2,
+                check_stride=False,
+            )
+
+        # Benchmark
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        record_property("benchmark", result)
+
+        # Cleanup
+        del q, k, v, framework_fn
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

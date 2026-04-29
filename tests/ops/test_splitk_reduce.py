@@ -40,6 +40,7 @@ class Test_SplitkReduce(common.PyTestCase):
         return attn_out.to(attn_splitk_out.dtype)
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("batch_size", [1, 2])  # Match MLA workload
     @pytest.mark.parametrize("num_heads", [16, 32])  # Match MLA workload
@@ -126,3 +127,93 @@ class Test_SplitkReduce(common.PyTestCase):
             rtol=1e-2,
             multiple_outputs=False,
         )
+
+    @pytest.mark.parametrize("batch_size", [1])  # Match MLA workload
+    @pytest.mark.parametrize("num_heads", [16, 32])
+    @pytest.mark.parametrize("head_dim", [512])  # Match MLA BLOCK_D
+    @pytest.mark.parametrize("num_kv_splits", [2, 8, 16, 64])  # MLA common split counts
+    @pytest.mark.parametrize("dtype", [torch.float16])
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(
+        self,
+        batch_size,
+        num_heads,
+        head_dim,
+        num_kv_splits,
+        dtype,
+        framework,
+        record_property,
+    ):
+        """Performance test for splitk_reduce"""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA support required")
+
+        self.setUp()
+        device = torch.device("cuda")
+        torch.manual_seed(42)  # For reproducibility
+
+        # Set S_kv based on num_kv_splits to match MLA actual workload
+        if num_kv_splits == 2:
+            S_kv = 1024  # S_kv=1024 with kv_len_per_split=512
+        elif num_kv_splits == 8:
+            S_kv = 1024  # S_kv=1024 with kv_len_per_split=128
+        elif num_kv_splits == 16:
+            S_kv = 8192  # S_kv=8192 with kv_len_per_split=512
+        elif num_kv_splits == 64:
+            S_kv = 8192  # S_kv=8192 with kv_len_per_split=128
+        else:
+            S_kv = num_kv_splits * 128  # Default
+
+        # Create test data
+        attn_splitk_out = torch.randn(
+            batch_size,
+            num_heads,
+            num_kv_splits,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        lse_splitk_out = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                num_kv_splits,
+                device=device,
+                dtype=torch.float32,
+            )
+            * 2.0
+            + 5.0
+        )
+
+        attn_out = torch.empty(batch_size, num_heads, head_dim, device=device, dtype=dtype)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(attn_splitk_out, lse_splitk_out, S_kv)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        if framework != "pytorch":
+            # Verify correctness before benchmarking
+            atol = 1e-2
+            rtol = 1e-2
+            self.assertCorrectness(
+                framework_fn,
+                lambda: self.reference(attn_splitk_out, lse_splitk_out, S_kv),
+                kwargs={},
+                atol=atol,
+                rtol=rtol,
+                multiple_outputs=False,
+            )
+
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        record_property("benchmark", result)
+
+        # Explicit cleanup to prevent OOM
+        del attn_splitk_out, lse_splitk_out, attn_out, framework_fn
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

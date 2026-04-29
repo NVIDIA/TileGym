@@ -5,13 +5,13 @@
 """Tests for gemma-specific attention implementation"""
 
 import math
-import os
 from typing import Optional
 from typing import Tuple
 
 import pytest
 import torch
 
+import tilegym
 from tilegym.backend import set_backend
 from tilegym.ops import gemma_attention
 
@@ -195,6 +195,7 @@ def einsum_reference(
 
 class TestGemmaAttention(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_size, num_heads, num_kv_heads, seq_len, head_dim, window_size, soft_cap, is_causal, dtype",
@@ -229,6 +230,8 @@ class TestGemmaAttention(common.PyTestCase):
         """Test gemma attention correctness against pure PyTorch reference"""
         if arch in ["sm120", "sm121"]:
             pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+        if arch in ["sm80"]:
+            pytest.skip("Skip on sm80: gemma attention requires SM90+")
 
         self.setUp()
         set_backend(backend)
@@ -259,3 +262,98 @@ class TestGemmaAttention(common.PyTestCase):
             rtol=1e-2,
             check_stride=False,
         )
+
+    @pytest.mark.parametrize(
+        "batch_size, num_heads, num_kv_heads, seq_len, head_dim, window_size, soft_cap, dtype",
+        [
+            # (1, 16, 8, 4096, 128, 0, 50.0, torch.bfloat16),
+            (1, 16, 8, 8192, 128, 4096, 50.0, torch.bfloat16),
+            # (1, 16, 8, 10670, 256, 0, None, torch.bfloat16),
+            # (1, 8, 4, 10670, 256, 1024, None, torch.bfloat16),
+        ],
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(
+        self,
+        batch_size,
+        num_heads,
+        num_kv_heads,
+        seq_len,
+        head_dim,
+        window_size,
+        soft_cap,
+        dtype,
+        framework,
+        record_property,
+        arch,
+    ):
+        """Benchmark gemma attention performance"""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA support required")
+        if arch in ["sm120", "sm121"]:
+            pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+        if arch in ["sm80"]:
+            pytest.skip("Skip on sm80: gemma attention requires SM90+")
+
+        self.setUp()
+        device = torch.device("cuda")
+        is_causal = True
+
+        # Create test data
+        q, k, v = _get_qkv(batch_size, num_heads, num_kv_heads, seq_len, seq_len, head_dim, device, dtype)
+        scaling = 1.0 / math.sqrt(head_dim)
+
+        # Generate mask for reference
+        ref_mask = _get_mask(batch_size, num_heads, seq_len, device, is_causal, window_size)
+
+        if framework == "pytorch":
+            framework_fn = lambda: einsum_reference(
+                q=q,
+                k=k,
+                v=v,
+                scaling=scaling,
+                mask=ref_mask,
+                soft_cap=soft_cap,
+            )
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: gemma_attention(
+                q=q,
+                k=k,
+                v=v,
+                scaling=scaling,
+                window_size=window_size,
+                soft_cap=soft_cap,
+                is_causal=is_causal,
+            )
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        # Verify correctness before benchmarking
+        if framework != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: einsum_reference(
+                    q=q,
+                    k=k,
+                    v=v,
+                    scaling=scaling,
+                    mask=ref_mask,
+                    soft_cap=soft_cap,
+                ),
+                kwargs={},
+                atol=1e-2,
+                rtol=1e-2,
+                check_stride=False,
+            )
+
+        # Benchmark
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        record_property("benchmark", result)
+
+        # Cleanup
+        del q, k, v, framework_fn
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

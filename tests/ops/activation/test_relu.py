@@ -16,6 +16,7 @@ class Test_ReLU(common.PyTestCase):
         return torch.nn.functional.relu(x)
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "m,n,dtype",

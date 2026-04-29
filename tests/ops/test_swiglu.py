@@ -2,10 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 
+import gc
+
 import pytest
 import torch
 import torch.nn.functional as F
 
+import tilegym
 from tests import common
 from tilegym import set_backend
 from tilegym.ops import get_swiglu
@@ -23,6 +26,7 @@ class Test_SwiGLU(common.PyTestCase):
         return F.silu(a) * b
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     # Regular shapes (power-of-2)
     @pytest.mark.parametrize(
@@ -194,3 +198,40 @@ class Test_SwiGLU(common.PyTestCase):
 
         torch.testing.assert_close(a.grad, a_ref.grad, rtol=1e-2, atol=1e-2)
         torch.testing.assert_close(b.grad, b_ref.grad, rtol=1e-2, atol=1e-2)
+
+    @pytest.mark.parametrize(
+        "batch_size,seq_len,hidden_size,intermediate_size",
+        [
+            # (1, 128, 1024, 4096),
+            # (2, 256, 2048, 8192),
+            (8, 1, 4096, 14336)
+        ],
+        ids=lambda x: str(x),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, batch_size, seq_len, hidden_size, intermediate_size, framework, record_property):
+        """Performance comparison for SwiGLU"""
+        self.setUp()
+
+        # Generate input data
+        a = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
+        b = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
+
+        with torch.no_grad():
+            if framework == "pytorch":
+                framework_fn = lambda: self.reference(a, b)
+            elif tilegym.is_backend_available(framework):
+                set_backend(framework)
+                framework_fn = lambda: get_swiglu()(a, b)[2]
+            else:
+                pytest.skip(f"Framework {framework} is not available")
+
+            # Run benchmarks
+            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+            # Log results
+            record_property("benchmark", result)
+
+        # Explicit cleanup to prevent OOM
+        del a, b, framework_fn
+        torch.cuda.empty_cache()
+        gc.collect()

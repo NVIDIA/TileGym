@@ -47,6 +47,7 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         return 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("num_heads", [16, 32])
     @pytest.mark.parametrize("seq_len", [129, 1024, 8192, 11049])
@@ -89,3 +90,66 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
             return self.reference(q, qpe, kv, kpe, sm_scale)
 
         self.assertCorrectness(split_kv_fn, ref_fn, {}, atol=1e-2, rtol=1e-2, multiple_outputs=False)
+
+    @pytest.mark.parametrize("batch_size, num_heads, head_dim, kpe_dim", [(1, 16, 512, 64)])
+    @pytest.mark.parametrize(
+        "seq_len",
+        [2**9, 2**10, 2**11, 2**12, 2**13] + [11049, 31079],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16])
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(
+        self,
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        kpe_dim,
+        dtype,
+        framework,
+        record_property,
+    ):
+        """Performance test for MLA decoding with Split-KV"""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA support required")
+        if torch.cuda.get_device_capability()[0] == 12:
+            pytest.xfail(
+                "Shared memory exhaustion on sm120: MLADecodingSplitKV requires 131,080 B > hardware limit 102,400 B"
+            )
+
+        self.setUp()
+        device = torch.device("cuda")
+
+        # Create test data with specified dtype
+        torch.manual_seed(42)  # For reproducibility
+        q = torch.randn(batch_size, num_heads, head_dim, device=device, dtype=dtype)
+        qpe = torch.randn(batch_size, num_heads, kpe_dim, device=device, dtype=dtype)
+        kv = torch.randn(batch_size, seq_len, head_dim, device=device, dtype=dtype)
+        kpe = torch.randn(batch_size, seq_len, kpe_dim, device=device, dtype=dtype)
+
+        # Calculate scaling factor
+        sm_scale = self._get_sm_scale(q, qpe)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(q, qpe, kv, kpe, sm_scale)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.mla_decoding_split_kv(q, qpe, kv, kpe, sm_scale)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        if framework != "pytorch":
+            # Verify correctness before benchmarking
+            atol = 1e-2
+            rtol = 1e-2
+            self.assertCorrectness(
+                framework_fn,
+                lambda: self.reference(q, qpe, kv, kpe, sm_scale),
+                kwargs={},
+                atol=atol,
+                rtol=rtol,
+                multiple_outputs=False,
+            )
+
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        record_property("benchmark", result)

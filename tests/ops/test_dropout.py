@@ -16,6 +16,7 @@ class Test_Dropout(common.PyTestCase):
         return torch.nn.functional.dropout(x, p, training, inplace)
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "m, p, training, inplace, dtype, eps",
@@ -87,3 +88,42 @@ class Test_Dropout(common.PyTestCase):
             assert p - threshold < zero_ratio < p + threshold, zero_ratio
         else:
             self.assertAllClose(x, x_clone, rtol=0, atol=0)
+
+    @pytest.mark.parametrize(
+        "m, p, inplace, dtype",
+        [
+            (m, p, inplace, dtype)
+            for m in [2**i for i in range(20, 28, 2)]
+            for p in [0.5]
+            for inplace in [True, False]
+            for dtype in [torch.float32, torch.float16]
+        ],
+        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, m, p, inplace, dtype, framework, record_property):
+        self.setUp()
+        seed = torch.random.initial_seed()
+        device = torch.device("cuda")
+
+        requires_grad = False
+
+        x = torch.rand(m, device=device, dtype=dtype, requires_grad=requires_grad)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(x, p, True, inplace)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.dropout(x, seed, p, True, inplace)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        record_property("benchmark", res)
+
+        # Explicit cleanup to prevent OOM
+        del x, framework_fn
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

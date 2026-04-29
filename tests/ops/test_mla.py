@@ -7,6 +7,7 @@ import math
 import pytest
 import torch
 
+import tilegym
 from tilegym.backend import set_backend
 from tilegym.ops import mla_interface
 
@@ -77,6 +78,7 @@ class Test_MLA(common.PyTestCase):
         return o
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("is_causal", [True, False])
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -174,3 +176,95 @@ class Test_MLA(common.PyTestCase):
             rtol=1e-2,
             atol=1e-2,
         )
+
+    @pytest.mark.parametrize(
+        "batch,heads,seq_len,d_model,d_pe,dtype",
+        [
+            (4, 32, seq_len, 128, 64, dtype)
+            for seq_len in [2**9, 2**10, 2**11, 2**12, 2**13]
+            for dtype in [torch.bfloat16, torch.float8_e5m2]
+        ],
+        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+    )
+    @pytest.mark.parametrize("is_causal", [True])
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, batch, heads, seq_len, d_model, d_pe, dtype, is_causal, framework, record_property):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA support required")
+        if framework == "cutile":
+            if is_causal == False:
+                pytest.skip("Skip non-causal case for cutile")
+        if dtype == torch.float8_e5m2 and torch.cuda.get_device_capability()[0] == 8:
+            pytest.skip("Skip case due to sm80 not support float8")
+        if seq_len == 8192 and torch.cuda.get_device_capability()[0] == 8:
+            pytest.skip("Skip case on ampere due to OOM")
+        if torch.cuda.get_device_capability() == (12, 0) and seq_len == 8192:
+            pytest.skip("Skip OOM on B20X (sm120): MLA with seqlen=8192 requires 16 GiB, exceeds 32 GiB total VRAM")
+        self.setUp()
+        device = torch.device("cuda")
+        # Create random tensors
+        q = (
+            torch.empty(batch, heads, seq_len, d_model, device=device, dtype=torch.half)
+            .normal_(mean=0.0, std=0.3)
+            .to(dtype)
+        )
+
+        qpe = (
+            torch.empty(batch, heads, seq_len, d_pe, device=device, dtype=torch.half)
+            .normal_(mean=0.0, std=0.3)
+            .to(dtype)
+        )
+
+        k = (
+            torch.empty(batch, heads, seq_len, d_model, device=device, dtype=torch.half)
+            .normal_(mean=0.0, std=0.3)
+            .to(dtype)
+        )
+
+        kpe = torch.empty(batch, 1, seq_len, d_pe, device=device, dtype=torch.half).normal_(mean=0.0, std=0.3).to(dtype)
+
+        v = (
+            torch.empty(batch, heads, seq_len, d_model, device=device, dtype=torch.half)
+            .normal_(mean=0.0, std=0.3)
+            .to(dtype)
+        )
+
+        # Calculate scaling
+        scaling = 1.0 / math.sqrt(d_model + d_pe)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(q, k, v, qpe, kpe, is_causal, scaling)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: mla_interface(q, k, v, qpe, kpe, is_causal, scaling)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        # pytorch reference uses dynamic tensor creation (torch.triu_indices) which is
+        # incompatible with CUDA graph capture — disabling cudagraph for that framework
+        # to prevent capture_epilogue() being skipped on failure, which would leave the
+        # default CUDA generator in capturing_=True state and corrupt subsequent tests.
+        use_cudagraph = framework != "pytorch"
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=use_cudagraph)
+        record_property("benchmark", result)
+
+        if dtype == torch.bfloat16:
+            tols = {"rtol": 1e-2, "atol": 1e-2}
+        else:
+            tols = {"rtol": 1e-1, "atol": 1e-1}
+
+        torch.cuda.empty_cache()
+        # check after benchmark
+        self.assertCorrectness(
+            framework_fn,
+            lambda: self.reference(q, k, v, qpe, kpe, is_causal, scaling),
+            kwargs={},
+            **tols,
+        )
+
+        # Explicit cleanup to prevent OOM
+        del q, k, v, qpe, kpe, framework_fn
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

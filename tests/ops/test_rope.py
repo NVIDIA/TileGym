@@ -46,6 +46,7 @@ class Test_RoPE(common.PyTestCase):
         return torch.cat([q_rot, q_pass], dim=-1), torch.cat([k_rot, k_pass], dim=-1)
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "bsz, seq_len, num_q_heads, num_kv_heads, head_dim, partial_rotary_factor",
@@ -218,3 +219,103 @@ class Test_RoPE(common.PyTestCase):
 
         torch.testing.assert_close(q_ref.grad, q_tt.grad, atol=atol, rtol=rtol)
         torch.testing.assert_close(k_ref.grad, k_tt.grad, atol=atol, rtol=rtol)
+
+    @pytest.mark.parametrize(
+        "bsz, seq_len, num_q_heads, num_kv_heads, head_dim, partial_rotary_factor",
+        [
+            # Full RoPE
+            (8, 1, 32, 32, 128, 1.0),
+            (8, 128, 32, 32, 128, 1.0),
+            (8, 65536, 32, 32, 128, 1.0),
+            # different q/k heads
+            (8, 1, 32, 8, 128, 1.0),
+            (8, 128, 32, 8, 128, 1.0),
+            (8, 65536, 32, 8, 128, 1.0),
+            # Partial RoPE: Qwen3.5 config
+            (8, 1, 32, 8, 256, 0.25),
+            (8, 128, 32, 8, 256, 0.25),
+            (8, 65536, 32, 8, 256, 0.25),
+            # Partial RoPE: 50% rotation
+            (8, 1, 32, 8, 128, 0.5),
+            (8, 128, 32, 8, 128, 0.5),
+            (8, 65536, 32, 8, 128, 0.5),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16])
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(
+        self,
+        bsz,
+        seq_len,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        partial_rotary_factor,
+        dtype,
+        framework,
+        record_property,
+    ):
+        self.setUp()
+        if torch.cuda.get_device_capability() == (12, 0) and seq_len == 65536:
+            pytest.skip("Skip OOM on B20X (sm120): RoPE with seq_len=65536 exceeds 32 GiB VRAM")
+        if framework == "pytorch":
+            pass
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        device = torch.device("cuda")
+        rope_dim = int(head_dim * partial_rotary_factor)
+
+        _tensor_q = (
+            torch.randn((bsz, seq_len, num_q_heads, head_dim), device=device)
+            .normal_(mean=0.0, std=1.0)
+            .transpose(1, 2)
+            .to(dtype)
+        )
+        _tensor_k = (
+            torch.randn((bsz, seq_len, num_kv_heads, head_dim), device=device)
+            .normal_(mean=0.0, std=1.0)
+            .transpose(1, 2)
+            .to(dtype)
+        )
+
+        pos_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(bsz, -1)
+        rotary_emb = LlamaRotaryEmbedding(
+            config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim),
+            device=device,
+        )
+        cos, sin = rotary_emb(_tensor_k, pos_ids)
+
+        if framework == "pytorch":
+            if partial_rotary_factor < 1.0:
+                framework_fn = lambda: self.reference_partial_rope(_tensor_q.clone(), _tensor_k.clone(), cos, sin)
+            else:
+                framework_fn = lambda: apply_rotary_pos_emb(_tensor_q, _tensor_k, cos, sin)
+        else:
+            framework_fn = lambda: tilegym.ops.apply_rope_base(
+                _tensor_q, _tensor_k, cos, sin, partial_rotary_factor=partial_rotary_factor
+            )
+
+        # Validate correctness first
+        if framework != "pytorch":
+            if partial_rotary_factor < 1.0:
+                ref_q, ref_k = self.reference_partial_rope(_tensor_q.clone(), _tensor_k.clone(), cos, sin)
+            else:
+                ref_q, ref_k = apply_rotary_pos_emb(_tensor_q.clone(), _tensor_k.clone(), cos, sin)
+            test_q, test_k = framework_fn()
+            torch.testing.assert_close(ref_q, test_q, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(ref_k, test_k, atol=1e-2, rtol=1e-2)
+
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        record_property("benchmark", result)
+
+        # Explicit cleanup to prevent OOM
+        del _tensor_q, _tensor_k, pos_ids, cos, sin, framework_fn
+        if "rotary_emb" in locals():
+            del rotary_emb
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()
