@@ -238,7 +238,7 @@ def fused_experts_impl(
             use_int8_w8a16=use_int8_w8a16,
         )
         if topk_ids.shape[1] == 1:
-            pass  # we write directly into out_hidden_states
+            out_hidden_states[begin_chunk_idx:end_chunk_idx] = intermediate_cache3[:, 0]
         elif topk_ids.shape[1] == 2:
             torch.add(
                 intermediate_cache3[:, 0],
