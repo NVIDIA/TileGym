@@ -1,21 +1,22 @@
 ---
 name: converting-cutile-to-triton
 version: "1.0.0"
-author: "NVIDIA Corporation"
 description: Converts cuTile GPU kernels (@ct.kernel) to Triton (@triton.jit). Handles standard in-repo conversion, debugging (cudaErrorIllegalAddress, shape mismatch, numerical mismatch), and mapping cuTile idioms (ct.load/ct.store, ct.Constant, ct.launch) to Triton equivalents. Covers dual-kernel layout flags (e.g. transpose=True/False + autotune grid via META) per translations/advanced-patterns.md. Use when converting, porting, or translating cuTile kernels to Triton, or debugging existing Triton translations.
 license: MIT. Complete terms in LICENSE.
-tags:
-  - triton
-  - cutile
-  - tilegym
-  - gpu
-  - kernel
 tools:
   - Read
   - Write
   - Grep
   - Glob
   - Bash
+metadata:
+  author: "TileGym Team <TileGym@nvidia.com>"
+  tags:
+    - cutile
+    - triton
+    - conversion
+    - gpu
+    - kernel
 ---
 
 # cuTile → Triton Conversion
@@ -119,50 +120,19 @@ Post-conversion Verification (TMA is mandatory for 2D+ loads):
 
 ## Gotchas (Most Common Translation Errors) {#gotchas-most-common-translation-errors}
 
-| Pattern | cuTile | Triton | Common Mistake |
-|---------|--------|--------|----------------|
-| **mma accumulator** | `ct.mma(a, b, acc=acc)` | `tl.dot(a, b, acc)` | Using keyword `acc=` in Triton (positional only) |
-| **mma float32→tf32** | Explicit `ct.astype(..., ct.tfloat32)` guard before ct.mma | `tl.dot(a, b, allow_tf32=True)` (default) | Over-specifying; Triton auto-casts by default |
-| **Type cast** | `ct.astype(x, dtype)` | `x.to(dtype)` | Using ct.astype in Triton |
-| **Grid** | `(n, 1, 1)` tuple, `ct.launch(stream, grid, kernel, args)` | `lambda meta: (n,)` or tuple, bracket launch | Using ct.launch or 3-tuple in Triton |
-| **Host cdiv** | `(a + b - 1) // b` (Python) | `triton.cdiv(a, b)` | Forgetting triton.cdiv in host |
-| **2D+ tile load** | `ct.load(arr, index=(i,j), shape=(BM,BK))` (cuTile uses TMA) | `tl.make_tensor_descriptor(...).load([...])` | Using raw `tl.load(ptr+offs, mask=m)` → **5-20x regression**; always use TMA for 2D+ block loads |
-| **Index type** | Block index in ct.load/ct.store | Element offset (ptr + offs) or TMA descriptor | Using block index as tl.load offset |
-| **arange** | `ct.arange(N, dtype=ct.int32)` | `tl.arange(0, N)` | Triton has start param (0, N) |
-| **None args** | Dummy tensor + flag | Allowed in kernel | Carrying over dummy+flag when not needed |
-| **String const** | `ct.Constant[int]` only (no str) | `tl.constexpr` (any type) | Keeping int enum; Triton can use str constexpr if needed |
-| **Shape args** | Static/constexpr in ct.full/ct.zeros | Dynamic shapes OK in Triton | Over-constraining shapes |
-| **Launch** | `ct.launch(stream, grid, kernel, args)` | bracket launch (grid then args) | Leaving ct.launch in Triton host |
-| **Branch vars** | Pre-define before if | Can define in branch | Over-defining before branch in Triton |
-| **Pointer table type** | Typed tensor descriptor (auto) | `tl.load(ptrs+idx).to(tl.pointer_type(DTYPE))` where `DTYPE: tl.constexpr` | **Hardcoding `tl.float16`** → `cudaErrorIllegalAddress` for bfloat16/float32 inputs |
-| **Stride dtype** | cuTile uses tensor shape (auto) | Pass strides as `torch.int64`, not `int32` | `int32` overflows → illegal address for large matrices (M×K > 2^31) |
-| **dtype map coverage** | cuTile typed tensors (auto) | `_DTYPE_MAP` must cover all dtypes (incl. float8); use `hasattr` guards | Missing entry → `ValueError: Unsupported dtype` before kernel launch |
-| **tl.math.erf dtype** | cuTile erf handles all dtypes | `tl.math.erf` **only accepts fp32/fp64** | `ValueError: Expected dtype ['fp32', 'fp64'] but got fp16` — do NOT replace with tanh approximation (mathematically wrong); let Triton auto-promote or cast input |
-| **tl.exp with fp16** | cuTile exp handles all dtypes | Cast to fp32 before `tl.exp` for precision: `tl.exp(x.to(tl.float32))` | Precision loss or NaN with fp16 inputs in exp/log/sqrt |
-| **Math func approx** | N/A | Never substitute `tl.math.erf` with tanh-based approximation | Using GELU tanh formula (`0.044715*x³`) as erf approximation is **mathematically incorrect** — they are different functions |
-| **Layout flag (`transpose`)** | cuTile may use one path per layout | Need **two Triton kernels** when math differs (e.g. MLA: `qk` `[H,N]` vs `[N,H]`, different `V` TMA) | Reusing transpose-only logic for `transpose=False` + fixed blocks → **3–15×** on that mode; see [advanced-patterns.md](./translations/advanced-patterns.md) |
-| **Batched matmul** | `ct.matmul(W, X)` broadcasts implicitly at tile level | `tl.dot(W, X)` only supports 2D operands | Using `broadcast_to + tl.dot` → **10-50× slower**, no tensor cores (see FFT anti-pattern below) |
-| **Batch-per-block** | cuTile processes 1 batch per block naturally | Triton temptation: process BS batches per block | Creates BS× register pressure, breaks tensor core compatibility |
+Comprehensive table of patterns that frequently break or regress when porting `@ct.kernel` to `@triton.jit` — *mma accumulator, type cast, grid, TMA usage, dtype handling, layout flags, batched matmul, etc.*
+
+**See:** [references/gotchas.md](./references/gotchas.md) — read this BEFORE writing the Triton kernel.
 
 ## Performance Gotchas (10-50x Regression Risk) {#performance-gotchas-10-50x-regression-risk}
 
 **⚠️ These cause CATASTROPHIC slowdowns. Check BEFORE benchmarking.**
 
-| Pattern | SLOW (Regression) | FAST (Optimized) | Impact |
-|---------|-------------------|------------------|--------|
-| **Memory access (2D+ tiles)** | Raw ptr + masks: `tl.load(ptr+offs, mask=m)` for block-shaped 2D+ loads | TMA: `tl.make_tensor_descriptor(...).load([off])` | **5-20x (500%-2000%)** — **most common cause of conversion regression; use TMA for every 2D+ tile load** |
-| **Group iteration** | Linear search all groups per tile | While-loop with `last_problem_end` tracking | **2-5x** |
-| **Tile sizes** | Fixed `BLOCK_M=128, BLOCK_N=128` | `@triton.autotune` with GPU-specific configs | **2-3x** |
-| **Alignment** | No hints | `tl.assume(stride % 8 == 0)`, `tl.assume(ptr % 16 == 0)` | **1.5-2x** |
-| **Full-tile masks** | Masks on every load/store | Remove masks, let TMA handle bounds | **1.2-1.5x** |
-| **K-loop offsets** | Recalculate full offset each iter | `a_ptrs += BLOCK_K` or TMA offset increment | **1.1-1.2x** |
-| **Memory layout** | 5D reshape for split dims | Transpose + contiguous first/second half | **50-150%** |
-| **constexpr params** | Dynamic dimension params | Mark `bs`, `hd`, `n_h` as `tl.constexpr` | **10-20%** |
-| **Unnecessary clones** | `q.clone()` before in-place op | Transpose → contiguous (natural copy) | **10-20%** |
-| **Row stride pattern** | Per-element stride calculation | Row stride with `ptr + pid * row_stride` | **10-30%** |
-| **broadcast_to + tl.dot** | `W.broadcast_to((BS,M,K))` then `tl.dot(W, X)` | 1-batch-per-block, load W as 2D `(M,K)`, use `tl.dot(W, X)` | **10-50×** (FFT case study) |
-| **extract_slice chains** | Chain of `extract_slice` + `reshape` (24+ calls) | Direct offset computation, load into final shape | **2-5×** |
-**Full details:** [translations/workflow.md](./translations/workflow.md) — section **CRITICAL PERFORMANCE PATTERNS (AVOID 10-50x REGRESSION)**
+Patterns and their impact: TMA vs raw ptr+mask (5-20×), autotune vs fixed tile sizes (2-3×), `broadcast_to + tl.dot` (10-50×), `extract_slice` chains (2-5×), and more.
+
+**See:** [references/performance-gotchas.md](./references/performance-gotchas.md) — full regression-risk table.
+
+**Full details:** [translations/workflow.md](./translations/workflow.md) — section **CRITICAL PERFORMANCE PATTERNS (AVOID 10-50x REGRESSION)**.
 
 Full API mapping: [references/api-mapping.md](./references/api-mapping.md).
 
@@ -188,6 +158,8 @@ Read from **cuTile → Triton** perspective. Core files live in this skill under
 | | **[translations/advanced-patterns.md](./translations/advanced-patterns.md)** | **Dual layout flags (transpose), autotune + `META` grid, MLA-style two kernels** |
 | **API** | [api-mapping.md](./references/api-mapping.md) | cuTile → Triton mapping |
 | | [optimizing-reference.md](./references/optimizing-reference.md) | **GEMM/BMM/attention optimizations** (EVEN_K, transpose, grid, autotune, epilogue subtile) |
+| **Gotchas** | [gotchas.md](./references/gotchas.md) | **Common cuTile→Triton translation errors** (mma, dtype, grid, TMA, layout flags) |
+| | [performance-gotchas.md](./references/performance-gotchas.md) | **10-50× regression-risk table** (TMA vs ptr+mask, broadcast_to, extract_slice chains, autotune) |
 | **Testing & errors** | [references/debugging.md](./references/debugging.md) | **Triton runtime errors** (cudaErrorIllegalAddress, pointer type, stride overflow) |
 
 ## Worked Examples

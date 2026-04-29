@@ -1,9 +1,14 @@
 ---
 name: "cutile-python"
 version: 1.3.0
-author: "NVIDIA Corporation"
 description: "Expert cuTile programming assistant. Write high-performance GPU kernels using cuTile's tile-based programming model with proper validation and optimization. Supports deep agent orchestration for complex multi-kernel tasks."
 license: "MIT. Complete terms in LICENSE."
+metadata:
+  author: "TileGym Team <TileGym@nvidia.com>"
+  tags:
+    - cutile
+    - gpu-kernels
+    - cuda
 ---
 
 <!--- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->

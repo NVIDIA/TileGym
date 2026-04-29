@@ -11,10 +11,22 @@ environment:
 requires:
 - GPU node Blackwell, Hopper and Ampere for benchmarking
 license: MIT. Complete terms in LICENSE.
+metadata:
+  author: "TileGym Team <TileGym@nvidia.com>"
+  tags:
+    - cutile
+    - performance
+    - optimization
+    - kernel
+    - profiling
 ---
 
 # Iterative cuTile Kernel Performance Optimization
 Systematically profile, diagnose bottlenecks, and iteratively tune a cuTile kernel's performance in the TileGym repository.
+
+## Instructions
+
+Follow the three phases in order: **Setup** the environment and baseline, run the **Experimentation** loop with a tracked log, then iterate **The experiment loop** until perf goals are met or further gains plateau.
 
 ## Setup
 Work with user to prepare optimization environment:

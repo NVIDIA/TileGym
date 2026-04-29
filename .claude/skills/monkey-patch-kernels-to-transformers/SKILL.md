@@ -10,11 +10,19 @@ environment:
   - Opus 4.6
   - GPT-5.3-CodeX
 license: MIT. Complete terms in LICENSE.
+metadata:
+  author: "TileGym Team <TileGym@nvidia.com>"
+  tags:
+    - tilegym
+    - transformers
+    - integration
+    - kernel
+    - monkey-patch
 ---
 # Integrate TileGym kernels to Transformers
 The main purpose of TileGym project is to provide performant kernels for LLM training and inference. We will integrate proper kernels available in TileGym project to LLM models provided by Hugging Face `transformers` library to validate end-to-end functional correctness and performance improvements. Instead of modifying `transformers` source code, we will take a non-intrusive monkey-patch approach: We will replace certain modules/classes/methods in `transformers` library that implement the Transformer model we would like to integrate, such that at model instantiation, that model's core components will be replaced by TileGym implementations. At runtime the model will actually invoke TileGym kernels under the hood.
 
-## Workflow
+## Instructions
 The integration process follows a "research kernel requirement and supply -> propose kernel integration candidates -> implement kernel integrations and verify -> aggregate valid integrations" workflow. Refer to the diagram below to understand the overall process, then check the numbered text below for details. If you find it difficult to interpret embedding Mermaid script, check the rendered PNG image which represents the exactly identical workflow diagram:
 <details>
 

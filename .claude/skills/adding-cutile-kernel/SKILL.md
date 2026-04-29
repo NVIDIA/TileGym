@@ -2,6 +2,14 @@
 name: adding-cutile-kernel
 description: Add a new cuTile GPU kernel operator to TileGym. Covers dispatch registration in ops.py, cuTile backend implementation, __init__.py exports, test creation, and benchmark in tests/benchmark. Use when adding, creating, or implementing a new cuTile operator/kernel in TileGym, or when asking how to register a new cuTile op.
 license: MIT. Complete terms in LICENSE.
+metadata:
+  author: "TileGym Team <TileGym@nvidia.com>"
+  tags:
+    - cutile
+    - kernel
+    - tilegym
+    - gpu
+    - dispatch
 ---
 
 # Adding a cuTile Kernel to TileGym
@@ -17,7 +25,7 @@ End-to-end workflow for adding a new operator (e.g., `my_op`) with cuTile backen
 4. If a step is not applicable (e.g., no cuTile impl), mark it `completed` with a note, do NOT silently skip
 5. Each step MUST result in a file write or explicit skip decision — no silent omissions
 
-## Workflow
+## Instructions
 
 MUST copy this checklist to TodoWrite at the start:
 

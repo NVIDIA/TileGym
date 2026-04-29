@@ -282,7 +282,8 @@ def standard_normal_cdf(x):
 
 # CORRECT - use the actual erf function
 def standard_normal_cdf(x):
-    inverse_sqrt_2 = 0.7071067811865475
+    # 1.0 / math.sqrt(2.0)  ≈ 0.70710678
+    inverse_sqrt_2 = 0.70710678
     cdf = 0.5 * (1 + tl.math.erf(x * inverse_sqrt_2))  # CORRECT
     return cdf
 ```
@@ -301,10 +302,12 @@ def kernel_with_erf(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
 
     # For erf: Triton auto-promotes fp16→fp32, result stays fp32
     # Output will be written as fp32 unless you cast back
-    cdf = 0.5 * (1 + tl.math.erf(x * 0.7071067811865475))
+    # 1.0 / math.sqrt(2.0)  ≈ 0.70710678
+    cdf = 0.5 * (1 + tl.math.erf(x * 0.70710678))
 
     # For exp with fp16 input: explicit cast recommended for precision
-    pdf = 0.3989422804014327 * tl.exp((-0.5 * x * x).to(tl.float32))
+    # 1.0 / math.sqrt(2.0 * math.pi)  ≈ 0.39894228
+    pdf = 0.39894228 * tl.exp((-0.5 * x * x).to(tl.float32))
 
     tl.store(y_ptr + offs, x * cdf, mask=offs < n)
 ```
