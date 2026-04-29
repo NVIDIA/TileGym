@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import gc
 
 import pytest
 import torch
@@ -11,6 +12,7 @@ import tilegym
 from .. import common
 
 _backends = ["cutile"]
+_perf_frameworks = _backends + ["pytorch"]
 
 _SHAPE_CONFIGS = [
     pytest.param(2, 1, 4, 64, 64, False, False, False, id="decode"),
@@ -160,3 +162,43 @@ class Test_RecurrentGatedDeltaRule(common.PyTestCase):
             assert torch.allclose(ref_state.float(), test_state.float(), atol=atol, rtol=rtol), (
                 f"State mismatch: max_abs_err={(ref_state.float() - test_state.float()).abs().max().item():.2e}"
             )
+
+    @pytest.mark.parametrize(
+        "T",
+        [128 * 2**i for i in range(0, 8)],
+        ids=[f"T{128 * 2**i}" for i in range(0, 8)],
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, T, framework, record_property, arch):
+        self.setUp()
+        dtype = torch.bfloat16
+        B, H, D = 2, 4, 128
+        device = "cuda"
+
+        if framework == "pytorch" and T > 1024:
+            pytest.skip("PyTorch reference too slow for T > 1024")
+
+        torch.manual_seed(0)
+        q = torch.randn(B, T, H, D, device=device, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, dtype=dtype)
+        g = -torch.abs(torch.randn(B, T, H, device=device, dtype=dtype)) * 0.5
+        beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype))
+
+        with torch.no_grad():
+            if framework == "pytorch":
+                framework_fn = lambda: self.reference(q, k, v, g, beta)
+            elif tilegym.is_backend_available(framework):
+                tilegym.set_backend(framework)
+                from tilegym.ops import recurrent_gated_delta_rule
+
+                framework_fn = lambda: recurrent_gated_delta_rule(q, k, v, g, beta)
+            else:
+                pytest.skip(f"Framework {framework} is not available")
+
+            result = common.benchmark_framework(framework, framework_fn, use_cupti=True)
+            record_property("benchmark", result)
+
+        del q, k, v, g, beta
+        torch.cuda.empty_cache()
+        gc.collect()

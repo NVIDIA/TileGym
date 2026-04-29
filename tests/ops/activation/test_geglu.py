@@ -6,6 +6,7 @@
 import pytest
 import torch
 
+import tilegym
 import tilegym.ops
 from tilegym import set_backend
 
@@ -23,6 +24,7 @@ class Test_GEGLU(common.PyTestCase):
         return geglu
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "x_shape,dim,dtype,approximate",
@@ -98,3 +100,42 @@ class Test_GEGLU(common.PyTestCase):
             rtol=1e-2,
             atol=1e-2,
         )
+
+    @pytest.mark.parametrize(
+        "x_shape,dim,dtype,approximate",
+        [
+            ((256, 64, 16, 128), 3, torch.float16, "none"),
+            ((256, 64, 16, 128), 3, torch.float16, "tanh"),
+        ],
+        ids=lambda x: str(x),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, x_shape, dim, dtype, approximate, framework, record_property):
+        self.setUp()
+        device = torch.device("cuda")
+        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=True)
+        # Calculate output shape for gradient
+        y_shape = list(x_shape)
+        y_shape[dim] = y_shape[dim] // 2
+        dy = 0.1 * torch.randn(*y_shape, device=device)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(x, dim, approximate)
+        elif tilegym.is_backend_available(framework):
+            set_backend(framework)
+            framework_fn = lambda: tilegym.ops.activation.geglu(x, dim, approximate)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        if framework != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: self.reference(x, dim, approximate),
+                kwargs={},
+                gradient=dy,
+                rtol=1e-2,
+                atol=1e-2,
+            )
+
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+        record_property("benchmark", result)

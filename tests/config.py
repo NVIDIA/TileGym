@@ -202,6 +202,24 @@ class Config(metaclass=CacheMeta):
             help=("Record to csv file"),
         )
         parser.add_argument(
+            "--cudagraph",
+            envvar="CUDAGRAPH",
+            action=FromEnvironment,
+            required=False,
+            default=False,
+            type=bool,
+            help=("Use cudagraph"),
+        )
+        parser.add_argument(
+            "--cupti",
+            envvar="CUPTI",
+            action=FromEnvironment,
+            required=False,
+            default=True,
+            type=bool,
+            help=("Use CUPTI (torch.profiler) for kernel profiling instead of CUDA Events"),
+        )
+        parser.add_argument(
             "--file",
             envvar="FILE",
             action=FromEnvironment,

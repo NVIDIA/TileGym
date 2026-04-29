@@ -7,6 +7,7 @@
 import pytest
 import torch
 
+import tilegym
 from tilegym import set_backend
 from tilegym.ops.moe_interface import fused_moe
 
@@ -64,6 +65,7 @@ class Test_MOE(common.PyTestCase):
         return final_output
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends
 
     @pytest.mark.parametrize(
         "num_tokens, hidden_size, moe_intermediate_size, n_experts, top_k",
@@ -202,3 +204,82 @@ class Test_MOE(common.PyTestCase):
             rtol=rtol,
             atol=atol,
         )
+
+    _perf_call_types = ["e2e_fused"]
+
+    @pytest.mark.parametrize(
+        "num_tokens, hidden_size, moe_intermediate_size, n_experts, top_k",
+        [
+            # Small configurations
+            (64, 512, 256, 8, 2),
+            (128, 1024, 512, 16, 4),
+            # DeepSeek V2 Lite-like medium configurations
+            (256, 2048, 1408, 32, 6),
+            (512, 2048, 1408, 64, 6),
+            # Large configurations (kept commented for regular runs)
+            # (1024, 4096, 2816, 64, 6),
+            # (2048, 4096, 2816, 128, 8),
+            # Very large configurations (commented out for regular testing)
+            # (4096, 8192, 5632, 128, 8),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            torch.float16,
+            # torch.bfloat16,
+            # torch.float32,  # Commented out for performance (slower)
+        ],
+    )
+    @pytest.mark.parametrize("call_type", _perf_call_types)
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(
+        self,
+        num_tokens,
+        hidden_size,
+        moe_intermediate_size,
+        n_experts,
+        top_k,
+        dtype,
+        framework,
+        call_type,
+        record_property,
+    ):
+        self.setUp()
+        # Skip if CUDA not available
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        if tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        # Create mock data based on call type
+        if call_type == "e2e_fused":
+            # E2E fused MoE: test fused_moe
+            hidden_states = (
+                torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda").normal_(0, 0.5).contiguous()
+            )
+            w1 = (
+                torch.randn(n_experts, moe_intermediate_size * 2, hidden_size, dtype=dtype, device="cuda")
+                .normal_(0, 0.1)
+                .contiguous()
+            )
+            w2 = (
+                torch.randn(n_experts, hidden_size, moe_intermediate_size, dtype=dtype, device="cuda")
+                .normal_(0, 0.1)
+                .contiguous()
+            )
+            topk_ids = torch.randint(0, n_experts, (num_tokens, top_k), dtype=torch.long, device="cuda").contiguous()
+            topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device="cuda"), dim=-1).to(dtype).contiguous()
+
+            def framework_fn():
+                return fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
+
+        # Run performance benchmark
+        try:
+            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            record_property("benchmark", result)
+        except Exception as e:
+            pytest.fail(f"Performance benchmark failed for {framework} {call_type}: {e}")

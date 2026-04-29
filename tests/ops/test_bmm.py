@@ -22,6 +22,7 @@ class Test_BMM_FWD(common.PyTestCase):
         return torch.bmm(a, b)
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_size, m, n, k, transpose_a, transpose_b, dtype",
@@ -95,3 +96,65 @@ class Test_BMM_FWD(common.PyTestCase):
             rtol=1e-3,
             atol=1e-8,
         )
+
+    @pytest.mark.parametrize(
+        "q, m, n, k, transpose_a, transpose_b, dtype",
+        [
+            (q, 2**i, 2**i, 2**i, ta, tb, torch.float16)
+            for q in [2, 8]
+            for i in range(11, 14)
+            for ta, tb in itertools.product([True, False], repeat=2)
+        ],
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, q, m, n, k, transpose_a, transpose_b, dtype, framework, record_property):
+        self.setUp()
+        device = torch.device("cuda")
+
+        if transpose_a:
+            a_shape = (q, k, m)
+        else:
+            a_shape = (q, m, k)
+
+        if transpose_b:
+            b_shape = (q, n, k)
+        else:
+            b_shape = (q, k, n)
+
+        a = torch.rand(a_shape, device=device, dtype=dtype)
+        b = torch.rand(b_shape, device=device, dtype=dtype)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(a, b, transpose_a, transpose_b)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.bmm(
+                a,
+                b,
+                transpose_a=transpose_a,
+                transpose_b=transpose_b,
+            )
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        if framework != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: self.reference(a, b, transpose_a, transpose_b),
+                kwargs={},
+                rtol=1e-3,
+                atol=1e-8,
+            )
+
+        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+        record_property("benchmark", res)
+
+        # Explicit cleanup to prevent OOM
+        del a, b, framework_fn
+        if "dout" in locals():
+            del dout
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

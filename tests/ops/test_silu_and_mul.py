@@ -20,6 +20,7 @@ class Test_SiLUAndMul(common.PyTestCase):
         return torch.nn.functional.silu(x1) * x2
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_size, seq_len, hidden_size, dtype",
@@ -117,3 +118,40 @@ class Test_SiLUAndMul(common.PyTestCase):
             rtol=0.0,
             atol=1e-2,
         )
+
+    @pytest.mark.parametrize(
+        "batch_size, seq_len, hidden_size, dtype",
+        [
+            (64, 1024, hidden_size, dtype)
+            for hidden_size in [512, 1024, 4096, 8192]
+            for dtype in [torch.float16, torch.float32]
+        ],
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, batch_size, seq_len, hidden_size, dtype, framework, record_property):
+        self.setUp()
+        device = torch.device("cuda")
+        # Create input tensor
+        input_shape = (batch_size, seq_len, 2 * hidden_size)
+        x = torch.randn(input_shape, dtype=dtype, device=device, requires_grad=True)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(x)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.silu_and_mul(x)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        result = common.benchmark_framework(
+            framework, framework_fn, use_cudagraph=(framework not in ("pytorch", "cutile"))
+        )
+        record_property("benchmark", result)
+
+        # Explicit cleanup to prevent OOM
+        del x, framework_fn
+        torch.cuda.empty_cache()
+        import gc
+
+        gc.collect()

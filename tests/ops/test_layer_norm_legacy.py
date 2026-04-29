@@ -11,6 +11,7 @@ from tilegym.backend import set_backend
 from .. import common
 
 _backends = ["cutile"]
+_perf_frameworks = _backends + ["pytorch"]
 
 
 class Test_LayerNorm(common.PyTestCase):
@@ -65,6 +66,43 @@ class Test_LayerNorm(common.PyTestCase):
                 rtol=0.0,
                 atol=1e-2,
             )
+
+    @pytest.mark.parametrize(
+        "m,n,dtype",
+        [(4096, 2**i, torch.float16) for i in range(5, 15, 1)],
+        ids=lambda x: f"n={x}" if isinstance(x, int) else str(x),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, m, n, dtype, framework, record_property):
+        self.setUp()
+
+        device = torch.device("cuda")
+        eps = 1e-5
+        weight_shift = 0.0
+
+        x_shape = (m, n)
+        w_shape = (n,)
+        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=True)
+        weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=True)
+        bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(x, w_shape, weight, bias, eps, weight_shift)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.layer_norm_legacy(x, w_shape, weight, bias, eps, weight_shift)
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+        with torch.no_grad():
+            res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            record_property("benchmark", res)
+
+            # Explicit cleanup to prevent OOM
+            del x, weight, bias, framework_fn
+            torch.cuda.empty_cache()
+            import gc
+
+            gc.collect()
 
 
 class Test_PersistentLayerNorm(common.PyTestCase):
@@ -126,3 +164,55 @@ class Test_PersistentLayerNorm(common.PyTestCase):
         torch.testing.assert_close(y, y_ref, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(mean, mean_ref.float(), atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(rstd, rstd_ref.float(), atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize(
+        "m,n,dtype",
+        [
+            (30000, 256, torch.bfloat16),
+            (30000, 1024, torch.bfloat16),
+            (30000, 10000, torch.bfloat16),
+            (128000, 256, torch.bfloat16),
+            (128000, 1024, torch.bfloat16),
+        ],
+        ids=lambda x: f"n={x}" if isinstance(x, int) else str(x),
+    )
+    @pytest.mark.parametrize("framework", _perf_frameworks)
+    def test_perf(self, m, n, dtype, framework, record_property):
+        if torch.cuda.get_device_capability() == (12, 0) and m == 30000 and n == 10000:
+            pytest.xfail("Timeout on B20X (sm120): PersistentLayerNorm 30000×10000 bfloat16 exceeds 300s")
+
+        self.setUp()
+
+        device = torch.device("cuda")
+        eps = 1e-6
+
+        x_shape = (m, n)
+        w_shape = (n,)
+        x = torch.randn(x_shape, dtype=dtype, device=device, requires_grad=False)
+        weight = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=False)
+        bias = torch.randn(w_shape, dtype=dtype, device=device, requires_grad=False)
+
+        if framework == "pytorch":
+            framework_fn = lambda: self.reference(x, weight, bias, eps)
+        elif tilegym.is_backend_available(framework):
+            tilegym.set_backend(framework)
+            framework_fn = lambda: tilegym.ops.persistent_layer_norm(
+                input=x,
+                normalized_shape=w_shape,
+                weight=weight,
+                bias=bias,
+                eps=eps,
+            )
+        else:
+            pytest.skip(f"Framework {framework} is not available")
+
+        with torch.no_grad():
+            res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            record_property("benchmark", res)
+
+            # Explicit cleanup to prevent OOM
+            del x, weight, bias, framework_fn
+            torch.cuda.empty_cache()
+            import gc
+
+            gc.collect()

@@ -16,6 +16,7 @@ class Test_GeLU(common.PyTestCase):
         return torch.nn.functional.gelu(input, approximate=approximate)
 
     _backends = ["cutile"]
+    _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "m,n,approximate,dtype",

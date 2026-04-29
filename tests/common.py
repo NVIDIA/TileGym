@@ -5,19 +5,24 @@
 import collections
 import dataclasses
 import functools
+import gc
 import inspect
 import itertools
+import json
 import multiprocessing
 import numbers
 import os
 import pathlib
 import random
+import re
 from functools import wraps
 
 import pytest
 
 # import pandas as pd
 import torch
+from torch.profiler import ProfilerActivity
+from torch.profiler import profile as torch_profile
 
 from .config import Config
 
@@ -759,6 +764,561 @@ def any_output_requires_grad(fn):
 
     any_requires = any(i.requires_grad for i in out if isinstance(i, torch.Tensor))
     return any_requires
+
+
+def benchmark(
+    fn,
+    mode=Config.mode,
+    warmup=Config.warmup,
+    rep=Config.rep,
+    min_rep=Config.min_rep,
+    initial_rep=Config.initial_rep,
+    grad_to_none=None,
+    fast_flush=True,
+    use_cudagraph=Config.cudagraph,
+    use_cupti=Config.cupti,
+    kernel_filter=None,
+    retain_graph=True,
+):
+    r"""
+    Benchmarks forward and backward pass of a given function.
+
+    It supports 3 operating modes:
+
+        - ``'forward'`` - benchmarks only the forward pass
+        - ``'backward'`` - benchmarks backward pass
+        - ``'auto'`` - benchmarks forward pass and backward pass if any output
+          requires gradient
+
+    Benchmarking of backward pass computes gradient with respect to the first
+    output argument. The function automatically generates input gradient w.r.t.
+    1st output argument, gradient tensor is filled with ones.
+
+    Args:
+        fn: function to be benchmarked
+        mode: string to specify the mode: 'auto', 'forward', 'backward'
+        warmup: duration of warmup phase, specified in milliseconds
+        rep: duration of benchmark phase, specified in milliseconds
+        min_rep: minimal number of benchmark iterations, specified as an
+            integer
+        initial_rep: number of initial iterations to establish approximate
+            runtime and to compute number of warmup and benchmark iterations
+            given a budged expressed in milliseconds
+        grad_to_none: list of tensors for which gradients are set to None after
+            every benchmark iteration
+        fast_flush: if True: flush L2 cache with torch.int tensor, if False:
+            flush L2 cache with torch.int8 tensor
+        kernel_filter: regex pattern to filter GPU kernels in CUPTI mode
+            (only used when use_cupti=True, ignored otherwise)
+        retain_graph: if True (default), the computation graph is retained
+            across backward iterations using ``retain_graph=True``. Set to
+            False for ops whose backward writes gradients in-place to saved
+            tensors (e.g. swiglu, geglu), which would corrupt the graph on
+            repeated calls. When False, the forward pass is re-run before
+            each backward iteration (not timed) so that only the backward
+            kernel time is measured.
+
+    Returns:
+        Dictionary with benchmark results for forward and backward pass
+        (depending on the specified ``mode``).
+
+    Example::
+
+        result = common.benchmark(
+            lambda: tilegym.ops.matmul.matmul_fn(
+                a, b, transpose_a, transpose_b
+            )
+        )
+
+        # For ops with in-place backward (e.g. swiglu, geglu):
+        result = common.benchmark(
+            lambda: tilegym.ops.swiglu(a, b),
+            retain_graph=False,
+        )
+
+    """
+    if kernel_filter is not None and not use_cupti:
+        raise ValueError("kernel_filter is only supported with use_cupti=True (CUPTI=1)")
+    if use_cupti:
+        # assert not use_cudagraph, "use_cudagraph and use_cupti cannot be True at the same time"
+        _benchmark_fn = functools.partial(benchmark_fn_cupti, kernel_filter=kernel_filter)
+    elif use_cudagraph:
+        _benchmark_fn = benchmark_fn_cudagraph
+    else:
+        _benchmark_fn = benchmark_fn
+    res = {}
+    if mode in ("auto", "forward"):
+        res["forward"] = _benchmark_fn(fn, warmup, rep, min_rep, initial_rep, grad_to_none, fast_flush)
+    if mode == "backward" or (mode == "auto" and any_output_requires_grad(fn)):
+        if retain_graph:
+            out = fn()
+            if not isinstance(out, tuple):
+                out = (out,)
+            first_output = out[0]
+            assert first_output.requires_grad
+            dy = torch.ones_like(first_output)
+            bwd_fn = lambda: first_output.backward(dy, retain_graph=True)
+            res["backward"] = _benchmark_fn(
+                bwd_fn,
+                warmup,
+                rep,
+                min_rep,
+                initial_rep,
+                grad_to_none,
+                fast_flush,
+            )
+        else:
+            # retain_graph=False: ops whose backward modifies saved tensors in-place
+            # (e.g. swiglu, geglu). Re-run forward in setup_fn (not timed) before
+            # each backward call so the graph is always fresh.
+            _state = {}
+
+            def _setup_fn():
+                out = fn()
+                if not isinstance(out, tuple):
+                    out = (out,)
+                _state["first_output"] = out[0]
+
+            def _bwd_fn():
+                _state["first_output"].backward(torch.ones_like(_state["first_output"]))
+
+            res["backward"] = benchmark_fn(
+                _bwd_fn,
+                warmup,
+                rep,
+                min_rep,
+                initial_rep,
+                grad_to_none,
+                fast_flush,
+                setup_fn=_setup_fn,
+            )
+        if grad_to_none is not None:
+            for x in grad_to_none:
+                x.grad = None
+    return res
+
+
+def _extract_kernel_times_from_profile(fn):
+    """
+    Run fn() once under torch.profiler (CUDA only). Return the dominant kernel
+    name and a list of all CUDA kernel names with their times (for logging).
+    Returns (dominant_kernel_name, kernel_times_list) or (None, []) on failure.
+    kernel_times_list entries are dicts: name, self_time_us, total_time_us, count.
+    """
+    if not torch.cuda.is_available():
+        return None, []
+    try:
+        with torch_profile(activities=[ProfilerActivity.CUDA]) as prof:
+            fn()
+        kernel_times = []
+        for item in prof.key_averages():
+            device_type_str = str(getattr(item, "device_type", ""))
+            if device_type_str != "DeviceType.CUDA":
+                continue
+            self_us = getattr(item, "self_device_time_total", 0.0) or 0.0
+            total_us = getattr(item, "device_time_total", 0.0) or 0.0
+            count = getattr(item, "count", 0) or 0
+            kernel_times.append(
+                {
+                    "name": item.key,
+                    "self_time_us": self_us,
+                    "total_time_us": total_us,
+                    "count": int(count),
+                }
+            )
+        # sort by self time descending so dominant kernel is first
+        kernel_times.sort(key=lambda x: x["self_time_us"], reverse=True)
+        best_key = kernel_times[0]["name"] if kernel_times else None
+        return best_key, kernel_times
+    except Exception:
+        return None, []
+
+
+# Adapted from https://github.com/openai/triton
+def benchmark_fn_cudagraph(
+    fn,
+    warmup=Config.warmup,
+    rep=Config.rep,
+    min_rep=Config.min_rep,
+    initial_rep=Config.initial_rep,
+    grad_to_none=None,
+    fast_flush=True,
+):
+    n_retries = 10
+    rep = rep / n_retries
+    # warmup
+    fn()
+    # extract kernel names and times from one profiled run (reuses warmup conceptually)
+    kernel_name, kernel_times = _extract_kernel_times_from_profile(fn)
+    if kernel_times and not Config.quiet:
+        print("Kernel times from profiled run (cudagraph):")
+        print(json.dumps(kernel_times, indent=2))
+    # step 1 - we estimate the amount of time the kernel call takes
+    # NOTE: this is a single-run estimate, variance may be high.
+    if grad_to_none is not None:
+        for x in grad_to_none:
+            x.detach_()
+            x.requires_grad_(True)
+            x.grad = None
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        fn()
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    g.replay()
+    end_event.record()
+    torch.cuda.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event)
+    n_repeat = max(min_rep, int(rep / estimate_ms))
+    # step 2 - construct a cuda graph with `n_repeat` unrolled function calls to minimize
+    # host overhead
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for i in range(n_repeat):
+            if grad_to_none is not None:
+                for x in grad_to_none:
+                    x.grad = None
+            fn()
+    torch.cuda.synchronize()
+    # measure time and return
+    ret = []
+    for i in range(n_retries):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        ret += [start_event.elapsed_time(end_event) / n_repeat]
+    stats = torch.cuda.memory_stats()
+    peak_mem_mb = stats["allocated_bytes.all.peak"] // (1024 * 1024)
+    times = torch.tensor(ret)
+    res = {
+        "mean": times.mean().item(),
+        "std": times.std().item(),
+        "rel_std": (times.std() / times.mean()).item() * 100,
+        "median": times.median().item(),
+        "min": times.min().item(),
+        "max": times.max().item(),
+        "nrep": len(times),
+        "peak_mem_mb": peak_mem_mb,
+    }
+    if kernel_name is not None:
+        res["kernel_name"] = kernel_name
+    if kernel_times:
+        res["kernel_times"] = kernel_times
+    return res
+
+
+# Adapted from https://github.com/openai/triton
+def benchmark_fn(
+    fn,
+    warmup=Config.warmup,
+    rep=Config.rep,
+    min_rep=Config.min_rep,
+    initial_rep=Config.initial_rep,
+    grad_to_none=None,
+    fast_flush=True,
+    setup_fn=None,
+):
+    # setup_fn: optional callable run before each fn() call but outside the
+    # CUDA timing events, so only fn() is measured. Used to recreate a fresh
+    # computation graph when retain_graph=False (in-place backward ops).
+    # Estimate the runtime of the function
+    if setup_fn is not None:
+        setup_fn()
+    fn()
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(initial_rep):
+        if setup_fn is not None:
+            setup_fn()
+        fn()
+    end_event.record()
+    torch.cuda.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event) / initial_rep
+    # compute number of warmup and repeat
+    n_warmup = max(1, int(warmup / estimate_ms))
+    n_repeat = max(min_rep, int(rep / estimate_ms))
+    # We maintain a buffer of 256 MB that we clear
+    # before each kernel call to make sure that the L2
+    # doesn't contain any input data before the run
+    start_event = [torch.cuda.Event(enable_timing=True) for i in range(n_repeat)]
+    end_event = [torch.cuda.Event(enable_timing=True) for i in range(n_repeat)]
+    if fast_flush:
+        cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+    else:
+        cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
+    # Extract kernel names and times from one profiled warmup run
+    kernel_name, kernel_times = _extract_kernel_times_from_profile(fn)
+    if kernel_times and not Config.quiet:
+        print("Kernel times from profiled run:")
+        print(json.dumps(kernel_times, indent=2))
+    # Warm-up
+    for _ in range(n_warmup):
+        if setup_fn is not None:
+            setup_fn()
+        fn()
+    # Benchmark
+    torch.cuda.empty_cache()
+    gc.collect()
+    torch._C._cuda_clearCublasWorkspaces()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    for i in range(n_repeat):
+        # we don't want `fn` to accumulate gradient values
+        # if it contains a backward pass. So we clear the
+        # provided gradients
+        if grad_to_none is not None:
+            for x in grad_to_none:
+                x.grad = None
+        # we clear the L2 cache before each run
+        cache.zero_()
+        torch.cuda._sleep(2000000)
+        # if setup_fn is provided, run it after cache flush but before timing
+        # so that only fn() is measured (used for ops with in-place backward)
+        if setup_fn is not None:
+            setup_fn()
+        # record time of `fn`
+        start_event[i].record()
+        fn()
+        end_event[i].record()
+    # Record clocks
+    torch.cuda.synchronize()
+    stats = torch.cuda.memory_stats()
+    peak_mem_mb = stats["allocated_bytes.all.peak"] // (1024 * 1024)
+    times = torch.tensor([s.elapsed_time(e) for s, e in zip(start_event, end_event)])
+    q25 = times.quantile(0.25).item()
+    q75 = times.quantile(0.75).item()
+    res = {
+        "mean": times.mean().item(),
+        "std": times.std().item(),
+        "rel_std": (times.std() / times.mean()).item() * 100,
+        "median": times.median().item(),
+        "iqr": q75 - q25,
+        "q25": q25,
+        "q75": q75,
+        "min": times.min().item(),
+        "max": times.max().item(),
+        "nrep": len(times),
+        "peak_mem_mb": peak_mem_mb,
+    }
+    if kernel_name is not None:
+        res["kernel_name"] = kernel_name
+    if kernel_times:
+        res["kernel_times"] = kernel_times
+    return res
+
+
+def _try_reset_kineto() -> None:
+    """Best-effort reset of the Kineto/CUPTI profiler state after an error.
+
+    When an exception or external interrupt (e.g. ``pytest-timeout``) occurs
+    inside a ``torch.profiler.profile`` context, Kineto can be left in a
+    partially-initialised state.  Subsequent tests that call
+    ``_prepare_profiler`` then fail with::
+
+        RuntimeError: Can't disable Kineto profiler when it's not running
+
+    triggering a cascade of otherwise-unrelated failures across the entire
+    test session.
+
+    This function attempts to complete the interrupted cleanup so the next
+    test starts with a clean Kineto slate.  All errors are swallowed
+    intentionally: if the reset itself fails there is nothing more we can do,
+    and raising here would mask the original exception.
+    """
+    for _reset in (
+        # PyTorch ≥ 2.1
+        lambda: torch._C._profiler._disable_profiler(),  # type: ignore[attr-defined]
+        # Legacy fallback (PyTorch < 2.1)
+        lambda: torch._C._autograd._disable_profiler_legacy(),  # type: ignore[attr-defined]
+    ):
+        try:
+            _reset()
+            return
+        except Exception:
+            pass
+
+
+def benchmark_fn_cupti(
+    fn,
+    warmup=Config.warmup,
+    rep=Config.rep,
+    min_rep=Config.min_rep,
+    initial_rep=Config.initial_rep,
+    grad_to_none=None,
+    fast_flush=True,
+    kernel_filter=None,
+):
+    """
+    Benchmark a function using CUPTI via ``torch.profiler``.
+
+    Uses ``torch.profiler`` with ``ProfilerActivity.CUDA`` which collects
+    per-kernel GPU execution time through CUPTI callbacks — entirely in-process,
+    no ncu subprocess needed.
+
+    Compared to CUDA Events:
+      - Measures pure kernel execution time (excludes launch overhead, CPU gaps)
+      - Each kernel is reported individually by name
+
+    Args:
+        fn: function to benchmark (may launch one or more GPU kernels)
+        warmup: duration of warmup phase in milliseconds
+        rep: duration of measurement phase in milliseconds
+        min_rep: minimum number of measurement iterations
+        initial_rep: initial iterations to estimate runtime
+        grad_to_none: tensors whose ``.grad`` is set to None before each run
+        fast_flush: if True, flush L2 cache before each measurement
+        kernel_filter: filter for which GPU kernels to include in timing.
+            Can be a single regex string or a list of regex strings.
+            A kernel is included if it matches ANY of the patterns.
+            If None (default), all kernels are included.
+            Examples:
+              - ``"cutlass"`` — only CUTLASS kernels
+              - ``["softmax", "layer_norm"]`` — softmax or layer_norm kernels
+
+    Returns:
+        dict compatible with ``benchmark_fn`` output:
+        ``{"mean", "std", "rel_std", "median", "min", "max", "nrep", "peak_mem_mb"}``
+    """
+    from torch.profiler import ProfilerActivity
+    from torch.profiler import profile
+
+    if kernel_filter is None:
+        kernel_re_list = None
+    elif isinstance(kernel_filter, str):
+        kernel_re_list = [re.compile(kernel_filter)]
+    else:
+        kernel_re_list = [re.compile(p) for p in kernel_filter]
+
+    # Step 1: estimate runtime to compute n_warmup and n_repeat
+    fn()
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(initial_rep):
+        fn()
+    end_event.record()
+    torch.cuda.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event) / initial_rep
+
+    n_warmup = max(1, int(warmup / estimate_ms))
+    n_repeat = max(min_rep, int(rep / estimate_ms))
+
+    # Step 2: warmup
+    for _ in range(n_warmup):
+        fn()
+    torch.cuda.synchronize()
+
+    # Step 3: L2 cache flush setup (same as benchmark_fn)
+    if fast_flush:
+        cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+    else:
+        cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
+
+    # Step 4: measure with torch.profiler (CUPTI)
+    torch.cuda.empty_cache()
+    gc.collect()
+    torch._C._cuda_clearCublasWorkspaces()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    run_times_us = []
+    for i in range(n_repeat):
+        if grad_to_none is not None:
+            for x in grad_to_none:
+                x.grad = None
+
+        try:
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                fn()
+                torch.cuda.synchronize()
+        except Exception:
+            # The profiler may have been left in a broken Kineto state, e.g.
+            # after a pytest-timeout interrupts _disable_profiler mid-flight,
+            # or after a GPU kernel hang.  Attempt cleanup here so the *next*
+            # test case can still use CUPTI instead of cascading into dozens
+            # of unrelated "Can't disable Kineto profiler" failures.
+            _try_reset_kineto()
+            raise
+
+        # Sum all kernel times for this run (fn may launch multiple kernels)
+        total_us = sum(
+            evt.self_device_time_total
+            for evt in prof.key_averages()
+            if evt.self_device_time_total > 0
+            and (kernel_re_list is None or any(r.search(evt.key) for r in kernel_re_list))
+        )
+
+        # On the first iteration, diagnose why total_us might be 0.
+        # Three distinct failure modes:
+        #   1. CUPTI/libcupti not available — torch.profiler silently returns 0
+        #   2. fn() launched no GPU kernels — nothing to measure
+        #   3. kernel_filter regex matched none of the actual kernels
+        if i == 0 and total_us == 0:
+            all_kernel_us = sum(
+                evt.self_device_time_total for evt in prof.key_averages() if evt.self_device_time_total > 0
+            )
+            if all_kernel_us == 0:
+                # Could be (1) or (2) — check if ANY cuda events were recorded
+                has_cuda_events = any(
+                    "cuda" in evt.key.lower() or evt.device_time_total > 0 for evt in prof.key_averages()
+                )
+                if not has_cuda_events:
+                    raise RuntimeError(
+                        "CUPTI returned 0 device time — libcupti may not be available. "
+                        "Check that nvidia-cuda-cupti is installed, or unset the CUPTI env var."
+                    )
+                else:
+                    raise RuntimeError(
+                        "fn() did not launch any GPU kernels. "
+                        "Ensure the benchmarked function runs at least one CUDA kernel."
+                    )
+            if kernel_re_list is not None:
+                matched_names = [evt.key for evt in prof.key_averages() if evt.self_device_time_total > 0]
+                raise RuntimeError(
+                    f"kernel_filter matched no GPU kernels. Filter: {kernel_filter}, actual kernels: {matched_names}"
+                )
+
+        run_times_us.append(total_us)
+
+    times = torch.tensor(run_times_us, dtype=torch.float64) / 1000.0  # us -> ms
+
+    stats = torch.cuda.memory_stats()
+    peak_mem_mb = stats["allocated_bytes.all.peak"] // (1024 * 1024)
+
+    return {
+        "mean": times.mean().item(),
+        "std": times.std().item(),
+        "rel_std": (times.std() / times.mean()).item() * 100 if times.mean().item() > 0 else 0,
+        "median": times.median().item(),
+        "min": times.min().item(),
+        "max": times.max().item(),
+        "nrep": len(times),
+        "peak_mem_mb": peak_mem_mb,
+    }
+
+
+def benchmark_framework(framework_name, framework_fn, **benchmark_kwargs):
+    """
+    Benchmark a specific framework function and return results with the framework name.
+
+    Args:
+        framework_name: Name of the framework (e.g., 'pytorch', 'cutile')
+        framework_fn: Function to benchmark
+        **benchmark_kwargs: Additional arguments to pass to benchmark function
+
+    Returns:
+        Dictionary with benchmark results keyed by framework name
+    """
+    result = benchmark(framework_fn, **benchmark_kwargs)
+    return {framework_name: result}
 
 
 def markif(condition_func, mark):
