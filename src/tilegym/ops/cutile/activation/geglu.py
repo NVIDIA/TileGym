@@ -10,33 +10,17 @@ import torch
 
 from tilegym.backend import register_impl
 
-from .gelu import gelu_fwd_ct
-from .gelu import gelu_tanh_fwd_ct
-from .gelu import standard_normal_cdf_ct
-from .gelu import standard_normal_pdf_ct
-
-# Approximation mode constants
-GELU_EXACT = 0
-GELU_TANH = 1
+from .gelu import GELU_EXACT
+from .gelu import GELU_TANH
+from .gelu import _gelu_fwd
+from .gelu import _gelu_tanh_fwd
+from .gelu import _normal_cdf
+from .gelu import _normal_pdf
 
 
-def gelu_bwd_ct(x_val, dy_val, BLOCK_SIZE: ct.Constant[int]):
-    """
-    Compute GELU backward gradient: dy * (Φ(x) + x * φ(x))
-
-    Args:
-        x_val: Input value tile
-        dy_val: Output gradient tile
-        BLOCK_SIZE: Block size constant
-
-    Returns:
-        Gradient with respect to input
-    """
-    cdf_val = standard_normal_cdf_ct(x_val, BLOCK_SIZE)
-    pdf_val = standard_normal_pdf_ct(x_val, BLOCK_SIZE)
-    x_pdf = x_val * pdf_val
-    grad_factor = cdf_val + x_pdf
-    return dy_val * grad_factor
+def _gelu_bwd(x_val, dy_val, BLOCK_SIZE: ct.Constant[int]):
+    # dy * (Φ(x) + x * φ(x))
+    return dy_val * (_normal_cdf(x_val, BLOCK_SIZE) + x_val * _normal_pdf(x_val, BLOCK_SIZE))
 
 
 @ct.kernel
@@ -50,42 +34,28 @@ def geglu_fwd_kernel(
     APPROXIMATE: ct.Constant[int],
 ):
     """
-    Forward kernel for GEGLU activation.
-
-    Computes: output = a * GELU(b)
+    Forward kernel for GEGLU activation: output = a * GELU(b)
     where a is the left half and b is the right half of the input.
     """
     bid = ct.bid(0)
 
-    # Compute global indices for this block
     global_id = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-
-    # Compute m_id (batch/row index) and n_offs (column offset)
-    # m_id = global_id // N
     m_id = global_id // N
     n_offs = global_id % N
 
-    # Compute strides for input and output
-    m_offs = m_id * m_stride
-    my_offs = m_id * my_stride
+    left_ptr_offsets = m_id * m_stride + n_offs
+    right_ptr_offsets = m_id * m_stride + n_offs + N
+    out_ptr_offsets = m_id * my_stride + n_offs
 
-    # Calculate pointer offsets for left and right halves
-    left_ptr_offsets = m_offs + n_offs
-    right_ptr_offsets = m_offs + n_offs + N
-    out_ptr_offsets = my_offs + n_offs
-
-    # Load left and right halves using gather
     a = ct.gather(x, (left_ptr_offsets,))
     b = ct.gather(x, (right_ptr_offsets,))
 
-    # Compute a * GELU(b)
     if APPROXIMATE == GELU_TANH:
-        geglu_output = a * gelu_tanh_fwd_ct(b, BLOCK_SIZE)
+        out = a * _gelu_tanh_fwd(b, BLOCK_SIZE)
     else:
-        geglu_output = a * gelu_fwd_ct(b, BLOCK_SIZE)
+        out = a * _gelu_fwd(b, BLOCK_SIZE)
 
-    # Store output using scatter
-    ct.scatter(y, (out_ptr_offsets,), geglu_output)
+    ct.scatter(y, (out_ptr_offsets,), out)
 
 
 @ct.kernel
@@ -100,55 +70,38 @@ def geglu_bwd_kernel(
     APPROXIMATE: ct.Constant[int],
 ):
     """
-    Backward kernel for GEGLU activation.
-
-    Computes gradients with respect to a and b:
-    - da = dy * GELU(b)
-    - db = dy * a * GELU'(b)
+    Backward kernel for GEGLU: da = dy * GELU(b),  db = dy * a * GELU'(b).
     """
     bid = ct.bid(0)
 
-    # Compute global indices for this block
     global_id = bid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-
-    # Compute m_id (batch/row index) and n_offs (column offset)
     m_id = global_id // N
     n_offs = global_id % N
 
-    # Compute strides for input and output
-    m_offs = m_id * m_stride
-    my_offs = m_id * my_stride
+    left_ptr_offsets = m_id * m_stride + n_offs
+    right_ptr_offsets = m_id * m_stride + n_offs + N
+    out_ptr_offsets = m_id * my_stride + n_offs
 
-    # Calculate pointer offsets
-    left_ptr_offsets = m_offs + n_offs
-    right_ptr_offsets = m_offs + n_offs + N
-    out_ptr_offsets = my_offs + n_offs
-
-    # Load input splits and output gradient
     a = ct.gather(x, (left_ptr_offsets,))
     b = ct.gather(x, (right_ptr_offsets,))
     dy_val = ct.gather(dy, (out_ptr_offsets,))
 
-    # Compute GELU(b) for gradient of a
     if APPROXIMATE == GELU_TANH:
-        dy_da = gelu_tanh_fwd_ct(b, BLOCK_SIZE)
+        gelu_b = _gelu_tanh_fwd(b, BLOCK_SIZE)
     else:
-        dy_da = gelu_fwd_ct(b, BLOCK_SIZE)
+        gelu_b = _gelu_fwd(b, BLOCK_SIZE)
 
-    # Compute gradients
-    da = dy_val * dy_da
-    db = a * gelu_bwd_ct(b, dy_val, BLOCK_SIZE)
+    da = dy_val * gelu_b
+    db = a * _gelu_bwd(b, dy_val, BLOCK_SIZE)
 
-    # Store gradients
     ct.scatter(dx, (left_ptr_offsets,), da)
     ct.scatter(dx, (right_ptr_offsets,), db)
 
 
-class GEGLU(torch.autograd.Function):
+class GegluFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, dim, approximate):
         assert approximate == "none" or approximate == "tanh", "Only `none` or `tanh` activations are supported"
-        # Process input
         assert x.is_contiguous()
         assert x.shape[dim] % 2 == 0
 
@@ -157,26 +110,22 @@ class GEGLU(torch.autograd.Function):
         y_shape = list(x_shape)
         y_shape[dim] = y_shape[dim] // 2
 
-        # Flatten input and output for kernel processing
         x_flat = x.view(-1)
         y_flat = torch.empty(reduce(operator.mul, y_shape, 1), device=x.device, dtype=x.dtype)
 
-        # Compute strides
         if dim == 0:
             m_stride = 0
             my_stride = 0
         else:
             m_stride = x.stride(dim - 1)
-            my_stride = reduce(operator.mul, y_shape[dim:], 1)  # Stride for flattened y
+            my_stride = reduce(operator.mul, y_shape[dim:], 1)
 
-        # Compute dimensions
         M = reduce(operator.mul, x_shape[:dim], 1)
         N2 = reduce(operator.mul, x_shape[dim:], 1) // 2
         n_elements = reduce(operator.mul, x_shape, 1) // 2
 
         BLOCK_SIZE = 256
         grid = ((n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1)
-
         approximate_mode = GELU_TANH if approximate == "tanh" else GELU_EXACT
 
         ct.launch(
@@ -186,9 +135,7 @@ class GEGLU(torch.autograd.Function):
             (y_flat, x_flat, N2, m_stride, my_stride, BLOCK_SIZE, approximate_mode),
         )
 
-        # Reshape output back to expected shape
         y = y_flat.view(y_shape)
-
         ctx.save_for_backward(x, y)
         ctx.M = M
         ctx.N2 = N2
@@ -209,13 +156,8 @@ class GEGLU(torch.autograd.Function):
         n_elements = ctx.n_elements
 
         x_shape = x.shape
+        dx_flat = torch.empty_like(x.view(-1))
 
-        # Flatten tensors for kernel processing
-        x_flat = x.view(-1)
-        dy_flat = dy.view(-1)
-        dx_flat = torch.empty_like(x_flat)
-
-        # Compute strides
         if dim == 0:
             m_stride = 0
             my_stride = 0
@@ -225,20 +167,16 @@ class GEGLU(torch.autograd.Function):
 
         BLOCK_SIZE = 256
         grid = ((n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1)
-
         approximate_mode = GELU_TANH if approximate == "tanh" else GELU_EXACT
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
             geglu_bwd_kernel,
-            (dx_flat, dy_flat, x_flat, N2, m_stride, my_stride, BLOCK_SIZE, approximate_mode),
+            (dx_flat, dy.view(-1), x.view(-1), N2, m_stride, my_stride, BLOCK_SIZE, approximate_mode),
         )
 
-        # Reshape output back to expected shape
-        dx = dx_flat.view(x_shape)
-
-        return dx, None, None
+        return dx_flat.view(x_shape), None, None
 
 
 @register_impl("geglu", backend="cutile")
@@ -258,4 +196,4 @@ def geglu(input: torch.Tensor, dim=-1, approximate="none"):
         dim: int
         approximate: ``'none'`` or ``'tanh'``
     """
-    return GEGLU.apply(input, dim, approximate)
+    return GegluFunction.apply(input, dim, approximate)
