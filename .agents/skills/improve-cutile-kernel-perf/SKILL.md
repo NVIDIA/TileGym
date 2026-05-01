@@ -35,13 +35,14 @@ Work with user to prepare optimization environment:
    - cuTile kernels live under `src/tilegym/suites/<suite>/cutile/` or `src/tilegym/ops/cutile/`
    - Read the kernel file and identify: the `@ct.kernel` decorated function(s), the launch wrapper (`ct.launch()` or `ct_experimental.autotune_launch()`), the `@register_impl` registration, and current autotune configs (if any)
 3. Classify the kernel:
-   - Arithmetic Intensity < 10 -> Memory-bound (primary metric: GB/s)
-   - Arithmetic Intensity 10-50 -> Balanced (track both GB/s and TFLOPS)
-   - Arithmetic Intensity > 50 -> Compute-bound (primary metric: TFLOPS)
+   - Arithmetic Intensity < 10 -> Memory-bound
+   - Arithmetic Intensity 10-50 -> Balanced
+   - Arithmetic Intensity > 50 -> Compute-bound
+
+   Note: classification is only used to pick the optimization priority order in the experiment loop. The **core metric** is always `latency (ms)`.
 4. Check GPU environment:
    - Ensure a GPU node (B200/H100/H200) is available
    - All subsequent benchmark commands should run on the GPU node
-   - Check `ncu` CLI available for deep profiling
 5. Study related references:
    - `references/optimization-playbook.md`: Step-by-step recipes for each optimization (A through J) with before/after code examples
    - `references/perf-knobs-catalog.md`: Complete catalog of all tunable parameters (TMA, persistent scheduling, occupancy, tile sizes, latency hints, etc.)
@@ -56,8 +57,8 @@ Work with user to prepare optimization environment:
 Every experiment iteration applies ONE optimization to the target kernel, verifies correctness, re-benchmarks, and records results. Each iteration should be enforced to finish within 10 minutes.
 
 ### The goal
-- Improve the **core metric**: reduce `SM Active Cycles`
-- Subject to the **core constraint**: Correctness shall not regress — every optimization MUST preserve numerical correctness. `SM Active Cycles` shall not regress > 2% compared to baseline.
+- Improve the **core metric**: reduce `latency (ms)`
+- Subject to the **core constraint**: Correctness shall not regress — every optimization MUST preserve numerical correctness. `latency (ms)` shall not regress > 2% compared to baseline.
 
 ### What you can change
 - The target kernel file under `src/tilegym/suites/<suite>/cutile/` or `src/tilegym/ops/cutile/`: kernel body, tile sizes, occupancy, num_ctas, TMA usage, latency hints, flush_to_zero, autotune configs, persistent scheduling, and other cuTile-specific parameters
@@ -79,8 +80,7 @@ python -m pytest tests/suites/.../test_<kernel_name>.py -k "test_ and cutile and
 #### Performance benchmark:
 For each iteration:
 1. Run pytest benchmark: `python -m pytest ... --print-record` → extract latency (ms)
-2. Run ncu profiling: `ncu [command]` → extract GB/s (memory-bound), TFLOPS (compute-bound) and `SM Active Cycles`.
-3. Record both metrics in perf_results.md
+2. Record latency in perf_results.md
 
 Benchmark cmdlines:
 ```bash
@@ -93,22 +93,20 @@ Cutile: {'forward': {'mean': 3.7903138461538455, 'std': 0.0016941310873207053, '
 ```
 
 ### Track experiment progress
-Use @sandbox/perf_results.md to record each iteration's results. It should only contain a Markdown table with 7 columns:
+Use @sandbox/perf_results.md to record each iteration's results. It should only contain a Markdown table with 5 columns:
 - `iteration`: iteration number, starting from 0 (baseline)
 - `optimization`: what was applied (e.g., "baseline", "TMA replace gather", "persistent scheduling")
-- `metric`: primary metric value (GB/s or TFLOPS)
 - `latency_ms`: kernel latency in milliseconds, six decimal points
-- `SM Active Cycles`: cuTile backend `SM Active Cycles`
 - `correctness`: PASS or FAIL
 - `status`: Whether this iteration was `keep`, `revert`, or `crash`
 
 Example content:
 
 ```markdown
-| iteration | optimization | metric | latency_ms | SM Active Cycles | correctness | status |
-|----------:|:-------------|-------:|-----------:|------------------:|:------------|-------:|
-| 0 | baseline | 245.30 | 0.82 |  1,342,117        | PASS | keep |
-| 1 | TMA replace gather | 512.60 | 0.39 | 1,161,237         | PASS | keep |
+| iteration | optimization       | latency_ms | correctness | status |
+|----------:|:-------------------|-----------:|:------------|-------:|
+| 0         | baseline           |   0.820000 | PASS        | keep   |
+| 1         | TMA replace gather |   0.390000 | PASS        | keep   |
 ```
 
 Create the tabular header if the file was empty. Append one line for each iteration.
@@ -145,7 +143,7 @@ LOOP:
 
    | Outcome | Action |
    |---------|--------|
-   | Improvement(`SM Active Cycles`) >= 5% | Accept as new baseline, continue |
+   | Improvement(`latency (ms)`) >= 5% | Accept as new baseline, continue |
    | Improvement 2-5% | Accept, lower priority for next iteration |
    | Improvement < 2% | Accept but stop unless user wants more |
    | Regression on any config | Revert immediately, try next optimization |
