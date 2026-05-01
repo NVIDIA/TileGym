@@ -76,20 +76,25 @@ def test_get_comment_style():
 
 def test_should_skip_file():
     """Test file skipping logic."""
+    # ``should_skip_file`` resolves the path relative to ``root_dir`` to
+    # check directory-level skip rules. Use the current directory so the
+    # bare relative paths below behave as the test names imply.
+    root = Path(".")
+
     # Should skip compiled files
-    assert should_skip_file(Path("test.pyc"))
-    assert should_skip_file(Path("__pycache__/test.py"))
+    assert should_skip_file(Path("test.pyc"), root)
+    assert should_skip_file(Path("__pycache__/test.py"), root)
 
     # Should skip .git directory files
-    assert should_skip_file(Path(".git/config"))
+    assert should_skip_file(Path(".git/config"), root)
 
     # Should NOT skip .github directory files
-    assert not should_skip_file(Path(".github/workflows/ci.yml"))
-    assert not should_skip_file(Path(".github/scripts/utils.py"))
+    assert not should_skip_file(Path(".github/workflows/ci.yml"), root)
+    assert not should_skip_file(Path(".github/scripts/utils.py"), root)
 
     # Should not skip source files
-    assert not should_skip_file(Path("test.py"))
-    assert not should_skip_file(Path("README.md"))
+    assert not should_skip_file(Path("test.py"), root)
+    assert not should_skip_file(Path("README.md"), root)
 
 
 def test_integration_write_and_check():
