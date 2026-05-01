@@ -8,6 +8,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 import triton
+from bench_utils import profile_with_l2flush
 
 import tilegym
 from tilegym.backend import is_backend_available
@@ -106,7 +107,7 @@ def bench_rmsnorm(N, config_idx, dtype, M, device=DEVICE):
     torch.testing.assert_close(fn(), ref(), atol=5e-2, rtol=0.0)
 
     # Benchmark the function
-    ms = triton.testing.do_bench_cudagraph(fn)
+    ms = profile_with_l2flush(fn)
 
     # Calculate memory bandwidth (GB/s)
     # RMSNorm operation: read input, read weight, write output
