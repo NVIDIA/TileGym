@@ -23,9 +23,11 @@ def list_available() -> List[str]:
     available = []
     try:
         from . import flashinfer
+        from . import liger
         from . import unsloth
 
         available.append("flashinfer")
+        available.append("liger")
         available.append("unsloth")
     except ImportError:
         pass
