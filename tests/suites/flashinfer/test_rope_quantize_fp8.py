@@ -162,8 +162,6 @@ class Test_FlashInfer_RopeQuantizeFp8(common.PyTestCase):
             tilegym.set_backend(framework)
         else:
             pytest.skip(f"Backend {framework} is not available")
-        if framework == "cutile":
-            pytest.xfail("CuTile rope_kernel: TileAS lowering to NVVM fails with invalid use-def chain ")
 
         if arch == "sm80" and "float8" in quant_dtype.__repr__():
             pytest.skip("FP8 is not supported on sm80 (Ampere).")
