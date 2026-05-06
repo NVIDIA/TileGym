@@ -16,13 +16,15 @@ import triton
 from tilegym.backend import is_backend_available
 
 if is_backend_available("cutile"):
-    from tilegym.ops.cutile.rms_norm import TileRMSNorm
-    from tilegym.ops.cutile.rms_norm import _bwd_tiles
+    from tilegym.ops.cutile.rms_norm import compute_rms_norm_rstd_torch
     from tilegym.ops.cutile.rms_norm import rms_norm_backward
+    from tilegym.ops.cutile.rms_norm import rms_norm_backward_torch
+    from tilegym.ops.cutile.rms_norm import rms_norm_backward_workspace_bytes
 else:
-    TileRMSNorm = None
-    _bwd_tiles = None
+    compute_rms_norm_rstd_torch = None
     rms_norm_backward = None
+    rms_norm_backward_torch = None
+    rms_norm_backward_workspace_bytes = None
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -31,7 +33,7 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 rms_norm_backward_cutile = rms_norm_backward
 
 # Torch backward
-rms_norm_backward_torch = TileRMSNorm.rms_norm_backward_torch if TileRMSNorm is not None else None
+rms_norm_backward_reference = rms_norm_backward_torch
 
 
 # Backend dispatch
@@ -92,7 +94,7 @@ def bench_rmsnorm_backward(N, backend, dtype, M, device=DEVICE):
     dy = torch.randn(x_shape, dtype=dtype, device=device)
 
     # Pre-compute rstd (simulating what forward pass would save)
-    rstd = TileRMSNorm.compute_rstd_torch(x, eps)
+    rstd = compute_rms_norm_rstd_torch(x, eps)
 
     # Get the backward function for this backend
     backward_fn = BACKWARD_FUNCTIONS[backend]
@@ -102,7 +104,7 @@ def bench_rmsnorm_backward(N, backend, dtype, M, device=DEVICE):
         return backward_fn(x, dy, weight, rstd)
 
     # Compute reference for correctness check
-    dx_ref, dw_ref = rms_norm_backward_torch(x, dy, weight, rstd)
+    dx_ref, dw_ref = rms_norm_backward_reference(x, dy, weight, rstd)
 
     # Run once to verify correctness
     dx, dw = run_backward()
@@ -124,8 +126,7 @@ def bench_rmsnorm_backward(N, backend, dtype, M, device=DEVICE):
     dw_bytes = weight.numel() * bytes_per_element  # Write dw
 
     if backend == "cutile":
-        _, tile_n, grid, _ = _bwd_tiles(M, N)
-        temp_buffer_bytes = grid * tile_n * 4 * 2  # partial-sum buffer: write + read float32
+        temp_buffer_bytes = rms_norm_backward_workspace_bytes(M, N)
     else:
         temp_buffer_bytes = 0
 

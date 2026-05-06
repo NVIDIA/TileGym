@@ -2,14 +2,12 @@
 #
 # SPDX-License-Identifier: MIT
 
+import importlib.util
+
 import pytest
 
-try:
-    import transformers
-
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
+HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
+if not HAS_TRANSFORMERS:
     pytest.skip("transformers not installed, skipping test_rope.py", allow_module_level=True)
 
 import torch
@@ -46,7 +44,7 @@ class Test_RoPE(common.PyTestCase):
         return torch.cat([q_rot, q_pass], dim=-1), torch.cat([k_rot, k_pass], dim=-1)
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "bsz, seq_len, num_q_heads, num_kv_heads, head_dim, partial_rotary_factor",
@@ -242,7 +240,7 @@ class Test_RoPE(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("framework", _perf_backends)
     def test_perf(
         self,
         bsz,

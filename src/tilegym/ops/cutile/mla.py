@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (S_qo, TILE_D, TILE_KPE, H, query_group_size, dtype, device) -> (best_cfg, tuned_kernel)
@@ -38,7 +38,7 @@ INV_LOG_2 = 1.0 / math.log(2)
 
 
 @ct.kernel
-def prefill_mla(
+def _prefill_mla_kernel(
     Q,
     QPE,
     K,
@@ -92,7 +92,8 @@ def prefill_mla(
 
     # Stage 1 inline:
     start_m = bid_x
-    lo, mask_start, hi = 0, start_m * TILE_M, (start_m + 1) * TILE_M
+    mask_start = start_m * TILE_M
+    hi = (start_m + 1) * TILE_M
     mask_start = mask_start // TILE_N
     hi = ct.cdiv(hi, TILE_N)
     for j in range(0, hi):
@@ -153,7 +154,7 @@ def prefill_mla(
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
 
 
-class _attention(torch.autograd.Function):
+class _AttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, qpe, k, kpe, v, sm_scale, IS_CAUSAL, kernel_configs):
         assert IS_CAUSAL, "CuTile MLA only supports IS_CAUSAL=True"
@@ -181,7 +182,7 @@ class _attention(torch.autograd.Function):
                     list(_configs_fn()),
                     stream,
                     lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
-                    prefill_mla,
+                    _prefill_mla_kernel,
                     lambda cfg: (
                         q,
                         qpe,
@@ -202,7 +203,7 @@ class _attention(torch.autograd.Function):
             best_cfg = result.best.config
             _mla_tune_cache[cache_key] = (
                 best_cfg,
-                ct.kernel(prefill_mla._pyfunc, num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
+                _prefill_mla_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
             )
         best_cfg, tuned_kernel = _mla_tune_cache[cache_key]
         ct.launch(
@@ -221,13 +222,13 @@ class _attention(torch.autograd.Function):
         raise NotImplementedError("Backward pass is not implemented for CuTile MLA")
 
 
-class Attention:
+class _Attention:
     def __init__(self, IS_CAUSAL, kernel_configs):
         self.IS_CAUSAL = IS_CAUSAL
         self.kernel_configs = kernel_configs
 
     def __call__(self, q, k, v, sm_scale, qpe=None, kpe=None):
-        c = _attention.apply(
+        c = _AttentionFunction.apply(
             q,
             qpe,
             k,
@@ -240,7 +241,7 @@ class Attention:
         return c
 
 
-def cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_size):
+def _cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_size):
     """Autotuned launch for prefill_mla kernel."""
     B, _, S_qo, TILE_D = q.shape
     TILE_KPE = qpe.shape[3]
@@ -248,12 +249,13 @@ def cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_s
     _configs_fn = _mla_sm80_autotune_configs if _gpu_cap[0] < 9 else _mla_sm90_autotune_configs
     cache_key = (S_qo, TILE_D, TILE_KPE, H, query_group_size, q.dtype, str(q.device))
 
-    if os.environ.get("DISABLE_AUTOTUNE", "0") == "1":
+    if is_autotune_disabled():
         cfg = next(_configs_fn())
+        kernel = _prefill_mla_kernel.replace_hints(num_ctas=cfg.num_ctas, occupancy=cfg.occupancy)
         ct.launch(
             stream,
             (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
-            prefill_mla,
+            kernel,
             (q, qpe, k, kpe, v, o, sm_scale, TILE_D, TILE_KPE, H, cfg.TILE_M, cfg.TILE_N, query_group_size),
         )
         return
@@ -264,7 +266,7 @@ def cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_s
                 list(_configs_fn()),
                 stream,
                 lambda cfg: (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
-                prefill_mla,
+                _prefill_mla_kernel,
                 lambda cfg: (
                     q,
                     qpe,
@@ -285,7 +287,7 @@ def cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_s
         best_cfg = result.best.config
         _mla_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(prefill_mla._pyfunc, num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
+            _prefill_mla_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _mla_tune_cache[cache_key]
     ct.launch(
@@ -296,6 +298,7 @@ def cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_s
     )
 
 
+@register_impl("mla", backend="cutile")
 def tile_mla(q, k, v, qpe, kpe, is_causal, scaling, **kwargs):
     assert is_causal, "CuTile MLA only supports is_causal=True"
     if scaling is None:
@@ -312,8 +315,5 @@ def tile_mla(q, k, v, qpe, kpe, is_causal, scaling, **kwargs):
         query_group_size = int(H / num_head_kv)
 
     stream = torch.cuda.current_stream()
-    cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, scaling, H, query_group_size)
+    _cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, scaling, H, query_group_size)
     return o
-
-
-register_impl("mla", "cutile")(tile_mla)

@@ -18,50 +18,50 @@ _ALIGN = 8
 
 
 @experimental_kernel
-@ct.kernel(occupancy=1)
+@ct.kernel
 def _ce_online_kernel(
     logits,
     loss_out,
     target_logits,
-    n_rows: ConstInt,
-    vocab_size: ConstInt,
-    tile_v: ConstInt,
+    N_ROWS: ConstInt,
+    VOCAB_SIZE: ConstInt,
+    TILE_V: ConstInt,
 ):
     """2-pass online softmax over vocab tiles; writes loss and softmax probs in-place."""
     pid = ct.bid(0)
     num_blocks = ct.num_blocks(0)
-    num_chunks = ct.cdiv(vocab_size, tile_v)
-    col_base = ct.arange(tile_v, dtype=ct.int32)
+    num_chunks = ct.cdiv(VOCAB_SIZE, TILE_V)
+    col_base = ct.arange(TILE_V, dtype=ct.int32)
 
-    for row in range(pid, n_rows, num_blocks):
+    for row in range(pid, N_ROWS, num_blocks):
         row_max = ct.full((1,), -1e30, dtype=ct.float32)
         sum_exp = ct.full((1,), 0.0, dtype=ct.float32)
 
         for chunk_idx in range(num_chunks):
-            cols = ct.add(ct.full((tile_v,), chunk_idx * tile_v, dtype=ct.int32), col_base)
+            cols = ct.full((TILE_V,), chunk_idx * TILE_V, dtype=ct.int32) + col_base
             chunk = ct.gather(logits, (row, cols), check_bounds=True, padding_value=-1e30)
             chunk_f32 = ct.astype(chunk, ct.float32)
 
             chunk_max = ct.max(chunk_f32, 0, keepdims=True)
             new_max = ct.maximum(row_max, chunk_max)
-            sum_exp = ct.mul(sum_exp, ct.exp(ct.sub(row_max, new_max)))
-            exp_chunk = ct.exp(ct.sub(chunk_f32, new_max))
-            sum_exp = ct.add(sum_exp, ct.sum(exp_chunk, 0, keepdims=True))
+            sum_exp = sum_exp * ct.exp(row_max - new_max)
+            exp_chunk = ct.exp(chunk_f32 - new_max)
+            sum_exp = sum_exp + ct.sum(exp_chunk, 0, keepdims=True)
             row_max = new_max
 
-        lse = ct.add(row_max, ct.log(sum_exp))
+        lse = row_max + ct.log(sum_exp)
         tgt_logit = ct.load(target_logits, index=(row,), shape=(1,), padding_mode=ct.PaddingMode.ZERO)
         tgt_logit = ct.astype(tgt_logit, ct.float32)
-        loss = ct.sub(ct.reshape(lse, (1,)), tgt_logit)
+        loss = ct.reshape(lse, (1,)) - tgt_logit
         ct.store(loss_out, index=(row,), tile=loss, allow_tma=False)
 
-        inv_sum = ct.truediv(ct.full((1,), 1.0, dtype=ct.float32), sum_exp)
+        inv_sum = ct.full((1,), 1.0, dtype=ct.float32) / sum_exp
 
         for chunk_idx in range(num_chunks):
-            cols = ct.add(ct.full((tile_v,), chunk_idx * tile_v, dtype=ct.int32), col_base)
+            cols = ct.full((TILE_V,), chunk_idx * TILE_V, dtype=ct.int32) + col_base
             chunk = ct.gather(logits, (row, cols), check_bounds=True, padding_value=-1e30)
             chunk_f32 = ct.astype(chunk, ct.float32)
-            probs = ct.mul(ct.exp(ct.sub(chunk_f32, row_max)), inv_sum)
+            probs = ct.exp(chunk_f32 - row_max) * inv_sum
             ct.scatter(logits, (row, cols), ct.astype(probs, logits.dtype), check_bounds=True)
 
 
@@ -79,10 +79,11 @@ def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor, loss_chunk: Tensor, i
     tile_v = 4096
     sm_count = torch.cuda.get_device_properties("cuda").multi_processor_count
     grid = (min(sm_count * 4, n_rows),)
+    kernel = _ce_online_kernel.replace_hints(occupancy=1)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        _ce_online_kernel,
+        kernel,
         (logits_chunk, loss_chunk, target_logits, n_rows, logits_chunk.shape[1], tile_v),
     )
 

@@ -51,7 +51,7 @@ if is_backend_available("cutile"):
     from .experimental.sparse_mla import tile_sparse_mla
     from .experimental.swa_attention import tile_swa_attention
     from .flash_decode import fmha_decode
-    from .moe import fused_moe_kernel as invoke_fused_moe_kernel
+    from .moe import invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .recurrent_gated_delta_rule import recurrent_gated_delta_rule
     from .rms_norm import get_rms_norm_module

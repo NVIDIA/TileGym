@@ -6,7 +6,7 @@
 import cuda.tile as ct
 import torch
 import torch.nn as nn
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
@@ -16,21 +16,21 @@ from .utils import next_power_of_2
 PAD_ZERO = ct.PaddingMode.ZERO
 
 
-def sigmoid(x):
-    denom = ct.add(1.0, ct.exp(-x), flush_to_zero=True)
+def _sigmoid(x):
+    denom = 1.0 + ct.exp(-x)
     return ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
 
 
-def silu(x):
-    return ct.mul(x, sigmoid(x), flush_to_zero=True)
+def _silu(x):
+    return x * _sigmoid(x)
 
 
-def ceildiv(a, b):
+def _ceildiv(a, b):
     return -(a // -b)
 
 
 @ct.kernel
-def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
+def _swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
     offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
 
@@ -38,11 +38,11 @@ def swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     b_tile = ct.gather(b, (row, offsets), check_bounds=True, padding_value=0.0)
 
     a_tile_f32 = a_tile.astype(ct.float32)
-    c_tile = silu(a_tile_f32).astype(a.dtype) * b_tile
+    c_tile = _silu(a_tile_f32).astype(a.dtype) * b_tile
     ct.scatter(c, (row, offsets), c_tile, check_bounds=True)
 
 
-def swiglu_forward(a, b):
+def _swiglu_forward(a, b):
     """
     a: (batch_size, seq_len, intermediate_size)
     b: (batch_size, seq_len, intermediate_size)
@@ -59,7 +59,7 @@ def swiglu_forward(a, b):
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        swiglu_forward_kernel,
+        _swiglu_forward_kernel,
         (
             a,
             b,
@@ -77,7 +77,7 @@ def swiglu_forward(a, b):
 # db = dc * silu(a)
 @experimental_kernel
 @ct.kernel
-def swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
+def _swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
     col = ct.bid(1)
 
@@ -90,7 +90,7 @@ def swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
     a_tile_f32 = a_tile.astype(ct.float32)
     b_tile_f32 = b_tile.astype(ct.float32)
 
-    sigmoid_a = sigmoid(a_tile_f32)
+    sigmoid_a = _sigmoid(a_tile_f32)
     silu_a = a_tile_f32 * sigmoid_a
 
     # db = dc * silu(a)
@@ -104,7 +104,7 @@ def swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
     ct.store(da, index=(row, col), tile=da_tile.astype(a.dtype))
 
 
-def swiglu_backward(dc, a, b):
+def _swiglu_backward(dc, a, b):
     """
     Backward pass for SwiGLU operation.
 
@@ -127,33 +127,38 @@ def swiglu_backward(dc, a, b):
     db = torch.empty_like(b)
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    TILE_N = ceildiv(NUM_SMS, n_rows)
+    TILE_N = _ceildiv(NUM_SMS, n_rows)
     TILE_SIZE = next_power_of_2(int(n_cols / TILE_N))
-    grid = (n_rows, ceildiv(n_cols, TILE_SIZE), 1)
+    grid = (n_rows, _ceildiv(n_cols, TILE_SIZE), 1)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        swiglu_backward_kernel,
+        _swiglu_backward_kernel,
         (dc, a, b, da, db, TILE_SIZE),
     )
     return da.view(*ori_shape), db.view(*ori_shape)
 
 
-class SiLUMulFunction(torch.autograd.Function):
+class _SiLUMulFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b):
-        c = swiglu_forward(a, b)
+        c = _swiglu_forward(a, b)
         ctx.save_for_backward(a, b)
         return c
 
     @staticmethod
     def backward(ctx, dc):
         a, b = ctx.saved_tensors
-        da, db = swiglu_backward(dc, a, b)
+        da, db = _swiglu_backward(dc, a, b)
         return da, db
 
 
-class SwiGLUMLP(nn.Module):
+def swiglu(a, b):
+    """Autograd-capable cuTile SwiGLU operator."""
+    return _SiLUMulFunction.apply(a, b)
+
+
+class _SwiGLUMLP(nn.Module):
     def __init__(self, config, hidden_size=None, intermediate_size=None):
         super().__init__()
         self.config = config
@@ -166,14 +171,14 @@ class SwiGLUMLP(nn.Module):
             raise ValueError(f"Activation function {config.hidden_act} not supported.")
 
     def forward(self, x):
-        return self.down_proj(SiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x)))
+        return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
 
 
 @register_impl("get_swiglu_module", backend="cutile")
 def get_swiglu_module():
-    return SwiGLUMLP
+    return _SwiGLUMLP
 
 
 @register_impl("get_swiglu", backend="cutile")
 def get_swiglu():
-    return swiglu_forward
+    return swiglu

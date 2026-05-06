@@ -8,15 +8,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import tilegym
 from tests import common
 from tilegym import set_backend
 from tilegym.ops import get_swiglu
-
-try:
-    from tilegym.ops.cutile.swiglu import SiLUMulFunction
-except (ImportError, ModuleNotFoundError):
-    SiLUMulFunction = None
 
 
 class Test_SwiGLU(common.PyTestCase):
@@ -26,7 +20,7 @@ class Test_SwiGLU(common.PyTestCase):
         return F.silu(a) * b
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     # Regular shapes (power-of-2)
     @pytest.mark.parametrize(
@@ -113,8 +107,6 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward(self, batch_size, seq_len, hidden_size, dtype, backend, arch):
         """Test backward pass of SwiGLU (SiLUMulFunction)."""
-        if SiLUMulFunction is None:
-            pytest.skip("CuTile SiLUMulFunction not available (cuda.tile not installed)")
         self.setUp()
         try:
             set_backend(backend)
@@ -131,7 +123,7 @@ class Test_SwiGLU(common.PyTestCase):
         b_ref = b.clone().detach().requires_grad_(True)
 
         # Forward
-        out = SiLUMulFunction.apply(a, b)
+        out = get_swiglu()(a, b)
         out_ref = self.reference(a_ref, b_ref)
 
         # Check forward correctness
@@ -168,8 +160,6 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward_irregular(self, batch_size, seq_len, hidden_size, backend, arch):
         """Test backward pass with irregular (non-power-of-2) shapes."""
-        if SiLUMulFunction is None:
-            pytest.skip("CuTile SiLUMulFunction not available (cuda.tile not installed)")
         self.setUp()
         try:
             set_backend(backend)
@@ -186,7 +176,7 @@ class Test_SwiGLU(common.PyTestCase):
         b_ref = b.clone().detach().requires_grad_(True)
 
         # Forward
-        out = SiLUMulFunction.apply(a, b)
+        out = get_swiglu()(a, b)
         out_ref = self.reference(a_ref, b_ref)
 
         torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
@@ -208,30 +198,36 @@ class Test_SwiGLU(common.PyTestCase):
         ],
         ids=lambda x: str(x),
     )
-    @pytest.mark.parametrize("framework", _perf_frameworks)
-    def test_perf(self, batch_size, seq_len, hidden_size, intermediate_size, framework, record_property):
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch_size, seq_len, hidden_size, intermediate_size, backend, record_property):
         """Performance comparison for SwiGLU"""
         self.setUp()
+        if backend != "pytorch":
+            try:
+                set_backend(backend)
+            except Exception as e:
+                pytest.skip(f"Backend is not supported: {e}")
 
         # Generate input data
         a = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
         b = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
 
         with torch.no_grad():
-            if framework == "pytorch":
-                framework_fn = lambda: self.reference(a, b)
-            elif tilegym.is_backend_available(framework):
-                set_backend(framework)
-                framework_fn = lambda: get_swiglu()(a, b)[2]
+            if backend == "pytorch":
+                backend_fn = lambda: self.reference(a, b)
             else:
-                pytest.skip(f"Framework {framework} is not available")
+                try:
+                    backend_fn = lambda: get_swiglu()(a, b)[2]
+                except Exception as e:
+                    pytest.skip(f"Cutile backend not available: {e}")
 
             # Run benchmarks
-            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
-            # Log results
-            record_property("benchmark", result)
+            result = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+
+        # Log results
+        record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
-        del a, b, framework_fn
+        del a, b, backend_fn
         torch.cuda.empty_cache()
         gc.collect()

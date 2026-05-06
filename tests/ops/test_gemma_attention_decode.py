@@ -11,7 +11,7 @@ from typing import Tuple
 import pytest
 import torch
 
-import tilegym
+from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
 from tilegym.ops import gemma_attention_decode
 
@@ -131,7 +131,7 @@ def einsum_reference_decode(
 
 class TestGemmaAttentionDecode(common.PyTestCase):
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_size, num_heads, num_kv_heads, seq_len_kv, head_dim, window_size, soft_cap, dtype",
@@ -161,7 +161,7 @@ class TestGemmaAttentionDecode(common.PyTestCase):
             (1, 8, 8, 10019, 64, 256, 50.0, torch.bfloat16),
         ],
     )
-    @pytest.mark.parametrize("framework", _backends)
+    @pytest.mark.parametrize("backend", _backends)
     def test_op(
         self,
         batch_size,
@@ -172,7 +172,7 @@ class TestGemmaAttentionDecode(common.PyTestCase):
         window_size,
         soft_cap,
         dtype,
-        framework: str,
+        backend: str,
         arch,
     ):
         """Test Gemma attention decode correctness against pure PyTorch reference"""
@@ -181,7 +181,7 @@ class TestGemmaAttentionDecode(common.PyTestCase):
         if arch in ["sm80"]:
             pytest.skip("Skip on sm80: Gemma attention decode requires SM90+")
         self.setUp()
-        set_backend(framework)
+        set_backend(backend)
         device = torch.device("cuda")
 
         # Create test data
@@ -222,7 +222,7 @@ class TestGemmaAttentionDecode(common.PyTestCase):
             (1, 32, 8, 16384, 128, 0, 50.0, torch.bfloat16),
         ],
     )
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("backend", _perf_backends)
     def test_perf(
         self,
         batch_size,
@@ -233,7 +233,7 @@ class TestGemmaAttentionDecode(common.PyTestCase):
         window_size,
         soft_cap,
         dtype,
-        framework: str,
+        backend: str,
         record_property,
         arch,
     ):
@@ -251,8 +251,8 @@ class TestGemmaAttentionDecode(common.PyTestCase):
         q, k, v = _get_qkv_decode(batch_size, num_heads, num_kv_heads, seq_len_kv, head_dim, device, dtype)
         scaling = 1.0 / math.sqrt(head_dim)
 
-        if framework == "pytorch":
-            framework_fn = lambda: einsum_reference_decode(
+        if backend == "pytorch":
+            backend_fn = lambda: einsum_reference_decode(
                 q=q,
                 k=k,
                 v=v,
@@ -260,9 +260,9 @@ class TestGemmaAttentionDecode(common.PyTestCase):
                 window_size=window_size,
                 soft_cap=soft_cap,
             )
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            framework_fn = lambda: gemma_attention_decode(
+        elif is_backend_available(backend):
+            set_backend(backend)
+            backend_fn = lambda: gemma_attention_decode(
                 q=q,
                 k=k,
                 v=v,
@@ -271,12 +271,12 @@ class TestGemmaAttentionDecode(common.PyTestCase):
                 soft_cap=soft_cap,
             )
         else:
-            pytest.skip(f"Framework {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         # Verify correctness before benchmarking
-        if framework != "pytorch":
+        if backend != "pytorch":
             self.assertCorrectness(
-                framework_fn,
+                backend_fn,
                 lambda: einsum_reference_decode(
                     q=q,
                     k=k,
@@ -292,11 +292,11 @@ class TestGemmaAttentionDecode(common.PyTestCase):
             )
 
         # Benchmark
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
         record_property("benchmark", result)
 
         # Cleanup
-        del q, k, v, framework_fn
+        del q, k, v, backend_fn
         torch.cuda.empty_cache()
         import gc
 

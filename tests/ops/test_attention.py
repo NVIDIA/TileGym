@@ -8,7 +8,7 @@ import math
 import pytest
 import torch
 
-import tilegym
+from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
 from tilegym.ops import fmha_interface
 
@@ -50,7 +50,7 @@ class Test_FMHA(common.PyTestCase):
         return ref
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_size, num_heads, seq_len, head_dim, is_causal, dtype",
@@ -152,11 +152,11 @@ class Test_FMHA(common.PyTestCase):
             )
             for head_dim in ([64] if torch.cuda.get_device_capability()[0] == 8 else [128])
         ],
-        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
     @pytest.mark.parametrize("is_causal", [True, False])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
-    def test_perf(self, batch, heads, seq_len, head_dim, dtype, is_causal, framework, record_property):
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch, heads, seq_len, head_dim, dtype, is_causal, backend, record_property):
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
         if torch.cuda.get_device_capability()[0] == 8:
@@ -201,16 +201,18 @@ class Test_FMHA(common.PyTestCase):
         # Calculate scaling factor
         sm_scale = 1.0 / math.sqrt(head_dim)
 
-        if framework == "pytorch":
-            framework_fn = lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=is_causal)
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            framework_fn = lambda: fmha_interface(
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=is_causal)
+        elif is_backend_available(backend):
+            set_backend(backend)
+            backend_fn = lambda: fmha_interface(
                 q, k, v, scaling=sm_scale, is_causal=is_causal, has_backward=has_backward
             )
         else:
-            pytest.skip(f"Framework {framework} is not available")
-        if framework != "pytorch":
+            pytest.skip(f"Backend {backend} is not available")
+        skip_correctness = backend == "pytorch"
+        if not skip_correctness:
+            # use the same tolerance for float8_e5m2 as triton tutorial
             if dtype == torch.float8_e5m2:
                 atol = 3
                 rtol = 0
@@ -218,18 +220,20 @@ class Test_FMHA(common.PyTestCase):
                 atol = 5e-2
                 rtol = 2e-2
             self.assertCorrectness(
-                framework_fn,
+                backend_fn,
                 lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=is_causal),
                 kwargs={},
                 atol=atol,
                 rtol=rtol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
-        del q, k, v, framework_fn
+        del q, k, v, backend_fn
+        if "kernel_configs" in locals():
+            del kernel_configs
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -251,11 +255,11 @@ class Test_FMHA(common.PyTestCase):
                 128,
             ),  # BLOCK_M: 128, BLOCK_N: 128, num_warps: 8, num_ctas: 1, num_stages: 2
         ],
-        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e5m2])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
-    def test_perf_llm(self, model, batch_size, num_heads, seq_len, head_dim, dtype, framework, record_property):
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf_llm(self, model, batch_size, num_heads, seq_len, head_dim, dtype, backend, record_property):
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
         if torch.cuda.get_device_capability()[0] == 8:
@@ -269,14 +273,16 @@ class Test_FMHA(common.PyTestCase):
 
         # Calculate scaling factor
         sm_scale = 1.0 / math.sqrt(head_dim)
-        if framework == "pytorch":
-            framework_fn = lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=True)
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            framework_fn = lambda: fmha_interface(q, k, v, scaling=sm_scale, is_causal=True, has_backward=False)
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=True)
+        elif is_backend_available(backend):
+            set_backend(backend)
+            backend_fn = lambda: fmha_interface(q, k, v, scaling=sm_scale, is_causal=True, has_backward=False)
         else:
-            pytest.skip(f"Framework {framework} is not available")
-        if framework != "pytorch":
+            pytest.skip(f"Backend {backend} is not available")
+        skip_correctness = backend == "pytorch"
+        if not skip_correctness:
+            # use the same tolerance for float8_e5m2 as triton tutorial
             if dtype == torch.float8_e5m2:
                 atol = 3
                 rtol = 0
@@ -284,17 +290,19 @@ class Test_FMHA(common.PyTestCase):
                 atol = 1e-2
                 rtol = 1e-2
             self.assertCorrectness(
-                framework_fn,
+                backend_fn,
                 lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=True),
                 kwargs={},
                 rtol=rtol,
                 atol=atol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
-        del q, k, v, framework_fn
+        del q, k, v, backend_fn
+        if "kernel_configs" in locals():
+            del kernel_configs
         torch.cuda.empty_cache()
         gc.collect()

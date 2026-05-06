@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-import tilegym
+from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
 from tilegym.ops import mla_interface
 
@@ -78,7 +78,7 @@ class Test_MLA(common.PyTestCase):
         return o
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("is_causal", [True, False])
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -184,14 +184,14 @@ class Test_MLA(common.PyTestCase):
             for seq_len in [2**9, 2**10, 2**11, 2**12, 2**13]
             for dtype in [torch.bfloat16, torch.float8_e5m2]
         ],
-        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
     @pytest.mark.parametrize("is_causal", [True])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
-    def test_perf(self, batch, heads, seq_len, d_model, d_pe, dtype, is_causal, framework, record_property):
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch, heads, seq_len, d_model, d_pe, dtype, is_causal, backend, record_property):
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
-        if framework == "cutile":
+        if backend == "cutile":
             if is_causal == False:
                 pytest.skip("Skip non-causal case for cutile")
         if dtype == torch.float8_e5m2 and torch.cuda.get_device_capability()[0] == 8:
@@ -232,20 +232,20 @@ class Test_MLA(common.PyTestCase):
         # Calculate scaling
         scaling = 1.0 / math.sqrt(d_model + d_pe)
 
-        if framework == "pytorch":
-            framework_fn = lambda: self.reference(q, k, v, qpe, kpe, is_causal, scaling)
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            framework_fn = lambda: mla_interface(q, k, v, qpe, kpe, is_causal, scaling)
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(q, k, v, qpe, kpe, is_causal, scaling)
+        elif is_backend_available(backend):
+            set_backend(backend)
+            backend_fn = lambda: mla_interface(q, k, v, qpe, kpe, is_causal, scaling)
         else:
-            pytest.skip(f"Framework {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         # pytorch reference uses dynamic tensor creation (torch.triu_indices) which is
-        # incompatible with CUDA graph capture — disabling cudagraph for that framework
+        # incompatible with CUDA graph capture — disabling cudagraph for that backend
         # to prevent capture_epilogue() being skipped on failure, which would leave the
         # default CUDA generator in capturing_=True state and corrupt subsequent tests.
-        use_cudagraph = framework != "pytorch"
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=use_cudagraph)
+        use_cudagraph = backend != "pytorch"
+        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=use_cudagraph)
         record_property("benchmark", result)
 
         if dtype == torch.bfloat16:
@@ -256,14 +256,14 @@ class Test_MLA(common.PyTestCase):
         torch.cuda.empty_cache()
         # check after benchmark
         self.assertCorrectness(
-            framework_fn,
+            backend_fn,
             lambda: self.reference(q, k, v, qpe, kpe, is_causal, scaling),
             kwargs={},
             **tols,
         )
 
         # Explicit cleanup to prevent OOM
-        del q, k, v, qpe, kpe, framework_fn
+        del q, k, v, qpe, kpe, backend_fn
         torch.cuda.empty_cache()
         import gc
 

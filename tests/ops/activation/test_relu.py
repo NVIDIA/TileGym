@@ -16,7 +16,7 @@ class Test_ReLU(common.PyTestCase):
         return torch.nn.functional.relu(x)
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "m,n,dtype",
@@ -31,6 +31,7 @@ class Test_ReLU(common.PyTestCase):
     def test_op(self, m, n, dtype, backend):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
+            self.setUp()
         else:
             pytest.skip(f"Backend {backend} is not available")
         device = torch.device("cuda")

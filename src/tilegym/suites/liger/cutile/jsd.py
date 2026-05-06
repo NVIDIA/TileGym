@@ -13,7 +13,7 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
-_JSD_BLOCK_SIZE = 4096
+JSD_BLOCK_SIZE = 4096
 
 
 def ensure_contiguous(fn):
@@ -30,7 +30,7 @@ def ensure_contiguous(fn):
 
 
 @ct.kernel(occupancy=ct.ByTarget(sm_100=4))
-def _jsd_kernel(
+def jsd_kernel_ct(
     X,  # (BT, V) log Q (student)
     Y,  # (BT, V) log P (teacher)
     loss,  # (BT, V) float32 loss accumulator (pre-initialized to 0)
@@ -119,7 +119,7 @@ def _jsd_kernel(
 
 def _jsd_forward(_input, target, shift_labels, beta, ignore_index, has_label):
     BT, V = _input.shape
-    BLOCK_SIZE = min(_JSD_BLOCK_SIZE, next_power_of_2(V))
+    BLOCK_SIZE = min(JSD_BLOCK_SIZE, next_power_of_2(V))
 
     # loss pre-initialized to 0: ignored rows contribute 0, partial-chunk pads stay 0
     loss = torch.zeros(_input.shape, dtype=torch.float32, device=_input.device)
@@ -141,7 +141,7 @@ def _jsd_forward(_input, target, shift_labels, beta, ignore_index, has_label):
     ct.launch(
         torch.cuda.current_stream(),
         (BT, 1, 1),
-        _jsd_kernel,
+        jsd_kernel_ct,
         (
             _input,
             target,

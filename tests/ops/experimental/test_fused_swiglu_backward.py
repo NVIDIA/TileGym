@@ -6,7 +6,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import tilegym
 from tilegym import set_backend
 from tilegym.ops.fused_mlp import PartiallyFusedSwiGLUMLP
 

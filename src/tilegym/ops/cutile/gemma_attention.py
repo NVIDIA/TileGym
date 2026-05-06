@@ -103,10 +103,10 @@ def _gemma_attn_fwd_inner(
         qk = ct.mma(q, k, qk)
 
         if HAS_SOFT_CAP:
-            qk = ct.mul(qk, sm_scale, flush_to_zero=True)
+            qk = qk * sm_scale
             qk = ct.truediv(qk, SOFT_CAP, flush_to_zero=True, rounding_mode=RMd.APPROX)
             qk = ct.tanh(qk, rounding_mode=RMd.APPROX)
-            qk = ct.mul(qk, SOFT_CAP, flush_to_zero=True)
+            qk = qk * SOFT_CAP
 
             if STAGE == 2:
                 causal_mask = offs_m[:, None] >= (curr_n + offs_n[None, :])
@@ -121,8 +121,8 @@ def _gemma_attn_fwd_inner(
                 window_mask = (qk_offset >= -WINDOW_SIZE) & (qk_offset <= WINDOW_SIZE)
                 qk = ct.where(window_mask, qk, -1.0e6)
 
-            m_ij = max(m_i, ct.mul(ct.max(qk, axis=-1), INV_LOG_2, flush_to_zero=True))
-            qk = ct.sub(ct.mul(qk, INV_LOG_2, flush_to_zero=True), m_ij[:, None], flush_to_zero=True)
+            m_ij = max(m_i, ct.max(qk, axis=-1) * INV_LOG_2)
+            qk = qk * INV_LOG_2 - m_ij[:, None]
         else:
             if STAGE == 2:
                 causal_mask = offs_m[:, None] >= (curr_n + offs_n[None, :])
@@ -137,16 +137,14 @@ def _gemma_attn_fwd_inner(
                 window_mask = (qk_offset >= -WINDOW_SIZE) & (qk_offset <= WINDOW_SIZE)
                 qk = ct.where(window_mask, qk, -1.0e6)
 
-            m_ij = max(m_i, ct.mul(ct.max(qk, axis=-1), qk_scale, flush_to_zero=True))
-            qk = ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), m_ij[:, None], flush_to_zero=True)
-
+            m_ij = max(m_i, ct.max(qk, axis=-1) * qk_scale)
+            qk = qk * qk_scale - m_ij[:, None]
         p = ct.exp2(qk, flush_to_zero=True)
         l_ij = ct.sum(p, axis=-1)
 
-        alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-        l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), l_ij, flush_to_zero=True)
-
-        acc = ct.mul(acc, alpha[:, None], flush_to_zero=True)
+        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+        l_i = l_i * alpha + l_ij
+        acc = acc * alpha[:, None]
 
         v = ct.load(V, index=(batch_idx, kv_head_idx, cnt, 0), shape=(1, 1, BLOCK_N, BLOCK_D), latency=3).reshape(
             (BLOCK_N, BLOCK_D)
@@ -160,8 +158,8 @@ def _gemma_attn_fwd_inner(
     return acc, l_i, m_i
 
 
-@ct.kernel(occupancy=2)
-def gemma_fmha_kernel(
+@ct.kernel
+def _gemma_fmha_kernel(
     Q,
     K,
     V,
@@ -169,8 +167,8 @@ def gemma_fmha_kernel(
     sm_scale: float,
     B: ConstInt,
     H: ConstInt,
-    S_qo: ConstInt,
-    S_kv: ConstInt,
+    S_QO: ConstInt,
+    S_KV: ConstInt,
     BLOCK_D: ConstInt,
     BLOCK_M: ConstInt,
     BLOCK_N: ConstInt,
@@ -200,7 +198,7 @@ def gemma_fmha_kernel(
     else:
         kv_head_idx = head_idx
 
-    qk_scale = ct.mul(sm_scale, INV_LOG_2, flush_to_zero=True)
+    qk_scale = sm_scale * INV_LOG_2
 
     offs_m = bid_x * BLOCK_M + ct.arange(BLOCK_M, dtype=ct.int32)
     offs_n = ct.arange(BLOCK_N, dtype=ct.int32)
@@ -325,7 +323,7 @@ def _cutile_autotune_gemma_fmha(
                 list(_gemma_fmha_autotune_configs()),
                 stream,
                 lambda cfg: (math.ceil(S_qo / cfg.BLOCK_M), B * H, 1),
-                gemma_fmha_kernel,
+                _gemma_fmha_kernel,
                 lambda cfg: (
                     q,
                     k,
@@ -351,11 +349,7 @@ def _cutile_autotune_gemma_fmha(
         best_cfg = result.best.config
         _gemma_fmha_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                gemma_fmha_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _gemma_fmha_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _gemma_fmha_tune_cache[cache_key]
     ct.launch(
@@ -386,7 +380,7 @@ def _cutile_autotune_gemma_fmha(
     return o
 
 
-class _gemma_attention(torch.autograd.Function):
+class _GemmaAttentionFunction(torch.autograd.Function):
     """Autograd function for gemma attention"""
 
     @staticmethod
@@ -448,11 +442,12 @@ class _gemma_attention(torch.autograd.Function):
         BLOCK_N = 64 if _gemma_cap[0] < 9 else 128
         EVEN_K = (S_kv % BLOCK_N) == 0
         grid = ((S_qo + BLOCK_M - 1) // BLOCK_M, B * H, 1)
+        kernel = _gemma_fmha_kernel.replace_hints(occupancy=2)
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            gemma_fmha_kernel,
+            kernel,
             (
                 q,
                 k,
@@ -482,7 +477,7 @@ class _gemma_attention(torch.autograd.Function):
         raise NotImplementedError("Backward pass not implemented for gemma attention")
 
 
-gemma_attention = _gemma_attention.apply
+gemma_attention = _GemmaAttentionFunction.apply
 
 
 @register_impl("gemma_attention", backend="cutile")

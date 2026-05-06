@@ -35,7 +35,7 @@ def _sigmoid(x):
 
 @experimental_kernel
 @ct.kernel
-def mhc_split_gemm_rms_kernel(
+def _mhc_split_gemm_rms_kernel(
     X,
     W,
     Y_acc,
@@ -105,7 +105,7 @@ def mhc_split_gemm_rms_kernel(
 
 @experimental_kernel
 @ct.kernel
-def mhc_finalize_scale_bias_sigmoid_kernel(
+def _mhc_finalize_scale_bias_sigmoid_kernel(
     Y_acc,
     R_acc,
     Y,
@@ -127,7 +127,6 @@ def mhc_finalize_scale_bias_sigmoid_kernel(
     bid_n = ct.bid(1)
 
     num_bid_m = ct.cdiv(M, TILE_SIZE_M)
-    num_bid_n = ct.cdiv(N, TILE_SIZE_N)
 
     y_accum = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=ct.float32)
     r_accum = ct.full((TILE_SIZE_M, 1), 0.0, dtype=ct.float32)
@@ -155,10 +154,10 @@ def mhc_finalize_scale_bias_sigmoid_kernel(
         r_accum = r_accum + r_tile
 
     denom = ct.full((TILE_SIZE_M, 1), K * 1.0, dtype=ct.float32)
-    mean = ct.truediv(r_accum, denom)
+    mean = r_accum / denom
     rstd = ct.rsqrt(mean)
     ones = ct.full((TILE_SIZE_M, 1), 1.0, dtype=ct.float32)
-    r = ct.truediv(ones, rstd)
+    r = ones / rstd
     if bid_n == 0:
         r_out = ct.astype(r, R.dtype)
         ct.store(R, index=(bid_m, 0), tile=r_out)
@@ -170,15 +169,15 @@ def mhc_finalize_scale_bias_sigmoid_kernel(
 
     one = ct.full((TILE_SIZE_N,), 1.0, dtype=ct.float32)
     zero = ct.full((TILE_SIZE_N,), 0.0, dtype=ct.float32)
-    mask_pre = ct.where(ct.less(col_ids, n), one, zero)
-    mask_post = ct.where(ct.less(col_ids, 2 * n), one, zero)
+    mask_pre = ct.where((col_ids < n), one, zero)
+    mask_post = ct.where((col_ids < 2 * n), one, zero)
     mask_post = mask_post - mask_pre
     mask_res = one - mask_pre - mask_post
 
     scale = alpha_pre * mask_pre + alpha_post * mask_post + alpha_res * mask_res
     scale = ct.reshape(scale, (1, TILE_SIZE_N))
 
-    linear = ct.truediv(y_accum * scale, r) + ct.astype(bias, ct.float32)
+    linear = y_accum * scale / r + ct.astype(bias, ct.float32)
     sigmoid_linear = _sigmoid(linear)
     two_sigmoid = sigmoid_linear * 2.0
 
@@ -210,7 +209,7 @@ def _mhc_split_gemm_rms_autotune_configs():
                     )
 
 
-def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
+def _cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     if cfg is not None:
         if isinstance(cfg, dict):
             cfg = SimpleNamespace(**cfg)
@@ -237,7 +236,7 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
         ct.launch(
             stream,
             grid,
-            mhc_split_gemm_rms_kernel,
+            _mhc_split_gemm_rms_kernel,
             (
                 x,
                 w,
@@ -272,7 +271,7 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
                 cfg.SPLIT_K,
                 1,
             ),
-            mhc_split_gemm_rms_kernel,
+            _mhc_split_gemm_rms_kernel,
             lambda cfg: (
                 x,
                 w,
@@ -306,7 +305,7 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     ct.launch(
         stream,
         grid,
-        mhc_split_gemm_rms_kernel,
+        _mhc_split_gemm_rms_kernel,
         (
             x,
             w,
@@ -325,7 +324,7 @@ def cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     return y_acc, r_acc, best_cfg
 
 
-def mhc_split_gemm_rms(x: torch.Tensor, w: torch.Tensor, **kwargs):
+def _mhc_split_gemm_rms(x: torch.Tensor, w: torch.Tensor, **kwargs):
     M, K = x.shape
     KB, N = w.shape
     assert K == KB, f"Incompatible matrices: K dimension of X is {K}, K dimension of W is {KB}"
@@ -335,10 +334,10 @@ def mhc_split_gemm_rms(x: torch.Tensor, w: torch.Tensor, **kwargs):
     w = w.contiguous()
 
     stream = torch.cuda.current_stream()
-    return cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=cfg)
+    return _cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=cfg)
 
 
-def mhc_finalize_scale_bias_sigmoid(
+def _mhc_finalize_scale_bias_sigmoid(
     y_acc: torch.Tensor,
     r_acc: torch.Tensor,
     n: int,
@@ -371,7 +370,7 @@ def mhc_finalize_scale_bias_sigmoid(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        mhc_finalize_scale_bias_sigmoid_kernel,
+        _mhc_finalize_scale_bias_sigmoid_kernel,
         (
             y_acc,
             r_acc,
@@ -393,56 +392,16 @@ def mhc_finalize_scale_bias_sigmoid(
     return y, r
 
 
-@register_impl("mhc_gemm_rms_scale", backend="cutile")
-def mhc_gemm_rms_scale(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    n: int,
-    alpha_pre: float,
-    alpha_post: float,
-    alpha_res: float,
-    bias: torch.Tensor,
-    **kwargs,
-):
-    cfg = kwargs.pop("cfg", None)
-    kwargs.pop("w_nt", None)
-    w = w.contiguous()
-
-    M, K = x.shape
-    _, N = w.shape
-    y_acc, r_acc, cfg = cutile_autotune_mhc_split_gemm_rms(
-        torch.cuda.current_stream(),
-        x,
-        w,
-        M,
-        N,
-        K,
-        cfg=cfg,
-    )
-    return mhc_finalize_scale_bias_sigmoid(
-        y_acc,
-        r_acc,
-        n,
-        alpha_pre,
-        alpha_post,
-        alpha_res,
-        bias,
-        M,
-        K,
-        cfg=cfg,
-    )
-
-
 @experimental_kernel
 @ct.kernel
-def mhc_apply_residual_kernel(
+def _mhc_apply_residual_kernel(
     X,
     F_out,
     Y_post,
     Y_res,
     Out,
     C: int,
-    n: ct.Constant[int],
+    N: ct.Constant[int],
     TILE_SIZE_C: ConstInt,
 ):
     """Apply H_res and H_post to residual stream (in-place on Out)."""
@@ -469,23 +428,23 @@ def mhc_apply_residual_kernel(
     h_post = ct.load(
         Y_post,
         index=(row, 0),
-        shape=(1, n),
+        shape=(1, N),
         padding_mode=ct.PaddingMode.ZERO,
     )
-    h_post = ct.reshape(h_post, (n, 1))
+    h_post = ct.reshape(h_post, (N, 1))
     h_post = ct.astype(h_post, compute_dtype)
 
     h_res = ct.load(
         Y_res,
         index=(row, 0, 0),
-        shape=(1, n, n),
+        shape=(1, N, N),
         padding_mode=ct.PaddingMode.ZERO,
     )
-    h_res = ct.reshape(h_res, (n, n))
+    h_res = ct.reshape(h_res, (N, N))
     h_res = ct.astype(h_res, compute_dtype)
 
-    acc = ct.full((n, TILE_SIZE_C), 0.0, dtype=compute_dtype)
-    for j in range(n):
+    acc = ct.full((N, TILE_SIZE_C), 0.0, dtype=compute_dtype)
+    for j in range(N):
         x_row = ct.load(
             X,
             index=(row, j, c_tile),
@@ -494,18 +453,83 @@ def mhc_apply_residual_kernel(
         )
         x_row = ct.reshape(x_row, (1, TILE_SIZE_C))
         x_row = ct.astype(x_row, compute_dtype)
-        h_col = ct.extract(h_res, (0, j), shape=(n, 1))
-        x_row = ct.broadcast_to(x_row, (n, TILE_SIZE_C))
-        h_col = ct.broadcast_to(h_col, (n, TILE_SIZE_C))
+        h_col = ct.extract(h_res, (0, j), shape=(N, 1))
+        x_row = ct.broadcast_to(x_row, (N, TILE_SIZE_C))
+        h_col = ct.broadcast_to(h_col, (N, TILE_SIZE_C))
         prod = h_col * x_row
         acc = acc + prod
-    h_post = ct.broadcast_to(h_post, (n, TILE_SIZE_C))
-    f_tile = ct.broadcast_to(f_tile, (n, TILE_SIZE_C))
+    h_post = ct.broadcast_to(h_post, (N, TILE_SIZE_C))
+    f_tile = ct.broadcast_to(f_tile, (N, TILE_SIZE_C))
     x_post = h_post * f_tile
     out_tile = acc + x_post
     out_tile = ct.astype(out_tile, Out.dtype)
-    out_tile = ct.reshape(out_tile, (1, n, TILE_SIZE_C))
+    out_tile = ct.reshape(out_tile, (1, N, TILE_SIZE_C))
     ct.store(Out, index=(row, 0, c_tile), tile=out_tile)
+
+
+@experimental_kernel
+@ct.kernel
+def _mhc_sinkhorn_kernel(
+    Y,
+    N: ct.Constant[int],
+):
+    """Sinkhorn-Knopp normalization for residual block (in-place on Y)."""
+    row = ct.bid(0)
+    total = N * N
+    mat = ct.load(Y, index=(row, 0), shape=(1, total))
+    mat = ct.reshape(mat, (N, N))
+    mat = ct.astype(mat, ct.float32)
+    mat = ct.exp2(mat * LOG2E)
+
+    for _ in range(20):
+        row_sum = ct.sum(mat, axis=1, keepdims=True)
+        mat = mat / row_sum
+        col_sum = ct.sum(mat, axis=0, keepdims=True)
+        mat = mat / col_sum
+
+    mat = ct.reshape(mat, (1, total))
+    mat = ct.astype(mat, Y.dtype)
+    ct.store(Y, index=(row, 0), tile=mat)
+
+
+@register_impl("mhc_gemm_rms_scale", backend="cutile")
+def mhc_gemm_rms_scale(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    n: int,
+    alpha_pre: float,
+    alpha_post: float,
+    alpha_res: float,
+    bias: torch.Tensor,
+    **kwargs,
+):
+    cfg = kwargs.pop("cfg", None)
+    kwargs.pop("w_nt", None)
+    w = w.contiguous()
+
+    M, K = x.shape
+    _, N = w.shape
+    y_acc, r_acc, cfg = _cutile_autotune_mhc_split_gemm_rms(
+        torch.cuda.current_stream(),
+        x,
+        w,
+        M,
+        N,
+        K,
+        cfg=cfg,
+    )
+    return _mhc_finalize_scale_bias_sigmoid(
+        y_acc,
+        r_acc,
+        n,
+        alpha_pre,
+        alpha_post,
+        alpha_res,
+        bias,
+        M,
+        K,
+        cfg=cfg,
+    )
 
 
 @register_impl("mhc_apply_residual", backend="cutile")
@@ -533,7 +557,7 @@ def mhc_apply_residual(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        mhc_apply_residual_kernel,
+        _mhc_apply_residual_kernel,
         (
             x_view,
             f_out,
@@ -546,31 +570,6 @@ def mhc_apply_residual(
         ),
     )
     return out
-
-
-@experimental_kernel
-@ct.kernel
-def mhc_sinkhorn_kernel(
-    Y,
-    n: ct.Constant[int],
-):
-    """Sinkhorn-Knopp normalization for residual block (in-place on Y)."""
-    row = ct.bid(0)
-    total = n * n
-    mat = ct.load(Y, index=(row, 0), shape=(1, total))
-    mat = ct.reshape(mat, (n, n))
-    mat = ct.astype(mat, ct.float32)
-    mat = ct.exp2(mat * LOG2E)
-
-    for _ in range(20):
-        row_sum = ct.sum(mat, axis=1, keepdims=True)
-        mat = ct.truediv(mat, row_sum)
-        col_sum = ct.sum(mat, axis=0, keepdims=True)
-        mat = ct.truediv(mat, col_sum)
-
-    mat = ct.reshape(mat, (1, total))
-    mat = ct.astype(mat, Y.dtype)
-    ct.store(Y, index=(row, 0), tile=mat)
 
 
 @register_impl("mhc_sinkhorn", backend="cutile")
@@ -586,7 +585,7 @@ def mhc_sinkhorn(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        mhc_sinkhorn_kernel,
+        _mhc_sinkhorn_kernel,
         (
             y_view,
             n,

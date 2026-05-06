@@ -14,7 +14,7 @@ ConstBool = ct.Constant[bool]
 
 
 @ct.kernel
-def recurrent_gated_delta_rule_fwd_cutile_kernel(
+def _recurrent_gated_delta_rule_fwd_kernel(
     # Tensors — native (B, T, H, D) layout for Q/K/V; (B, T, H) for G/Beta
     Q,
     K,
@@ -49,7 +49,6 @@ def recurrent_gated_delta_rule_fwd_cutile_kernel(
 
     _ZERO = ct.PaddingMode.ZERO
 
-    # ---- Initialize state (BLOCK_K, BLOCK_V) ----
     state = ct.zeros((BLOCK_K, BLOCK_V), dtype=ct.float32)
     if HAS_INITIAL_STATE:
         state = ct.load(
@@ -60,7 +59,6 @@ def recurrent_gated_delta_rule_fwd_cutile_kernel(
         ).reshape((BLOCK_K, BLOCK_V))
         state = ct.astype(state, ct.float32)
 
-    # ---- Recurrent loop ----
     for t in range(seq_len):
         # Load q_t, k_t: (BLOCK_K,)
         q_t = ct.load(
@@ -122,7 +120,6 @@ def recurrent_gated_delta_rule_fwd_cutile_kernel(
         )
         ct.store(Output, index=(b, t, h, pid_v), tile=out_tile)
 
-    # ---- Store final state ----
     if OUTPUT_FINAL_STATE:
         ct.store(
             FinalState,
@@ -131,7 +128,7 @@ def recurrent_gated_delta_rule_fwd_cutile_kernel(
         )
 
 
-class RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
+class _RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
     @staticmethod
     def forward(ctx, query, key, value, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel):
         initial_dtype = query.dtype
@@ -167,7 +164,7 @@ class RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            recurrent_gated_delta_rule_fwd_cutile_kernel,
+            _recurrent_gated_delta_rule_fwd_kernel,
             (
                 query,
                 key,
@@ -200,7 +197,7 @@ def recurrent_gated_delta_rule(
     query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm_in_kernel=False, **kwargs
 ):
     """Drop-in cuTile replacement for torch_recurrent_gated_delta_rule."""
-    return RecurrentGatedDeltaRuleCuTile.apply(
+    return _RecurrentGatedDeltaRuleCuTile.apply(
         query,
         key,
         value,

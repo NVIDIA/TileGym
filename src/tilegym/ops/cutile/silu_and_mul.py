@@ -6,7 +6,7 @@ import functools
 
 import cuda.tile as ct
 import torch
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
@@ -17,7 +17,7 @@ from .utils import next_power_of_2
 ConstInt = ct.Constant[int]
 
 
-def ensure_contiguous(fn):
+def _ensure_contiguous(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         def maybe_to_contiguous(x):
@@ -33,11 +33,11 @@ def ensure_contiguous(fn):
 # To be launched with grid = number of rows (batch_size)
 # each "block" computes an entire row of the ouptut
 @ct.kernel
-def silu_and_mul_kernel_row_wise(
+def _silu_and_mul_kernel_row_wise(
     input,
     output,
     TILE_SIZE: ConstInt,
-    hidden_size: ConstInt,
+    TOTAL_HIDDEN_SIZE: ConstInt,
 ):
     bid = ct.bid(0)  # this gives us our row
     offsets = ct.arange(TILE_SIZE, dtype=torch.int32)
@@ -46,7 +46,7 @@ def silu_and_mul_kernel_row_wise(
     # Row index is just bid (scalar), column indices are offsets-based
     row_idx = bid
     a_col_idx = offsets  # First half: [0, hidden_size)
-    b_col_idx = offsets + hidden_size  # Second half: [hidden_size, 2*hidden_size)
+    b_col_idx = offsets + TOTAL_HIDDEN_SIZE  # Second half: [hidden_size, 2*hidden_size)
 
     # Load tiles using gather with 2D indices
     # gather broadcasts (scalar, tile) to (tile,)
@@ -56,15 +56,13 @@ def silu_and_mul_kernel_row_wise(
     b_tile = ct.astype(b_tile, torch.float32)
 
     # Implement sigmoid for SiLU
-    denom = ct.add(1, ct.exp(-a_tile), flush_to_zero=True)
+    denom = 1 + ct.exp(-a_tile)
     sigmoid_a = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
 
     # Perform SiLU(a) * b
-    silu_a = ct.mul(a_tile, sigmoid_a, flush_to_zero=True)
-    result = ct.mul(silu_a, b_tile, flush_to_zero=True)
+    silu_a = a_tile * sigmoid_a
+    result = silu_a * b_tile
     result = ct.astype(result, output.dtype)
-
-    # Store result using scatter with 2D indices
     # output is also 2D: (batch_size, hidden_size)
     out_col_idx = offsets
     ct.scatter(output, (row_idx, out_col_idx), result, check_bounds=True)
@@ -78,20 +76,20 @@ def silu_and_mul_kernel_row_wise(
 # db = dc * silu(a)
 @experimental_kernel
 @ct.kernel
-def silu_and_mul_backward_kernel_row_wise(
+def _silu_and_mul_backward_kernel_row_wise(
     grad_output,  # dc: (batch_size, hidden_size)
     input,  # original input: (batch_size, 2*hidden_size)
     grad_a,  # output: (batch_size, hidden_size)
     grad_b,  # output: (batch_size, hidden_size)
     TILE_SIZE: ConstInt,
-    hidden_size: ConstInt,
+    TOTAL_HIDDEN_SIZE: ConstInt,
 ):
     bid = ct.bid(0)  # row index
     offsets = ct.arange(TILE_SIZE, dtype=torch.int32)
 
     row_idx = bid
     a_col_idx = offsets  # First half: [0, hidden_size)
-    b_col_idx = offsets + hidden_size  # Second half: [hidden_size, 2*hidden_size)
+    b_col_idx = offsets + TOTAL_HIDDEN_SIZE  # Second half: [hidden_size, 2*hidden_size)
 
     # Load grad_output (dc)
     dc_tile = ct.gather(grad_output, (row_idx, offsets), check_bounds=True)
@@ -104,25 +102,25 @@ def silu_and_mul_backward_kernel_row_wise(
     b_tile = ct.astype(b_tile, torch.float32)
 
     # Recompute sigmoid(a) and silu(a)
-    denom = ct.add(1, ct.exp(-a_tile), flush_to_zero=True)
+    denom = 1 + ct.exp(-a_tile)
     sigmoid_a = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
-    silu_a = ct.mul(a_tile, sigmoid_a, flush_to_zero=True)
+    silu_a = a_tile * sigmoid_a
 
     # Compute db = dc * silu(a)
-    db_tile = ct.mul(dc_tile, silu_a, flush_to_zero=True)
+    db_tile = dc_tile * silu_a
     db_tile = ct.astype(db_tile, input.dtype)
     ct.scatter(grad_b, (row_idx, offsets), db_tile, check_bounds=True)
 
     # Compute da = dc * b * sigmoid(a) * (1 + a * (1 - sigmoid(a)))
     # = dc * b * (sigmoid(a) + a * sigmoid(a) * (1 - sigmoid(a)))
-    one_minus_sigmoid = ct.add(1.0, -sigmoid_a, flush_to_zero=True)
-    silu_grad = ct.add(sigmoid_a, ct.mul(silu_a, one_minus_sigmoid, flush_to_zero=True), flush_to_zero=True)
-    da_tile = ct.mul(dc_tile, ct.mul(b_tile, silu_grad, flush_to_zero=True), flush_to_zero=True)
+    one_minus_sigmoid = 1.0 + -sigmoid_a
+    silu_grad = sigmoid_a + silu_a * one_minus_sigmoid
+    da_tile = dc_tile * (b_tile * silu_grad)
     da_tile = ct.astype(da_tile, input.dtype)
     ct.scatter(grad_a, (row_idx, offsets), da_tile, check_bounds=True)
 
 
-def silu_and_mul_backward(
+def _silu_and_mul_backward(
     grad_output: torch.Tensor,
     input: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -143,8 +141,6 @@ def silu_and_mul_backward(
     grad_output_flat = grad_output.contiguous().view(-1, hidden_size)
     input_flat = input.contiguous().view(-1, input.shape[-1])
     batch_size = grad_output_flat.shape[0]
-
-    # Allocate output gradients
     grad_a = torch.empty_like(grad_output_flat)
     grad_b = torch.empty_like(grad_output_flat)
 
@@ -153,14 +149,14 @@ def silu_and_mul_backward(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        silu_and_mul_backward_kernel_row_wise,
+        _silu_and_mul_backward_kernel_row_wise,
         (grad_output_flat, input_flat, grad_a, grad_b, TILE_SIZE, hidden_size),
     )
 
     return grad_a.view(*original_output_shape), grad_b.view(*original_output_shape)
 
 
-class SiLUAndMulFunction(torch.autograd.Function):
+class _SiLUAndMulFunction(torch.autograd.Function):
     """Autograd function for silu_and_mul with backward support."""
 
     @staticmethod
@@ -175,8 +171,6 @@ class SiLUAndMulFunction(torch.autograd.Function):
         # Flatten input to 2D
         input_flat = input.view(-1, original_shape[-1])
         batch_size = input_flat.shape[0]
-
-        # Allocate output
         output = torch.empty(
             (batch_size, hidden_size),
             dtype=input.dtype,
@@ -190,7 +184,7 @@ class SiLUAndMulFunction(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            silu_and_mul_kernel_row_wise,
+            _silu_and_mul_kernel_row_wise,
             (input_flat, output, TILE_SIZE, hidden_size),
         )
 
@@ -202,7 +196,7 @@ class SiLUAndMulFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         (input,) = ctx.saved_tensors
-        grad_a, grad_b = silu_and_mul_backward(grad_output, input)
+        grad_a, grad_b = _silu_and_mul_backward(grad_output, input)
 
         # Concatenate gradients for the original input layout
         grad_input = torch.cat([grad_a, grad_b], dim=-1)
@@ -210,7 +204,7 @@ class SiLUAndMulFunction(torch.autograd.Function):
 
 
 @register_impl("silu_and_mul", backend="cutile")
-@ensure_contiguous
+@_ensure_contiguous
 def silu_and_mul(
     input: torch.Tensor,
     out: torch.Tensor = None,
@@ -230,7 +224,7 @@ def silu_and_mul(
     if input.requires_grad:
         if out is not None:
             raise ValueError("out parameter not supported when requires_grad=True")
-        return SiLUAndMulFunction.apply(input)
+        return _SiLUAndMulFunction.apply(input)
 
     # Direct kernel call for inference (no backward needed)
     original_shape = input.shape
@@ -263,7 +257,7 @@ def silu_and_mul(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        silu_and_mul_kernel_row_wise,
+        _silu_and_mul_kernel_row_wise,
         (input_flat, output, TILE_SIZE, hidden_size),
     )
     return output.reshape(*output_shape)

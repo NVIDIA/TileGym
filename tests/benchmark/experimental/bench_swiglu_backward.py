@@ -14,6 +14,7 @@ import triton.testing
 
 import tilegym
 from tilegym.backend import is_backend_available
+from tilegym.ops import get_swiglu
 
 
 def reference_swiglu_forward(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -78,10 +79,10 @@ def bench_swiglu(
 
     if backend == "cutile":
         tilegym.set_backend("cutile")
-        from tilegym.ops.cutile.swiglu import SiLUMulFunction
+        swiglu = get_swiglu()
 
         def fwd():
-            return SiLUMulFunction.apply(a, b)
+            return swiglu(a, b)
     else:
         # PyTorch reference - direct function call
 

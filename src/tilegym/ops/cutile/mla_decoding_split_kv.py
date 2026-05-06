@@ -11,7 +11,7 @@ import torch
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
@@ -21,8 +21,8 @@ from .utils import next_power_of_2
 INV_LOG_2 = 1.0 / math.log(2)
 
 
-@ct.kernel(occupancy=2)
-def naive_absorb_mla_transpose(
+@ct.kernel
+def _naive_absorb_mla_transpose_kernel(
     Q,
     QPE,
     K,
@@ -35,7 +35,7 @@ def naive_absorb_mla_transpose(
     NUM_HEADS: int,
     S_kv: int,
     NUM_KV_SPLITS: ConstInt,
-    kv_len_per_split: ConstInt,
+    KV_LEN_PER_SPLIT: ConstInt,
     TILE_D: ConstInt,
     TILE_H: ConstInt,
     TILE_N: ConstInt,
@@ -76,8 +76,8 @@ def naive_absorb_mla_transpose(
     qpe = ct.reshape(qpe, (TILE_KPE, TILE_H))
 
     # Calculate split range (split-specific logic)
-    split_kv_start = kv_len_per_split * tile_idx
-    split_kv_end = split_kv_start + kv_len_per_split
+    split_kv_start = KV_LEN_PER_SPLIT * tile_idx
+    split_kv_end = split_kv_start + KV_LEN_PER_SPLIT
     if split_kv_end > S_kv:
         split_kv_end = S_kv
 
@@ -171,7 +171,7 @@ def naive_absorb_mla_transpose(
     )
 
 
-class _mla_decoding_split_kv(torch.autograd.Function):
+class _MlaDecodingSplitKvFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, QPE, KV, KPE, sm_scale, kv_len_per_split=None):
         """
@@ -232,10 +232,11 @@ class _mla_decoding_split_kv(torch.autograd.Function):
             B,
             NUM_KV_SPLITS,
         )
+        split_kernel = _naive_absorb_mla_transpose_kernel.replace_hints(occupancy=2)
         ct.launch(
             torch.cuda.current_stream(),
             grid_split,
-            naive_absorb_mla_transpose,
+            split_kernel,
             (
                 Q,
                 QPE,
@@ -288,5 +289,5 @@ def mla_decoding_split_kv(q, qpe, kv, kpe, sm_scale=None, kv_len_per_split=None,
     if sm_scale is None:
         sm_scale = 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
-    o = _mla_decoding_split_kv.apply(q, qpe, kv, kpe, sm_scale, kv_len_per_split)
+    o = _MlaDecodingSplitKvFunction.apply(q, qpe, kv, kpe, sm_scale, kv_len_per_split)
     return o

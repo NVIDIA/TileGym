@@ -6,7 +6,7 @@ import math
 
 import cuda.tile as ct
 import torch
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 from tilegym.ops.cutile.splitk_reduce import splitk_reduce
@@ -59,7 +59,7 @@ def attention_decode_kernel_grouped_impl(
     """
     # Use program IDs passed as parameters
 
-    qk_scale = ct.mul(softmax_scale, INV_LOG_2)
+    qk_scale = softmax_scale * INV_LOG_2
 
     # Load Q with grouped query attention layout
     # Q is organized as [B, H_qo // NUM_Q_HEAD_PER_KV, NUM_Q_HEAD_PER_KV, HEAD_DIM]
@@ -74,8 +74,8 @@ def attention_decode_kernel_grouped_impl(
     q = ct.transpose(q)  # Shape: (HEAD_DIM, QUERY_GROUP_TILE_SIZE)
 
     # Calculate start and end indices for this tile
-    start_idx = ct.mul(tile_id, KV_LEN_PER_SPLIT)
-    end_idx = ct.minimum(ct.add(start_idx, KV_LEN_PER_SPLIT), S_kv)
+    start_idx = tile_id * KV_LEN_PER_SPLIT
+    end_idx = ct.minimum(start_idx + KV_LEN_PER_SPLIT, S_kv)
 
     # Initialize accumulators
     m_i = ct.full((QUERY_GROUP_TILE_SIZE,), -math.inf, dtype=ct.float32)
@@ -114,21 +114,21 @@ def attention_decode_kernel_grouped_impl(
 
             # Process boundary case (non-causal) - apply mask to result only
             if curr_n + TILE_N > S_kv:
-                mask = ct.less(ct.add(curr_n, offs_n[:, None]), S_kv)
+                mask = curr_n + offs_n[:, None] < S_kv
                 qk = ct.where(mask, qk, -1.0e6)
 
             # Compute softmax statistics
-            qk_scaled = ct.mul(qk, qk_scale)
+            qk_scaled = qk * qk_scale
             m_ij = ct.maximum(m_i, ct.max(qk_scaled, 0))
-            qk = ct.sub(qk_scaled, m_ij[None, :])
+            qk = qk_scaled - m_ij[None, :]
             p = ct.exp2(qk)
 
             # Update m_i and l_i
-            alpha = ct.exp2(ct.sub(m_i, m_ij))
-            l_i = ct.add(ct.mul(l_i, alpha[None, :]), p)
+            alpha = ct.exp2(m_i - m_ij)
+            l_i = l_i * alpha[None, :] + p
 
             # Update output accumulator
-            acc = ct.mul(acc, alpha[None, :])
+            acc = acc * alpha[None, :]
 
             # Load V and update accumulator
             v = ct.load(
@@ -152,7 +152,7 @@ def attention_decode_kernel_grouped_impl(
     acc = ct.astype(acc, ct.float32)
     acc = ct.transpose(acc)
     acc = ct.astype(acc, Att_Out.dtype)
-    l = ct.add(m_i, ct.log2(l))
+    l = m_i + ct.log2(l)
 
     # Store attention output
     acc_reshaped = ct.reshape(acc, (1, 1, QUERY_GROUP_TILE_SIZE, 1, HEAD_DIM))
@@ -190,7 +190,7 @@ def attention_decode_kernel_grouped_impl(
 
 
 @ct.kernel()
-def attention_decode_kernel_grouped(
+def _attention_decode_kernel_grouped(
     Q,
     K,
     V,
@@ -249,7 +249,7 @@ def attention_decode_kernel_grouped(
     )
 
 
-class _attention_decode(torch.autograd.Function):
+class _AttentionDecodeFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, softmax_scale, kv_len_per_split=None):
         """
@@ -329,7 +329,6 @@ class _attention_decode(torch.autograd.Function):
             NUM_KV_SPLITS,
         )
 
-        # Calculate strides
         stride_mid_ob, stride_mid_oh, stride_mid_os = (
             Att_Mid_Out.stride(0),
             Att_Mid_Out.stride(1),
@@ -350,14 +349,12 @@ class _attention_decode(torch.autograd.Function):
             num_q_head_per_kv,
             head_dim,
         )
-
-        # Launch kernel
         grid = (batch_size, num_kv_heads, NUM_KV_SPLITS)
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            attention_decode_kernel_grouped,
+            _attention_decode_kernel_grouped,
             (
                 Q_grouped,
                 K,
@@ -393,7 +390,7 @@ class _attention_decode(torch.autograd.Function):
         raise NotImplementedError("Attention backward is not implemented yet")
 
 
-attention_decode = _attention_decode.apply
+attention_decode = _AttentionDecodeFunction.apply
 
 
 @register_impl("fmha_decode", backend="cutile")

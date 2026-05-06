@@ -65,7 +65,7 @@ class Test_MOE(common.PyTestCase):
         return final_output
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends
+    _perf_backends = _backends
 
     @pytest.mark.parametrize(
         "num_tokens, hidden_size, moe_intermediate_size, n_experts, top_k",
@@ -125,21 +125,7 @@ class Test_MOE(common.PyTestCase):
             device=device,
         ).normal_(0, 0.1)
 
-        quant_block = 128
         if dtype == torch.float8_e4m3fn:
-            hidden_states_scale = 1.5 * torch.ones(
-                (num_tokens, hidden_size // quant_block), device=device, dtype=torch.float32
-            )
-            w1_scale = 1.2 * torch.ones(
-                (n_experts, moe_intermediate_size * 2 // quant_block, hidden_size // quant_block),
-                device=device,
-                dtype=torch.float32,
-            )
-            w2_scale = 0.5 * torch.ones(
-                (n_experts, hidden_size // quant_block, moe_intermediate_size // quant_block),
-                device=device,
-                dtype=torch.float32,
-            )
             hidden_states_fp8 = hidden_states.to(torch.float8_e4m3fn)
             w1_fp8 = w1.to(torch.float8_e4m3fn)
             w2_fp8 = w2.to(torch.float8_e4m3fn)
@@ -160,7 +146,6 @@ class Test_MOE(common.PyTestCase):
         topk_ids = topk_ids.contiguous()
 
         # Define wrapper for fused_moe
-        from tilegym.ops.moe_interface import fused_experts_impl
 
         def moe_wrapper(hidden_states, w1, w2, topk_weights, topk_ids):
             return fused_moe(
@@ -232,7 +217,7 @@ class Test_MOE(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("call_type", _perf_call_types)
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("backend", _perf_backends)
     def test_perf(
         self,
         num_tokens,
@@ -241,7 +226,7 @@ class Test_MOE(common.PyTestCase):
         n_experts,
         top_k,
         dtype,
-        framework,
+        backend,
         call_type,
         record_property,
     ):
@@ -250,10 +235,10 @@ class Test_MOE(common.PyTestCase):
         if not torch.cuda.is_available():
             pytest.skip("CUDA not available")
 
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-        else:
-            pytest.skip(f"Framework {framework} is not available")
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Failed to set backend {backend}: {e}")
 
         # Create mock data based on call type
         if call_type == "e2e_fused":
@@ -274,12 +259,12 @@ class Test_MOE(common.PyTestCase):
             topk_ids = torch.randint(0, n_experts, (num_tokens, top_k), dtype=torch.long, device="cuda").contiguous()
             topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device="cuda"), dim=-1).to(dtype).contiguous()
 
-            def framework_fn():
+            def backend_fn():
                 return fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
 
         # Run performance benchmark
         try:
-            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
             record_property("benchmark", result)
         except Exception as e:
-            pytest.fail(f"Performance benchmark failed for {framework} {call_type}: {e}")
+            pytest.fail(f"Performance benchmark failed for {backend} {call_type}: {e}")

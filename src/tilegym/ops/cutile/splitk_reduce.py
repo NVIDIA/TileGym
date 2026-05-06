@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 import math
 
 import cuda.tile as ct
@@ -14,17 +13,18 @@ from .utils import next_power_of_2
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
+_SPLITK_REDUCE_OCCUPANCY = ct.ByTarget(sm_80=2, default=4)
 
 
-@ct.kernel(occupancy=ct.ByTarget(sm_80=2, default=4))
-def splitk_reduce_kernel(
+@ct.kernel
+def _splitk_reduce_kernel(
     attn_splitk_out,
     lse_splitk_out,
     attn_out,
     B: ConstInt,
-    S_kv: ConstInt,
-    num_heads: ConstInt,
-    head_dim: ConstInt,
+    S_KV: ConstInt,
+    NUM_HEADS: ConstInt,
+    HEAD_DIM: ConstInt,
     NUM_KV_SPLITS: ConstInt,
     NUM_KV_SPLITS_POW2: ConstInt,
     TILE_D: ConstInt,
@@ -119,11 +119,12 @@ def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
 
     # Calculate grid dimensions
     grid = (B, num_heads, (head_dim + TILE_D - 1) // TILE_D)
+    kernel = _splitk_reduce_kernel.replace_hints(occupancy=_SPLITK_REDUCE_OCCUPANCY)
 
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        splitk_reduce_kernel,
+        kernel,
         (
             attn_splitk_out,
             lse_splitk_out,

@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -12,6 +11,7 @@ import torch
 from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (batch_size, n_heads, n_ctx, head_dim, n_kv_ctx, bandwidth, dtype, device) -> (best_cfg, tuned_kernel)
@@ -24,8 +24,8 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 
 
-@ct.kernel(occupancy=2)
-def attention_sink_kernel(
+@ct.kernel
+def _attention_sink_kernel(
     Q,
     K,
     V,
@@ -203,7 +203,7 @@ def _cutile_autotune_attention_sink(
                 list(_attention_sink_autotune_configs()),
                 stream,
                 lambda cfg: (math.ceil(n_ctx / cfg.TILE_M), batch_size * n_heads, 1),
-                attention_sink_kernel,
+                _attention_sink_kernel,
                 lambda cfg: (
                     q,
                     k,
@@ -225,11 +225,7 @@ def _cutile_autotune_attention_sink(
         best_cfg = result.best.config
         _attention_sink_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                attention_sink_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _attention_sink_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _attention_sink_tune_cache[cache_key]
     ct.launch(
@@ -255,6 +251,7 @@ def _cutile_autotune_attention_sink(
     )
 
 
+@register_impl("attention_sink", backend="cutile")
 def attention_sink(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -282,8 +279,6 @@ def attention_sink(
     q = q.transpose(1, 2).contiguous()
     k = k.transpose(1, 2).contiguous()
     v = v.transpose(1, 2).contiguous()
-
-    # Allocate output
     o = torch.empty_like(q)
 
     # Ensure start_q is a tensor on GPU (CRITICAL: avoid .item() which causes sync)
@@ -298,7 +293,7 @@ def attention_sink(
     bandwidth = sliding_window if sliding_window is not None else 0
 
     # Use autotune
-    enable_autotune = os.environ.get("DISABLE_AUTOTUNE", "0") != "1"
+    enable_autotune = is_autotune_enabled()
 
     if enable_autotune:
         _cutile_autotune_attention_sink(
@@ -321,11 +316,12 @@ def attention_sink(
         TILE_M = 128
         TILE_N = 128
         grid = (math.ceil(n_ctx / TILE_M), bs * n_heads, 1)
+        kernel = _attention_sink_kernel.replace_hints(occupancy=2)
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            attention_sink_kernel,
+            kernel,
             (
                 q,
                 k,
@@ -349,7 +345,3 @@ def attention_sink(
     o = o.view(bs, n_ctx, n_heads * head_dim)
 
     return o
-
-
-# Register cutile implementation for attention_sink
-register_impl("attention_sink", "cutile")(attention_sink)

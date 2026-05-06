@@ -17,7 +17,7 @@ _bmm_tune_cache: dict = {}
 
 # CuTile implementation of BMM kernel
 @ct.kernel
-def ct_bmm_kernel(A, B, C, tm: ct.Constant[int], tn: ct.Constant[int], tk: ct.Constant[int]):
+def _bmm_kernel(A, B, C, TM: ct.Constant[int], TN: ct.Constant[int], TK: ct.Constant[int]):
     """CuTile kernel for batch matrix multiplication
     A has shape (Q, M, K), B has shape (Q, K, N) and C has shape (Q, M, N)
     where Q is the batch size (number of independent matrix multiplications)
@@ -27,33 +27,33 @@ def ct_bmm_kernel(A, B, C, tm: ct.Constant[int], tn: ct.Constant[int], tk: ct.Co
     bidz = ct.bid(2)  # Q (batch) dimension
 
     # Calculate number of K tiles using ct.num_tiles
-    num_k_tiles = ct.num_tiles(A, axis=2, shape=(1, tm, tk))
+    num_k_tiles = ct.num_tiles(A, axis=2, shape=(1, TM, TK))
 
     # Initialize accumulator
-    sum = ct.full((tm, tn), 0.0, dtype=ct.float32)
+    sum = ct.full((TM, TN), 0.0, dtype=ct.float32)
 
     zero_pad = ct.PaddingMode.ZERO
 
     # K-dimension loop
     for k in range(num_k_tiles):
         # Load tiles with 3D index and 3D shape
-        a = ct.load(A, index=(bidz, bidx, k), shape=(1, tm, tk), padding_mode=zero_pad)
-        a = ct.reshape(a, (tm, tk))  # Reshape to 2D
+        a = ct.load(A, index=(bidz, bidx, k), shape=(1, TM, TK), padding_mode=zero_pad)
+        a = ct.reshape(a, (TM, TK))  # Reshape to 2D
 
-        b = ct.load(B, index=(bidz, k, bidy), shape=(1, tk, tn), padding_mode=zero_pad)
-        b = ct.reshape(b, (tk, tn))  # Reshape to 2D
+        b = ct.load(B, index=(bidz, k, bidy), shape=(1, TK, TN), padding_mode=zero_pad)
+        b = ct.reshape(b, (TK, TN))  # Reshape to 2D
 
         sum = ct.mma(a, b, acc=sum)
 
     # Convert to output dtype and store
     result = ct.astype(sum, C.dtype)
     # Store with 3D index and 3D shape
-    result_3d = ct.reshape(result, (1, tm, tn))
+    result_3d = ct.reshape(result, (1, TM, TN))
     ct.store(C, index=(bidz, bidx, bidy), tile=result_3d)
 
 
 @ct.kernel
-def ct_static_persistent_bmm_kernel(
+def _static_persistent_bmm_kernel(
     A,
     B,
     C,
@@ -74,7 +74,6 @@ def ct_static_persistent_bmm_kernel(
     - Proper handling of transposed inputs via order parameter
     - Static persistent scheduling with proper grid calculation
     """
-    # Get program ID
     bid = ct.bid(0)
 
     # Calculate total number of tiles
@@ -192,12 +191,7 @@ def _bmm_autotune_configs():
                 for TILE_K in [32, 64, 128]:
                     for occupancy in [1, 2]:
                         yield SimpleNamespace(
-                            TILE_M=TILE_M,
-                            TILE_N=TILE_N,
-                            TILE_K=TILE_K,
-                            GROUP_SIZE_M=8,
-                            occupancy=occupancy,
-                            num_ctas=1,
+                            TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=1
                         )
     elif torch.cuda.get_device_capability() == (9, 0):
         # H100 (sm_90): Medium tiles with occupancy tuning
@@ -206,12 +200,7 @@ def _bmm_autotune_configs():
                 for TILE_K in [64]:
                     for occupancy in [1, 2]:
                         yield SimpleNamespace(
-                            TILE_M=TILE_M,
-                            TILE_N=TILE_N,
-                            TILE_K=TILE_K,
-                            GROUP_SIZE_M=8,
-                            occupancy=occupancy,
-                            num_ctas=2,
+                            TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=2
                         )
     else:
         # Other GPUs (e.g., GB100): Larger tiles with num_ctas=2
@@ -219,12 +208,7 @@ def _bmm_autotune_configs():
             for TILE_N in [256]:
                 for TILE_K in [64]:
                     yield SimpleNamespace(
-                        TILE_M=TILE_M,
-                        TILE_N=TILE_N,
-                        TILE_K=TILE_K,
-                        GROUP_SIZE_M=8,
-                        occupancy=1,
-                        num_ctas=2,
+                        TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=1, num_ctas=2
                     )
 
 
@@ -288,18 +272,14 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
                 list(_bmm_autotune_configs()),
                 stream,
                 grid_fn,
-                ct_static_persistent_bmm_kernel,
+                _static_persistent_bmm_kernel,
                 args_fn,
                 lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
             )
         best_cfg = result.best.config
         _bmm_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                ct_static_persistent_bmm_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _static_persistent_bmm_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _bmm_tune_cache[cache_key]
     ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
@@ -307,6 +287,7 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
     return output
 
 
+@register_impl("bmm", backend="cutile")
 def bmm(a, b, transpose_a=False, transpose_b=False, static_persistent=True, **kwargs):
     """
     Batch Matrix Multiplication using CuTile
@@ -359,11 +340,10 @@ def bmm(a, b, transpose_a=False, transpose_b=False, static_persistent=True, **kw
         TILE_K = kernel_configs.get("TILE_K")
         # Grid calculation
         grid = (ceil(M / TILE_M), ceil(N / TILE_N), Q_A)
-        # Launch kernel
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            ct_bmm_kernel,
+            _bmm_kernel,
             (a, b, output, TILE_M, TILE_N, TILE_K),
         )
 
@@ -371,4 +351,3 @@ def bmm(a, b, transpose_a=False, transpose_b=False, static_persistent=True, **kw
 
 
 # Backend registration
-register_impl("bmm", "cutile")(bmm)

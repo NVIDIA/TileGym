@@ -30,11 +30,9 @@ def _cdiv(a, b):
     return (a + b - 1) // b
 
 
-# occupancy=2 keeps two CTAs resident per SM for latency hiding.
-# the @experimental_kernel tag prints a one-time notice on first launch.
 @experimental_kernel
-@ct.kernel(occupancy=2)
-def swa_fwd_kernel(
+@ct.kernel
+def _swa_fwd_kernel(
     Q,
     K,
     V,
@@ -125,6 +123,7 @@ _DEFAULT_TILE_M = 64
 _DEFAULT_TILE_N = 128  # autotuned: 1.9x faster than N=64 on B300
 
 
+@register_impl("swa_attention", backend="cutile")
 def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwargs):
     # q: (B, H, S_Q, D), k/v: (B, H_K, S_K, D) -- fp16
     if q.dtype not in (torch.float16,):
@@ -174,11 +173,12 @@ def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwa
     k_flat = k_3d.reshape(-1, D).contiguous()
     v_flat = v_3d.reshape(-1, D).contiguous()
     out_flat = torch.empty_like(q_flat)
+    kernel = _swa_fwd_kernel.replace_hints(occupancy=2)
 
     ct.launch(
         torch.cuda.current_stream(),
         (stride_q, B * H, 1),
-        swa_fwd_kernel,
+        kernel,
         (
             q_flat,
             k_flat,
@@ -199,10 +199,6 @@ def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwa
     # strip padding and reshape back to (B, H, S_Q, D)
     out_3d = out_flat.reshape(B * H, S_Q_padded, D)[:, :S_Q, :]
     return out_3d.reshape(B, H, S_Q, D).contiguous()
-
-
-# register as the cutile backend for the "swa_attention" dispatch key
-register_impl("swa_attention", backend="cutile")(tile_swa_attention)
 
 
 # -- HuggingFace model integration --

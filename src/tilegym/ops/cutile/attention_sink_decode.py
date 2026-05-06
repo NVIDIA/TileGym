@@ -6,7 +6,7 @@ import math
 
 import cuda.tile as ct
 import torch
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 from tilegym.ops.cutile.splitk_reduce import splitk_reduce
@@ -22,7 +22,7 @@ INV_LOG_2 = 1.0 / math.log(2)
 
 
 @ct.kernel
-def attention_sink_decode_kernel(
+def _attention_sink_decode_kernel(
     Q,
     K,
     V,
@@ -61,7 +61,7 @@ def attention_sink_decode_kernel(
     head_id = ct.bid(1)  # KV head index
     split_id = ct.bid(2)
 
-    qk_scale = ct.mul(softmax_scale, INV_LOG_2)
+    qk_scale = softmax_scale * INV_LOG_2
 
     # Load start_q value - shape (1,), extract scalar
     start_q_tile = ct.load(
@@ -86,19 +86,19 @@ def attention_sink_decode_kernel(
     q = ct.transpose(q)  # Shape: (HEAD_DIM, QUERY_GROUP_BLOCK_SIZE)
 
     # Calculate start and end indices for this split
-    start_idx = ct.mul(split_id, KV_LEN_PER_SPLIT)
-    end_idx = ct.minimum(ct.add(start_idx, KV_LEN_PER_SPLIT), S_kv)
+    start_idx = split_id * KV_LEN_PER_SPLIT
+    end_idx = ct.minimum(start_idx + KV_LEN_PER_SPLIT, S_kv)
 
     # For causal attention, limit to positions <= start_q
-    end_idx = ct.minimum(end_idx, ct.add(start_q_val, 1))
+    end_idx = ct.minimum(end_idx, start_q_val + 1)
 
     # For sliding window, also limit start
     if BANDWIDTH > 0:
-        window_start = ct.maximum(0, ct.sub(start_q_val, ct.sub(BANDWIDTH, 1)))
+        window_start = ct.maximum(0, start_q_val - (BANDWIDTH - 1))
         start_idx = ct.maximum(start_idx, window_start)
 
     # Align start_idx to BLOCK_N
-    start_idx = ct.mul(ct.floordiv(start_idx, BLOCK_N), BLOCK_N)
+    start_idx = start_idx // BLOCK_N * BLOCK_N
 
     # Load sink values for first split
     # When HAS_SINKS is False, sink_scaled = -inf so sink_exp = 0 (no contribution)
@@ -106,10 +106,10 @@ def attention_sink_decode_kernel(
     if HAS_SINKS:
         # For grouped attention, we need per-head sinks
         # Sinks shape: [H_qo] - one sink per query head
-        offs_h = ct.add(ct.mul(head_id, NUM_Q_HEAD_PER_KV), ct.arange(QUERY_GROUP_BLOCK_SIZE, dtype=ct.int32))
+        offs_h = head_id * NUM_Q_HEAD_PER_KV + ct.arange(QUERY_GROUP_BLOCK_SIZE, dtype=ct.int32)
         sink_vals = ct.gather(Sinks, (offs_h,), padding_value=0)
         sink_vals = ct.astype(sink_vals, ct.float32)
-        sink_scaled = ct.mul(sink_vals, INV_LOG_2)
+        sink_scaled = sink_vals * INV_LOG_2
 
     # Initialize accumulators
     m_i = ct.full((QUERY_GROUP_BLOCK_SIZE,), -math.inf, dtype=ct.float32)
@@ -118,14 +118,14 @@ def attention_sink_decode_kernel(
 
     # Pre-compute variables
     num_tiles = ct.cdiv(KV_LEN_PER_SPLIT, BLOCK_N)
-    start_tile = ct.floordiv(start_idx, BLOCK_N)
+    start_tile = start_idx // BLOCK_N
     offs_n = ct.arange(BLOCK_N, dtype=ct.int32)
 
     # Process keys and values in this split
     if end_idx > start_idx:
         for idx in range(num_tiles):
-            cnt = ct.add(start_tile, idx)
-            curr_n = ct.mul(cnt, BLOCK_N)
+            cnt = start_tile + idx
+            curr_n = cnt * BLOCK_N
 
             # Load K - [B, H_kv, S_kv, HEAD_DIM]
             k = ct.load(
@@ -144,36 +144,36 @@ def attention_sink_decode_kernel(
             qk = ct.mma(k, q, qk)
 
             # Build combined mask: boundary + causal + sliding window
-            kv_positions = ct.add(curr_n, offs_n)
+            kv_positions = curr_n + offs_n
 
             # Boundary mask: positions beyond valid KV
-            mask = ct.greater_equal(kv_positions, S_kv)
+            mask = kv_positions >= S_kv
 
             # Causal mask: cannot attend to future positions
-            causal_mask = ct.greater(kv_positions, start_q_val)
+            causal_mask = kv_positions > start_q_val
             mask = mask | causal_mask
 
             # Sliding window mask
             if BANDWIDTH > 0:
-                window_limit = ct.sub(ct.add(start_q_val, 1), BANDWIDTH)
-                too_old = ct.less(kv_positions, window_limit)
+                window_limit = start_q_val + 1 - BANDWIDTH
+                too_old = kv_positions < window_limit
                 mask = mask | too_old
 
             # Apply mask - expand mask for broadcasting
             qk = ct.where(mask[:, None], -1.0e6, qk)
 
             # Compute softmax statistics
-            qk_scaled = ct.mul(qk, qk_scale)
+            qk_scaled = qk * qk_scale
             m_ij = ct.maximum(m_i, ct.max(qk_scaled, 0))
-            qk = ct.sub(qk_scaled, m_ij[None, :])
+            qk = qk_scaled - m_ij[None, :]
             p = ct.exp2(qk)
 
             # Update m_i and l_i
-            alpha = ct.exp2(ct.sub(m_i, m_ij))
-            l_i = ct.add(ct.mul(l_i, alpha[None, :]), p)
+            alpha = ct.exp2(m_i - m_ij)
+            l_i = l_i * alpha[None, :] + p
 
             # Update output accumulator
-            acc = ct.mul(acc, alpha[None, :])
+            acc = acc * alpha[None, :]
 
             # Load V and update accumulator
             v = ct.load(
@@ -200,12 +200,12 @@ def attention_sink_decode_kernel(
         # Update m_i to consider sink
         m_i_with_sink = ct.maximum(m_i, sink_scaled)
         # Rescale existing l and acc by the max change
-        alpha = ct.exp2(ct.sub(m_i, m_i_with_sink))
-        l = ct.mul(l, alpha)
-        acc = ct.mul(acc, alpha[None, :])
+        alpha = ct.exp2(m_i - m_i_with_sink)
+        l = l * alpha
+        acc = acc * alpha[None, :]
         # Add sink contribution to denominator
-        sink_exp = ct.exp2(ct.sub(sink_scaled, m_i_with_sink))
-        l = ct.add(l, sink_exp)
+        sink_exp = ct.exp2(sink_scaled - m_i_with_sink)
+        l = l + sink_exp
         # Update m_i for LSE calculation
         m_i = m_i_with_sink
 
@@ -216,7 +216,7 @@ def attention_sink_decode_kernel(
     acc = ct.astype(acc, Att_Out.dtype)
 
     # Compute LSE = m + log2(l)
-    lse = ct.add(m_i, ct.log2(l))
+    lse = m_i + ct.log2(l)
     lse = ct.astype(lse, Att_Out.dtype)
 
     # Store attention output
@@ -254,7 +254,7 @@ def attention_sink_decode_kernel(
     )
 
 
-class _attention_sink_decode(torch.autograd.Function):
+class _AttentionSinkDecodeFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, sinks, sm_scale, bandwidth, start_q, kv_len_per_split=None):
         """
@@ -365,14 +365,12 @@ class _attention_sink_decode(torch.autograd.Function):
             num_q_head_per_kv,
             NUM_KV_SPLITS,
         )
-
-        # Launch kernel
         grid = (bs, n_kv_heads, NUM_KV_SPLITS)
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            attention_sink_decode_kernel,
+            _attention_sink_decode_kernel,
             (
                 Q_grouped,
                 k_reshaped,
@@ -418,7 +416,7 @@ class _attention_sink_decode(torch.autograd.Function):
         return o
 
 
-attention_splitkv = _attention_sink_decode.apply
+attention_splitkv = _AttentionSinkDecodeFunction.apply
 
 
 @register_impl("attention_sink_decode", backend="cutile")

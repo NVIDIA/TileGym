@@ -246,7 +246,7 @@ def bench_mhc_split_gemm_rms(M, backend, dtype, K, N, n, device=DEVICE):
     if is_backend_available("cutile"):
         from tilegym.ops.cutile.experimental import mhc as mhc_cutile
 
-        _, _, cfg = mhc_cutile.cutile_autotune_mhc_split_gemm_rms(
+        _, _, cfg = mhc_cutile._cutile_autotune_mhc_split_gemm_rms(
             torch.cuda.current_stream(),
             x,
             w,
@@ -327,7 +327,7 @@ def bench_mhc_split_gemm_rms(M, backend, dtype, K, N, n, device=DEVICE):
         fn = lambda: ct.launch(
             torch.cuda.current_stream(),
             grid,
-            mhc_cutile.mhc_split_gemm_rms_kernel,
+            mhc_cutile._mhc_split_gemm_rms_kernel,
             (
                 x,
                 w,
@@ -372,7 +372,7 @@ def bench_mhc_gemm_rms_scale(M, backend, dtype, K, N, n, device=DEVICE):
     if backend == "cutile":
         from tilegym.ops.cutile.experimental import mhc as mhc_cutile
 
-        _, _, cfg = mhc_cutile.cutile_autotune_mhc_split_gemm_rms(
+        _, _, cfg = mhc_cutile._cutile_autotune_mhc_split_gemm_rms(
             torch.cuda.current_stream(),
             x,
             w,

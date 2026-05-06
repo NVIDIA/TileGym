@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 
 @ct.kernel
-def fused_moe_kernel(
+def _fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
@@ -34,19 +34,19 @@ def fused_moe_kernel(
     K: ct.Constant[int],
     EM: int,
     num_valid_tokens: int,
-    group_n: ct.Constant[int],
-    group_k: ct.Constant[int],
+    GROUP_N: ct.Constant[int],
+    GROUP_K: ct.Constant[int],
     # Tile sizes and configuration (Meta-parameters)
     TILE_SIZE_M: ct.Constant[int],
     TILE_SIZE_N: ct.Constant[int],
     TILE_SIZE_K: ct.Constant[int],
     GROUP_SIZE_M: ct.Constant[int],
     MUL_ROUTED_WEIGHT: ct.Constant[int],
-    top_k: ct.Constant[int],
-    use_fp8_w8a8: ct.Constant[int],
-    use_int8_w8a16: ct.Constant[int],
-    even_Ks: ct.Constant[int],
-    a_stride_1: ct.Constant[int],  # Original A shape[1] before flatten
+    TOP_K: ct.Constant[int],
+    USE_FP8_W8A8: ct.Constant[int],
+    USE_INT8_W8A16: ct.Constant[int],
+    EVEN_KS: ct.Constant[int],
+    A_STRIDE_1: ct.Constant[int],  # Original A shape[1] before flatten
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -74,7 +74,6 @@ def fused_moe_kernel(
     TILE_SIZE_M, which is necessary to maintain consistency in tile matrix
     multiplication across different tiles processed by the same expert.
     """
-    # -----------------------------------------------------------
     # Map program ids `bid` to the tile of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     bid = ct.bid(axis=0)
@@ -89,19 +88,15 @@ def fused_moe_kernel(
 
     num_tokens_post_padded = ct.gather(num_tokens_post_padded_ptr, 0, padding_value=0)
     if bid_m * TILE_SIZE_M < num_tokens_post_padded:
-        # ----------------------------------------------------------
         # Create offsets for the first tiles of A and B.
         # We will advance these offsets along the K dimension
         # and accumulate.
         offs_token_id = bid_m * TILE_SIZE_M + ct.arange(TILE_SIZE_M, dtype=ct.int32)
         offs_token = ct.gather(sorted_token_ids_ptr, offs_token_id, padding_value=0)
-        token_mask = offs_token < num_valid_tokens
         off_experts = ct.load(expert_ids_ptr, index=(bid_m,), shape=(1,))
         off_experts = off_experts.item()
-        row_indices = offs_token // top_k
-        a_row_offset = row_indices[:, None] * a_stride_1
-        mask_a = ct.broadcast_to(token_mask[:, None], (TILE_SIZE_M, TILE_SIZE_K))
-        # -----------------------------------------------------------
+        row_indices = offs_token // TOP_K
+        a_row_offset = row_indices[:, None] * A_STRIDE_1
         # Iterate to compute a tile of the C matrix.
         # We accumulate into a `[TILE_SIZE_M, TILE_SIZE_N]` tile.
         accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=ct.float32)
@@ -123,7 +118,6 @@ def fused_moe_kernel(
             moe_weight = ct.gather(topk_weights_ptr, offs_token, padding_value=0)
             moe_weight = ct.expand_dims(moe_weight, axis=1)
             accumulator = accumulator * moe_weight
-        # -----------------------------------------------------------
         # Write back the tile of the output.
         # Use 2D indexing so cuTile bounds-checks the N dimension. Otherwise,
         # with TILE_SIZE_N > N (e.g. down-projection GEMM where N=hidden_size),
@@ -139,7 +133,7 @@ def fused_moe_kernel(
         )
 
 
-@register_impl("invoke_fused_moe_kernel", "cutile")
+@register_impl("invoke_fused_moe_kernel", backend="cutile")
 def invoke_fused_moe_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -200,7 +194,7 @@ def invoke_fused_moe_kernel(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        fused_moe_kernel,
+        _fused_moe_kernel,
         (
             A_flat,
             B,

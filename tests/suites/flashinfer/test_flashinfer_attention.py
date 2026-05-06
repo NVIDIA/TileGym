@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import math
 import os
 import warnings
 
@@ -99,11 +98,8 @@ class Test_FlashInfer_PrefillPaged(common.PyTestCase):
         )
 
         workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
-        total_num_pages = k_cache.shape[0]
         num_qo_heads = q.shape[1]
-        num_kv_heads = k_cache.shape[1]
         head_dim_qk = q.shape[-1]
-        head_dim_vo = v_cache.shape[-1]
         lse = torch.zeros([q.shape[0], num_qo_heads], device=device, dtype=torch.float32)
         k_scale = 3.444
         v_scale = 2.444

@@ -22,8 +22,8 @@ import torch
 
 from tilegym.backend import register_impl
 
-from .jsd import _JSD_BLOCK_SIZE
-from .jsd import _jsd_kernel
+from .jsd import JSD_BLOCK_SIZE
+from .jsd import jsd_kernel_ct
 from .utils import next_power_of_2
 
 
@@ -45,9 +45,9 @@ def _fused_linear_jsd_forward(
 
     BT, H = student_input.shape
     V = student_weight.shape[0]
-    # Use _JSD_BLOCK_SIZE (4096) — NOT a local MAX_FUSED_SIZE.
-    # Larger values (e.g. 32768) cause register spill in _jsd_kernel → 5-10x slowdown.
-    BLOCK_SIZE = min(_JSD_BLOCK_SIZE, next_power_of_2(V))
+    # Use JSD_BLOCK_SIZE (4096), not a local MAX_FUSED_SIZE.
+    # Larger values (e.g. 32768) cause register spill in jsd_kernel_ct and 5-10x slowdown.
+    BLOCK_SIZE = min(JSD_BLOCK_SIZE, next_power_of_2(V))
 
     if has_label:
         n_non_ignore = (shift_labels != ignore_index).sum().item()
@@ -100,7 +100,7 @@ def _fused_linear_jsd_forward(
         ct.launch(
             torch.cuda.current_stream(),
             (chunk_n_rows, 1, 1),
-            _jsd_kernel,
+            jsd_kernel_ct,
             (
                 log_prob_s_chunk,
                 log_prob_t_chunk,

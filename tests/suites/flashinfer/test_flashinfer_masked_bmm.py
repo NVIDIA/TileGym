@@ -2,9 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
 import random
-import sys
 
 import pytest
 import torch

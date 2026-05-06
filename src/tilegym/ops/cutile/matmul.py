@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 ConstInt = ct.Constant[int]
 
 
-def swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
+def _swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
     # Get the global IDs of the current CUDA block (CTA) in a 1D grid.
     bid = ct.bid(0)
     num_bid_m = ct.cdiv(M, TILE_SIZE_M)
@@ -36,8 +36,8 @@ def swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
     return bid_m, bid_n
 
 
-@ct.kernel(num_ctas=ct.ByTarget(sm_100=2))
-def matmul_kernel(
+@ct.kernel
+def _matmul_kernel(
     A,
     B,
     C,
@@ -66,7 +66,7 @@ def matmul_kernel(
     GROUP_SIZE_M = 8
     M = A.shape[0]
     N = B.shape[1]
-    bidx, bidy = swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M)
+    bidx, bidy = _swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M)
 
     # Calculate the total number of K-tiles that need to be processed.
     # `ct.num_tiles(A, axis=1, shape=(TILE_SIZE_M, TILE_SIZE_K))` extracts the K-dimension (axis 1)
@@ -119,8 +119,8 @@ def _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M):
     return bid_m, bid_n
 
 
-@ct.kernel(num_ctas=2)
-def static_persistent_matmul_kernel(
+@ct.kernel
+def _static_persistent_matmul_kernel(
     A,
     B,
     C,
@@ -130,12 +130,11 @@ def static_persistent_matmul_kernel(
     TILE_SIZE_M: ct.Constant[int],
     TILE_SIZE_N: ct.Constant[int],
     TILE_SIZE_K: ct.Constant[int],
-    transpose_a: ct.Constant[bool],
-    transpose_b: ct.Constant[bool],
+    TRANSPOSE_A: ct.Constant[bool],
+    TRANSPOSE_B: ct.Constant[bool],
     GROUP_SIZE_M: ct.Constant[int],
 ):
     """CuTile static persistent matmul kernel: C = A @ B with static scheduling"""
-    # Get program ID
     start_bid = ct.bid(0)
 
     # Calculate total number of tiles
@@ -158,7 +157,7 @@ def static_persistent_matmul_kernel(
         # K-dimension loop
         for k_tile in range(k_tiles):
             # Load A tile
-            if transpose_a:
+            if TRANSPOSE_A:
                 # A is transposed: load from (K, M) layout
                 a = ct.load(A, index=(k_tile, bid_m), shape=(TILE_SIZE_K, TILE_SIZE_M), padding_mode=zero_pad)
                 a = ct.transpose(a)  # Convert to (TILE_SIZE_M, TILE_SIZE_K)
@@ -167,7 +166,7 @@ def static_persistent_matmul_kernel(
                 a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad)
 
             # Load B tile
-            if transpose_b:
+            if TRANSPOSE_B:
                 # B is transposed: load from (N, K) layout
                 b = ct.load(B, index=(bid_n, k_tile), shape=(TILE_SIZE_N, TILE_SIZE_K), padding_mode=zero_pad)
                 b = ct.transpose(b)  # Convert to (TILE_SIZE_K, TILE_SIZE_N)
@@ -205,11 +204,7 @@ def _matmul_autotune_configs():
                 for TILE_K in [32, 64, 128]:
                     for occ in [1, 2]:
                         yield SimpleNamespace(
-                            TILE_SIZE_M=TILE_M,
-                            TILE_SIZE_N=TILE_N,
-                            TILE_SIZE_K=TILE_K,
-                            num_ctas=1,
-                            occupancy=occ,
+                            TILE_SIZE_M=TILE_M, TILE_SIZE_N=TILE_N, TILE_SIZE_K=TILE_K, num_ctas=1, occupancy=occ
                         )
     else:
         # sm100+ (Blackwell)
@@ -219,7 +214,7 @@ def _matmul_autotune_configs():
         yield SimpleNamespace(TILE_SIZE_M=512, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1)
 
 
-def cutile_autotune_matmul(stream, a, b, c):
+def _cutile_autotune_matmul(stream, a, b, c):
     M, N = c.shape
     K = a.shape[1]
     cache_key = (M, N, K, a.dtype, str(a.device))
@@ -229,18 +224,14 @@ def cutile_autotune_matmul(stream, a, b, c):
                 list(_matmul_autotune_configs()),
                 stream,
                 lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
-                matmul_kernel,
+                _matmul_kernel,
                 lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
                 lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
             )
         best_cfg = result.best.config
         _matmul_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                matmul_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _matmul_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _matmul_tune_cache[cache_key]
     ct.launch(
@@ -284,7 +275,7 @@ def _static_persistent_matmul_autotune_configs():
         )
 
 
-def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b):
+def _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b):
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     cache_key = (M, N, K, trans_a, trans_b, a.dtype, str(a.device))
     if cache_key not in _static_persistent_matmul_tune_cache:
@@ -297,7 +288,7 @@ def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, 
                     1,
                     1,
                 ),
-                static_persistent_matmul_kernel,
+                _static_persistent_matmul_kernel,
                 lambda cfg: (
                     a,
                     b,
@@ -317,11 +308,7 @@ def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, 
         best_cfg = result.best.config
         _static_persistent_matmul_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                static_persistent_matmul_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _static_persistent_matmul_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _static_persistent_matmul_tune_cache[cache_key]
     ct.launch(
@@ -351,6 +338,7 @@ def cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, 
     return c
 
 
+@register_impl("matmul", backend="cutile")
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -379,12 +367,9 @@ def matmul(
 
     stream = torch.cuda.current_stream()
     if static_persistent:
-        cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b)
+        _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b)
     else:
         assert trans_a == False, "trans_a is not supported for cutile"
         assert trans_b == False, "trans_b is not supported for cutile"
-        cutile_autotune_matmul(stream, a, b, c)
+        _cutile_autotune_matmul(stream, a, b, c)
     return c
-
-
-register_impl("matmul", "cutile")(matmul)

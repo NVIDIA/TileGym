@@ -15,13 +15,13 @@ PAD_ZERO = ct.PaddingMode.ZERO
 
 
 @ct.kernel
-def rope_kernel(
+def _rope_kernel(
     q,
     k,
     cos,
     sin,
-    cos_bs: ConstInt,
-    seq_len: ConstInt,
+    COS_BS: ConstInt,
+    SEQ_LEN: ConstInt,
     TILE_QH: ConstInt,
     TILE_KH: ConstInt,
     TILE_RD: ConstInt,
@@ -40,12 +40,10 @@ def rope_kernel(
     cos shape: (cos_bs, seq_len, rope_dim)            — 3-D
     sin shape: (cos_bs, seq_len, rope_dim)            — 3-D
     """
-    cos_bs = cos.shape[0]
-
     bid = ct.bid(0)
-    batch_idx = bid // seq_len
-    row_idx = bid % seq_len
-    cos_batch_idx = 0 if cos_bs == 1 else batch_idx
+    batch_idx = bid // SEQ_LEN
+    row_idx = bid % SEQ_LEN
+    cos_batch_idx = 0 if COS_BS == 1 else batch_idx
 
     # ####################################################################
     # Load cos and sin values — first half of rope_dim
@@ -117,7 +115,7 @@ def rope_kernel(
     )
 
 
-def rope_forward(q, k, cos, sin, rope_dim=None):
+def _rope_forward(q, k, cos, sin, rope_dim=None):
     """
     Apply rotary position encoding **in-place** on 4-D Q/K tensors.
 
@@ -157,7 +155,7 @@ def rope_forward(q, k, cos, sin, rope_dim=None):
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        rope_kernel,
+        _rope_kernel,
         (
             q,
             k,
@@ -174,7 +172,7 @@ def rope_forward(q, k, cos, sin, rope_dim=None):
     return q, k, cos, sin
 
 
-class TileRopeFunction(torch.autograd.Function):
+class _TileRopeFunction(torch.autograd.Function):
     """
     CUDA Tile implementation of the Rotary Positional Embedding (RoPE) operation. Please note that
     this implements the HuggingFace Llama & Mistral version, whose rotation matrix is slightly different
@@ -195,7 +193,7 @@ class TileRopeFunction(torch.autograd.Function):
         cos size: (1, seq_len, rope_dim) or (bsz, seq_len, rope_dim)  — rope_dim == head_dim for full RoPE
         sin size: same as cos
         """
-        q, k, cos, sin = rope_forward(q, k, cos, sin, rope_dim=rope_dim)
+        q, k, cos, sin = _rope_forward(q, k, cos, sin, rope_dim=rope_dim)
         ctx.save_for_backward(cos, sin)
         ctx.rope_dim = rope_dim
         return q, k
@@ -208,7 +206,7 @@ class TileRopeFunction(torch.autograd.Function):
         cos, sin = ctx.saved_tensors
         dq = dq.contiguous()
         dk = dk.contiguous()
-        dq_out, dk_out, _, _ = rope_forward(dq, dk, cos, -sin, rope_dim=ctx.rope_dim)
+        dq_out, dk_out, _, _ = _rope_forward(dq, dk, cos, -sin, rope_dim=ctx.rope_dim)
         return dq_out, dk_out, None, None, None, None, None
 
 
@@ -237,7 +235,7 @@ def apply_rope_base(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, partial_
             f"cos last dim ({cos.shape[-1]}) must equal int(head_dim * partial_rotary_factor) "
             f"= int({head_dim} * {partial_rotary_factor}) = {rope_dim}"
         )
-    return TileRopeFunction.apply(q, k, cos, sin, position_ids, unsqueeze_dim, rope_dim)
+    return _TileRopeFunction.apply(q, k, cos, sin, position_ids, unsqueeze_dim, rope_dim)
 
 
 @register_impl("get_apply_rope_func", backend="cutile")

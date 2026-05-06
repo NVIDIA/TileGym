@@ -9,32 +9,26 @@ from tilegym.backend import register_impl
 
 
 @ct.kernel
-def relu_fwd_kernel_ct(x, y, n_elements: ct.Constant[int], BLOCK_SIZE: ct.Constant[int]):
-    pid = ct.bid(0)  # new var
-    block_start = pid * BLOCK_SIZE  # new var
-    offsets_base = ct.arange(BLOCK_SIZE, dtype=ct.int32)  # new var
-    offsets = ct.add(block_start, offsets_base)  # new var
-
-    # Load input data using gather
+def _relu_fwd_kernel(x, y, N_ELEMENTS: ct.Constant[int], BLOCK_SIZE: ct.Constant[int]):
+    pid = ct.bid(0)
+    block_start = pid * BLOCK_SIZE
+    offsets_base = ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    offsets = block_start + offsets_base
     # For 1D arrays, indices are passed directly (not as tuple)
     # Use padding_value=0 (int) to avoid dtype mismatch with float16
-    x_tile = ct.gather(x, offsets, padding_value=0)  # new var
+    x_tile = ct.gather(x, offsets, padding_value=0)
 
     # Convert to float32 for computation
-    x_f32 = ct.astype(x_tile, ct.float32)  # new var
-    zeros = ct.zeros((BLOCK_SIZE,), dtype=ct.float32)  # new var
+    x_f32 = ct.astype(x_tile, ct.float32)
+    zeros = ct.zeros((BLOCK_SIZE,), dtype=ct.float32)
 
     # Compute ReLU: max(0, x)
-    y_f32 = ct.maximum(x_f32, zeros)  # new var
-
-    # Convert back to original dtype
-    y_tile = ct.astype(y_f32, x_tile.dtype)  # new var
-
-    # Store result
+    y_f32 = ct.maximum(x_f32, zeros)
+    y_tile = ct.astype(y_f32, x_tile.dtype)
     ct.scatter(y, offsets, y_tile)
 
 
-class ReLU_CT(torch.autograd.Function):
+class _ReluCuTileFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
         ctx.x = x
@@ -52,7 +46,7 @@ class ReLU_CT(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            relu_fwd_kernel_ct,
+            _relu_fwd_kernel,
             (x_flat, y_flat, n_elements, BLOCK_SIZE),
         )
 
@@ -66,4 +60,4 @@ class ReLU_CT(torch.autograd.Function):
 @register_impl("relu", backend="cutile")
 def relu(x):
     """Returns ReLU activation of x using cuTile kernels."""
-    return ReLU_CT.apply(x)
+    return _ReluCuTileFunction.apply(x)

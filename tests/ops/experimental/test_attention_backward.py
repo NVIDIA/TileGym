@@ -11,14 +11,10 @@ from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
 
 if is_backend_available("cutile"):
-    from tilegym.ops.cutile.attention import FlashAttentionFunction
-    from tilegym.ops.cutile.attention import fmha_backward
     from tilegym.ops.cutile.attention import fmha_forward_with_lse
     from tilegym.ops.cutile.attention import tile_fmha_functional
     from tilegym.ops.cutile.attention import tile_fmha_with_backward
 else:
-    FlashAttentionFunction = None
-    fmha_backward = None
     fmha_forward_with_lse = None
     tile_fmha_functional = None
     tile_fmha_with_backward = None
@@ -101,6 +97,7 @@ class Test_FMHA_Backward(common.PyTestCase):
         """Test backward pass with regular (power of 2) shapes."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -177,6 +174,7 @@ class Test_FMHA_Backward(common.PyTestCase):
         """Test backward pass with irregular (non-power of 2) shapes."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -247,6 +245,7 @@ class Test_FMHA_Backward(common.PyTestCase):
         """Test backward pass with corner case configurations."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -304,6 +303,7 @@ class Test_FMHA_Backward(common.PyTestCase):
         """Verify forward pass with LSE produces correct output."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -332,6 +332,7 @@ class Test_FMHA_Backward(common.PyTestCase):
         """Test that functional API correctly uses inference mode when appropriate."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -354,6 +355,7 @@ class Test_FMHA_Backward(common.PyTestCase):
         """Test that functional API correctly uses training mode with gradients."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -419,6 +421,7 @@ class Test_FMHA_Backward_GQA(common.PyTestCase):
         """Test backward pass with Grouped Query Attention (GQA)."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -479,6 +482,7 @@ class Test_FMHA_Backward_Numerical(common.PyTestCase):
         """Test using torch.autograd.gradcheck for numerical validation."""
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
@@ -494,7 +498,7 @@ class Test_FMHA_Backward_Numerical(common.PyTestCase):
         sm_scale = 1.0 / math.sqrt(head_dim)
 
         def func(q, k, v):
-            return FlashAttentionFunction.apply(q, k, v, sm_scale, True)
+            return tile_fmha_with_backward(q, k, v, scaling=sm_scale, is_causal=True)
 
         # Note: gradcheck may be slow due to the nature of attention computation
         # Using eps=1e-6 and atol=1e-4 for reasonable tolerance

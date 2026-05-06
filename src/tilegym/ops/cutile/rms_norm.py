@@ -53,14 +53,14 @@ def rms_norm_kernel_multi_wave_cached(
 
 
 @ct.kernel
-def rms_norm_kernel_gather(
+def _rms_norm_kernel_gather(
     x,
     w,
     out,
     Rstd,
     N: ct.Constant[int],
-    eps: ct.Constant[float],
-    offset: ct.Constant[float],
+    EPS: ct.Constant[float],
+    OFFSET: ct.Constant[float],
     TILE_SIZE: ct.Constant[int],
 ):
     """
@@ -82,8 +82,7 @@ def rms_norm_kernel_gather(
         xj = ct.astype(xj, ct.float32)
         _rms += xj * xj
 
-    # Calculate RMS Norm
-    rms = ct.rsqrt(ct.sum(_rms, axis=0, keepdims=False) / N + eps)
+    rms = ct.rsqrt(ct.sum(_rms, axis=0, keepdims=False) / N + EPS)
     ct.scatter(Rstd, row, rms)
 
     for j in range(0, num_tiles):
@@ -93,21 +92,21 @@ def rms_norm_kernel_gather(
         xj = ct.gather(x, (row, offs), check_bounds=check_bound, latency=1)
         xj = ct.astype(xj, ct.float32)
         # Apply offset: y = x_normalized * (offset + w)
-        yj = xj * rms * (offset + wj)
+        yj = xj * rms * (OFFSET + wj)
         yj = ct.astype(yj, x.dtype)
         ct.scatter(out, (row, offs), yj, latency=1)
 
 
 @ct.kernel
-def rms_norm_kernel_static_persistent(
+def _rms_norm_kernel_static_persistent(
     X,  # Input tensor
     Y,  # Output tensor
     W,  # Weight tensor
     Rstd,  # rstd output (for backward)
     TILE_SIZE_M: ct.Constant[int],  # rows per tile
     TILE_SIZE_N: ct.Constant[int],  # columns per tile
-    eps: ct.Constant[float],  # Epsilon value
-    offset: ct.Constant[float],  # Offset value
+    EPS: ct.Constant[float],  # Epsilon value
+    OFFSET: ct.Constant[float],  # Offset value
 ):
     """
     CuTile static persistent RMSNorm kernel that uses a persistent approach,
@@ -117,14 +116,12 @@ def rms_norm_kernel_static_persistent(
     Formula: y = norm(x) * (offset + w)
     For Llama: offset=0.0, For Gemma3: offset=1.0
     """
-    # Get program ID
     bid = ct.bid(0)
 
     # Infer tensor dimensions from input shape
     M = X.shape[0]  # Number of rows
     N = X.shape[1]  # Number of columns
 
-    # Calculate upper bound
     upper_bound = (M + TILE_SIZE_M - 1) // TILE_SIZE_M
 
     # Load weight vector once (shared across all tiles processed by this program).
@@ -152,42 +149,32 @@ def rms_norm_kernel_static_persistent(
         )
         x = ct.astype(x, ct.float32)
 
-        # Step 1: Compute x^2
-        x_squared = ct.mul(x, x)
+        x_squared = x * x
 
-        # Step 2: Reduce sum along axis=1 (columns)
         x2_sum = ct.sum(x_squared, axis=1, keepdims=True)  # Shape: [TILE_SIZE_M, 1]
 
-        # Step 3: Compute variance (divide by N)
         N_f32 = ct.full((TILE_SIZE_M, 1), N * 1.0, dtype=ct.float32)
-        variance = ct.truediv(x2_sum, N_f32)
+        variance = x2_sum / N_f32
 
-        # Step 4: Add epsilon and compute rsqrt
-        eps_tensor = ct.full((TILE_SIZE_M, 1), eps, dtype=ct.float32)
-        variance_eps = ct.add(variance, eps_tensor)
+        eps_tensor = ct.full((TILE_SIZE_M, 1), EPS, dtype=ct.float32)
+        variance_eps = variance + eps_tensor
         rsqrt_var = ct.rsqrt(variance_eps)
 
         # Store rstd for backward pass
         ct.store(Rstd, index=(current_bid,), tile=ct.reshape(rsqrt_var, (TILE_SIZE_M,)), allow_tma=False)
 
-        # Step 5: Apply normalization
-        x_normalized = ct.mul(x, rsqrt_var)
+        x_normalized = x * rsqrt_var
 
-        # Step 6: Apply linear transformation with offset
         # Broadcast weight to match input shape
         w_broadcasted = ct.reshape(w, (1, TILE_SIZE_N))
 
         # Apply offset to weight: (offset + w)
-        offset_tensor = ct.full((1, TILE_SIZE_N), offset, dtype=ct.float32)
-        w_with_offset = ct.add(offset_tensor, w_broadcasted)
+        offset_tensor = ct.full((1, TILE_SIZE_N), OFFSET, dtype=ct.float32)
+        w_with_offset = offset_tensor + w_broadcasted
 
         # Apply linear transformation: y = x_normalized * (offset + w)
-        y = ct.mul(x_normalized, w_with_offset)
-
-        # Convert back to original dtype
+        y = x_normalized * w_with_offset
         y = ct.astype(y, X.dtype)
-
-        # Store result
         ct.store(
             Y,
             index=(current_bid, 0),
@@ -198,8 +185,8 @@ def rms_norm_kernel_static_persistent(
 
 
 @experimental_kernel
-@ct.kernel(occupancy=1)
-def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
+@ct.kernel
+def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
     """
     Persistent RMSNorm backward — grid-stride loop with fused dw accumulation.
 
@@ -260,7 +247,7 @@ def _bwd_tiles(M, N):
     return (tm, T, g, N)
 
 
-def rms_norm_backward(
+def _rms_norm_backward(
     x: torch.Tensor,
     dy: torch.Tensor,
     weight: torch.Tensor,
@@ -287,7 +274,8 @@ def rms_norm_backward(
 
     dx = torch.empty_like(x)
     dwp = torch.empty((g, T), device=x.device, dtype=torch.float32)
-    ct.launch(stream, (g,), _rms_bwd, (dx, dy, x, weight, rstd, dwp, tm, T))
+    kernel = _rms_bwd_kernel.replace_hints(occupancy=1)
+    ct.launch(stream, (g,), kernel, (dx, dy, x, weight, rstd, dwp, tm, T))
 
     dw = dwp.sum(0)
     if T != No:
@@ -296,7 +284,23 @@ def rms_norm_backward(
     return dx.view(*x_shape), dw.to(weight.dtype)
 
 
-class RMSNorm(torch.autograd.Function):
+def rms_norm_backward(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    weight: torch.Tensor,
+    rstd: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Standalone cuTile RMSNorm backward entry point."""
+    return _rms_norm_backward(x, dy, weight, rstd)
+
+
+def rms_norm_backward_workspace_bytes(M: int, N: int) -> int:
+    """Return temporary workspace traffic for the standalone backward benchmark."""
+    _, tile_n, grid, _ = _bwd_tiles(M, N)
+    return grid * tile_n * 4 * 2
+
+
+class _RMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -331,8 +335,6 @@ class RMSNorm(torch.autograd.Function):
 
         # Reshape input data into 2D tensor
         x_arg = x.reshape(-1, x.shape[-1])
-
-        # Allocate output tensor
         y = torch.empty_like(x_arg)
         M, N = x_arg.shape
         y = y.detach()
@@ -372,7 +374,7 @@ class RMSNorm(torch.autograd.Function):
                 ct.launch(
                     torch.cuda.current_stream(),
                     (M,),
-                    rms_norm_kernel_gather,
+                    _rms_norm_kernel_gather,
                     (x_arg, weight, y, rstd, N, eps, offset, _tile),
                 )
                 ctx.save_for_backward(x, weight, rstd)
@@ -395,7 +397,7 @@ class RMSNorm(torch.autograd.Function):
             ct.launch(
                 torch.cuda.current_stream(),
                 grid,
-                rms_norm_kernel_static_persistent,
+                _rms_norm_kernel_static_persistent,
                 (x_arg, y, weight, rstd, TILE_SIZE_M, TILE_SIZE_N, eps, offset),
             )
         elif mode == "multi_wave_cached":
@@ -422,7 +424,7 @@ class RMSNorm(torch.autograd.Function):
             ct.launch(
                 torch.cuda.current_stream(),
                 grid,
-                rms_norm_kernel_gather,
+                _rms_norm_kernel_gather,
                 (
                     x_arg,
                     weight,
@@ -461,7 +463,7 @@ class RMSNorm(torch.autograd.Function):
             )
 
         x, weight, rstd = ctx.saved_tensors
-        dx, dw = rms_norm_backward(x, dy, weight, rstd)
+        dx, dw = _rms_norm_backward(x, dy, weight, rstd)
 
         # Gradients: (x, normalized_shape, weight, eps, bias, mode, offset)
         return dx, None, dw, None, None, None, None
@@ -485,10 +487,10 @@ def rms_norm(input, normalized_shape, weight, eps, bias=None, mode=None, offset=
     Returns:
         Normalized tensor with same shape as input
     """
-    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, mode, offset)
+    return _RMSNorm.apply(input, normalized_shape, weight, eps, bias, mode, offset)
 
 
-class TileRMSNorm(nn.Module):
+class _TileRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6, offset=0.0):
         """
         RMSNorm implementation using CUDA Tile
@@ -549,7 +551,7 @@ class TileRMSNorm(nn.Module):
         """
         Only for testing purposes.
         """
-        return rms_norm_backward(x, dy, weight, rstd)
+        return _rms_norm_backward(x, dy, weight, rstd)
 
     @staticmethod
     def rms_norm_backward_torch(
@@ -590,7 +592,22 @@ class TileRMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}, offset={self.offset}"
 
 
-class RMSNormForGemma3(TileRMSNorm):
+def compute_rms_norm_rstd_torch(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compute the PyTorch reference RMSNorm rstd used by standalone backward benchmarks."""
+    return _TileRMSNorm.compute_rstd_torch(x, eps)
+
+
+def rms_norm_backward_torch(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    weight: torch.Tensor,
+    rstd: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """PyTorch reference implementation for standalone RMSNorm backward."""
+    return _TileRMSNorm.rms_norm_backward_torch(x, dy, weight, rstd)
+
+
+class _RMSNormForGemma3(_TileRMSNorm):
     """
     RMSNorm implementation for Gemma3 models using CuTile backend.
 
@@ -611,6 +628,6 @@ class RMSNormForGemma3(TileRMSNorm):
 @register_impl("get_rms_norm_module", backend="cutile")
 def get_rms_norm_module(model: str = "llama"):
     if model == "gemma3":
-        return RMSNormForGemma3
+        return _RMSNormForGemma3
     else:
-        return TileRMSNorm
+        return _TileRMSNorm

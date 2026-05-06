@@ -42,7 +42,7 @@ def _ct_solve_tril(A, CS):
 
 
 @ct.kernel
-def _ct_intra_chunk_prepare_kernel(
+def _intra_chunk_prepare_kernel(
     Q,
     K,
     V,
@@ -71,17 +71,14 @@ def _ct_intra_chunk_prepare_kernel(
     _ZERO = ct.PaddingMode.ZERO
 
     if CHUNK_SIZE == 64:
-        # ================================================================
         # Hierarchical 32×32 block solve for CHUNK_SIZE=64
         # 2 diagonal blocks + 1 off-diagonal (simpler than old 16×16).
-        # ================================================================
         BS = 32
         offs_bs = ct.arange(BS, dtype=ct.int32)
         strict_lower_bs = ct.expand_dims(offs_bs, axis=1) > ct.expand_dims(offs_bs, axis=0)
 
         t_base = pid_chunk * 2  # block index into T dim (32-row blocks)
 
-        # ---- Load 2 sub-blocks of K: (32, BLOCK_K) each ----
         k0 = ct.astype(
             ct.load(K, index=(b, t_base, h, 0), shape=(1, BS, 1, BLOCK_K), padding_mode=_ZERO).reshape((BS, BLOCK_K)),
             ct.float32,
@@ -97,7 +94,6 @@ def _ct_intra_chunk_prepare_kernel(
             k0 = k0 * ct.rsqrt(ct.sum(k0 * k0, axis=1, keepdims=True) + 1e-6)
             k1 = k1 * ct.rsqrt(ct.sum(k1 * k1, axis=1, keepdims=True) + 1e-6)
 
-        # ---- Load Beta and G sub-blocks ----
         b0 = ct.astype(
             ct.load(Beta, index=(b, t_base, h), shape=(1, BS, 1), padding_mode=_ZERO).reshape((BS,)), ct.float32
         )
@@ -116,11 +112,9 @@ def _ct_intra_chunk_prepare_kernel(
         gc0_last = ct.sum(ct.where(offs_bs == BS - 1, gc0, 0.0))
         gc1 = ct.cumsum(g1_raw, axis=0) + gc0_last
 
-        # ---- k * beta ----
         kb0 = k0 * ct.expand_dims(b0, axis=1)
         kb1 = k1 * ct.expand_dims(b1, axis=1)
 
-        # ---- 2 diagonal blocks (strictly lower within each 32×32) ----
         gc0r = ct.expand_dims(gc0, axis=1)
         gc0c = ct.expand_dims(gc0, axis=0)
         gc1r = ct.expand_dims(gc1, axis=1)
@@ -133,17 +127,13 @@ def _ct_intra_chunk_prepare_kernel(
             strict_lower_bs, -(_ct_mm(kb1, ct.transpose(k1)) * ct.where(strict_lower_bs, ct.exp(gc1r - gc1c), 0.0)), 0.0
         )
 
-        # ---- 1 off-diagonal block (full 32×32) ----
         L10 = -(_ct_mm(kb1, ct.transpose(k0)) * ct.exp(gc1r - gc0c))
 
-        # ---- Invert 2 diagonal blocks: (I + D_i)^{-1} ----
         D0 = _ct_solve_tril(D0, BS)
         D1 = _ct_solve_tril(D1, BS)
 
-        # ---- Forward substitution (only 1 off-diagonal for 2×2 block) ----
         M10 = -(_ct_mm(D1, _ct_mm(L10, D0)))
 
-        # ---- v_corrected = M @ (v * beta) ----
         num_v_tiles = ct.cdiv(V_dim, BLOCK_K)
         for vt in range(num_v_tiles):
             vb0 = ct.astype(
@@ -165,7 +155,6 @@ def _ct_intra_chunk_prepare_kernel(
             ct.store(V_corr, index=(b, h, pid_chunk, 0, vt), tile=ct.reshape(vc0, (1, 1, 1, BS, BLOCK_K)))
             ct.store(V_corr, index=(b, h, pid_chunk, 1, vt), tile=ct.reshape(vc1, (1, 1, 1, BS, BLOCK_K)))
 
-        # ---- k_cumdecay = M @ (k_beta * exp(g_cum)) ----
         kbe0 = kb0 * ct.expand_dims(ct.exp(gc0), axis=1)
         kbe1 = kb1 * ct.expand_dims(ct.exp(gc1), axis=1)
 
@@ -175,11 +164,9 @@ def _ct_intra_chunk_prepare_kernel(
         ct.store(K_cumdecay, index=(b, h, pid_chunk, 0, 0), tile=ct.reshape(kc0, (1, 1, 1, BS, BLOCK_K)))
         ct.store(K_cumdecay, index=(b, h, pid_chunk, 1, 0), tile=ct.reshape(kc1, (1, 1, 1, BS, BLOCK_K)))
 
-        # ---- Store g_cum ----
         ct.store(G_cum_out, index=(b, h, pid_chunk, 0), tile=ct.reshape(gc0, (1, 1, 1, BS)))
         ct.store(G_cum_out, index=(b, h, pid_chunk, 1), tile=ct.reshape(gc1, (1, 1, 1, BS)))
 
-        # ---- Rechunk Q (scaled, l2normed) ----
         q0 = ct.astype(
             ct.load(Q, index=(b, t_base, h, 0), shape=(1, BS, 1, BLOCK_K), padding_mode=_ZERO).reshape((BS, BLOCK_K)),
             ct.float32,
@@ -205,9 +192,7 @@ def _ct_intra_chunk_prepare_kernel(
         ct.store(K_out, index=(b, h, pid_chunk, 1, 0), tile=ct.reshape(k1, (1, 1, 1, BS, BLOCK_K)))
 
     else:
-        # ================================================================
         # Fallback: row-by-row Neumann series for other chunk sizes
-        # ================================================================
         k_tile = ct.astype(
             ct.load(
                 K,
@@ -300,7 +285,7 @@ def _ct_intra_chunk_prepare_kernel(
 
 
 @ct.kernel
-def _ct_chunk_inter_recurrence_kernel(
+def _chunk_inter_recurrence_kernel(
     Q_ch,
     K_ch,
     V_corr,
@@ -327,7 +312,6 @@ def _ct_chunk_inter_recurrence_kernel(
 
     _ZERO = ct.PaddingMode.ZERO
 
-    # ---- Initialize state (BLOCK_K, BLOCK_V) ----
     state = ct.zeros((BLOCK_K, BLOCK_V), dtype=ct.float32)
     if HAS_INITIAL_STATE:
         state = ct.load(
@@ -420,7 +404,7 @@ def _ct_chunk_inter_recurrence_kernel(
         )
 
 
-class ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
+class _ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -450,7 +434,6 @@ class ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
         BLOCK_K = 1 << (K - 1).bit_length()
 
         # Allocate intermediates (5D)
-        NC = num_chunks * chunk_size
         q_chunked = torch.empty(B, H, num_chunks, chunk_size, K, device=device, dtype=torch.float32)
         k_chunked = torch.empty(B, H, num_chunks, chunk_size, K, device=device, dtype=torch.float32)
         v_corrected = torch.empty(B, H, num_chunks, chunk_size, V, device=device, dtype=torch.float32)
@@ -462,7 +445,7 @@ class ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid_intra,
-            _ct_intra_chunk_prepare_kernel,
+            _intra_chunk_prepare_kernel,
             (
                 query,
                 key,
@@ -502,7 +485,7 @@ class ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid_inter,
-            _ct_chunk_inter_recurrence_kernel,
+            _chunk_inter_recurrence_kernel,
             (
                 q_chunked,
                 k_chunked,
@@ -547,7 +530,7 @@ def chunk_gated_delta_rule(
     **kwargs,
 ):
     """Drop-in cuTile replacement for torch_chunk_gated_delta_rule."""
-    return ChunkGatedDeltaRuleCuTile.apply(
+    return _ChunkGatedDeltaRuleCuTile.apply(
         query,
         key,
         value,

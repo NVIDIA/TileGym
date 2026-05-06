@@ -61,7 +61,7 @@ class Test_Matmul(common.PyTestCase):
         return a, b
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "m, n, k, offset_a, offset_b, dtype",
@@ -138,7 +138,7 @@ class Test_Matmul(common.PyTestCase):
     @pytest.mark.parametrize("transpose_b", [False, True])
     @pytest.mark.parametrize("static_persistent", [False, True])
     @pytest.mark.parametrize("use_tma", [False] if torch.cuda.get_device_capability()[0] == 8 else [True])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("backend", _perf_backends)
     def test_perf(
         self,
         m,
@@ -151,7 +151,7 @@ class Test_Matmul(common.PyTestCase):
         static_persistent,
         use_tma,
         dtype,
-        framework,
+        backend,
         record_property,
     ):
         self.setUp()
@@ -163,7 +163,7 @@ class Test_Matmul(common.PyTestCase):
                 )
 
         # Skip FP8 for pytorch reference (no native support)
-        if dtype == torch.float8_e4m3fn and framework == "pytorch":
+        if dtype == torch.float8_e4m3fn and backend == "pytorch":
             pytest.skip("Skip float8_e4m3fn because pytorch reference doesn't support it")
         # xfail on sm121 for 32768x32768 matmul due to performance
         if torch.cuda.get_device_capability() == (12, 1) and m == 32768:
@@ -172,7 +172,7 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip("Skip OOM on B20X (sm120): 32768³ matmul exceeds 32 GiB VRAM")
         if dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip due to sm80 not support fp8 type")
-        if framework == "cutile" and not static_persistent and transpose_a:
+        if backend == "cutile" and not static_persistent and transpose_a:
             pytest.skip("Cutile transpose_a is not supported when static_persistent is False")
 
         a, b = self.prepare_data(m, n, k, transpose_a, transpose_b, offset_a, offset_b, dtype)
@@ -182,16 +182,16 @@ class Test_Matmul(common.PyTestCase):
             "static_persistent": static_persistent,
             "use_tma": use_tma,
         }
-        if framework == "pytorch":
-            framework_fn = lambda: self.reference(a, b, transpose_a, transpose_b)
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            if framework == "cutile" and transpose_b:
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(a, b, transpose_a, transpose_b)
+        elif tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+            if backend == "cutile" and transpose_b:
                 pytest.skip("[matmul] cutile transpose_b is not supported")
-            framework_fn = lambda: tilegym.ops.matmul(a, b, **kernel_kwargs)
+            backend_fn = lambda: tilegym.ops.matmul(a, b, **kernel_kwargs)
         else:
-            pytest.skip(f"Framework {framework} is not available")
-        skip_correctness = framework == "pytorch"
+            pytest.skip(f"Backend {backend} is not available")
+        skip_correctness = backend == "pytorch"
         if not skip_correctness:
             if dtype == torch.float8_e4m3fn:
                 atol = 1
@@ -203,20 +203,22 @@ class Test_Matmul(common.PyTestCase):
                 atol = 1e-2
                 rtol = 1e-2
             self.assertCorrectness(
-                framework_fn,
+                backend_fn,
                 lambda: self.reference(a, b, trans_a=transpose_a, trans_b=transpose_b),
                 kwargs={},
                 atol=atol,
                 rtol=rtol,
             )
         try:
-            res = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+            res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
         except torch.OutOfMemoryError as e:
             pytest.skip(f"OOM during benchmark: {e}")
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM
-        del a, b, framework_fn
+        del a, b, backend_fn
+        if "kernel_configs" in locals():
+            del kernel_configs
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -234,7 +236,7 @@ class Test_Matmul(common.PyTestCase):
     )
     @pytest.mark.parametrize("static_persistent", [True, False])
     @pytest.mark.parametrize("use_tma", [True])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("backend", _perf_backends)
     def test_perf_llm(
         self,
         model,
@@ -246,7 +248,7 @@ class Test_Matmul(common.PyTestCase):
         dtype,
         static_persistent,
         use_tma,
-        framework,
+        backend,
         record_property,
     ):
         self.setUp()
@@ -254,32 +256,37 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip("Skip on sm80")
 
         a, b = self.prepare_data(m, n, k, False, False, offset_a, offset_b, dtype)
-        if framework == "pytorch":
-            framework_fn = lambda: self.reference(a, b)
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            kernel_kwargs = {
-                "trans_a": False,
-                "trans_b": False,
-                "static_persistent": static_persistent,
-                "use_tma": use_tma,
-            }
-            framework_fn = lambda: tilegym.ops.matmul(a, b, **kernel_kwargs)
+        kernel_kwargs = {
+            "trans_a": False,
+            "trans_b": False,
+            "static_persistent": static_persistent,
+            "use_tma": use_tma,
+        }
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(a, b)
+        elif tilegym.is_backend_available(backend):
+            try:
+                tilegym.set_backend(backend)
+            except Exception as e:
+                pytest.skip(f"Backend {backend} is not available: {e}")
+            backend_fn = lambda: tilegym.ops.matmul(a, b, **kernel_kwargs)
         else:
-            pytest.skip(f"Framework {framework} is not available")
-        skip_correctness = framework == "pytorch"
+            pytest.skip(f"Backend {backend} is not available")
+        skip_correctness = backend == "pytorch"
         if not skip_correctness:
             self.assertCorrectness(
-                framework_fn,
+                backend_fn,
                 lambda: self.reference(a, b),
                 kwargs={},
                 atol=1e-2,
                 rtol=1e-2,
             )
-        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM
-        del a, b, framework_fn
+        del a, b, backend_fn
+        if "kernel_configs" in locals():
+            del kernel_configs
         torch.cuda.empty_cache()
         gc.collect()

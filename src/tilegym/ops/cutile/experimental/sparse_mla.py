@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -11,15 +10,14 @@ import torch
 from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
 from tilegym.logger import get_logger
 
-from ..utils import next_power_of_2
-
 logger = get_logger(__name__)
 
-# Module-level tune cache: (B, H, S, topk, D, D_PE, query_group_size, dtype, device) -> (best_cfg, tuned_kernel)
+# Module-level tune cache: (B, H, S, topk, D, D_PE, query_group_size, dtype, device) -> best_cfg
 _sparse_mla_tune_cache: dict = {}
 
 ConstInt = ct.Constant[int]
@@ -30,15 +28,6 @@ INV_LOG_2 = 1.0 / math.log(2)
 # Candidate tile sizes for autotuning (must be powers of 2).
 _SPARSE_MLA_TILE_HS = [1, 2, 4, 8, 16, 32, 64]
 _SPARSE_MLA_TILE_NS = [16, 32, 64, 128]
-
-
-def _should_disable_autotune():
-    """Check if autotuning should be disabled (for testing).
-
-    Set DISABLE_AUTOTUNE=1 to skip autotuning and use the first config.
-    This is useful for CI testing where autotuning can cause timeouts.
-    """
-    return os.environ.get("DISABLE_AUTOTUNE", "0") == "1"
 
 
 def _is_power_of_2(x):
@@ -109,7 +98,7 @@ def _sparse_mla_autotune_configs(topk, H, query_group_size):
 
 @experimental_kernel
 @ct.kernel
-def sparse_mla_fwd_kernel(
+def _sparse_mla_fwd_kernel(
     Q,  # [B, H, S, D]
     K,  # [B, H_kv, S_kv, D]
     V,  # [B, H_kv, S_kv, D]
@@ -234,7 +223,7 @@ def _launch_sparse_mla_fwd(
 
     Three mutually exclusive config selection modes (no fallback between paths):
       Path 1: Explicit kernel_configs — validated and launched directly.
-      Path 2: DISABLE_AUTOTUNE=1 — first valid config from search space.
+      Path 2: TILEGYM_DISABLE_AUTOTUNE=1 — first valid config from search space.
       Path 3: Autotune — exhaustive_search over search space.
     """
     B = q.shape[0]
@@ -247,7 +236,7 @@ def _launch_sparse_mla_fwd(
         ct.launch(
             stream,
             grid,
-            sparse_mla_fwd_kernel,
+            _sparse_mla_fwd_kernel,
             (
                 q,
                 k,
@@ -274,8 +263,8 @@ def _launch_sparse_mla_fwd(
         _validate_sparse_mla_config(cfg, topk, H, query_group_size, explicit=True)
         _launch_with_cfg(cfg)
 
-    # Path 2: DISABLE_AUTOTUNE=1 — use first valid config from search space.
-    elif _should_disable_autotune():
+    # Path 2: TILEGYM_DISABLE_AUTOTUNE=1 — use first valid config from search space.
+    elif is_autotune_disabled():
         configs = list(_sparse_mla_autotune_configs(topk, H, query_group_size))
         assert len(configs) > 0, (
             f"No valid (TILE_H, TILE_N) config for topk={topk}, H={H}, query_group_size={query_group_size}"
@@ -293,7 +282,7 @@ def _launch_sparse_mla_fwd(
                     list(_sparse_mla_autotune_configs(topk, H, query_group_size)),
                     stream,
                     lambda cfg: (S, B * (H // cfg.TILE_H), 1),
-                    sparse_mla_fwd_kernel,
+                    _sparse_mla_fwd_kernel,
                     lambda cfg: (
                         q,
                         k,
@@ -314,16 +303,13 @@ def _launch_sparse_mla_fwd(
                     ),
                 )
             best_cfg = result.best.config
-            _sparse_mla_tune_cache[cache_key] = (
-                best_cfg,
-                ct.kernel(sparse_mla_fwd_kernel._pyfunc),
-            )
-        best_cfg, tuned_kernel = _sparse_mla_tune_cache[cache_key]
+            _sparse_mla_tune_cache[cache_key] = best_cfg
+        best_cfg = _sparse_mla_tune_cache[cache_key]
         _launch_with_cfg(best_cfg)
     return o
 
 
-class _sparse_attention(torch.autograd.Function):
+class _SparseAttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, indices, qpe, kpe, sm_scale, is_causal, kernel_configs):
         assert is_causal, "CuTile sparse_mla only supports is_causal=True"
@@ -373,6 +359,7 @@ class _sparse_attention(torch.autograd.Function):
         raise NotImplementedError("Backward pass is not implemented for CuTile sparse_mla")
 
 
+@register_impl("sparse_mla", backend="cutile")
 def tile_sparse_mla(q, k, v, indices, qpe, kpe, is_causal=True, scaling=None, **kwargs):
     if scaling is None:
         scaling = 1.0 / math.sqrt(q.size(-1) + qpe.size(-1))
@@ -386,7 +373,4 @@ def tile_sparse_mla(q, k, v, indices, qpe, kpe, is_causal=True, scaling=None, **
 
     kernel_configs = kwargs.get("kernel_configs")
 
-    return _sparse_attention.apply(q, k, v, indices, qpe, kpe, scaling, is_causal, kernel_configs)
-
-
-register_impl("sparse_mla", "cutile")(tile_sparse_mla)
+    return _SparseAttentionFunction.apply(q, k, v, indices, qpe, kpe, scaling, is_causal, kernel_configs)

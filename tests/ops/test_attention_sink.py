@@ -9,14 +9,13 @@ import torch
 
 import tilegym
 import tilegym.ops
-from tilegym.backend import get_current_backend
 from tilegym.backend import register_impl
 from tilegym.backend import set_backend
 
 from .. import common
 
 _backends = ["cutile"]
-_perf_frameworks = _backends + ["pytorch"]
+_perf_backends = _backends + ["pytorch"]
 
 
 def get_data(
@@ -156,7 +155,7 @@ class Test_AttentionSink(common.PyTestCase):
         ids=lambda x: str(x),
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("backend", _perf_backends)
     def test_perf(
         self,
         batch_size,
@@ -167,7 +166,7 @@ class Test_AttentionSink(common.PyTestCase):
         head_dim,
         sliding_window,
         dtype,
-        framework,
+        backend,
         record_property,
     ):
         """Test performance of attention_sink implementation."""
@@ -195,34 +194,28 @@ class Test_AttentionSink(common.PyTestCase):
 
         start_q_tensor = torch.tensor([0], dtype=torch.int32).cuda()
 
+        # Backend implementation - use backend parameter directly
+        backend_fn = lambda: tilegym.ops.attention_sink(
+            q, k, v, sinks, sm_scale, sliding_window, start_q_tensor, backend=backend
+        )
+
         # Reference implementation
         ref_fn = lambda: self.reference(q, k, v, sinks, sm_scale, sliding_window, start_q_tensor)
 
-        if framework == "pytorch":
-            framework_fn = ref_fn
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            framework_fn = lambda: tilegym.ops.attention_sink(
-                q, k, v, sinks, sm_scale, sliding_window, start_q_tensor, backend=framework
-            )
-        else:
-            pytest.skip(f"Framework {framework} is not available")
-
         # Verify correctness before benchmarking
-        if framework != "pytorch":
-            self.assertCorrectness(
-                framework_fn,
-                ref_fn,
-                kwargs={},
-                atol=5e-2,
-                rtol=1e-2,
-                check_stride=False,
-            )
+        self.assertCorrectness(
+            backend_fn,
+            ref_fn,
+            kwargs={},
+            atol=5e-2,
+            rtol=1e-2,
+            check_stride=False,
+        )
 
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
-        del q, k, v, sinks, framework_fn
+        del q, k, v, sinks, backend_fn
         torch.cuda.empty_cache()
         gc.collect()

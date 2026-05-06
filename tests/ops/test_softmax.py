@@ -38,6 +38,7 @@ class Test_Softmax(common.PyTestCase):
             pytest.skip("Cannot use both TMA and chunked softmax at the same time")
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
+            self.setUp()
         else:
             pytest.skip(f"Backend {backend} is not available")
 

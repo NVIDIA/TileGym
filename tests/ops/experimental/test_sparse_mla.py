@@ -201,7 +201,6 @@ class Test_SparseMLA(common.PyTestCase):
 
         device = torch.device("cuda")
         S = S_kv
-        topk = S_kv  # 64 — satisfies topk % TILE_N == 0
 
         q = torch.empty(B, H, S, D, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
         k = torch.empty(B, H_kv, S_kv, D, device=device, dtype=dtype).normal_(mean=0.0, std=0.3)
@@ -338,6 +337,7 @@ class Test_SparseMLA(common.PyTestCase):
             pytest.skip(f"Backend {backend} is not available")
         try:
             set_backend(backend)
+            self.setUp()
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 

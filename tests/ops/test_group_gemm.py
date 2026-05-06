@@ -25,7 +25,7 @@ class Test_GroupGemm(common.PyTestCase):
         ]
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "group_m, group_n, group_k, transpose_b, dtype",
@@ -48,7 +48,7 @@ class Test_GroupGemm(common.PyTestCase):
                 torch.float16,
             ]
         ],
-        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
     @pytest.mark.parametrize("backend", _backends)
     def test_op(
@@ -109,9 +109,9 @@ class Test_GroupGemm(common.PyTestCase):
             for transpose_b in [True, False]
             for dtype in [torch.float16, torch.float8_e5m2]
         ],
-        ids=lambda x: (str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x)),
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
-    @pytest.mark.parametrize("framework", _perf_frameworks)
+    @pytest.mark.parametrize("backend", _perf_backends)
     def test_perf(
         self,
         num_groups,
@@ -120,7 +120,7 @@ class Test_GroupGemm(common.PyTestCase):
         group_k,
         transpose_b,
         dtype,
-        framework,
+        backend,
         record_property,
     ):
         self.setUp()
@@ -143,32 +143,25 @@ class Test_GroupGemm(common.PyTestCase):
             group_A.append(A)
             group_B.append(B)
 
-        if (
-            torch.cuda.get_device_capability() == (12, 0)
-            and num_groups == 16
-            and group_n == 8192
-            and dtype == torch.float16
-        ):
-            pytest.xfail("Output mismatch on B20X (sm120): GroupGemm 16×2048×2048×8192 float16 — 1 element off")
-        if framework == "pytorch":
-            framework_fn = lambda: self.reference(group_A, group_B, transpose_b=transpose_b)
-        elif tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
-            if framework == "cutile" and dtype == torch.float8_e5m2:
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(group_A, group_B, transpose_b=transpose_b)
+        elif is_backend_available(backend):
+            if backend == "cutile" and dtype == torch.float8_e5m2:
                 pytest.skip("Skip float8_e5m2 due to cutile not support float8")
-            framework_fn = lambda: tilegym.ops.group_gemm(
+            set_backend(backend)
+            backend_fn = lambda: tilegym.ops.group_gemm(
                 group_A,
                 group_B,
                 transpose_b=transpose_b,
             )
         else:
-            pytest.skip(f"Framework {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         if record_property is None:
-            res = framework_fn()
+            res = backend_fn()
             return
 
-        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
         record_property("benchmark", res)
         if dtype == torch.float8_e5m2:
             atol = 1
@@ -177,10 +170,10 @@ class Test_GroupGemm(common.PyTestCase):
             atol = 1e-2
             rtol = 1e-2
         # run after benchmark
-        skip_correctness = framework == "pytorch"
+        skip_correctness = backend == "pytorch"
         if not skip_correctness:
             self.assertCorrectness(
-                framework_fn,
+                backend_fn,
                 lambda: self.reference(group_A, group_B, transpose_b=transpose_b),
                 kwargs={},
                 rtol=rtol,
@@ -189,7 +182,7 @@ class Test_GroupGemm(common.PyTestCase):
             )
 
         # Explicit cleanup to prevent OOM
-        del group_A, group_B, framework_fn
+        del group_A, group_B, backend_fn
         if "kernel_configs" in locals():
             del kernel_configs
         torch.cuda.empty_cache()

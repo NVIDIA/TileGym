@@ -16,7 +16,7 @@ class Test_GeLU(common.PyTestCase):
         return torch.nn.functional.gelu(input, approximate=approximate)
 
     _backends = ["cutile"]
-    _perf_frameworks = _backends + ["pytorch"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "m,n,approximate,dtype",
@@ -31,6 +31,7 @@ class Test_GeLU(common.PyTestCase):
     def test_op(self, m, n, approximate, dtype, backend):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
+            self.setUp()
         else:
             pytest.skip(f"Backend {backend} is not available")
         device = torch.device("cuda")

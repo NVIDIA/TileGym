@@ -2,13 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
 from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
@@ -28,8 +28,8 @@ def _layer_norm_fwd_kernel(
     Mean,
     Rstd,
     N: ct.Constant[int],
-    eps: ct.Constant[float],
-    weight_shift: ct.Constant[float],
+    EPS: ct.Constant[float],
+    WEIGHT_SHIFT: ct.Constant[float],
     BLOCK_SIZE: ct.Constant[int],
 ):
     # X, Y are 2D (M, N); row index from grid. Bounds (row < M, cols < N) mask partial block.
@@ -42,8 +42,8 @@ def _layer_norm_fwd_kernel(
         cols = off + ct.arange(BLOCK_SIZE, dtype=ct.int32)
         a = ct.gather(X, (row_tile, cols), padding_value=0)
         a = ct.astype(a, ct.float32)
-        _mean = ct.add(_mean, a)
-    mean = ct.truediv(ct.sum(_mean, axis=0), N)
+        _mean = _mean + a
+    mean = ct.sum(_mean, axis=0) / N
 
     # Compute variance
     _var = ct.zeros((BLOCK_SIZE,), dtype=ct.float32)
@@ -51,11 +51,11 @@ def _layer_norm_fwd_kernel(
         cols = off + ct.arange(BLOCK_SIZE, dtype=ct.int32)
         x = ct.gather(X, (row_tile, cols), padding_value=0)
         x = ct.astype(x, ct.float32)
-        mask = ct.less(cols, N)
-        x = ct.where(mask, ct.sub(x, mean), ct.zeros((BLOCK_SIZE,), dtype=ct.float32))
-        _var = ct.add(_var, ct.mul(x, x))
-    var = ct.truediv(ct.sum(_var, axis=0), N)
-    rstd = ct.rsqrt(ct.add(var, eps))
+        mask = cols < N
+        x = ct.where(mask, x - mean, ct.zeros((BLOCK_SIZE,), dtype=ct.float32))
+        _var = _var + x * x
+    var = ct.sum(_var, axis=0) / N
+    rstd = ct.rsqrt(var + EPS)
 
     # Write mean / rstd (1D arrays)
     mean_offset = ct.full((1,), row, dtype=ct.int32)
@@ -70,17 +70,17 @@ def _layer_norm_fwd_kernel(
     for off in range(0, N, BLOCK_SIZE):
         cols = off + ct.arange(BLOCK_SIZE, dtype=ct.int32)
         w = ct.gather(W, cols, padding_value=0)
-        w = ct.add(w, weight_shift)
+        w = w + WEIGHT_SHIFT
         b = ct.gather(B, cols, padding_value=0)
         x = ct.gather(X, (row_tile, cols), padding_value=0)
         x = ct.astype(x, ct.float32)
-        x_hat = ct.mul(ct.sub(x, mean), rstd)
-        y = ct.add(ct.mul(x_hat, w), b)
+        x_hat = (x - mean) * rstd
+        y = x_hat * w + b
         y = ct.astype(y, X.dtype)
         ct.scatter(Y, (row_tile, cols), y)
 
 
-class LayerNorm(torch.autograd.Function):
+class _LayerNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, normalized_shape, weight, bias, eps, weight_shift=0.0):
         # allocate output
@@ -132,25 +132,7 @@ class LayerNorm(torch.autograd.Function):
         raise NotImplementedError("LayerNorm backward is not implemented for this backend")
 
 
-@register_impl("layer_norm_legacy", backend="cutile")
-def layer_norm_legacy(input, normalized_shape, weight, bias, eps, weight_shift=0.0, **kwargs):
-    r"""
-    Returns the LayerNorm of input along dimension N
-
-    Args:
-        input: Tensor of shape (M, N)
-        normalized_shape: Unused
-        weight: Tensor of shape (N,)
-        bias: Tensor of shape (N,)
-        eps: small scaler to be added to
-            variance calculation prior to division.
-        weight_shift: float value to be added to the weight
-        **kwargs: Additional arguments for backend-specific configurations
-    """
-    return LayerNorm.apply(input, normalized_shape, weight, bias, eps, weight_shift)
-
-
-def switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
+def _switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
     """Switch tensor to contiguous layout if needed."""
     if x.stride(-1) == 1:
         return x
@@ -199,9 +181,9 @@ def _persistent_layer_norm_fwd_kernel(
     Rstd,
     N: ct.Constant[int],
     D: ct.Constant[int],
-    eps: ct.Constant[float],
-    stride_x: ct.Constant[int],
-    stride_y: ct.Constant[int],
+    EPS: ct.Constant[float],
+    STRIDE_X: ct.Constant[int],
+    STRIDE_Y: ct.Constant[int],
     IS_SWISH: ct.Constant[int],
     TRAINING: ct.Constant[int],
     BLOCK_N: ct.Constant[int],
@@ -211,38 +193,28 @@ def _persistent_layer_norm_fwd_kernel(
 ):
     """Persistent layer norm forward kernel with cuTile."""
     pid = ct.bid(0)
-    # Calculate upper bound
     upper_bound = ct.cdiv(N, BLOCK_N)
 
-    cols = ct.arange(BLOCK_D, dtype=ct.int32)
-    col_mask = cols < D
-
-    # Load weights (1D)
     # TMA handles padding (defaults to 0) automatically when BLOCK_D > D
     w = ct.load(W, index=(0,), shape=(BLOCK_D,), padding_mode=PAD_ZERO)
     b = ct.load(B, index=(0,), shape=(BLOCK_D,), padding_mode=PAD_ZERO)
 
-    # Cast to float32
     w = ct.astype(w, ct.float32)
     b = ct.astype(b, ct.float32)
 
-    # Persistent Grid Stride Loop
     for current_pid in range(pid, upper_bound, NUM_SMS):
         row_offset = current_pid * BLOCK_N
         rows = row_offset + ct.arange(BLOCK_N, dtype=ct.int32)
-        row_mask = rows < N
-        mask = row_mask[:, None] & col_mask[None, :]
 
         x_tile = ct.load(X, index=(current_pid, 0), shape=(BLOCK_N, BLOCK_D), padding_mode=PAD_ZERO, latency=4)
         x = ct.astype(x_tile, ct.float32)
 
         if COMPUTE_MEAN_AND_RSTD:
-            # Step 1: Compute x^2
             x_squared = x * x
             avg_square = ct.sum(x_squared, axis=1) / D
             mean = ct.sum(x, axis=1) / D
             var = avg_square - mean * mean
-            rstd = ct.rsqrt(var + eps)
+            rstd = ct.rsqrt(var + EPS)
             if TRAINING:
                 ct.store(Mean, index=(current_pid,), tile=mean, allow_tma=False)
                 ct.store(Rstd, index=(current_pid,), tile=rstd, allow_tma=False)
@@ -345,16 +317,13 @@ def _persistent_layer_norm_autotune_base(
         best_cfg = result.best.config
         _layer_norm_legacy_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                _persistent_layer_norm_fwd_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-            ),
+            _persistent_layer_norm_fwd_kernel.replace_hints(num_ctas=best_cfg.num_ctas),
         )
     best_cfg, tuned_kernel = _layer_norm_legacy_tune_cache[cache_key]
     ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
 
 
-def cutile_persistent_layer_norm_fwd(
+def _cutile_persistent_layer_norm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
@@ -377,7 +346,7 @@ def cutile_persistent_layer_norm_fwd(
         Tuple of (output, mean, rstd, BLOCK_D, num_warps)
     """
     assert x.dim() == 2, f"x.dim() == {x.dim()}, expected 2"
-    x = switch_to_contiguous_if_needed(x)
+    x = _switch_to_contiguous_if_needed(x)
     N, D = x.shape
     assert bias is not None and weight is not None
     assert weight.dim() == 1
@@ -411,7 +380,7 @@ def cutile_persistent_layer_norm_fwd(
         return y_out, mean, rstd, BLOCK_D, 8
 
     # Autotune disabled on pre-SM90: per-constant compilation is too slow per config.
-    enable_autotune = os.environ.get("DISABLE_CUTILE_TUNE", "0") != "1" and gpu_capability[0] >= 9
+    enable_autotune = is_autotune_enabled() and gpu_capability[0] >= 9
 
     if enable_autotune:
         _persistent_layer_norm_autotune_base(
@@ -505,10 +474,28 @@ def persistent_layer_norm(
     if input.dim() != 2:
         input = input.reshape(-1, input.shape[-1])
 
-    y, mean_out, rstd_out, block_d, num_warps = cutile_persistent_layer_norm_fwd(input, weight, bias, eps, mean, rstd)
+    y, mean_out, rstd_out, block_d, num_warps = _cutile_persistent_layer_norm_fwd(input, weight, bias, eps, mean, rstd)
 
     # Reshape output back to original shape if needed
     if len(original_shape) != 2:
         y = y.reshape(original_shape)
 
     return y, mean_out, rstd_out, block_d, num_warps
+
+
+@register_impl("layer_norm_legacy", backend="cutile")
+def layer_norm_legacy(input, normalized_shape, weight, bias, eps, weight_shift=0.0, **kwargs):
+    r"""
+    Returns the LayerNorm of input along dimension N
+
+    Args:
+        input: Tensor of shape (M, N)
+        normalized_shape: Unused
+        weight: Tensor of shape (N,)
+        bias: Tensor of shape (N,)
+        eps: small scaler to be added to
+            variance calculation prior to division.
+        weight_shift: float value to be added to the weight
+        **kwargs: Additional arguments for backend-specific configurations
+    """
+    return _LayerNorm.apply(input, normalized_shape, weight, bias, eps, weight_shift)

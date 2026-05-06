@@ -78,13 +78,13 @@ def _gemma_attn_decode_inner_grouped(
             # IMPORTANT: Use original sm_scale (without INV_LOG_2) for tanh
             # because tanh is non-linear: tanh(x/log2) != tanh(x)/log2
             # qk_scale = sm_scale / log(2), so sm_scale = qk_scale * log(2)
-            sm_scale_orig = ct.mul(qk_scale, LOG_2, flush_to_zero=True)
-            qk = ct.mul(qk, sm_scale_orig, flush_to_zero=True)
+            sm_scale_orig = qk_scale * LOG_2
+            qk = qk * sm_scale_orig
             qk = ct.truediv(qk, SOFT_CAP, flush_to_zero=True, rounding_mode=RMd.APPROX)
             # TODO: Performance will be ready once tanh approx is supported
             # Currently using exact tanh which may impact performance
             qk = ct.tanh(qk)
-            qk = ct.mul(qk, SOFT_CAP, flush_to_zero=True)
+            qk = qk * SOFT_CAP
 
             mask = curr_n + offs_n < S_kv
             qk = ct.where(mask[:, None], qk, -1.0e6)
@@ -95,8 +95,8 @@ def _gemma_attn_decode_inner_grouped(
                 in_window = kv_positions >= (query_pos - WINDOW_SIZE)
                 qk = ct.where(in_window[:, None], qk, -1.0e6)
 
-            m_ij = ct.maximum(m_i, ct.mul(ct.max(qk, axis=0), INV_LOG_2, flush_to_zero=True))
-            qk = ct.sub(ct.mul(qk, INV_LOG_2, flush_to_zero=True), m_ij[None, :], flush_to_zero=True)
+            m_ij = ct.maximum(m_i, ct.max(qk, axis=0) * INV_LOG_2)
+            qk = qk * INV_LOG_2 - m_ij[None, :]
         else:
             mask = curr_n + offs_n < S_kv
             qk = ct.where(mask[:, None], qk, -1.0e6)
@@ -107,15 +107,13 @@ def _gemma_attn_decode_inner_grouped(
                 in_window = kv_positions >= (query_pos - WINDOW_SIZE)
                 qk = ct.where(in_window[:, None], qk, -1.0e6)
 
-            m_ij = ct.maximum(m_i, ct.mul(ct.max(qk, axis=0), qk_scale, flush_to_zero=True))
-            qk = ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), m_ij[None, :], flush_to_zero=True)
+            m_ij = ct.maximum(m_i, ct.max(qk, axis=0) * qk_scale)
+            qk = qk * qk_scale - m_ij[None, :]
 
+        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
         p = ct.exp2(qk, flush_to_zero=True)
-
-        alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-        l_i = ct.add(ct.mul(l_i, alpha[None, :], flush_to_zero=True), p, flush_to_zero=True)
-
-        acc = ct.mul(acc, alpha[None, :], flush_to_zero=True)
+        l_i = l_i * alpha[None, :] + p
+        acc = acc * alpha[None, :]
 
         v = ct.load(
             V,
@@ -137,7 +135,7 @@ def _gemma_attn_decode_inner_grouped(
 
 
 @ct.kernel
-def gemma_attention_decode_kernel_grouped(
+def _gemma_attention_decode_kernel_grouped(
     Q,
     K,
     V,
@@ -145,9 +143,9 @@ def gemma_attention_decode_kernel_grouped(
     LSE_Out,
     softmax_scale: float,
     B: ConstInt,
-    H_qo: ConstInt,
-    H_kv: ConstInt,
-    S_kv: ConstInt,
+    H_QO: ConstInt,
+    H_KV: ConstInt,
+    S_KV: ConstInt,
     KV_LEN_PER_SPLIT: ConstInt,
     HEAD_DIM: ConstInt,
     BLOCK_N: ConstInt,
@@ -171,7 +169,7 @@ def gemma_attention_decode_kernel_grouped(
     head_id = ct.bid(1)
     block_id = ct.bid(2)
 
-    qk_scale = ct.mul(softmax_scale, INV_LOG_2, flush_to_zero=True)
+    qk_scale = softmax_scale * INV_LOG_2
 
     q = ct.load(
         Q,
@@ -184,7 +182,7 @@ def gemma_attention_decode_kernel_grouped(
     q = ct.transpose(q)
 
     start_idx = block_id * KV_LEN_PER_SPLIT
-    end_idx = min(start_idx + KV_LEN_PER_SPLIT, S_kv)
+    end_idx = min(start_idx + KV_LEN_PER_SPLIT, S_KV)
 
     m_i = ct.full((QUERY_GROUP_BLOCK_SIZE,), -math.inf, dtype=ct.float32)
     l_i = ct.full((BLOCK_N, QUERY_GROUP_BLOCK_SIZE), 1.0, dtype=ct.float32)
@@ -202,7 +200,7 @@ def gemma_attention_decode_kernel_grouped(
             head_id,
             qk_scale,
             start_idx,
-            S_kv,
+            S_KV,
             KV_LEN_PER_SPLIT,
             BLOCK_N,
             HEAD_DIM,
@@ -217,7 +215,7 @@ def gemma_attention_decode_kernel_grouped(
     acc = ct.astype(acc, ct.float32)
     acc = ct.transpose(acc)
     acc = ct.astype(acc, dtype)
-    l = ct.add(m_i, ct.astype(ct.log2(l), dtype), flush_to_zero=True)
+    l = m_i + ct.astype(ct.log2(l), dtype)
 
     acc_reshaped = ct.reshape(acc, (1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM))
 
@@ -250,7 +248,7 @@ def gemma_attention_decode_kernel_grouped(
     )
 
 
-class _gemma_attention_decode(torch.autograd.Function):
+class _GemmaAttentionDecodeFunction(torch.autograd.Function):
     """Autograd function for Gemma attention decode"""
 
     @staticmethod
@@ -339,7 +337,7 @@ class _gemma_attention_decode(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            gemma_attention_decode_kernel_grouped,
+            _gemma_attention_decode_kernel_grouped,
             (
                 Q_grouped,
                 K,
@@ -370,7 +368,7 @@ class _gemma_attention_decode(torch.autograd.Function):
         raise NotImplementedError("Gemma attention decode backward is not implemented yet")
 
 
-gemma_attention_decode = _gemma_attention_decode.apply
+gemma_attention_decode = _GemmaAttentionDecodeFunction.apply
 
 
 @register_impl("gemma_attention_decode", backend="cutile")

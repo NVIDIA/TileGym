@@ -6,7 +6,7 @@ import math
 
 import cuda.tile as ct
 import torch
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
@@ -18,7 +18,7 @@ INV_LOG_2 = 1.0 / math.log(2)
 
 
 @ct.kernel
-def naive_absorb_mla_transpose(
+def _naive_absorb_mla_transpose_kernel(
     Q,
     QPE,
     K,
@@ -31,7 +31,7 @@ def naive_absorb_mla_transpose(
     TILE_H: ConstInt,
     TILE_N: ConstInt,
     TILE_KPE: ConstInt,  # TILE_KPE = position embedding size
-    S_kv: ConstInt,
+    S_KV: ConstInt,
     EVEN_N: ConstBool,
 ):
     bid_x = ct.bid(0)
@@ -63,9 +63,9 @@ def naive_absorb_mla_transpose(
     qpe = ct.reshape(qpe, (TILE_KPE, TILE_H))
 
     # Loop over key-value pairs and update accumulator
-    end_n = S_kv
+    end_n = S_KV
     cnt = 0
-    mask_start = S_kv // TILE_N * TILE_N
+    mask_start = S_KV // TILE_N * TILE_N
     offs_n = ct.arange(TILE_N, dtype=ct.int32)
     for curr_n in range(0, end_n, TILE_N):
         # Load key and compute Q@K^T
@@ -90,7 +90,7 @@ def naive_absorb_mla_transpose(
         qk = ct.mma(kpe, qpe, qk)
 
         if not EVEN_N and curr_n >= mask_start:
-            mask = (curr_n + offs_n[:, None]) < S_kv
+            mask = (curr_n + offs_n[:, None]) < S_KV
             qk = ct.where(mask, qk, -1.0e6)
 
         # Apply scaling and compute attention scores
@@ -123,8 +123,6 @@ def naive_absorb_mla_transpose(
     l_prev = ct.sum(l_prev, 0)
     acc = ct.truediv(acc, (l_prev[None, :]), flush_to_zero=True, rounding_mode=RMd.APPROX)
     l_prev = m_prev + ct.log2(l_prev)
-
-    # Store results
     l_prev = ct.reshape(l_prev, (1, TILE_H))
     ct.store(L, index=(batch_idx, bid_x), tile=l_prev, allow_tma=True)
 
@@ -134,7 +132,7 @@ def naive_absorb_mla_transpose(
     ct.store(Out, index=(batch_idx, bid_x, 0), tile=acc, allow_tma=True)
 
 
-class _mla_decoding(torch.autograd.Function):
+class _MlaDecodingFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -159,7 +157,7 @@ class _mla_decoding(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            naive_absorb_mla_transpose,
+            _naive_absorb_mla_transpose_kernel,
             (
                 q,
                 qpe,
@@ -200,4 +198,4 @@ def mla_decoding(
     assert transpose == True, "CuTile MLA Decoding only supports transpose=True"
     if sm_scale is None:
         sm_scale = 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
-    return _mla_decoding.apply(q, qpe, kv, kpe, sm_scale, TILE_H, TILE_N, num_ctas)
+    return _MlaDecodingFunction.apply(q, qpe, kv, kpe, sm_scale, TILE_H, TILE_N, num_ctas)

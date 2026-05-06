@@ -22,15 +22,15 @@ ConstBool = ct.Constant[bool]
 
 
 @ct.kernel
-def group_gemm_kernel(
+def _group_gemm_kernel(
     As,  # List of A matrices
     Bs,  # List of B matrices
     Cs,  # List of C matrices
     TILE_M: ConstInt,
     TILE_N: ConstInt,
     TILE_K: ConstInt,
-    num_sm: ConstInt,
-    transpose_b: ConstBool,
+    NUM_SM: ConstInt,
+    TRANSPOSE_B: ConstBool,
 ):
     tile_idx = ct.bid(0)
     last_problem_end = 0
@@ -46,7 +46,7 @@ def group_gemm_kernel(
         # A: (M, K), B: (K, N) or (N, K) if transpose_b, C: (M, N)
         num_m_tiles = ct.num_tiles(Ai, 0, (TILE_M, TILE_K))
         num_k_tiles = ct.num_tiles(Ai, 1, (TILE_M, TILE_K))
-        if transpose_b:
+        if TRANSPOSE_B:
             num_n_tiles = ct.num_tiles(Bi, 0, (TILE_N, TILE_K))
         else:
             num_n_tiles = ct.num_tiles(Bi, 1, (TILE_K, TILE_N))
@@ -73,7 +73,7 @@ def group_gemm_kernel(
                 )
 
                 # Load B tile
-                if transpose_b:
+                if TRANSPOSE_B:
                     # B is transposed: load from (N, K) layout
                     tb = ct.load(
                         Bi,
@@ -99,7 +99,7 @@ def group_gemm_kernel(
             ct.store(Ci, (tile_m_idx, tile_n_idx), tile=acc)
 
             # Move to next tile
-            tile_idx += num_sm
+            tile_idx += NUM_SM
 
         # Update the end position for the next group
         last_problem_end = last_problem_end + num_tiles
@@ -121,7 +121,7 @@ def _group_gemm_autotune_configs():
         yield SimpleNamespace(TILE_M=256, TILE_N=256, TILE_K=64, num_ctas=2, occupancy=1)
 
 
-def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device):
+def _cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device):
     """Autotune group GEMM kernel."""
     NUM_SMS = torch.cuda.get_device_properties(device).multi_processor_count
     group_shapes = tuple((tuple(A.shape), tuple(B.shape)) for A, B in zip(group_A, group_B))
@@ -132,7 +132,7 @@ def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, d
                 list(_group_gemm_autotune_configs()),
                 stream,
                 lambda cfg: (NUM_SMS // cfg.num_ctas * cfg.occupancy, 1, 1),
-                group_gemm_kernel,
+                _group_gemm_kernel,
                 lambda cfg: (
                     group_A,
                     group_B,
@@ -148,11 +148,7 @@ def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, d
         best_cfg = result.best.config
         _group_gemm_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                group_gemm_kernel._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _group_gemm_kernel.replace_hints(num_ctas=best_cfg.num_ctas, occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _group_gemm_tune_cache[cache_key]
     ct.launch(
@@ -173,6 +169,7 @@ def cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, d
     return group_C
 
 
+@register_impl("group_gemm", backend="cutile")
 def group_gemm(
     group_A,
     group_B,
@@ -198,8 +195,5 @@ def group_gemm(
         group_C.append(C)
 
     stream = torch.cuda.current_stream()
-    cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device)
+    _cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device)
     return group_C
-
-
-register_impl("group_gemm", "cutile")(group_gemm)
