@@ -86,4 +86,5 @@ def bench_nvfp4_quantize(rows, cols, backend, dtype, device=DEVICE):
 
 
 if __name__ == "__main__":
-    bench_nvfp4_quantize.run(print_data=True)
+    if get_supported_backends():
+        bench_nvfp4_quantize.run(print_data=True)
