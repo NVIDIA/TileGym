@@ -993,3 +993,42 @@ def swa_attention(
         Output tensor of shape (B, H, S_Q, D), fp16
     """
     raise NotImplementedError(f"swa_attention is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "nvfp4_quantize",
+)
+def nvfp4_quantize(
+    x: torch.Tensor,
+    s_enc: float = 1.0,
+    **kwargs: Any,
+):
+    """
+    Block quantize a 2D bf16/fp16/fp32 tensor to NVFP4 (fp4_e2m1fn) with
+    swizzled fp8 e4m3fn scales.
+
+    Each 128x64 tile is divided into groups of 16 consecutive elements per row.
+    Per group:
+
+        s     = fp8_e4m3fn( clamp( max(|x_i|) / 6.0 * s_enc,  eps,  fp8_max ) )
+        x_q_i = fp4_e2m1fn( x_i  *  s_enc / fp32(s) )
+
+    where eps = 1.5259e-5 prevents zero scales.
+
+    Scales are stored in a swizzled 512-byte block per 128x64 tile.
+    The 128x4 logical scale grid is interleaved across four 32-row groups,
+    giving byte offset:  (r % 32) * 16  +  (r // 32) * 4  +  c
+    See ops/cutile/experimental/nvfp4_quantize.py for the full layout diagram.
+
+    Args:
+        x:     Input tensor, bf16/fp16/fp32, shape (rows, cols).
+               cols must be divisible by 16.
+        s_enc: Global encoding scale multiplier (default 1.0).
+        **kwargs: Additional backend-specific arguments.
+
+    Returns:
+        packed_out: uint8 tensor shape (rows, cols // 2) -- two fp4 values per byte.
+        scales_out: uint8 tensor shape (num_tiles * 512,) -- swizzled fp8 e4m3fn scales,
+                    where num_tiles = ceil(rows / 128) * ceil(cols / 64).
+    """
+    raise NotImplementedError(f"nvfp4_quantize is not implemented for {get_current_backend()}")

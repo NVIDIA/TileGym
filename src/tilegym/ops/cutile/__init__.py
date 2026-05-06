@@ -47,6 +47,7 @@ if is_backend_available("cutile"):
     from .experimental.mhc import mhc_apply_residual
     from .experimental.mhc import mhc_gemm_rms_scale
     from .experimental.mhc import mhc_sinkhorn
+    from .experimental.nvfp4_quantize import tile_nvfp4_quantize
     from .experimental.sparse_mla import tile_sparse_mla
     from .experimental.swa_attention import tile_swa_attention
     from .flash_decode import fmha_decode
@@ -103,6 +104,7 @@ if is_backend_available("cutile"):
         "sparse_mla",
         "swa_attention",
         "tile_swa_attention",
+        "tile_nvfp4_quantize",
     ]
 else:
     __all__ = []
