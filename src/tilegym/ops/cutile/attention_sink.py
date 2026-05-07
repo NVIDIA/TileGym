@@ -24,7 +24,7 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 
 
-@ct.kernel
+@ct.kernel(occupancy=2)
 def _attention_sink_kernel(
     Q,
     K,
@@ -316,12 +316,11 @@ def attention_sink(
         TILE_M = 128
         TILE_N = 128
         grid = (math.ceil(n_ctx / TILE_M), bs * n_heads, 1)
-        kernel = _attention_sink_kernel.replace_hints(occupancy=2)
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            kernel,
+            _attention_sink_kernel,
             (
                 q,
                 k,

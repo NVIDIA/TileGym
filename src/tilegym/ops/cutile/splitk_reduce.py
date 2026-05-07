@@ -13,10 +13,9 @@ from .utils import next_power_of_2
 # Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
-_SPLITK_REDUCE_OCCUPANCY = ct.ByTarget(sm_80=2, default=4)
 
 
-@ct.kernel
+@ct.kernel(occupancy=ct.ByTarget(sm_80=2, default=4))
 def _splitk_reduce_kernel(
     attn_splitk_out,
     lse_splitk_out,
@@ -119,12 +118,11 @@ def splitk_reduce(attn_splitk_out, lse_splitk_out, attn_out, S_kv, **kwargs):
 
     # Calculate grid dimensions
     grid = (B, num_heads, (head_dim + TILE_D - 1) // TILE_D)
-    kernel = _splitk_reduce_kernel.replace_hints(occupancy=_SPLITK_REDUCE_OCCUPANCY)
 
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        kernel,
+        _splitk_reduce_kernel,
         (
             attn_splitk_out,
             lse_splitk_out,

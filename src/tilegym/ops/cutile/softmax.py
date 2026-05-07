@@ -17,7 +17,7 @@ from .utils import next_power_of_2
 ConstInt = ct.Constant[int]
 
 
-@ct.kernel
+@ct.kernel(occupancy=4)
 def _softmax_kernel(
     output,
     input,
@@ -53,7 +53,7 @@ def _softmax_kernel(
 
 
 # TMA version with static persistent scheduling
-@ct.kernel
+@ct.kernel(occupancy=2)
 def _softmax_kernel_tma(
     output,
     input,
@@ -92,7 +92,7 @@ def _softmax_kernel_tma(
 
 # Chunked softmax kernel for large tensors (3-pass algorithm)
 @experimental_kernel
-@ct.kernel
+@ct.kernel(occupancy=4)
 def _softmax_kernel_chunked(
     output,
     input,
@@ -163,15 +163,13 @@ def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     output = output.contiguous()
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
-    occupancy = 4
-    num_programs = min(NUM_SM * occupancy, n_rows)
+    num_programs = min(NUM_SM * 4, n_rows)
     grid = (num_programs, 1, 1)
-    kernel = _softmax_kernel.replace_hints(occupancy=occupancy)
 
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        kernel,
+        _softmax_kernel,
         (
             output,
             input,
@@ -214,10 +212,9 @@ def _launch_softmax_kernel_tma(
     output = output.contiguous()
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
-    occupancy = 2
-    num_programs = min(NUM_SM * occupancy, n_rows)
+    num_programs = min(NUM_SM * 2, n_rows)
     grid = (num_programs, 1, 1)
-    softmax_kernel_forward = _softmax_kernel_tma.replace_hints(occupancy=occupancy)
+    softmax_kernel_forward = _softmax_kernel_tma
 
     ct.launch(
         torch.cuda.current_stream(),
@@ -254,15 +251,13 @@ def _launch_softmax_kernel_chunked(
     output = output.contiguous()
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
-    occupancy = 4
-    num_programs = min(NUM_SM * occupancy, n_rows)
+    num_programs = min(NUM_SM * 4, n_rows)
     grid = (num_programs, 1, 1)
-    kernel = _softmax_kernel_chunked.replace_hints(occupancy=occupancy)
 
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        kernel,
+        _softmax_kernel_chunked,
         (
             output,
             input,

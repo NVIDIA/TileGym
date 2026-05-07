@@ -185,7 +185,7 @@ def _rms_norm_kernel_static_persistent(
 
 
 @experimental_kernel
-@ct.kernel
+@ct.kernel(occupancy=1)
 def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
     """
     Persistent RMSNorm backward — grid-stride loop with fused dw accumulation.
@@ -274,8 +274,7 @@ def _rms_norm_backward(
 
     dx = torch.empty_like(x)
     dwp = torch.empty((g, T), device=x.device, dtype=torch.float32)
-    kernel = _rms_bwd_kernel.replace_hints(occupancy=1)
-    ct.launch(stream, (g,), kernel, (dx, dy, x, weight, rstd, dwp, tm, T))
+    ct.launch(stream, (g,), _rms_bwd_kernel, (dx, dy, x, weight, rstd, dwp, tm, T))
 
     dw = dwp.sum(0)
     if T != No:

@@ -158,7 +158,7 @@ def _gemma_attn_fwd_inner(
     return acc, l_i, m_i
 
 
-@ct.kernel
+@ct.kernel(occupancy=2)
 def _gemma_fmha_kernel(
     Q,
     K,
@@ -442,12 +442,11 @@ class _GemmaAttentionFunction(torch.autograd.Function):
         BLOCK_N = 64 if _gemma_cap[0] < 9 else 128
         EVEN_K = (S_kv % BLOCK_N) == 0
         grid = ((S_qo + BLOCK_M - 1) // BLOCK_M, B * H, 1)
-        kernel = _gemma_fmha_kernel.replace_hints(occupancy=2)
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            kernel,
+            _gemma_fmha_kernel,
             (
                 q,
                 k,

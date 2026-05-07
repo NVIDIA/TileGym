@@ -31,7 +31,7 @@ def _cdiv(a, b):
 
 
 @experimental_kernel
-@ct.kernel
+@ct.kernel(occupancy=2)
 def _swa_fwd_kernel(
     Q,
     K,
@@ -173,12 +173,11 @@ def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwa
     k_flat = k_3d.reshape(-1, D).contiguous()
     v_flat = v_3d.reshape(-1, D).contiguous()
     out_flat = torch.empty_like(q_flat)
-    kernel = _swa_fwd_kernel.replace_hints(occupancy=2)
 
     ct.launch(
         torch.cuda.current_stream(),
         (stride_q, B * H, 1),
-        kernel,
+        _swa_fwd_kernel,
         (
             q_flat,
             k_flat,

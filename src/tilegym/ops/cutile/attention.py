@@ -15,6 +15,7 @@ from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
 from tilegym.logger import get_logger
 
+from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 # Module-level tune caches for fmha forward, dkdv backward, and dq backward
@@ -276,7 +277,7 @@ def _fmha_fwd_kernel_with_lse(
 
 
 @experimental_kernel
-@ct.kernel
+@ct.kernel(occupancy=2)
 def _fmha_bwd_preprocess_kernel(
     O,
     dO,
@@ -718,7 +719,7 @@ def _cutile_autotune_fmha(
         configs = list(_fmha_autotune_configs(hidden_size))
         cfg = configs[0]
         grid = (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1)
-        kernel = _fmha_kernel.replace_hints(**_kernel_hints(cfg))
+        kernel = cached_replace_hints(_fmha_kernel, **_kernel_hints(cfg))
         ct.launch(
             stream,
             grid,
@@ -941,7 +942,7 @@ def fmha_forward_with_lse(
         batch_size * num_heads,
         1,
     )
-    kernel = _fmha_fwd_kernel_with_lse.replace_hints(**_kernel_hints(cfg))
+    kernel = cached_replace_hints(_fmha_fwd_kernel_with_lse, **_kernel_hints(cfg))
 
     ct.launch(
         torch.cuda.current_stream(),
@@ -1047,11 +1048,10 @@ def _fmha_backward(
         batch_size * num_heads,
         1,
     )
-    preprocess_kernel = _fmha_bwd_preprocess_kernel.replace_hints(occupancy=2)
     ct.launch(
         stream,
         grid_preprocess,
-        preprocess_kernel,
+        _fmha_bwd_preprocess_kernel,
         (o, do, delta_flat, preprocess_tile_m, TILE_D, num_heads, padded_q_len),
     )
 
@@ -1060,7 +1060,7 @@ def _fmha_backward(
         dkdv_configs = list(_fmha_bwd_dkdv_autotune_configs(hidden_size))
         cfg = dkdv_configs[0]
         grid = (math.ceil(k_len / cfg.TILE_N), batch_size * num_head_kv, 1)
-        kernel = _fmha_bwd_dkdv_kernel.replace_hints(**_kernel_hints(cfg))
+        kernel = cached_replace_hints(_fmha_bwd_dkdv_kernel, **_kernel_hints(cfg))
         ct.launch(
             stream,
             grid,
@@ -1162,7 +1162,7 @@ def _fmha_backward(
         dq_configs = list(_fmha_bwd_dq_autotune_configs(hidden_size))
         cfg = dq_configs[0]
         grid = (math.ceil(q_len / cfg.TILE_M), batch_size * num_heads, 1)
-        kernel = _fmha_bwd_dq_kernel.replace_hints(**_kernel_hints(cfg))
+        kernel = cached_replace_hints(_fmha_bwd_dq_kernel, **_kernel_hints(cfg))
         ct.launch(
             stream,
             grid,

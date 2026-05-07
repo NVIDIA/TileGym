@@ -21,7 +21,7 @@ from .utils import next_power_of_2
 INV_LOG_2 = 1.0 / math.log(2)
 
 
-@ct.kernel
+@ct.kernel(occupancy=2)
 def _naive_absorb_mla_transpose_kernel(
     Q,
     QPE,
@@ -232,11 +232,10 @@ class _MlaDecodingSplitKvFunction(torch.autograd.Function):
             B,
             NUM_KV_SPLITS,
         )
-        split_kernel = _naive_absorb_mla_transpose_kernel.replace_hints(occupancy=2)
         ct.launch(
             torch.cuda.current_stream(),
             grid_split,
-            split_kernel,
+            _naive_absorb_mla_transpose_kernel,
             (
                 Q,
                 QPE,

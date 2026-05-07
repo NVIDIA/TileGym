@@ -18,7 +18,7 @@ _ALIGN = 8
 
 
 @experimental_kernel
-@ct.kernel
+@ct.kernel(occupancy=1)
 def _ce_online_kernel(
     logits,
     loss_out,
@@ -79,11 +79,10 @@ def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor, loss_chunk: Tensor, i
     tile_v = 4096
     sm_count = torch.cuda.get_device_properties("cuda").multi_processor_count
     grid = (min(sm_count * 4, n_rows),)
-    kernel = _ce_online_kernel.replace_hints(occupancy=1)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        kernel,
+        _ce_online_kernel,
         (logits_chunk, loss_chunk, target_logits, n_rows, logits_chunk.shape[1], tile_v),
     )
 
