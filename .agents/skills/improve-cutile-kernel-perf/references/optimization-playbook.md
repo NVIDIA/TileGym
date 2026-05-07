@@ -334,10 +334,57 @@ CUDA_TILE_TESTING_DISABLE_TOKEN_ORDER=1 \
 
 ---
 
-## Optimization K: Customized Creative Optimization Plan (Last Resort)
+## Optimization K: Batch Small Copy Kernels
+
+**Impact**: +10-70% when launch overhead dominates
+**When**: An op launches one similar cuTile copy kernel per input/segment, each
+copy is regular enough to use `ct.load`/`ct.store`, and each individual launch
+does relatively little work.
+
+Group several independent copies into one fixed-slot kernel and use one grid
+dimension to select the active slot.
+
+### Recipe
+
+1. Sweep a small fixed slot count, e.g. {2, 4, 8}, and keep the best result.
+2. Define the kernel signature with one input view and metadata tuple per slot.
+3. Branch on `ct.bid(2)` to select the active slot.
+4. Keep the actual `ct.load`/`ct.store` tile shape fixed after the branch.
+5. On the host, pack up to `KERNEL_SLOTS` entries per launch, pad unused slots
+   with a valid dummy view, and launch the slot grid dimension with only the
+   real entry count.
+
+### Preserve Store Vectorization
+
+After batching, inspect SASS for store-width regressions such as `STG.E.128`
+becoming scalar stores like `STG.E.U16`. Dynamic output slices may lose scalar
+alignment/divisibility facts that the original single-copy kernel kept.
+
+If the host can prove the runtime slice bounds are divisible by the needed
+alignment, pass that fact as a constant divisor and materialize it before the
+dynamic `Array.slice`:
+
+```python
+SLICE_DIVISOR = 16 if all_slice_bounds_are_divisible_by_16 else 1
+start = (start // SLICE_DIVISOR) * SLICE_DIVISOR
+stop = (stop // SLICE_DIVISOR) * SLICE_DIVISOR
+```
+
+This is semantics-preserving only when the host passes the larger divisor for
+runtime bounds that are actually divisible by it; otherwise pass `1`. Benchmark
+both with and without the divisor expression. Launch reduction can be canceled
+out by scalarized stores.
+
+**Compatibility note**: Branch-selecting views can expose type-compatibility
+checks. If needed, split incompatible cases into host buckets while preserving
+original output offsets.
+
+---
+
+## Optimization L: Customized Creative Optimization Plan (Last Resort)
 
 **Impact**: Variable — depends on kernel characteristics
-**When**: All standard optimizations (A–J) have been exhausted or are inapplicable, and further performance gains are still desired. This is a last-resort creative pass.
+**When**: All standard optimizations (A–K) have been exhausted or are inapplicable, and further performance gains are still desired. This is a last-resort creative pass.
 
 ### Recipe
 
