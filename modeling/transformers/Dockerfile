@@ -100,9 +100,9 @@ COPY . /workspace/tilegym/
 # Verify repository structure
 RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
 
-# Install runtime dependencies from requirements.txt, then TileGym in editable mode
+# Install runtime dependencies from requirements.txt, then TileGym in editable mode with dev extras
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --no-deps -e .
+    pip install --no-cache-dir -e ".[dev]"
 
 # Set up model cache directory
 ENV HF_HOME=/workspace/.cache/huggingface \

@@ -13,7 +13,7 @@ Work with user to prepare the experiment environment:
    cd /path/to/project
    docker build --target source -f modeling/transformers/Dockerfile -t auto-kernel:latest .
    ```
-4. All subsequent commands in this experiment must run in the Docker container with explicit GPU UUID spec and with current work tree mounted:
+4. Run all subsequent commands **inside this Docker container**. Do not substitute a host conda/venv. Only use a non-Docker environment if the user explicitly requests it.
    ```bash
    # Use the UUID from nvidia-smi -L output in step 1
    docker run --rm --gpus "device=GPU-d8ea7ef9-442e-488f-bd23-d6912699e32d" \

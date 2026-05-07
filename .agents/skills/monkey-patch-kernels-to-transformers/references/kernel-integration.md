@@ -89,15 +89,15 @@ flowchart TD
 - Mapping note: `Step 1.1/1.2` correspond to the two explore-subagent bullets under Step 1; `Step 2.1/2.2` correspond to the two plan sub-steps under Step 2; `Step 3.2.1-3.2.7` correspond to the code-subagent sub-steps under Step 3.2.
 
 ### Detailed Steps
-1. Research phase: Study the target Transformer model and available kernel and monkey-patch implementation in TileGym. Launch 2 parallel explore subagents:
-   * Search the model ID on HuggingFace to know what architectures does it use. Then search GitHub code to get implementation of that architecture. If the explore subagent wants to inspect certain Python module and `grep` code, do it inside the experiment Docker container---The host machine might not have `transformers` or its dependence installed. Go through details to understand computations performed on every components. Summarize a comprehensive requirement list with all necessary details included. *Focus on details*. Some model might use variants of standard Attention/MoE/normalization, and/or use distinct data types at different part of computations;
+1. Research phase: Study the target Transformer model and available kernel and monkey-patch implementation in TileGym. Launch 2 parallel explore subagents. Each subagent needs `WebSearch` + `WebFetch`; if no available agent type exposes them, the orchestrator handles web lookups itself.
+   * Search the model ID on HuggingFace to know what architectures does it use. Then search GitHub code to get implementation of that architecture. To locate the integration point use any of: (a) `grep`/inspect `transformers` source **inside the Docker container** (host may lack `transformers` and deps); (b) `WebSearch`/`WebFetch` against the `transformers` GitHub repo or HF Hub model card; (c) if the model loads with `trust_remote_code=True`, the classes live not in `transformers.models.*` but in custom `modeling_*.py` downloaded to the HF modules cache (`$HF_HOME/modules/transformers_modules/<repo>/`, default `~/.cache/huggingface/...`) and resolved via `auto_map` in the model config — inspect that path inside the container after one load. Go through details to understand computations performed on every components. Summarize a comprehensive requirement list with all necessary details included. *Focus on details*. Some model might use variants of standard Attention/MoE/normalization, and/or use distinct data types at different part of computations;
    * Go through @src/tilegym/ to inventory available kernel implementations, OP interfaces, and Transformer model monkey-patches. Pay attention to the `@dispatch("<OP name>")` and `@register("<OP name>")` mappings, and `apply_tilegym_kernel_to_<transformer_module>` patch patterns. Summarize a manifest that list all available monkey-patch functions, OP interfaces, kernel implementations with sufficient details to distinguish variants of operations. *Refer to but don't rely on docstring/comments; focus on details that distinct similar kernels*. If unsure about `cuda.tile` kernel semantic, check https://docs.nvidia.com/cuda/cutile-python/operations.html.
 2. Plan phase: Check if the target model architecture is already patched. If so, inform the user and exit; Otherwise, propose an integration plan following these sub-steps:
    1. Check the requirement list and manifest to determine which set of computations could be patched by TileGym implementations. Be optimistic since subsequent steps/subagents will drop unsuitable proposals;
    2. For each of the computation selected at previous sub-step, propose matching TileGym OP interfaces or/and concrete kernel implementations. You may propose multiple candidates if uncertain, but do keep candidate pool small using your best judgement.
 3. Execute-and-verify phase: Check develop environment, launch subagents to implement monkey-patch for each of the items in integration plan once-a-time, verify it on develop environment, and accept/reject that monkey-patch. Specific sub-steps:
    1. The orchestrator agent (i.e., you) checks the Docker container is available, GPU UUID reported inside the Docker container is expected, and current git branch does not have unstaged/uncommitted changes
-   2. For each of the unverified integration plan item (i.e., a mapping of Transformer model compute <-> one or more TileGym implementation candidates), launch a code subagent. Tell this subagent how to invoke command in our Docker environment and its workflow:
+   2. For each unverified integration plan item (i.e., a mapping of Transformer model compute <-> one or more TileGym implementation candidates), launch a code subagent **sequentially, one at a time** — purpose is context isolation, not parallelism; concurrent subagents race on `src/tilegym/transformers/<submodule_name>/` and on the Docker container. Subagent needs filesystem read/write + Bash (in-container test runs); web access not required. Tell this subagent how to invoke command in our Docker environment and its workflow:
       1. Study @src/tilegym/transformers/monkey_patch.py and @modeling/transformers/infer.py to understand how to monkey-patch a transformer model with TileGym implementation;
       2. Locate the integration point at `transformers` library. E.g., It could be a `nn.Module` subclass that corresponds to a layer in the transformer model, or an utility function that applies certain modification to transformer models' intermediate variables/tensors;
       3. Collect inputs and outputs around integration point to serve as subsequent verifications' references. You can create a simple debug Python script that calls `transformers` library's `.generate()` API to prompt the Transformer model to output "The capital of France is", and add code before and after the integration point to save intermediate PyTorch tensors and other necessary variables to disk as future references. *Critical: unoptimized `.generate()` is slow, collect as less data as possible*;
@@ -117,22 +117,22 @@ flowchart TD
    3. Aggregate all verified computes and corresponding patches. If none of the compute can be faithfully integrated, exit the workflow and let users know; Otherwise, aggregate all patching logic to a main monkey-patch function `def apply_tilegym_kernel_to_<submodule_name>(...)` and place it at @src/tilegym/transformers/monkey_patch.py. Each compute has a corresponding boolean flag as function argument;
    4. Update @modeling/transformers/infer.py to include the main monkey-patch function in the inference and benchmark flow. Create a Bash script modeling/transformers/bench_<submodule_name>.sh similar to other bench scripts in that directory. Ensure to use `--use_cutile` at 2nd infer.py call, as we focus on cuTile backend;
    5. Run the end-to-end inference script created at sub-step 3.4. It should print ~300 lines of plain text. Collect baseline throughput, cuTile kernelized throughput, and cuTile kernel coverage by `grep -E "Average throughput|cuTile Kernel Coverage \(GPU Time\)" <output_file>`. Example output:
-   ```text
-   Average throughput: 25.93 ± 3.20 tokens/sec
-   Average throughput: 53.41 ± 0.25 tokens/sec
-   >>> cuTile Kernel Coverage (GPU Time):    49.21% <<<
-   ```
-   Git commit current changes **except those standalone monkey patch files and tests** created at step 3.2.6. I.e.:
-   ```text
-   src/tilegym/transformers/
-   |- monkey_patch.py  # check modifications to git
-   |- <submodule_name>/
-      |- __init__.py  # check to git
-      |- monkey_patch_<compute_name>.py  # don't check to git
-      |- test_monkey_patch_<compute_name>.py  # don't check to git
-      |- # Optional [monkey_patch_<other_compute_name>.py, test_monkey_patch_<other_compute_name>.py] pairs created by other subagents assigned with <other_compute_name>s --- don't check to git
-      |- modeling_<submodule_name>.py  # check to git
-   |- modeling/transformers/
-      |- bench_<submodule_name>.sh  # check to git
-      |- infer.py  # check modifications to git
-   ```
+      ```text
+      Average throughput: 25.93 ± 3.20 tokens/sec
+      Average throughput: 53.41 ± 0.25 tokens/sec
+      >>> cuTile Kernel Coverage (GPU Time):    49.21% <<<
+      ```
+      Git commit current changes **except those standalone monkey patch files and tests** created at step 3.2.6. I.e.:
+      ```text
+      src/tilegym/transformers/
+      |- monkey_patch.py  # check modifications to git
+      |- <submodule_name>/
+         |- __init__.py  # check to git
+         |- monkey_patch_<compute_name>.py  # don't check to git
+         |- test_monkey_patch_<compute_name>.py  # don't check to git
+         |- # Optional [monkey_patch_<other_compute_name>.py, test_monkey_patch_<other_compute_name>.py] pairs created by other subagents assigned with <other_compute_name>s --- don't check to git
+         |- modeling_<submodule_name>.py  # check to git
+      |- modeling/transformers/
+         |- bench_<submodule_name>.sh  # check to git
+         |- infer.py  # check modifications to git
+      ```
