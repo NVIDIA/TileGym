@@ -1,6 +1,3 @@
-<!--- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. --->
-
-<!--- SPDX-License-Identifier: CC-BY-4.0 AND Apache-2.0 --->
 # Setup GPU environment, Git branch, and Docker container
 Work with user to prepare the experiment environment:
 1. Get UUID of GPU(s) available on current node:
