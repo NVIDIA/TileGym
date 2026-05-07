@@ -15,6 +15,7 @@ import os
 import pathlib
 import random
 import re
+import sys
 from functools import wraps
 
 import pytest
@@ -1255,6 +1256,22 @@ def benchmark_fn_cupti(
             if evt.self_device_time_total > 0
             and (kernel_re_list is None or any(r.search(evt.key) for r in kernel_re_list))
         )
+
+        # DEBUG: print included events on the middle iteration (skip cold-start noise)
+        if i == n_repeat // 2 and os.environ.get("DUMP_CUPTI_EVENTS", "0") == "1":
+            print(f"=== CUPTI events (total={total_us:.1f} us) ===", file=sys.stderr)
+            for evt in prof.key_averages():
+                if evt.self_device_time_total > 0 and (
+                    kernel_re_list is None or any(r.search(evt.key) for r in kernel_re_list)
+                ):
+                    per_call = evt.self_device_time_total / evt.count
+                    print(
+                        f"  {evt.key[:100]}  "
+                        f"total={evt.self_device_time_total:.1f} us  "
+                        f"per_call={per_call:.2f} us  rep_num={evt.count}",
+                        file=sys.stderr,
+                    )
+            print("=== end ===", file=sys.stderr)
 
         # On the first iteration, diagnose why total_us might be 0.
         # Three distinct failure modes:
