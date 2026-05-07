@@ -314,12 +314,22 @@ def _has_yaml_frontmatter(path: Path) -> bool:
 
 
 def iter_skill_content_files(root_dir: Path) -> Iterator[Path]:
-    """Yield .py and non-frontmatter .md files under .agents/skills/ for SPDX headers.
+    """Yield .py and ``SKILL.md`` files under .agents/skills/ for SPDX headers.
 
-    Files with YAML frontmatter (.md starting with ``---``) are handled by
+    .md files with YAML frontmatter (starting with ``---``) are handled by
     :func:`iter_skill_files` using the frontmatter ``license:`` approach.
-    Everything else that has a recognised comment style gets a standard SPDX
-    comment header (currently dual-licensed CC-BY-4.0 AND Apache-2.0).
+
+    Non-frontmatter, non-``SKILL.md`` markdown files (reference docs,
+    translations, examples, etc.) are intentionally **skipped**: the
+    ``<!--- SPDX-... --->`` comment that the writer would otherwise inject at
+    the top of the file interferes with how skill-loading tools parse those
+    documents. Their license is covered transitively by the parent skill's
+    ``SKILL.md`` (which still carries an SPDX expression) and by the
+    repository-level ``LICENSE`` / ``LICENSES/`` files.
+
+    The ``SKILL.md`` exemption preserves SPDX comment headers on any
+    ``SKILL.md`` that has not yet been migrated to YAML frontmatter, so the
+    skill itself always advertises its license one way or another.
     """
     skills_dir = root_dir / ".agents" / "skills"
     if not skills_dir.is_dir():
@@ -330,9 +340,14 @@ def iter_skill_content_files(root_dir: Path) -> Iterator[Path]:
             # Must have a known comment style
             if get_comment_style(path) is None:
                 continue
-            # .md files with frontmatter are handled by iter_skill_files
-            if path.suffix == ".md" and _has_yaml_frontmatter(path):
-                continue
+            if path.suffix == ".md":
+                # Frontmatter .md files are handled by iter_skill_files.
+                if _has_yaml_frontmatter(path):
+                    continue
+                # Non-frontmatter, non-SKILL.md markdown files are skipped
+                # so they do not get an HTML-comment SPDX header injected.
+                if path.name != "SKILL.md":
+                    continue
             yield path
 
 
