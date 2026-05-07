@@ -51,10 +51,10 @@ ALL_CONFIGS = [
 
 
 def get_supported_configs():
-    cutile_available = is_backend_available("cutile")
-    if cutile_available:
-        return ALL_CONFIGS
-    return [c for c in ALL_CONFIGS if c[0] == "torch"]
+    configs = [c for c in ALL_CONFIGS if c is not None]
+    if is_backend_available("cutile"):
+        return configs
+    return [c for c in configs if c[0] != "cutile"]
 
 
 M_DEFAULT = 4096

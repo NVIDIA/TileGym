@@ -13,7 +13,7 @@ from .utils import next_power_of_2
 
 
 @ct.kernel
-def rms_norm_kernel_multi_wave_cached(
+def _rms_norm_kernel_multi_wave_cached(
     x,
     w,
     out,
@@ -409,7 +409,7 @@ class _RMSNorm(torch.autograd.Function):
             ct.launch(
                 torch.cuda.current_stream(),
                 grid,
-                rms_norm_kernel_multi_wave_cached,
+                _rms_norm_kernel_multi_wave_cached,
                 (x_arg, weight, y, rstd, N, eps, offset, TILE_SIZE),
             )
         elif mode == "multi_wave_reload":

@@ -55,6 +55,10 @@ class Test_RMSNorm(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
+        # multi_wave_cached is only implemented in the cutile backend
+        if backend != "cutile" and mode == "multi_wave_cached":
+            pytest.skip(f"multi_wave_cached mode is not implemented for backend {backend}")
+
         # skip static_persistent tests when n > 16384 to avoid excessive memory usage
         # Avoid tileiras hangs on RTX PRO 6000 which has 100 KB shared memory per SM
         # mode=None can also select static_persistent via heuristic when M > NUM_SMS * 2
@@ -95,16 +99,20 @@ class Test_RMSNorm(common.PyTestCase):
         + [(65536, 8192, torch.float16), (65536, 16384, torch.float16)],
         ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
-    @pytest.mark.parametrize("static_persistent", [True, False])
+    @pytest.mark.parametrize("mode", ["static_persistent", "multi_wave_reload"])
     @pytest.mark.parametrize("framework", _perf_frameworks)
-    def test_perf(self, m, n, static_persistent, dtype, framework, record_property, arch):
+    def test_perf(self, m, n, mode, dtype, framework, record_property, arch):
         if arch == "sm80":
             pytest.skip("Skip on sm80 due to OOM.")
         self.setUp()
         device = torch.device("cuda")
         eps = 1e-5
 
-        if framework == "cutile" and arch in ["sm120", "sm121"] and static_persistent == True and n == 16384:
+        # multi_wave_cached is only implemented in the cutile backend
+        if framework != "cutile" and mode == "multi_wave_cached":
+            pytest.skip(f"multi_wave_cached mode is not implemented for framework {framework}")
+
+        if framework == "cutile" and arch in ["sm120", "sm121"] and mode == "static_persistent" and n == 16384:
             pytest.skip("Cutile uses too much memory and hangs. This previously created a PTXAS Error")
 
         x_shape = (m, n)
@@ -121,7 +129,7 @@ class Test_RMSNorm(common.PyTestCase):
                     w_shape,
                     weight,
                     eps,
-                    static_persistent=static_persistent,
+                    mode=mode,
                 )
             else:
                 pytest.skip(f"Framework {framework} is not available")
