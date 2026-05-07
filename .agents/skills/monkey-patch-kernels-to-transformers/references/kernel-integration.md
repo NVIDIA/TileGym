@@ -1,6 +1,3 @@
-<!--- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. --->
-
-<!--- SPDX-License-Identifier: CC-BY-4.0 AND Apache-2.0 --->
 # Integrate TileGym kernels to Transformers
 The integration process follows a "research kernel requirement and supply -> propose kernel integration candidates -> implement kernel integrations and verify -> aggregate valid integrations" workflow. Refer to the diagram below to understand the overall process, then check the numbered text below for details. If you find it difficult to interpret embedding Mermaid script, check the rendered PNG image which represents the exactly identical workflow diagram:
 <details>
