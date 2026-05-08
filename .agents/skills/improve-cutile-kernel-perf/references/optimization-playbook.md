@@ -384,7 +384,7 @@ original output offsets.
 
 ### Recipe
 
-Carefully inspect the kernel code, its access patterns, computation graph, and profiling data (`ncu` / `nsys`). Then **generate a custom optimization plan** with ~5 items tailored to the specific kernel. Each item should be a concrete, actionable change.
+Carefully inspect the kernel code, its access patterns, computation graph, and profiling data (`ncu` / `nsys`). Then **generate a custom optimization plan** with ~20 items tailored to the specific kernel. Each item should be a concrete, actionable change.
 
 **Step 1: Deep analysis**
 - Re-read the kernel source and all profiling results collected so far
@@ -392,7 +392,7 @@ Carefully inspect the kernel code, its access patterns, computation graph, and p
 
 **Step 2: Generate the plan**
 
-Produce a numbered list of ~5 optimization items. Examples of what items might look like (these are illustrative — your plan should be kernel-specific):
+Produce a numbered list of ~20 optimization items. Examples of what items might look like (these are illustrative — your plan should be kernel-specific):
 
 1. Fuse adjacent elementwise ops into the main loop body to reduce memory round-trips
 2. Reorder loop dimensions to improve L2 cache hit rate for the dominant access pattern
