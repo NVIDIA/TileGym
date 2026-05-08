@@ -193,6 +193,7 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip(f"Backend {backend} is not available")
         skip_correctness = backend == "pytorch"
         if not skip_correctness:
+            output_processor = None
             if dtype == torch.float8_e4m3fn:
                 atol = 1
                 rtol = 1
@@ -208,6 +209,7 @@ class Test_Matmul(common.PyTestCase):
                 kwargs={},
                 atol=atol,
                 rtol=rtol,
+                output_processor=output_processor,
             )
         try:
             res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
