@@ -6,6 +6,7 @@ import gc
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import tilegym
 from tests import common
@@ -17,14 +18,8 @@ class Test_Liger_GEGLU(common.PyTestCase):
 
     @staticmethod
     def reference(a, b):
-        """PyTorch float32 reference for GEGLU (tanh approximation)."""
-        a_f32 = a.float()
-        b_f32 = b.float()
-        sqrt_2_over_pi = 0.7978845608028654
-        a_cubed = a_f32 * a_f32 * a_f32
-        tanh_arg = sqrt_2_over_pi * (a_f32 + 0.044715 * a_cubed)
-        geglu_a = 0.5 * a_f32 * (1 + torch.tanh(tanh_arg))
-        return (geglu_a * b_f32).to(a.dtype)
+        """PyTorch reference for GEGLU using tanh-approximate GELU."""
+        return F.gelu(a, approximate="tanh") * b
 
     @pytest.mark.parametrize(
         "shape, dtype",
@@ -36,7 +31,7 @@ class Test_Liger_GEGLU(common.PyTestCase):
             ((4, 256), torch.bfloat16),
             ((2, 4, 512), torch.float32),  # multi-dimensional
             ((4, 300), torch.float32),  # non-power-of-2
-            # Shapes from Liger test/transformers/test_geglu.py
+            # Extra transformer-style shapes
             ((2, 2, 8), torch.float32),
             ((9, 7, 41), torch.float32),
             ((9, 41, 341), torch.float32),

@@ -18,12 +18,14 @@ if is_backend_available("cutile"):
     from . import cutile as _cutile_impl
 
 # Import unified interface
+from .ops import cross_entropy
 from .ops import fused_linear_jsd
 from .ops import geglu
 from .ops import jsd
 from .ops import layer_norm
 
 __all__ = [
+    "cross_entropy",
     "fused_linear_jsd",
     "geglu",
     "jsd",

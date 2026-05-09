@@ -9,20 +9,11 @@ Forward: row-parallel (one block per row). Single-pass computes sum and sum_sq
   via fold trick → mean and variance. Second pass applies normalization:
   Y = (X - mean) * rstd * W + B. Mean and RSTD cached for backward.
 
-Backward: Split into two kernels for maximum SM parallelism:
-
-  Kernel 1 — DX kernel: grid=(n_rows, 1, 1), one block per row.
-    Per row: loads X, DY, W, Mean[row], RSTD[row]; computes x_hat, wdy, c1, c2;
-    writes DX[row]. High block count hides memory latency (same as forward).
-
-  Kernel 2 — DW/DB kernel: grid=(sm_count, 1, 1), persistent loop.
-    Block b processes rows [b*rpp, (b+1)*rpp); accumulates dW+=dy*x_hat, dB+=dy.
-    DW/DB partial buffers: (sm_count, n_cols). Host reduces dim=0.
-    Second read of X/DY hits L2 cache (still warm from DX kernel).
-
-  This split avoids the latency-bound regime of the old combined (148-block)
-  kernel: the DX kernel launches n_rows blocks (like HF's vectorized kernel),
-  giving warp occupancy ~60% and hiding long-scoreboard stalls.
+Backward: For combined backward path, use single combined kernel, grid=(sm_count, 1, 1), persistent loop.
+  Block b processes rows [b*rpp, min((b+1)*rpp, n_rows)).
+  Per row: loads X, DY, W, Mean[row], RSTD[row]; computes x_hat, wdy, c1, c2;
+  writes DX[row] inline; accumulates dW+=dy*x_hat, dB+=dy.
+  After loop: writes DW_partial[block_id] and DB_partial[block_id].
 """
 
 import math
@@ -34,37 +25,30 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
-# Cached secondary stream for concurrent DW/DB kernel launch.
-# Lazily created per device on first backward call; avoids stream creation overhead.
-_dw_stream_cache: dict = {}
+ConstBool = ct.Constant[bool]
+ConstFloat = ct.Constant[float]
+ConstInt = ct.Constant[int]
 
 
 def _calculate_settings(n_cols):
     BLOCK_SIZE = next_power_of_2(n_cols)
     if BLOCK_SIZE > 65536:
         raise RuntimeError(f"Hidden dimension {n_cols} exceeds maximum supported size of 65536.")
-    num_warps = 4
-    if BLOCK_SIZE >= 32768:
-        num_warps = 32
-    elif BLOCK_SIZE >= 8192:
-        num_warps = 16
-    elif BLOCK_SIZE >= 2048:
-        num_warps = 8
-    return BLOCK_SIZE, num_warps
+    return BLOCK_SIZE
 
 
 @ct.kernel(occupancy=1)
-def _layer_norm_fwd_ct(
-    X,  # (n_rows, n_cols) input
-    Y,  # (n_rows, n_cols) output
-    W,  # (n_cols,) scale
-    B,  # (n_cols,) bias
-    Mean,  # (n_rows,) cached mean
-    RSTD,  # (n_rows,) cached reciprocal std
-    n_cols: ct.Constant[int],
-    eps: ct.Constant[float],
-    BLOCK_SIZE: ct.Constant[int],
-    ALIGNED: ct.Constant[bool],
+def _layer_norm_fwd_kernel_ct(
+    x,  # (n_rows, n_cols) input
+    y,  # (n_rows, n_cols) output
+    weight,  # (n_cols,) scale
+    bias,  # (n_cols,) bias
+    mean_out,  # (n_rows,) cached mean
+    rstd_out,  # (n_rows,) cached reciprocal std
+    n_cols: ConstInt,
+    eps: ConstFloat,
+    BLOCK_SIZE: ConstInt,
+    ALIGNED: ConstBool,
 ):
     """
     Layer norm forward.
@@ -84,9 +68,9 @@ def _layer_norm_fwd_ct(
 
     for ci in range(n_chunks):
         col_idx = ct.add(ct.arange(BLOCK_SIZE, dtype=ct.int32), ci * BLOCK_SIZE)
-        x = ct.astype(ct.gather(X, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0), ct.float32)
-        sum_tile = ct.add(sum_tile, x)
-        sum_sq_tile = ct.add(sum_sq_tile, x * x)
+        x_tile = ct.astype(ct.gather(x, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0), ct.float32)
+        sum_tile = ct.add(sum_tile, x_tile)
+        sum_sq_tile = ct.add(sum_sq_tile, x_tile * x_tile)
 
     total_sum = ct.sum(sum_tile, 0, keepdims=False)  # scalar
     total_sum_sq = ct.sum(sum_sq_tile, 0, keepdims=False)  # scalar
@@ -95,30 +79,30 @@ def _layer_norm_fwd_ct(
     rstd = ct.rsqrt(var + eps)  # scalar
 
     # Cache mean and rstd for backward
-    ct.scatter(Mean, row_idx, ct.astype(mean, Mean.dtype))
-    ct.scatter(RSTD, row_idx, ct.astype(rstd, RSTD.dtype))
+    ct.scatter(mean_out, row_idx, ct.astype(mean, mean_out.dtype))
+    ct.scatter(rstd_out, row_idx, ct.astype(rstd, rstd_out.dtype))
 
     # ---- Pass 2: Y = (X - mean) * rstd * W + B ----
     for ci in range(n_chunks):
         col_idx = ct.add(ct.arange(BLOCK_SIZE, dtype=ct.int32), ci * BLOCK_SIZE)
-        x = ct.astype(ct.gather(X, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0), ct.float32)
-        w = ct.astype(ct.gather(W, col_idx, check_bounds=check_bounds, padding_value=0.0), ct.float32)
-        b = ct.astype(ct.gather(B, col_idx, check_bounds=check_bounds, padding_value=0.0), ct.float32)
-        y = (x - mean) * rstd * w + b
-        ct.scatter(Y, (row_idx, col_idx), ct.astype(y, Y.dtype), check_bounds=check_bounds)
+        x_tile = ct.astype(ct.gather(x, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0), ct.float32)
+        weight_tile = ct.astype(ct.gather(weight, col_idx, check_bounds=check_bounds, padding_value=0.0), ct.float32)
+        bias_tile = ct.astype(ct.gather(bias, col_idx, check_bounds=check_bounds, padding_value=0.0), ct.float32)
+        y_tile = (x_tile - mean) * rstd * weight_tile + bias_tile
+        ct.scatter(y, (row_idx, col_idx), ct.astype(y_tile, y.dtype), check_bounds=check_bounds)
 
 
 @ct.kernel(occupancy=1)
-def _layer_norm_bwd_dx_ct(
-    X,  # (n_rows, n_cols) saved input
-    DY,  # (n_rows, n_cols) upstream gradient
-    W,  # (n_cols,) scale
-    Mean,  # (n_rows,) saved mean
-    RSTD,  # (n_rows,) saved rstd
-    DX,  # (n_rows, n_cols) output gradient w.r.t. input
-    n_cols: ct.Constant[int],
-    BLOCK_SIZE: ct.Constant[int],
-    ALIGNED: ct.Constant[bool],
+def _layer_norm_bwd_dx_kernel_ct(
+    x,  # (n_rows, n_cols) saved input
+    dy,  # (n_rows, n_cols) upstream gradient
+    weight,  # (n_cols,) scale
+    mean,  # (n_rows,) saved mean
+    rstd,  # (n_rows,) saved rstd
+    dx,  # (n_rows, n_cols) output gradient w.r.t. input
+    n_cols: ConstInt,
+    BLOCK_SIZE: ConstInt,
+    ALIGNED: ConstBool,
 ):
     """
     Layer norm backward — DX kernel only.
@@ -133,85 +117,98 @@ def _layer_norm_bwd_dx_ct(
     col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32)
     check_bounds = not ALIGNED
 
-    mean = ct.astype(ct.load(Mean, row_idx, shape=(), latency=3), ct.float32)
-    rstd = ct.astype(ct.load(RSTD, row_idx, shape=(), latency=3), ct.float32)
+    mean_row = ct.astype(ct.load(mean, row_idx, shape=(), latency=3), ct.float32)
+    rstd_row = ct.astype(ct.load(rstd, row_idx, shape=(), latency=3), ct.float32)
 
-    w = ct.astype(ct.gather(W, col_idx, check_bounds=check_bounds, padding_value=0.0), ct.float32)
+    weight_tile = ct.astype(ct.gather(weight, col_idx, check_bounds=check_bounds, padding_value=0.0), ct.float32)
     _lat = 3 if BLOCK_SIZE <= 1024 else 6
-    x = ct.astype(
-        ct.gather(X, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=_lat), ct.float32
+    x_tile = ct.astype(
+        ct.gather(x, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=_lat), ct.float32
     )
-    dy = ct.astype(
-        ct.gather(DY, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=_lat), ct.float32
+    dy_tile = ct.astype(
+        ct.gather(dy, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=_lat), ct.float32
     )
 
     inv_n_cols = 1.0 / n_cols
-    x_hat = (x - mean) * rstd
-    wdy = w * dy
+    x_hat = (x_tile - mean_row) * rstd_row
+    wdy = weight_tile * dy_tile
     c1 = ct.sum(x_hat * wdy, 0, keepdims=False) * inv_n_cols
     c2 = ct.sum(wdy, 0, keepdims=False) * inv_n_cols
-    dx = (wdy - (x_hat * c1 + c2)) * rstd
-    ct.scatter(DX, (row_idx, col_idx), ct.astype(dx, DX.dtype), check_bounds=check_bounds)
+    dx_tile = (wdy - (x_hat * c1 + c2)) * rstd_row
+    ct.scatter(dx, (row_idx, col_idx), ct.astype(dx_tile, dx.dtype), check_bounds=check_bounds)
 
 
 @ct.kernel(occupancy=1)
-def _layer_norm_bwd_dw_ct(
-    X,  # (n_rows, n_cols) saved input
-    DY,  # (n_rows, n_cols) upstream gradient
-    Mean,  # (n_rows,) saved mean
-    RSTD,  # (n_rows,) saved rstd
-    DWDB_partial,  # (2*num_programs, n_cols) stacked DW [0:num_programs) + DB [num_programs:2*num_programs)
-    n_rows: ct.Constant[int],
-    n_cols: ct.Constant[int],
-    num_programs: ct.Constant[int],
-    rows_per_program: ct.Constant[int],
-    BLOCK_SIZE: ct.Constant[int],
-    ALIGNED: ct.Constant[bool],
+def _layer_norm_bwd_combined_kernel_ct(
+    x,  # (n_rows, n_cols) saved input
+    dy,  # (n_rows, n_cols) upstream gradient
+    weight,  # (n_cols,) scale
+    mean,  # (n_rows,) saved mean
+    rstd,  # (n_rows,) saved rstd
+    dx,  # (n_rows, n_cols) output gradient w.r.t. input
+    dw_partial,  # (num_programs, n_cols) partial DW accumulator
+    db_partial,  # (num_programs, n_cols) partial DB accumulator
+    n_rows: ConstInt,
+    n_cols: ConstInt,
+    num_programs: ConstInt,
+    rows_per_program: ConstInt,
+    BLOCK_SIZE: ConstInt,
+    ALIGNED: ConstBool,
 ):
     """
-    Layer norm backward — DW/DB accumulation kernel.
+    Layer norm backward — combined DX + DW/DB kernel (one-stream path).
 
     Grid: (num_programs, 1, 1). Block b processes rows [b*rpp, min((b+1)*rpp, n_rows)).
-    Writes DW partial to row block_id and DB partial to row (num_programs + block_id)
-    in the stacked DWDB_partial tensor. Host sums each half in a single call.
+    Computes DX inline (written per-row) and accumulates DW/DB partials over all rows.
 
+    W is loaded once per block outside the row loop to amortize the load cost.
     When ALIGNED=True: check_bounds=False → hardware TMA for all accesses.
     """
     block_id = ct.bid(0)
     col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32)
     check_bounds = not ALIGNED
 
-    dW_acc = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
-    dB_acc = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
+    # Load W once per block — shared across all rows this block processes.
+    weight_tile = ct.astype(
+        ct.gather(weight, col_idx, check_bounds=check_bounds, padding_value=0.0, latency=2), ct.float32
+    )
+
+    dw_acc = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
+    db_acc = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
 
     for ri in range(rows_per_program):
         row_idx = block_id * rows_per_program + ri
         if row_idx < n_rows:
-            mean = ct.astype(ct.load(Mean, row_idx, shape=(), latency=3), ct.float32)
-            rstd = ct.astype(ct.load(RSTD, row_idx, shape=(), latency=3), ct.float32)
-            _lat = 3 if BLOCK_SIZE <= 1024 else 6
-            x = ct.astype(
-                ct.gather(X, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=_lat), ct.float32
+            mean_row = ct.astype(ct.load(mean, row_idx, shape=(), latency=3), ct.float32)
+            rstd_row = ct.astype(ct.load(rstd, row_idx, shape=(), latency=3), ct.float32)
+            x_tile = ct.astype(
+                ct.gather(x, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=2), ct.float32
             )
-            dy = ct.astype(
-                ct.gather(DY, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=_lat),
+            dy_tile = ct.astype(
+                ct.gather(dy, (row_idx, col_idx), check_bounds=check_bounds, padding_value=0.0, latency=2),
                 ct.float32,
             )
-            x_hat = (x - mean) * rstd
-            dW_acc = ct.add(dW_acc, dy * x_hat)
-            dB_acc = ct.add(dB_acc, dy)
 
-    # Write DW to row block_id, DB to row (num_programs + block_id) in stacked buffer.
+            x_hat = (x_tile - mean_row) * rstd_row
+            wdy = weight_tile * dy_tile
+            inv_n_cols = 1.0 / n_cols
+            c1 = ct.sum(x_hat * wdy, 0, keepdims=False) * inv_n_cols
+            c2 = ct.sum(wdy, 0, keepdims=False) * inv_n_cols
+            dx_tile = (wdy - (x_hat * c1 + c2)) * rstd_row
+            ct.scatter(dx, (row_idx, col_idx), ct.astype(dx_tile, dx.dtype), check_bounds=check_bounds)
+
+            dw_acc = ct.add(dw_acc, dy_tile * x_hat)
+            db_acc = ct.add(db_acc, dy_tile)
+
+    # Write per-block DW/DB partials.
     # ALIGNED=True: BLOCK_SIZE==n_cols, ct.store is safe (no OOB).
-    # ALIGNED=False: BLOCK_SIZE>n_cols, must use scatter with check_bounds=True to
-    #   avoid writing OOB padding elements (col_idx already defined above).
-    db_row = num_programs + block_id
+    # ALIGNED=False: BLOCK_SIZE>n_cols, scatter with check_bounds=True to avoid OOB writes.
     if ALIGNED:
-        ct.store(DWDB_partial, index=(block_id, 0), tile=dW_acc.reshape((1, BLOCK_SIZE)))
-        ct.store(DWDB_partial, index=(db_row, 0), tile=dB_acc.reshape((1, BLOCK_SIZE)))
+        ct.store(dw_partial, index=(block_id, 0), tile=dw_acc.reshape((1, BLOCK_SIZE)))
+        ct.store(db_partial, index=(block_id, 0), tile=db_acc.reshape((1, BLOCK_SIZE)))
     else:
-        ct.scatter(DWDB_partial, (block_id, col_idx), dW_acc, check_bounds=True)
-        ct.scatter(DWDB_partial, (db_row, col_idx), dB_acc, check_bounds=True)
+        ct.scatter(dw_partial, (block_id, col_idx), dw_acc, check_bounds=True)
+        ct.scatter(db_partial, (block_id, col_idx), db_acc, check_bounds=True)
 
 
 def _layer_norm_forward_ct(X, W, B, eps):
@@ -220,7 +217,7 @@ def _layer_norm_forward_ct(X, W, B, eps):
     X2d = X.view(-1, dim).contiguous()
     n_rows, n_cols = X2d.shape
 
-    BLOCK_SIZE, _ = _calculate_settings(n_cols)
+    BLOCK_SIZE = _calculate_settings(n_cols)
     aligned = (n_cols & (n_cols - 1)) == 0  # True when n_cols is a power of 2
 
     Y = torch.empty_like(X2d)
@@ -231,7 +228,7 @@ def _layer_norm_forward_ct(X, W, B, eps):
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        _layer_norm_fwd_ct,
+        _layer_norm_fwd_kernel_ct,
         (
             X2d,
             Y,
@@ -250,6 +247,12 @@ def _layer_norm_forward_ct(X, W, B, eps):
 
 
 def _layer_norm_backward_ct(dY, X, W, B, Mean, RSTD, BLOCK_SIZE, compute_dW=True, compute_dB=True):
+    """
+    One-stream backward (default). Single combined kernel computes DX + DW/DB partials
+    in one pass per row.
+    Grid=(sm_count,): each block processes rows_per_program rows.
+    TODO: when cutile support num_warps, num_warps = 8, latency=3 can give better performance.
+    """
     shape = dY.shape
     dim = shape[-1]
     dY2d = dY.view(-1, dim).contiguous()
@@ -260,18 +263,15 @@ def _layer_norm_backward_ct(dY, X, W, B, Mean, RSTD, BLOCK_SIZE, compute_dW=True
 
     X_contig = X.contiguous()
     W_contig = W.contiguous()
-
     DX = torch.empty_like(X)
 
     # Fast path: skip DW/DB entirely if neither W nor B needs gradients.
-    # This halves memory traffic and eliminates the secondary kernel + stream sync.
     if not compute_dW and not compute_dB:
         main_stream = torch.cuda.current_stream()
-        dx_grid = (n_rows, 1, 1)
         ct.launch(
             main_stream,
-            dx_grid,
-            _layer_norm_bwd_dx_ct,
+            (n_rows, 1, 1),
+            _layer_norm_bwd_dx_kernel_ct,
             (
                 X_contig,
                 dY2d,
@@ -289,33 +289,19 @@ def _layer_norm_backward_ct(dY, X, W, B, Mean, RSTD, BLOCK_SIZE, compute_dW=True
         DB = torch.zeros_like(B)
         return DX, DW, DB
 
-    dw_scale = 1
-    num_programs = sm_count * dw_scale
-    # Stacked buffer: rows [0:num_programs) = dW partial, rows [num_programs:2*num_programs) = dB partial.
-    # One .sum() call reduces both halves in a single CUDA kernel, saving ~5-10us over two calls.
-    # Use torch.empty (not zeros): every row is fully written by one block in the DW/DB kernel
-    # (grid=(num_programs,), block b writes rows b and num_programs+b), so no initialization needed.
-    DWDB_partial = torch.empty(2 * num_programs, n_cols, dtype=torch.float32, device=W.device)
-
+    num_programs = sm_count
     rows_per_program = math.ceil(n_rows / num_programs)
-    dx_grid = (n_rows, 1, 1)
-    dw_grid = (num_programs, 1, 1)
 
-    # Launch DX and DW/DB kernels concurrently on two streams.
-    # Both kernels only READ X and DY (no write conflict), so parallel execution is safe.
-    # DX kernel: n_rows blocks → high concurrency, hides latency.
-    # DW/DB kernel: sm_count blocks, persistent loop → shares remaining SM capacity.
-    # Two-stream overlap gives 1.2–1.6x speedup over sequential launch.
+    # Separate partial buffers — one block writes one row in each.
+    # torch.empty is safe: every row [0, num_programs) is written by exactly one block.
+    DW_partial = torch.empty((num_programs, n_cols), dtype=torch.float32, device=W.device)
+    DB_partial = torch.empty((num_programs, n_cols), dtype=torch.float32, device=W.device)
+
     main_stream = torch.cuda.current_stream()
-    device_idx = X.device.index if X.device.index is not None else 0
-    if device_idx not in _dw_stream_cache:
-        _dw_stream_cache[device_idx] = torch.cuda.Stream(device=X.device)
-    dw_stream = _dw_stream_cache[device_idx]
-
     ct.launch(
         main_stream,
-        dx_grid,
-        _layer_norm_bwd_dx_ct,
+        (num_programs, 1, 1),
+        _layer_norm_bwd_combined_kernel_ct,
         (
             X_contig,
             dY2d,
@@ -323,23 +309,8 @@ def _layer_norm_backward_ct(dY, X, W, B, Mean, RSTD, BLOCK_SIZE, compute_dW=True
             Mean,
             RSTD,
             DX,
-            int(n_cols),
-            int(BLOCK_SIZE),
-            bool(aligned),
-        ),
-    )
-
-    # DW/DB kernel on secondary stream — runs concurrently with DX kernel.
-    ct.launch(
-        dw_stream,
-        dw_grid,
-        _layer_norm_bwd_dw_ct,
-        (
-            X_contig,
-            dY2d,
-            Mean,
-            RSTD,
-            DWDB_partial,
+            DW_partial,
+            DB_partial,
             int(n_rows),
             int(n_cols),
             int(num_programs),
@@ -349,21 +320,13 @@ def _layer_norm_backward_ct(dY, X, W, B, Mean, RSTD, BLOCK_SIZE, compute_dW=True
         ),
     )
 
-    # Run partial sums on dw_stream immediately after DW/DB kernel — overlaps with DX.
-    # Single sum over stacked (2*num_programs, n_cols) → (2, n_cols); split into DW/DB.
-    with torch.cuda.stream(dw_stream):
-        DWDB = DWDB_partial.view(2, num_programs, n_cols).sum(dim=1)
-
-    # Sync dw_stream back to main stream: wait for DW/DB kernel + sums.
-    main_stream.wait_stream(dw_stream)
-
     DX = DX.view(*shape)
-    DW = DWDB[0].to(W.dtype)
-    DB = DWDB[1].to(B.dtype)
+    DW = DW_partial.sum(dim=0).to(W.dtype)
+    DB = DB_partial.sum(dim=0).to(B.dtype)
     return DX, DW, DB
 
 
-class LayerNormFunction(torch.autograd.Function):
+class LayerNormCuTileFunction(torch.autograd.Function):
     """CuTile autograd wrapper for layer normalization."""
 
     @staticmethod
@@ -404,4 +367,4 @@ def layer_norm(
     eps: float = 1e-5,
     **kwargs,
 ) -> torch.Tensor:
-    return LayerNormFunction.apply(X, W, B, eps)
+    return LayerNormCuTileFunction.apply(X, W, B, eps)

@@ -15,6 +15,7 @@ Backward:
   No matmuls in backward.
 """
 
+import functools
 from typing import Optional
 
 import cuda.tile as ct
@@ -25,6 +26,9 @@ from tilegym.backend import register_impl
 from .jsd import JSD_BLOCK_SIZE
 from .jsd import jsd_kernel_ct
 from .utils import next_power_of_2
+
+amp_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
+amp_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
 
 
 def _fused_linear_jsd_forward(
@@ -43,20 +47,23 @@ def _fused_linear_jsd_forward(
     device = student_input.device
     dtype = student_input.dtype
 
-    BT, H = student_input.shape
-    V = student_weight.shape[0]
-    # Use JSD_BLOCK_SIZE (4096), not a local MAX_FUSED_SIZE.
-    # Larger values (e.g. 32768) cause register spill in jsd_kernel_ct and 5-10x slowdown.
-    BLOCK_SIZE = min(JSD_BLOCK_SIZE, next_power_of_2(V))
+    num_rows, hidden_size = student_input.shape
+    vocab_size = student_weight.shape[0]
+    # Cap at JSD_BLOCK_SIZE to avoid register spill in jsd_kernel_ct.
+    BLOCK_SIZE = min(JSD_BLOCK_SIZE, next_power_of_2(vocab_size))
 
     if has_label:
         n_non_ignore = (shift_labels != ignore_index).sum().item()
     else:
-        n_non_ignore = BT
+        n_non_ignore = num_rows
 
     if n_non_ignore == 0:
-        empty_input_grad = torch.zeros(BT, H, dtype=dtype, device=device) if compute_grad_input else None
-        empty_weight_grad = torch.zeros(V, H, dtype=dtype, device=device) if compute_grad_weight else None
+        empty_input_grad = (
+            torch.zeros(num_rows, hidden_size, dtype=dtype, device=device) if compute_grad_input else None
+        )
+        empty_weight_grad = (
+            torch.zeros(vocab_size, hidden_size, dtype=dtype, device=device) if compute_grad_weight else None
+        )
         return (
             torch.tensor(0.0, device=device, dtype=dtype),
             empty_input_grad,
@@ -66,17 +73,17 @@ def _fused_linear_jsd_forward(
     inv_n_non_ignore = 1.0 / n_non_ignore
     label_tensor = shift_labels if has_label else torch.empty(1, device=device, dtype=torch.int64)
 
-    inc_factor = (V + H - 1) // H
-    chunk_size = next_power_of_2((BT + inc_factor - 1) // inc_factor)
-    num_chunks = (BT + chunk_size - 1) // chunk_size
+    inc_factor = (vocab_size + hidden_size - 1) // hidden_size
+    chunk_size = next_power_of_2((num_rows + inc_factor - 1) // inc_factor)
+    num_chunks = (num_rows + chunk_size - 1) // chunk_size
 
     total_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
-    grad_input = torch.zeros(BT, H, dtype=dtype, device=device) if compute_grad_input else None
+    grad_input = torch.zeros(num_rows, hidden_size, dtype=dtype, device=device) if compute_grad_input else None
     grad_weight = torch.zeros_like(student_weight) if compute_grad_weight else None
 
     for chunk_id in range(num_chunks):
         start_idx = chunk_id * chunk_size
-        end_idx = min((chunk_id + 1) * chunk_size, BT)
+        end_idx = min((chunk_id + 1) * chunk_size, num_rows)
 
         student_input_chunk = student_input[start_idx:end_idx]
         teacher_input_chunk = teacher_input[start_idx:end_idx]
@@ -87,16 +94,16 @@ def _fused_linear_jsd_forward(
 
         log_prob_s_chunk = torch.log_softmax(student_logits_chunk, dim=-1).contiguous()
         log_prob_t_chunk = torch.log_softmax(teacher_logits_chunk, dim=-1).contiguous()
-        # Pre-compute softmax before overwriting log_prob_s_chunk with dX in-place.
-        softmax_s_chunk = torch.exp(log_prob_s_chunk)
-        del student_logits_chunk, teacher_logits_chunk
+        # Use softmax(logits) directly instead of exp(log_softmax(logits))
+        # before log_prob_s_chunk is overwritten in-place.
+        softmax_s_chunk = torch.softmax(student_logits_chunk, dim=-1)
 
-        loss_chunk = torch.zeros(chunk_n_rows, V, dtype=torch.float32, device=device)
+        loss_chunk = torch.zeros(chunk_n_rows, vocab_size, dtype=torch.float32, device=device)
 
         label_chunk = label_tensor[start_idx:end_idx] if has_label else label_tensor
 
-        # Pass log_prob_s_chunk as both X and dX (in-place) — saves one (chunk_size, V)
-        # float32 allocation. Safe: kernel reads X before writing dX within each row.
+        # Pass log_prob_s_chunk as both X and dX in-place. The kernel reads X
+        # before writing dX within each row, so this saves one float32 allocation.
         ct.launch(
             torch.cuda.current_stream(),
             (chunk_n_rows, 1, 1),
@@ -110,29 +117,31 @@ def _fused_linear_jsd_forward(
                 float(beta),
                 float(inv_n_non_ignore),
                 int(ignore_index),
-                int(V),
+                int(vocab_size),
                 int(BLOCK_SIZE),
                 int(has_label),
             ),
         )
         # log_prob_s_chunk now holds dX (written by kernel); softmax_s_chunk holds exp(log_prob_s).
         dX_chunk = log_prob_s_chunk
-        grad_chunk = (dX_chunk - softmax_s_chunk * dX_chunk.sum(dim=-1, keepdim=True)) / temperature
-        grad_chunk = grad_chunk.to(dtype)
-        del log_prob_s_chunk, log_prob_t_chunk, softmax_s_chunk, dX_chunk
+
+        grad_chunk = (dX_chunk - softmax_s_chunk * dX_chunk.sum(dim=-1, keepdim=True).expand_as(dX_chunk)) / temperature
+        del student_logits_chunk, teacher_logits_chunk, log_prob_s_chunk, log_prob_t_chunk, softmax_s_chunk, dX_chunk
 
         total_loss = total_loss + loss_chunk.sum()
 
+        grad_chunk_dtype = grad_chunk.to(dtype)
         if compute_grad_input:
-            grad_input[start_idx:end_idx] = grad_chunk @ student_weight
+            grad_input[start_idx:end_idx] = grad_chunk_dtype @ student_weight
         if compute_grad_weight:
-            grad_weight.addmm_(grad_chunk.t(), student_input_chunk)
+            grad_weight.add_(grad_chunk_dtype.t() @ student_input_chunk)
 
-    return total_loss.to(dtype), grad_input, grad_weight
+    return total_loss, grad_input, grad_weight
 
 
-class FusedLinearJSDFunction(torch.autograd.Function):
+class FusedLinearJSDCuTileFunction(torch.autograd.Function):
     @staticmethod
+    @amp_custom_fwd
     def forward(
         ctx,
         student_input: torch.Tensor,
@@ -178,6 +187,7 @@ class FusedLinearJSDFunction(torch.autograd.Function):
         return loss
 
     @staticmethod
+    @amp_custom_bwd
     def backward(ctx, grad_output):
         grad_input_saved, grad_weight_saved = ctx.saved_tensors
 
@@ -207,7 +217,7 @@ def fused_linear_jsd(
     temperature: float = 1.0,
     **kwargs,
 ) -> torch.Tensor:
-    return FusedLinearJSDFunction.apply(
+    return FusedLinearJSDCuTileFunction.apply(
         student_input,
         student_weight,
         teacher_input,

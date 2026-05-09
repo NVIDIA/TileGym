@@ -48,6 +48,51 @@ def jsd(
 
 
 @dispatch(
+    "liger.cross_entropy",
+)
+def cross_entropy(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    ignore_index: int = -100,
+    label_smoothing: float = 0.0,
+    reduction: str = "mean",
+    weight: Optional[torch.Tensor] = None,
+    lse_square_scale: float = 0.0,
+    softcap: Optional[float] = None,
+    return_z_loss: bool = False,
+    return_token_accuracy: bool = False,
+    return_predicted_tokens: bool = False,
+) -> torch.Tensor:
+    """
+    Fused cross-entropy loss with in-kernel gradient computation.
+
+    Computes cross entropy loss and pre-computes the gradient of the input
+    in a single kernel pass (Liger-style fused forward+backward).
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/cross_entropy.py
+
+    Args:
+        input: Logit tensor of shape (BT, V) where BT = batch*seq_len, V = vocab size.
+            Must require grad for gradient computation to occur.
+        target: Target class indices of shape (BT,).
+        ignore_index: Class index to ignore when computing loss and gradient. Default: -100
+        label_smoothing: Amount of label smoothing in [0, 1). Default: 0.0
+        reduction: Reduction mode: "mean" | "sum" | "none". Default: "mean"
+        weight: Optional per-class weight tensor of shape (V,). Default: None
+        lse_square_scale: Z-loss scale: adds lse_square_scale * logsumexp^2 to loss. Default: 0.0
+        softcap: If set, caps logits to (-softcap, +softcap) via softcap*tanh(x/softcap). Default: None
+        return_z_loss: Return z_loss as second element of 4-tuple. Default: False
+        return_token_accuracy: Return token accuracy as third element of 4-tuple. Default: False
+        return_predicted_tokens: Return predicted token indices as fourth element of 4-tuple. Default: False
+
+    Returns:
+        Scalar loss tensor when all RETURN_* flags are False (default, backward-compatible).
+        4-tuple (loss, z_loss, token_accuracy, predicted_tokens) when any RETURN_* flag is True.
+    """
+    raise NotImplementedError(f"cross_entropy is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.fused_linear_jsd",
 )
 def fused_linear_jsd(
