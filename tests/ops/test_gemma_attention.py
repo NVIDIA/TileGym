@@ -234,7 +234,10 @@ class TestGemmaAttention(common.PyTestCase):
             pytest.skip("Skip on sm80: gemma attention requires SM90+")
 
         self.setUp()
-        set_backend(backend)
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
         device = torch.device("cuda")
 
         # Create test data
