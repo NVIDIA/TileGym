@@ -4,6 +4,7 @@
 
 import torch
 import triton
+from bench_utils import profile_with_l2flush
 
 import tilegym
 from tilegym.backend import is_backend_available
@@ -77,7 +78,7 @@ def bench_softmax(M, N, backend, use_tma, use_chunked, dtype=torch.float32, devi
     torch.testing.assert_close(fn(), ref(), atol=1e-2, rtol=1e-2)
 
     # Benchmark the function
-    ms = triton.testing.do_bench_cudagraph(fn)
+    ms = profile_with_l2flush(fn)
 
     # Calculate memory bandwidth (GB/s)
     # Softmax operation: reads input, writes output
