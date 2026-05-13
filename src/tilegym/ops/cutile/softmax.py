@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-
 import math
 
 import cuda.tile as ct
@@ -13,7 +12,6 @@ from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 
 
@@ -146,6 +144,8 @@ def _softmax_kernel_chunked(
 
 
 # Launch patterns for the kernels:
+
+
 def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     """
     Launch the basic cuTile softmax kernel with static persistent scheduling
@@ -266,6 +266,9 @@ def _launch_softmax_kernel_chunked(
             TILE_SIZE,
         ),
     )
+
+
+# Autograd Function Classes
 
 
 class _Softmax(torch.autograd.Function):

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 from math import ceil
 from types import SimpleNamespace
 
@@ -15,7 +14,6 @@ from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 LOG2E = 1.4426950408889634
 
@@ -31,6 +29,25 @@ def _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M):
 
 def _sigmoid(x):
     return 1.0 / (1.0 + ct.exp(-x))
+
+
+def _mhc_split_gemm_rms_autotune_configs():
+    tile_ms = (64, 128)
+    tile_ks = (64, 128)
+    split_ks = (1, 2, 4, 8, 16)
+    group_size_ms = (8, 16)
+    tile_n = 32
+    for tile_m in tile_ms:
+        for tile_k in tile_ks:
+            for split_k in split_ks:
+                for group_size_m in group_size_ms:
+                    yield SimpleNamespace(
+                        TILE_SIZE_M=tile_m,
+                        TILE_SIZE_N=tile_n,
+                        TILE_SIZE_K=tile_k,
+                        SPLIT_K=split_k,
+                        GROUP_SIZE_M=group_size_m,
+                    )
 
 
 @experimental_kernel
@@ -190,25 +207,6 @@ def _mhc_finalize_scale_bias_sigmoid_kernel(
     ct.store(Y, index=(bid_m, bid_n), tile=out)
 
 
-def _mhc_split_gemm_rms_autotune_configs():
-    tile_ms = (64, 128)
-    tile_ks = (64, 128)
-    split_ks = (1, 2, 4, 8, 16)
-    group_size_ms = (8, 16)
-    tile_n = 32
-    for tile_m in tile_ms:
-        for tile_k in tile_ks:
-            for split_k in split_ks:
-                for group_size_m in group_size_ms:
-                    yield SimpleNamespace(
-                        TILE_SIZE_M=tile_m,
-                        TILE_SIZE_N=tile_n,
-                        TILE_SIZE_K=tile_k,
-                        SPLIT_K=split_k,
-                        GROUP_SIZE_M=group_size_m,
-                    )
-
-
 def _cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     if cfg is not None:
         if isinstance(cfg, dict):
@@ -324,19 +322,6 @@ def _cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=None):
     return y_acc, r_acc, best_cfg
 
 
-def _mhc_split_gemm_rms(x: torch.Tensor, w: torch.Tensor, **kwargs):
-    M, K = x.shape
-    KB, N = w.shape
-    assert K == KB, f"Incompatible matrices: K dimension of X is {K}, K dimension of W is {KB}"
-
-    cfg = kwargs.pop("cfg", None)
-    kwargs.pop("w_nt", None)
-    w = w.contiguous()
-
-    stream = torch.cuda.current_stream()
-    return _cutile_autotune_mhc_split_gemm_rms(stream, x, w, M, N, K, cfg=cfg)
-
-
 def _mhc_finalize_scale_bias_sigmoid(
     y_acc: torch.Tensor,
     r_acc: torch.Tensor,
@@ -390,6 +375,46 @@ def _mhc_finalize_scale_bias_sigmoid(
         ),
     )
     return y, r
+
+
+@register_impl("mhc_gemm_rms_scale", backend="cutile")
+def mhc_gemm_rms_scale(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    n: int,
+    alpha_pre: float,
+    alpha_post: float,
+    alpha_res: float,
+    bias: torch.Tensor,
+    **kwargs,
+):
+    cfg = kwargs.pop("cfg", None)
+    kwargs.pop("w_nt", None)
+    w = w.contiguous()
+
+    M, K = x.shape
+    _, N = w.shape
+    y_acc, r_acc, cfg = _cutile_autotune_mhc_split_gemm_rms(
+        torch.cuda.current_stream(),
+        x,
+        w,
+        M,
+        N,
+        K,
+        cfg=cfg,
+    )
+    return _mhc_finalize_scale_bias_sigmoid(
+        y_acc,
+        r_acc,
+        n,
+        alpha_pre,
+        alpha_post,
+        alpha_res,
+        bias,
+        M,
+        K,
+        cfg=cfg,
+    )
 
 
 @experimental_kernel
@@ -467,71 +492,6 @@ def _mhc_apply_residual_kernel(
     ct.store(Out, index=(row, 0, c_tile), tile=out_tile)
 
 
-@experimental_kernel
-@ct.kernel
-def _mhc_sinkhorn_kernel(
-    Y,
-    N: ct.Constant[int],
-):
-    """Sinkhorn-Knopp normalization for residual block (in-place on Y)."""
-    row = ct.bid(0)
-    total = N * N
-    mat = ct.load(Y, index=(row, 0), shape=(1, total))
-    mat = ct.reshape(mat, (N, N))
-    mat = ct.astype(mat, ct.float32)
-    mat = ct.exp2(mat * LOG2E)
-
-    for _ in range(20):
-        row_sum = ct.sum(mat, axis=1, keepdims=True)
-        mat = mat / row_sum
-        col_sum = ct.sum(mat, axis=0, keepdims=True)
-        mat = mat / col_sum
-
-    mat = ct.reshape(mat, (1, total))
-    mat = ct.astype(mat, Y.dtype)
-    ct.store(Y, index=(row, 0), tile=mat)
-
-
-@register_impl("mhc_gemm_rms_scale", backend="cutile")
-def mhc_gemm_rms_scale(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    n: int,
-    alpha_pre: float,
-    alpha_post: float,
-    alpha_res: float,
-    bias: torch.Tensor,
-    **kwargs,
-):
-    cfg = kwargs.pop("cfg", None)
-    kwargs.pop("w_nt", None)
-    w = w.contiguous()
-
-    M, K = x.shape
-    _, N = w.shape
-    y_acc, r_acc, cfg = _cutile_autotune_mhc_split_gemm_rms(
-        torch.cuda.current_stream(),
-        x,
-        w,
-        M,
-        N,
-        K,
-        cfg=cfg,
-    )
-    return _mhc_finalize_scale_bias_sigmoid(
-        y_acc,
-        r_acc,
-        n,
-        alpha_pre,
-        alpha_post,
-        alpha_res,
-        bias,
-        M,
-        K,
-        cfg=cfg,
-    )
-
-
 @register_impl("mhc_apply_residual", backend="cutile")
 def mhc_apply_residual(
     x: torch.Tensor,
@@ -570,6 +530,31 @@ def mhc_apply_residual(
         ),
     )
     return out
+
+
+@experimental_kernel
+@ct.kernel
+def _mhc_sinkhorn_kernel(
+    Y,
+    N: ct.Constant[int],
+):
+    """Sinkhorn-Knopp normalization for residual block (in-place on Y)."""
+    row = ct.bid(0)
+    total = N * N
+    mat = ct.load(Y, index=(row, 0), shape=(1, total))
+    mat = ct.reshape(mat, (N, N))
+    mat = ct.astype(mat, ct.float32)
+    mat = ct.exp2(mat * LOG2E)
+
+    for _ in range(20):
+        row_sum = ct.sum(mat, axis=1, keepdims=True)
+        mat = mat / row_sum
+        col_sum = ct.sum(mat, axis=0, keepdims=True)
+        mat = mat / col_sum
+
+    mat = ct.reshape(mat, (1, total))
+    mat = ct.astype(mat, Y.dtype)
+    ct.store(Y, index=(row, 0), tile=mat)
 
 
 @register_impl("mhc_sinkhorn", backend="cutile")

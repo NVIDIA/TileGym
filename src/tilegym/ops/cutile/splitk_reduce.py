@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
+
 import math
 
 import cuda.tile as ct
@@ -10,7 +11,6 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 

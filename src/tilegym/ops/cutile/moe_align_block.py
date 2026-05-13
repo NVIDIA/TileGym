@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+
 from typing import Tuple
 
 import cuda.tile as ct
@@ -9,10 +10,6 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.ops.cutile.utils import next_power_of_2
-
-
-def _ceil_div(a, b):
-    return (a + b - 1) // b
 
 
 @ct.kernel
@@ -160,6 +157,10 @@ def _moe_align_block_size_stage4_kernel(
         ct.scatter(sorted_token_ids, rank_post_pad, current_idx_tile)
         new_token_cnt = token_cnt + ct.ones((1,), dtype=ct.int32)
         ct.scatter(tokens_cnts, cnt_offset, new_token_cnt)
+
+
+def _ceil_div(a, b):
+    return (a + b - 1) // b
 
 
 def _moe_align_block_size(

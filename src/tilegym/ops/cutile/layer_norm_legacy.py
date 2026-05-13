@@ -14,9 +14,43 @@ from tilegym.backend import register_impl
 from .utils import next_power_of_2
 
 # Module-level tune cache: (N, D, BLOCK_D, IS_SWISH, TRAINING, COMPUTE_MEAN_AND_RSTD, dtype, device) -> (best_cfg, tuned_kernel)
+
+
 _layer_norm_legacy_tune_cache: dict = {}
 
 PAD_ZERO = ct.PaddingMode.ZERO
+
+
+def _persistent_layer_norm_autotune_configs():
+    """
+    Autotune config generator for persistent layer norm.
+
+    Generates configurations:
+    - BLOCK_N: [2, 4, 8, 16, 32] - number of rows per block
+    - num_ctas: [1] - single CTA for this kernel
+    """
+    for block_n in [2, 4, 8, 16, 32]:
+        yield SimpleNamespace(BLOCK_N=block_n, num_ctas=1)
+
+
+def _get_default_persistent_layer_norm_configs():
+    """GPU-specific defaults when autotune is disabled."""
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability[0] < 9:
+        # Smaller BLOCK_N reduces shared memory pressure on pre-SM90 GPUs.
+        return {"BLOCK_N": 4, "num_ctas": 1}
+    return {"BLOCK_N": 8, "num_ctas": 1}
+
+
+def _persistent_layer_norm_early_config_prune(configs, N, D, BLOCK_D):
+    """Prune configs that exceed register limits."""
+    pruned_configs = []
+    for cfg in configs:
+        BLOCK_N = cfg.BLOCK_N
+        # Register limit check: BLOCK_N * BLOCK_D / (8 * 32) <= 256
+        if BLOCK_N * BLOCK_D / (8 * 32) <= 256:
+            pruned_configs.append(cfg)
+    return pruned_configs
 
 
 @ct.kernel
@@ -78,97 +112,6 @@ def _layer_norm_fwd_kernel(
         y = x_hat * w + b
         y = ct.astype(y, X.dtype)
         ct.scatter(Y, (row_tile, cols), y)
-
-
-class _LayerNorm(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, normalized_shape, weight, bias, eps, weight_shift=0.0):
-        # allocate output
-        y = torch.empty_like(x)
-        # reshape input data into 2D tensor
-        x_arg = x.reshape(-1, x.shape[-1])
-        M, N = x_arg.shape
-        mean = torch.empty((M,), dtype=torch.float32, device="cuda")
-        rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
-        # Less than 64KB per feature: enqueue fused kernel
-        MAX_FUSED_SIZE = 65536 // x.element_size()
-        # Largest power-of-2 <= N so partial last block is handled by kernel masking (e.g. N=9 -> BLOCK_SIZE=8).
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, 1 << (N.bit_length() - 1)) if N >= 1 else 1
-        if N > MAX_FUSED_SIZE:
-            raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-        # heuristics for number of warps
-        num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
-
-        # Pass X, Y as 2D (M, N) so gather/scatter bounds (row < M, cols < N) mask partial block
-        # (e.g. N=9, BLOCK_SIZE=8) without writing into the next row.
-        y_arg = y.reshape(-1, y.shape[-1])
-        grid = (M,)
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            _layer_norm_fwd_kernel,
-            (
-                x_arg,
-                y_arg,
-                weight,
-                bias,
-                mean,
-                rstd,
-                N,
-                eps,
-                weight_shift,
-                BLOCK_SIZE,
-            ),
-        )
-        ctx.save_for_backward(x, weight, bias, mean, rstd)
-        ctx.BLOCK_SIZE = BLOCK_SIZE
-        ctx.num_warps = num_warps
-        ctx.eps = eps
-        ctx.weight_shift = weight_shift
-        return y
-
-    @staticmethod
-    def backward(ctx, dy):
-        raise NotImplementedError("LayerNorm backward is not implemented for this backend")
-
-
-def _switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
-    """Switch tensor to contiguous layout if needed."""
-    if x.stride(-1) == 1:
-        return x
-    return x.contiguous()
-
-
-def _persistent_layer_norm_autotune_configs():
-    """
-    Autotune config generator for persistent layer norm.
-
-    Generates configurations:
-    - BLOCK_N: [2, 4, 8, 16, 32] - number of rows per block
-    - num_ctas: [1] - single CTA for this kernel
-    """
-    for block_n in [2, 4, 8, 16, 32]:
-        yield SimpleNamespace(BLOCK_N=block_n, num_ctas=1)
-
-
-def _get_default_persistent_layer_norm_configs():
-    """GPU-specific defaults when autotune is disabled."""
-    gpu_capability = torch.cuda.get_device_capability()
-    if gpu_capability[0] < 9:
-        # Smaller BLOCK_N reduces shared memory pressure on pre-SM90 GPUs.
-        return {"BLOCK_N": 4, "num_ctas": 1}
-    return {"BLOCK_N": 8, "num_ctas": 1}
-
-
-def _persistent_layer_norm_early_config_prune(configs, N, D, BLOCK_D):
-    """Prune configs that exceed register limits."""
-    pruned_configs = []
-    for cfg in configs:
-        BLOCK_N = cfg.BLOCK_N
-        # Register limit check: BLOCK_N * BLOCK_D / (8 * 32) <= 256
-        if BLOCK_N * BLOCK_D / (8 * 32) <= 256:
-            pruned_configs.append(cfg)
-    return pruned_configs
 
 
 @ct.kernel
@@ -236,6 +179,65 @@ def _persistent_layer_norm_fwd_kernel(
             y = ct.sigmoid(y) * x
         y = ct.astype(y, ct.bfloat16)
         ct.store(Y, index=(current_pid, 0), tile=y, allow_tma=False)
+
+
+def _switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
+    """Switch tensor to contiguous layout if needed."""
+    if x.stride(-1) == 1:
+        return x
+    return x.contiguous()
+
+
+class _LayerNorm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, normalized_shape, weight, bias, eps, weight_shift=0.0):
+        # allocate output
+        y = torch.empty_like(x)
+        # reshape input data into 2D tensor
+        x_arg = x.reshape(-1, x.shape[-1])
+        M, N = x_arg.shape
+        mean = torch.empty((M,), dtype=torch.float32, device="cuda")
+        rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+        # Less than 64KB per feature: enqueue fused kernel
+        MAX_FUSED_SIZE = 65536 // x.element_size()
+        # Largest power-of-2 <= N so partial last block is handled by kernel masking (e.g. N=9 -> BLOCK_SIZE=8).
+        BLOCK_SIZE = min(MAX_FUSED_SIZE, 1 << (N.bit_length() - 1)) if N >= 1 else 1
+        if N > MAX_FUSED_SIZE:
+            raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+        # heuristics for number of warps
+        num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
+
+        # Pass X, Y as 2D (M, N) so gather/scatter bounds (row < M, cols < N) mask partial block
+        # (e.g. N=9, BLOCK_SIZE=8) without writing into the next row.
+        y_arg = y.reshape(-1, y.shape[-1])
+        grid = (M,)
+        ct.launch(
+            torch.cuda.current_stream(),
+            grid,
+            _layer_norm_fwd_kernel,
+            (
+                x_arg,
+                y_arg,
+                weight,
+                bias,
+                mean,
+                rstd,
+                N,
+                eps,
+                weight_shift,
+                BLOCK_SIZE,
+            ),
+        )
+        ctx.save_for_backward(x, weight, bias, mean, rstd)
+        ctx.BLOCK_SIZE = BLOCK_SIZE
+        ctx.num_warps = num_warps
+        ctx.eps = eps
+        ctx.weight_shift = weight_shift
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        raise NotImplementedError("LayerNorm backward is not implemented for this backend")
 
 
 def _persistent_layer_norm_autotune_base(

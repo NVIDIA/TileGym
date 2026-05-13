@@ -6,17 +6,15 @@ import math
 
 import cuda.tile as ct
 import torch
-
-# Type aliases for constants
-ConstInt = ct.Constant[int]
-ConstBool = ct.Constant[bool]
-
 from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
 from .splitk_reduce import splitk_reduce
 from .utils import next_power_of_2
+
+ConstInt = ct.Constant[int]
+ConstBool = ct.Constant[bool]
 
 INV_LOG_2 = 1.0 / math.log(2)
 

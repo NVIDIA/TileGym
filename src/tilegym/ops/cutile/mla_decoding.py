@@ -10,7 +10,6 @@ from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 

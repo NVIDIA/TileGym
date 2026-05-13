@@ -12,10 +12,57 @@ from cuda.tile.tune import exhaustive_search
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (batch_size, M, N, K, transpose_a, transpose_b, dtype, device) -> (best_cfg, tuned_kernel)
+
+
 _bmm_tune_cache: dict = {}
 
 
+def _bmm_autotune_configs():
+    if torch.cuda.get_device_capability() in [(12, 0), (12, 1)]:
+        # B200 (sm_120/121): Use smaller tiles with occupancy tuning, num_ctas=1
+        for TILE_M in [64, 128]:
+            for TILE_N in [64, 128]:
+                for TILE_K in [32, 64]:
+                    for occupancy in [1, 2, 4]:
+                        yield SimpleNamespace(
+                            TILE_M=TILE_M,
+                            TILE_N=TILE_N,
+                            TILE_K=TILE_K,
+                            GROUP_SIZE_M=8,
+                            occupancy=occupancy,
+                            num_ctas=1,
+                        )
+    elif torch.cuda.get_device_capability()[0] < 9:
+        # SM80 (A100): avoid 256×256 tiles and num_ctas=2 (not supported).
+        for TILE_M in [64, 128]:
+            for TILE_N in [64, 128]:
+                for TILE_K in [32, 64, 128]:
+                    for occupancy in [1, 2]:
+                        yield SimpleNamespace(
+                            TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=1
+                        )
+    elif torch.cuda.get_device_capability() == (9, 0):
+        # H100 (sm_90): Medium tiles with occupancy tuning
+        for TILE_M in [64, 128, 256]:
+            for TILE_N in [64, 128, 256]:
+                for TILE_K in [64]:
+                    for occupancy in [1, 2]:
+                        yield SimpleNamespace(
+                            TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=2
+                        )
+    else:
+        # Other GPUs (e.g., GB100): Larger tiles with num_ctas=2
+        for TILE_M in [128, 256]:
+            for TILE_N in [256]:
+                for TILE_K in [64]:
+                    yield SimpleNamespace(
+                        TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=1, num_ctas=2
+                    )
+
+
 # CuTile implementation of BMM kernel
+
+
 @ct.kernel
 def _bmm_kernel(A, B, C, TM: ct.Constant[int], TN: ct.Constant[int], TK: ct.Constant[int]):
     """CuTile kernel for batch matrix multiplication
@@ -167,49 +214,6 @@ def _static_persistent_bmm_kernel(
         # Reshape to 3D for store
         result_3d = ct.reshape(result, (1, TILE_M, TILE_N))
         ct.store(C, index=(bid_q, bid_m, bid_n), tile=result_3d, order=(0, 1, 2), latency=3)
-
-
-def _bmm_autotune_configs():
-    if torch.cuda.get_device_capability() in [(12, 0), (12, 1)]:
-        # B200 (sm_120/121): Use smaller tiles with occupancy tuning, num_ctas=1
-        for TILE_M in [64, 128]:
-            for TILE_N in [64, 128]:
-                for TILE_K in [32, 64]:
-                    for occupancy in [1, 2, 4]:
-                        yield SimpleNamespace(
-                            TILE_M=TILE_M,
-                            TILE_N=TILE_N,
-                            TILE_K=TILE_K,
-                            GROUP_SIZE_M=8,
-                            occupancy=occupancy,
-                            num_ctas=1,
-                        )
-    elif torch.cuda.get_device_capability()[0] < 9:
-        # SM80 (A100): avoid 256×256 tiles and num_ctas=2 (not supported).
-        for TILE_M in [64, 128]:
-            for TILE_N in [64, 128]:
-                for TILE_K in [32, 64, 128]:
-                    for occupancy in [1, 2]:
-                        yield SimpleNamespace(
-                            TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=1
-                        )
-    elif torch.cuda.get_device_capability() == (9, 0):
-        # H100 (sm_90): Medium tiles with occupancy tuning
-        for TILE_M in [64, 128, 256]:
-            for TILE_N in [64, 128, 256]:
-                for TILE_K in [64]:
-                    for occupancy in [1, 2]:
-                        yield SimpleNamespace(
-                            TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=2
-                        )
-    else:
-        # Other GPUs (e.g., GB100): Larger tiles with num_ctas=2
-        for TILE_M in [128, 256]:
-            for TILE_N in [256]:
-                for TILE_K in [64]:
-                    yield SimpleNamespace(
-                        TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=1, num_ctas=2
-                    )
 
 
 def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, transpose_a, transpose_b):

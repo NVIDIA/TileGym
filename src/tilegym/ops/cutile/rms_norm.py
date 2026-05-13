@@ -11,6 +11,8 @@ from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
+_bwd_cfg: dict = {}  # (M, N) → (tile_m, tile_n, grid, N)
+
 
 @ct.kernel
 def _rms_norm_kernel_multi_wave_cached(
@@ -227,9 +229,6 @@ def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int
     ct.store(dw_partial, index=(bid, 0), tile=dw_acc, allow_tma=False)
 
 
-_bwd_cfg: dict = {}  # (M, N) → (tile_m, tile_n, grid, N)
-
-
 def _bwd_tiles(M, N):
     """Heuristic tile configuration for backward kernel."""
     T = next_power_of_2(N)
@@ -245,6 +244,27 @@ def _bwd_tiles(M, N):
     if tiles <= 64:
         g = min(g, 32)
     return (tm, T, g, N)
+
+
+def rms_norm_backward_workspace_bytes(M: int, N: int) -> int:
+    """Return temporary workspace traffic for the standalone backward benchmark."""
+    _, tile_n, grid, _ = _bwd_tiles(M, N)
+    return grid * tile_n * 4 * 2
+
+
+def compute_rms_norm_rstd_torch(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compute the PyTorch reference RMSNorm rstd used by standalone backward benchmarks."""
+    return _TileRMSNorm.compute_rstd_torch(x, eps)
+
+
+def rms_norm_backward_torch(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    weight: torch.Tensor,
+    rstd: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """PyTorch reference implementation for standalone RMSNorm backward."""
+    return _TileRMSNorm.rms_norm_backward_torch(x, dy, weight, rstd)
 
 
 def _rms_norm_backward(
@@ -291,12 +311,6 @@ def rms_norm_backward(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Standalone cuTile RMSNorm backward entry point."""
     return _rms_norm_backward(x, dy, weight, rstd)
-
-
-def rms_norm_backward_workspace_bytes(M: int, N: int) -> int:
-    """Return temporary workspace traffic for the standalone backward benchmark."""
-    _, tile_n, grid, _ = _bwd_tiles(M, N)
-    return grid * tile_n * 4 * 2
 
 
 class _RMSNorm(torch.autograd.Function):
@@ -589,21 +603,6 @@ class _TileRMSNorm(nn.Module):
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}, offset={self.offset}"
-
-
-def compute_rms_norm_rstd_torch(x: torch.Tensor, eps: float) -> torch.Tensor:
-    """Compute the PyTorch reference RMSNorm rstd used by standalone backward benchmarks."""
-    return _TileRMSNorm.compute_rstd_torch(x, eps)
-
-
-def rms_norm_backward_torch(
-    x: torch.Tensor,
-    dy: torch.Tensor,
-    weight: torch.Tensor,
-    rstd: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """PyTorch reference implementation for standalone RMSNorm backward."""
-    return _TileRMSNorm.rms_norm_backward_torch(x, dy, weight, rstd)
 
 
 class _RMSNormForGemma3(_TileRMSNorm):

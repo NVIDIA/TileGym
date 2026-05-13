@@ -26,6 +26,12 @@ INV_LOG_2 = 1.0 / math.log(2)  # pre-computed for exp2-based softmax
 _NEG_INF = -1e30  # sentinel for masked-out attention positions
 
 
+# -- host launcher --
+
+_DEFAULT_TILE_M = 64
+_DEFAULT_TILE_N = 128  # autotuned: 1.9x faster than N=64 on B300
+
+
 def _cdiv(a, b):
     return (a + b - 1) // b
 
@@ -115,89 +121,6 @@ def _swa_fwd_kernel(
     l_i = ct.maximum(l_i, ct.full((TILE_M,), 1e-6, dtype=ct.float32))
     out = acc / ct.expand_dims(l_i, axis=1)
     ct.store(Out, index=(q_offset, 0), tile=ct.astype(out, ct.float16))
-
-
-# -- host launcher --
-
-_DEFAULT_TILE_M = 64
-_DEFAULT_TILE_N = 128  # autotuned: 1.9x faster than N=64 on B300
-
-
-@register_impl("swa_attention", backend="cutile")
-def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwargs):
-    # q: (B, H, S_Q, D), k/v: (B, H_K, S_K, D) -- fp16
-    if q.dtype not in (torch.float16,):
-        raise ValueError(f"SWA kernel requires fp16 input, got {q.dtype}")
-
-    B, H, S_Q, D = q.shape
-    _, H_K, S_K, _ = k.shape
-
-    if scaling is None:
-        scaling = 1.0 / math.sqrt(D)
-    if window_size <= 0:
-        window_size = S_K  # non-positive W means full causal
-
-    # expand KV heads for GQA (Mistral uses 8 KV heads for 32 Q heads)
-    if H_K != H:
-        if H_K > H or H % H_K != 0:
-            raise ValueError(
-                f"Invalid GQA head configuration: query heads H={H} must be an integer multiple of KV heads H_K={H_K}."
-            )
-        kv_repeat = H // H_K
-        k = k.repeat_interleave(kv_repeat, dim=1)
-        v = v.repeat_interleave(kv_repeat, dim=1)
-
-    TILE_M = _DEFAULT_TILE_M
-    TILE_N = _DEFAULT_TILE_N
-
-    # compute strides: how many tiles each head occupies in the flat buffer
-    stride_q = _cdiv(S_Q, TILE_M)
-    stride_kv = _cdiv(S_K, TILE_N)
-    S_Q_padded = stride_q * TILE_M
-    S_K_padded = stride_kv * TILE_N
-
-    # flatten (B, H, S, D) -> (B*H, S, D) for contiguous tile indexing
-    q_3d = q.reshape(B * H, S_Q, D)
-    k_3d = k.reshape(B * H, S_K, D)
-    v_3d = v.reshape(B * H, S_K, D)
-
-    # pad seq dim to tile boundary so tile loads don't cross head boundaries
-    if S_Q_padded != S_Q:
-        q_3d = F.pad(q_3d, (0, 0, 0, S_Q_padded - S_Q))
-    if S_K_padded != S_K:
-        k_3d = F.pad(k_3d, (0, 0, 0, S_K_padded - S_K))
-        v_3d = F.pad(v_3d, (0, 0, 0, S_K_padded - S_K))
-
-    # reshape to (B*H*S_padded, D) -- the kernel indexes this as a 2D tile grid
-    q_flat = q_3d.reshape(-1, D).contiguous()
-    k_flat = k_3d.reshape(-1, D).contiguous()
-    v_flat = v_3d.reshape(-1, D).contiguous()
-    out_flat = torch.empty_like(q_flat)
-
-    ct.launch(
-        torch.cuda.current_stream(),
-        (stride_q, B * H, 1),
-        _swa_fwd_kernel,
-        (
-            q_flat,
-            k_flat,
-            v_flat,
-            out_flat,
-            scaling,
-            S_K,
-            window_size,
-            stride_q,
-            stride_kv,
-            TILE_M,
-            TILE_N,
-            D,
-            is_causal,
-        ),
-    )
-
-    # strip padding and reshape back to (B, H, S_Q, D)
-    out_3d = out_flat.reshape(B * H, S_Q_padded, D)[:, :S_Q, :]
-    return out_3d.reshape(B, H, S_Q, D).contiguous()
 
 
 # -- HuggingFace model integration --
@@ -295,3 +218,80 @@ def apply_tilegym_swa_to_mistral(window_size=4096, use_cutile=True):
         pass
     except Exception:
         raise
+
+
+@register_impl("swa_attention", backend="cutile")
+def tile_swa_attention(q, k, v, window_size, scaling=None, is_causal=True, **kwargs):
+    # q: (B, H, S_Q, D), k/v: (B, H_K, S_K, D) -- fp16
+    if q.dtype not in (torch.float16,):
+        raise ValueError(f"SWA kernel requires fp16 input, got {q.dtype}")
+
+    B, H, S_Q, D = q.shape
+    _, H_K, S_K, _ = k.shape
+
+    if scaling is None:
+        scaling = 1.0 / math.sqrt(D)
+    if window_size <= 0:
+        window_size = S_K  # non-positive W means full causal
+
+    # expand KV heads for GQA (Mistral uses 8 KV heads for 32 Q heads)
+    if H_K != H:
+        if H_K > H or H % H_K != 0:
+            raise ValueError(
+                f"Invalid GQA head configuration: query heads H={H} must be an integer multiple of KV heads H_K={H_K}."
+            )
+        kv_repeat = H // H_K
+        k = k.repeat_interleave(kv_repeat, dim=1)
+        v = v.repeat_interleave(kv_repeat, dim=1)
+
+    TILE_M = _DEFAULT_TILE_M
+    TILE_N = _DEFAULT_TILE_N
+
+    # compute strides: how many tiles each head occupies in the flat buffer
+    stride_q = _cdiv(S_Q, TILE_M)
+    stride_kv = _cdiv(S_K, TILE_N)
+    S_Q_padded = stride_q * TILE_M
+    S_K_padded = stride_kv * TILE_N
+
+    # flatten (B, H, S, D) -> (B*H, S, D) for contiguous tile indexing
+    q_3d = q.reshape(B * H, S_Q, D)
+    k_3d = k.reshape(B * H, S_K, D)
+    v_3d = v.reshape(B * H, S_K, D)
+
+    # pad seq dim to tile boundary so tile loads don't cross head boundaries
+    if S_Q_padded != S_Q:
+        q_3d = F.pad(q_3d, (0, 0, 0, S_Q_padded - S_Q))
+    if S_K_padded != S_K:
+        k_3d = F.pad(k_3d, (0, 0, 0, S_K_padded - S_K))
+        v_3d = F.pad(v_3d, (0, 0, 0, S_K_padded - S_K))
+
+    # reshape to (B*H*S_padded, D) -- the kernel indexes this as a 2D tile grid
+    q_flat = q_3d.reshape(-1, D).contiguous()
+    k_flat = k_3d.reshape(-1, D).contiguous()
+    v_flat = v_3d.reshape(-1, D).contiguous()
+    out_flat = torch.empty_like(q_flat)
+
+    ct.launch(
+        torch.cuda.current_stream(),
+        (stride_q, B * H, 1),
+        _swa_fwd_kernel,
+        (
+            q_flat,
+            k_flat,
+            v_flat,
+            out_flat,
+            scaling,
+            S_K,
+            window_size,
+            stride_q,
+            stride_kv,
+            TILE_M,
+            TILE_N,
+            D,
+            is_causal,
+        ),
+    )
+
+    # strip padding and reshape back to (B, H, S_Q, D)
+    out_3d = out_flat.reshape(B * H, S_Q_padded, D)[:, :S_Q, :]
+    return out_3d.reshape(B, H, S_Q, D).contiguous()
