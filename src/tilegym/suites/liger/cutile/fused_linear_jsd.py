@@ -134,7 +134,10 @@ def _fused_linear_jsd_forward(
         if compute_grad_input:
             grad_input[start_idx:end_idx] = grad_chunk_dtype @ student_weight
         if compute_grad_weight:
-            grad_weight.add_(grad_chunk_dtype.t() @ student_input_chunk)
+            if grad_weight.dtype == grad_chunk_dtype.dtype == student_input_chunk.dtype:
+                grad_weight.addmm_(grad_chunk_dtype.t(), student_input_chunk)
+            else:
+                grad_weight.add_(grad_chunk_dtype.t() @ student_input_chunk)
 
     return total_loss, grad_input, grad_weight
 
