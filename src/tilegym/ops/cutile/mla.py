@@ -14,7 +14,14 @@ from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (S_qo, TILE_D, TILE_KPE, H, query_group_size, dtype, device) -> (best_cfg, tuned_kernel)
+
+
 _mla_tune_cache: dict = {}
+
+
+ConstInt = ct.Constant[int]
+
+INV_LOG_2 = 1.0 / math.log(2)
 
 
 def _mla_sm80_autotune_configs():
@@ -29,12 +36,6 @@ def _mla_sm90_autotune_configs():
     for tm in [64, 128, 256]:
         for tn in [64, 128]:
             yield SimpleNamespace(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=1)
-
-
-# Type aliases for constants
-ConstInt = ct.Constant[int]
-
-INV_LOG_2 = 1.0 / math.log(2)
 
 
 @ct.kernel
@@ -220,25 +221,6 @@ class _AttentionFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do):
         raise NotImplementedError("Backward pass is not implemented for CuTile MLA")
-
-
-class _Attention:
-    def __init__(self, IS_CAUSAL, kernel_configs):
-        self.IS_CAUSAL = IS_CAUSAL
-        self.kernel_configs = kernel_configs
-
-    def __call__(self, q, k, v, sm_scale, qpe=None, kpe=None):
-        c = _AttentionFunction.apply(
-            q,
-            qpe,
-            k,
-            kpe,
-            v,
-            sm_scale,
-            self.IS_CAUSAL,
-            self.kernel_configs,
-        )
-        return c
 
 
 def _cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_size):

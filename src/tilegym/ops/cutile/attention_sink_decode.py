@@ -13,7 +13,6 @@ from tilegym.ops.cutile.splitk_reduce import splitk_reduce
 
 from .utils import next_power_of_2
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
 ConstBool = ct.Constant[bool]

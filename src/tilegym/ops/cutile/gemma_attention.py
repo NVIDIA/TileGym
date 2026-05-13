@@ -23,13 +23,13 @@ from cuda.tile.tune import exhaustive_search
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (B, H, S_qo, S_kv, BLOCK_D, query_group_size, stage, window_size, soft_cap_val, has_soft_cap, dtype, device) -> (best_cfg, tuned_kernel)
+
+
 _gemma_fmha_tune_cache: dict = {}
 
-# Constants
 INV_LOG_2 = 1.0 / math.log(2)
 LOG_2 = math.log(2)
 
-# Define type aliases for Constant integers and booleans
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
 ConstBool = ct.Constant[bool]
@@ -158,6 +158,17 @@ def _gemma_attn_fwd_inner(
     return acc, l_i, m_i
 
 
+def _gemma_fmha_autotune_configs():
+    """Iterator of autotune configurations for gemma FMHA kernel."""
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability[0] < 9:
+        yield SimpleNamespace(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=64, num_ctas=1, occupancy=2)
+    else:
+        yield SimpleNamespace(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2)
+
+
 @ct.kernel(occupancy=2)
 def _gemma_fmha_kernel(
     Q,
@@ -271,17 +282,6 @@ def _gemma_fmha_kernel(
     acc = ct.truediv(acc, l_i[:, None], flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, BLOCK_M, BLOCK_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
-
-
-def _gemma_fmha_autotune_configs():
-    """Iterator of autotune configurations for gemma FMHA kernel."""
-    gpu_capability = torch.cuda.get_device_capability()
-    if gpu_capability[0] < 9:
-        yield SimpleNamespace(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=64, num_ctas=1, occupancy=2)
-    else:
-        yield SimpleNamespace(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2)
 
 
 def _cutile_autotune_gemma_fmha(

@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -16,9 +17,24 @@ logger = get_logger(__name__)
 # Module-level tune cache: (group_shapes, transpose_b, dtype, device) -> (best_cfg, tuned_kernel)
 _group_gemm_tune_cache: dict = {}
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
+
+
+def _group_gemm_autotune_configs():
+    """
+    Iterator of autotune configurations for group GEMM kernel.
+    """
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability in [(12, 0), (12, 1)]:
+        yield SimpleNamespace(TILE_M=64, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=64, num_ctas=1, occupancy=1)
+    elif gpu_capability[0] < 9:
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
+    else:
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=256, TILE_N=256, TILE_K=64, num_ctas=2, occupancy=1)
 
 
 @ct.kernel
@@ -103,22 +119,6 @@ def _group_gemm_kernel(
 
         # Update the end position for the next group
         last_problem_end = last_problem_end + num_tiles
-
-
-def _group_gemm_autotune_configs():
-    """
-    Iterator of autotune configurations for group GEMM kernel.
-    """
-    gpu_capability = torch.cuda.get_device_capability()
-    if gpu_capability in [(12, 0), (12, 1)]:
-        yield SimpleNamespace(TILE_M=64, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=64, num_ctas=1, occupancy=1)
-    elif gpu_capability[0] < 9:
-        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
-    else:
-        yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_M=256, TILE_N=256, TILE_K=64, num_ctas=2, occupancy=1)
 
 
 def _cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device):

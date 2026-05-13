@@ -19,6 +19,8 @@ from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 # Module-level tune caches for fmha forward, dkdv backward, and dq backward
+
+
 _fmha_fwd_tune_cache: dict = {}
 _fmha_bwd_dkdv_tune_cache: dict = {}
 _fmha_bwd_dq_tune_cache: dict = {}
@@ -28,7 +30,6 @@ logger = get_logger(__name__)
 INV_LOG_2 = 1.0 / math.log(2)
 LN2 = math.log(2)
 
-# Define type aliases for Constant integers and booleans
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 
@@ -37,6 +38,8 @@ ConstBool = ct.Constant[bool]
 # @ct.kernel() entry point so it can be reused by different kernels
 # (e.g. standalone prefill attention and fused POD attention) without
 # duplicating the attention computation code.
+
+
 def fmha_kernel_impl(
     Q,
     K,
@@ -159,6 +162,89 @@ def fmha_kernel_impl(
     acc = ct.truediv(acc, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, TILE_M, TILE_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
+
+
+_FMHA_BWD_DKDV_TILE_CONFIGS_BY_D = {
+    64: ([32, 64, 128], [64, 128]),
+    128: ([16, 32, 64], [32, 64]),
+    256: ([32], [32, 64]),
+}
+
+_FMHA_BWD_DQ_TILE_CONFIGS_BY_D = {
+    64: ([64, 128], [32, 64, 128]),
+    128: ([32, 64], [16, 32, 64]),
+    256: ([64], [32, 64]),
+}
+
+
+def _iter_tile_configs(tile_ms: list[int], tile_ns: list[int]):
+    for tm in tile_ms:
+        for tn in tile_ns:
+            yield SimpleNamespace(TILE_M=tm, TILE_N=tn)
+
+
+def _fmha_autotune_configs(head_dim: int | None = None):
+    """
+    Iterator of autotune configurations for FMHA forward kernel.
+    """
+    gpu_capability = torch.cuda.get_device_capability()
+
+    if gpu_capability in [(12, 0), (12, 1)]:
+        # sm120, sm121
+        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
+    elif gpu_capability[0] < 9:
+        # GPU capability < 9.0
+        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=128, TILE_N=64, num_ctas=1, occupancy=2)
+    else:
+        # sm100 (Blackwell)
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=2, occupancy=2)
+
+
+def _fmha_bwd_autotune_configs(head_dim: int | None = None):
+    """Reference configs for FMHA backward (used for padding/preprocess only).
+
+    The actual autotuning is done by _fmha_bwd_dkdv_autotune_configs and
+    _fmha_bwd_dq_autotune_configs. This function provides the superset of
+    tile sizes for padding calculation.
+    """
+    key = _head_dim_key(head_dim)
+    dkdv_ms, dkdv_ns = _FMHA_BWD_DKDV_TILE_CONFIGS_BY_D.get(key, ([32, 64, 128], [64, 128]))
+    dq_ms, dq_ns = _FMHA_BWD_DQ_TILE_CONFIGS_BY_D.get(key, ([64, 128], [32, 64, 128]))
+    tile_ms = sorted(set(dkdv_ms + dq_ms))
+    tile_ns = sorted(set(dkdv_ns + dq_ns))
+    yield from _iter_tile_configs(tile_ms, tile_ns)
+
+
+def _fmha_bwd_dkdv_autotune_configs(head_dim: int | None = None):
+    """Autotune configurations for dK/dV kernel.
+
+    Only tunes tile sizes; num_ctas and occupancy are left to the compiler.
+
+    Search dimensions:
+    - TILE_M: [32, 64, 128] (Q tile, inner loop)
+    - TILE_N: [64, 128] (K/V tile, this block's tile)
+    """
+    key = _head_dim_key(head_dim)
+    tile_ms, tile_ns = _FMHA_BWD_DKDV_TILE_CONFIGS_BY_D.get(key, ([32, 64, 128], [64, 128]))
+    yield from _iter_tile_configs(tile_ms, tile_ns)
+
+
+def _fmha_bwd_dq_autotune_configs(head_dim: int | None = None):
+    """Autotune configurations for dQ kernel.
+
+    Only tunes tile sizes; num_ctas and occupancy are left to the compiler.
+
+    Search dimensions:
+    - TILE_M: [64, 128] (Q tile, this block's tile)
+    - TILE_N: [32, 64, 128] (K/V tile, inner loop)
+    """
+    key = _head_dim_key(head_dim)
+    tile_ms, tile_ns = _FMHA_BWD_DQ_TILE_CONFIGS_BY_D.get(key, ([64, 128], [32, 64, 128]))
+    yield from _iter_tile_configs(tile_ms, tile_ns)
 
 
 @experimental_kernel
@@ -599,63 +685,6 @@ def _fmha_bwd_dq_kernel(
     ct.store(dQ, index=(batch_idx, head_idx, bid_m, 0), tile=dq_store)
 
 
-_FMHA_BWD_DKDV_TILE_CONFIGS_BY_D = {
-    64: ([32, 64, 128], [64, 128]),
-    128: ([16, 32, 64], [32, 64]),
-    256: ([32], [32, 64]),
-}
-
-_FMHA_BWD_DQ_TILE_CONFIGS_BY_D = {
-    64: ([64, 128], [32, 64, 128]),
-    128: ([32, 64], [16, 32, 64]),
-    256: ([64], [32, 64]),
-}
-
-
-def _head_dim_key(head_dim: int | None) -> int | None:
-    if head_dim is None:
-        return None
-    return next_power_of_2(head_dim)
-
-
-def _iter_tile_configs(tile_ms: list[int], tile_ns: list[int]):
-    for tm in tile_ms:
-        for tn in tile_ns:
-            yield SimpleNamespace(TILE_M=tm, TILE_N=tn)
-
-
-def _kernel_hints(cfg, *, default_occupancy: int | None = 2):
-    hints = {}
-    num_ctas = getattr(cfg, "num_ctas", None)
-    occupancy = getattr(cfg, "occupancy", default_occupancy)
-    if num_ctas is not None:
-        hints["num_ctas"] = num_ctas
-    if occupancy is not None:
-        hints["occupancy"] = occupancy
-    return hints
-
-
-def _fmha_autotune_configs(head_dim: int | None = None):
-    """
-    Iterator of autotune configurations for FMHA forward kernel.
-    """
-    gpu_capability = torch.cuda.get_device_capability()
-
-    if gpu_capability in [(12, 0), (12, 1)]:
-        # sm120, sm121
-        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
-    elif gpu_capability[0] < 9:
-        # GPU capability < 9.0
-        yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_M=128, TILE_N=64, num_ctas=1, occupancy=2)
-    else:
-        # sm100 (Blackwell)
-        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=2, occupancy=2)
-
-
 @ct.kernel
 def _fmha_kernel(
     Q,
@@ -696,6 +725,23 @@ def _fmha_kernel(
         bid_x,
         bid_y,
     )
+
+
+def _head_dim_key(head_dim: int | None) -> int | None:
+    if head_dim is None:
+        return None
+    return next_power_of_2(head_dim)
+
+
+def _kernel_hints(cfg, *, default_occupancy: int | None = 2):
+    hints = {}
+    num_ctas = getattr(cfg, "num_ctas", None)
+    occupancy = getattr(cfg, "occupancy", default_occupancy)
+    if num_ctas is not None:
+        hints["num_ctas"] = num_ctas
+    if occupancy is not None:
+        hints["occupancy"] = occupancy
+    return hints
 
 
 def _cutile_autotune_fmha(
@@ -851,49 +897,6 @@ def tile_fmha(
     kernel_configs = kwargs.get("kernel_configs", None)
     o = _tile_prefill_fmha(q, k, v, scaling, is_causal, kernel_configs)
     return o
-
-
-def _fmha_bwd_autotune_configs(head_dim: int | None = None):
-    """Reference configs for FMHA backward (used for padding/preprocess only).
-
-    The actual autotuning is done by _fmha_bwd_dkdv_autotune_configs and
-    _fmha_bwd_dq_autotune_configs. This function provides the superset of
-    tile sizes for padding calculation.
-    """
-    key = _head_dim_key(head_dim)
-    dkdv_ms, dkdv_ns = _FMHA_BWD_DKDV_TILE_CONFIGS_BY_D.get(key, ([32, 64, 128], [64, 128]))
-    dq_ms, dq_ns = _FMHA_BWD_DQ_TILE_CONFIGS_BY_D.get(key, ([64, 128], [32, 64, 128]))
-    tile_ms = sorted(set(dkdv_ms + dq_ms))
-    tile_ns = sorted(set(dkdv_ns + dq_ns))
-    yield from _iter_tile_configs(tile_ms, tile_ns)
-
-
-def _fmha_bwd_dkdv_autotune_configs(head_dim: int | None = None):
-    """Autotune configurations for dK/dV kernel.
-
-    Only tunes tile sizes; num_ctas and occupancy are left to the compiler.
-
-    Search dimensions:
-    - TILE_M: [32, 64, 128] (Q tile, inner loop)
-    - TILE_N: [64, 128] (K/V tile, this block's tile)
-    """
-    key = _head_dim_key(head_dim)
-    tile_ms, tile_ns = _FMHA_BWD_DKDV_TILE_CONFIGS_BY_D.get(key, ([32, 64, 128], [64, 128]))
-    yield from _iter_tile_configs(tile_ms, tile_ns)
-
-
-def _fmha_bwd_dq_autotune_configs(head_dim: int | None = None):
-    """Autotune configurations for dQ kernel.
-
-    Only tunes tile sizes; num_ctas and occupancy are left to the compiler.
-
-    Search dimensions:
-    - TILE_M: [64, 128] (Q tile, this block's tile)
-    - TILE_N: [32, 64, 128] (K/V tile, inner loop)
-    """
-    key = _head_dim_key(head_dim)
-    tile_ms, tile_ns = _FMHA_BWD_DQ_TILE_CONFIGS_BY_D.get(key, ([64, 128], [32, 64, 128]))
-    yield from _iter_tile_configs(tile_ms, tile_ns)
 
 
 def fmha_forward_with_lse(

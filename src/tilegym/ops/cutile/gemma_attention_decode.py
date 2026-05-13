@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 """
 Gemma-specific attention decode implementation with soft cap and sliding window support.
 
@@ -23,11 +22,9 @@ from tilegym.backend import register_impl
 from .splitk_reduce import splitk_reduce
 from .utils import next_power_of_2
 
-# Constants
 INV_LOG_2 = 1.0 / math.log(2)
 LOG_2 = math.log(2)
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
 ConstBool = ct.Constant[bool]

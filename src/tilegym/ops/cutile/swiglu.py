@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-
 import cuda.tile as ct
 import torch
 import torch.nn as nn
@@ -25,10 +24,6 @@ def _silu(x):
     return x * _sigmoid(x)
 
 
-def _ceildiv(a, b):
-    return -(a // -b)
-
-
 @ct.kernel
 def _swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     row = ct.bid(0)
@@ -40,34 +35,6 @@ def _swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
     a_tile_f32 = a_tile.astype(ct.float32)
     c_tile = _silu(a_tile_f32).astype(a.dtype) * b_tile
     ct.scatter(c, (row, offsets), c_tile, check_bounds=True)
-
-
-def _swiglu_forward(a, b):
-    """
-    a: (batch_size, seq_len, intermediate_size)
-    b: (batch_size, seq_len, intermediate_size)
-    """
-    ori_shape = a.shape
-    n_cols = ori_shape[-1]
-    a = a.view(-1, n_cols)
-    b = b.view(-1, n_cols)
-    c = torch.empty_like(a)
-    n_rows = a.shape[0]
-
-    TILE_SIZE = next_power_of_2(n_cols)
-    grid = (n_rows,)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        _swiglu_forward_kernel,
-        (
-            a,
-            b,
-            c,
-            TILE_SIZE,
-        ),
-    )
-    return c.view(*ori_shape)
 
 
 # Backward kernel for swiglu
@@ -102,6 +69,38 @@ def _swiglu_backward_kernel(dc, a, b, da, db, TILE_SIZE: ct.Constant[int]):
     silu_grad = sigmoid_a * (1.0 + a_tile_f32 * one_minus_sigmoid)
     da_tile = dc_tile * b_tile_f32 * silu_grad
     ct.store(da, index=(row, col), tile=da_tile.astype(a.dtype))
+
+
+def _ceildiv(a, b):
+    return -(a // -b)
+
+
+def _swiglu_forward(a, b):
+    """
+    a: (batch_size, seq_len, intermediate_size)
+    b: (batch_size, seq_len, intermediate_size)
+    """
+    ori_shape = a.shape
+    n_cols = ori_shape[-1]
+    a = a.view(-1, n_cols)
+    b = b.view(-1, n_cols)
+    c = torch.empty_like(a)
+    n_rows = a.shape[0]
+
+    TILE_SIZE = next_power_of_2(n_cols)
+    grid = (n_rows,)
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        _swiglu_forward_kernel,
+        (
+            a,
+            b,
+            c,
+            TILE_SIZE,
+        ),
+    )
+    return c.view(*ori_shape)
 
 
 def _swiglu_backward(dc, a, b):

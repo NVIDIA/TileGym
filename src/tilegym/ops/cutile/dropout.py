@@ -10,29 +10,6 @@ import torch
 from tilegym.backend import register_impl
 
 
-def _mix_seed(seed: int) -> int:
-    """Pre-mix a user-provided seed into a well-spread signed int32.
-
-    The cuTile kernel's internal hash (3 rounds of XOR-shift) does not
-    amplify small seed deltas — e.g. seed=11 vs seed=99 only differ in
-    the low bits of `combined = offsets*prime + seed`, and bit 30 of the
-    final hash (which drives the p=0.5 keep decision) ends up identical
-    across all lanes, so the mask is independent of the seed.
-
-    Multiplying the seed by Knuth's constant 0x9E3779B1 (== floor(2^32 / phi))
-    spreads the bits evenly across all 32 positions. Same input seed still
-    yields the same mixed seed (reproducibility), while different seeds
-    produce bit patterns with large Hamming distance, which the kernel's
-    XOR-shift can then amplify into a proper per-lane mask difference.
-    """
-    mixed = (int(seed) * 2654435761) & 0xFFFFFFFF
-    # Convert unsigned uint32 bit pattern to signed int32 (two's complement)
-    # so it can be passed as a `ct.Constant[int]` to the int32 kernel arg.
-    if mixed >= 0x80000000:
-        mixed -= 0x100000000
-    return mixed
-
-
 @ct.kernel
 def _dropout_kernel(
     x,
@@ -95,6 +72,29 @@ def _dropout_kernel(
         # In inference mode, just copy input to output
         output_tile = x_tile
     ct.scatter(output, offsets, output_tile)
+
+
+def _mix_seed(seed: int) -> int:
+    """Pre-mix a user-provided seed into a well-spread signed int32.
+
+    The cuTile kernel's internal hash (3 rounds of XOR-shift) does not
+    amplify small seed deltas — e.g. seed=11 vs seed=99 only differ in
+    the low bits of `combined = offsets*prime + seed`, and bit 30 of the
+    final hash (which drives the p=0.5 keep decision) ends up identical
+    across all lanes, so the mask is independent of the seed.
+
+    Multiplying the seed by Knuth's constant 0x9E3779B1 (== floor(2^32 / phi))
+    spreads the bits evenly across all 32 positions. Same input seed still
+    yields the same mixed seed (reproducibility), while different seeds
+    produce bit patterns with large Hamming distance, which the kernel's
+    XOR-shift can then amplify into a proper per-lane mask difference.
+    """
+    mixed = (int(seed) * 2654435761) & 0xFFFFFFFF
+    # Convert unsigned uint32 bit pattern to signed int32 (two's complement)
+    # so it can be passed as a `ct.Constant[int]` to the int32 kernel arg.
+    if mixed >= 0x80000000:
+        mixed -= 0x100000000
+    return mixed
 
 
 class _DropoutCuTileFunction(torch.autograd.Function):

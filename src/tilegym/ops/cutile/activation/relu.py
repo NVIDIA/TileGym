@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 import cuda.tile as ct
 import torch
 
 from tilegym.backend import register_impl
+
+# ReLU
 
 
 @ct.kernel
@@ -26,6 +27,9 @@ def _relu_fwd_kernel(x, y, N_ELEMENTS: ct.Constant[int], BLOCK_SIZE: ct.Constant
     y_f32 = ct.maximum(x_f32, zeros)
     y_tile = ct.astype(y_f32, x_tile.dtype)
     ct.scatter(y, offsets, y_tile)
+
+
+# Wrapper Classes
 
 
 class _ReluCuTileFunction(torch.autograd.Function):
@@ -55,6 +59,9 @@ class _ReluCuTileFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         raise NotImplementedError("Backward pass for ReLU activation is not implemented")
+
+
+# Public API Functions
 
 
 @register_impl("relu", backend="cutile")

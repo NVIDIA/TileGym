@@ -13,25 +13,13 @@ from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
-
-
-def _ensure_contiguous(fn):
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        def maybe_to_contiguous(x):
-            return x.contiguous() if isinstance(x, torch.Tensor) else x
-
-        args = [maybe_to_contiguous(arg) for arg in args]
-        kwargs = {k: maybe_to_contiguous(v) for k, v in kwargs.items()}
-        return fn(*args, **kwargs)
-
-    return wrapper
 
 
 # To be launched with grid = number of rows (batch_size)
 # each "block" computes an entire row of the ouptut
+
+
 @ct.kernel
 def _silu_and_mul_kernel_row_wise(
     input,
@@ -118,6 +106,19 @@ def _silu_and_mul_backward_kernel_row_wise(
     da_tile = dc_tile * (b_tile * silu_grad)
     da_tile = ct.astype(da_tile, input.dtype)
     ct.scatter(grad_a, (row_idx, offsets), da_tile, check_bounds=True)
+
+
+def _ensure_contiguous(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        def maybe_to_contiguous(x):
+            return x.contiguous() if isinstance(x, torch.Tensor) else x
+
+        args = [maybe_to_contiguous(arg) for arg in args]
+        kwargs = {k: maybe_to_contiguous(v) for k, v in kwargs.items()}
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _silu_and_mul_backward(

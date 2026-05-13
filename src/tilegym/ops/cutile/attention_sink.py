@@ -15,13 +15,32 @@ from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (batch_size, n_heads, n_ctx, head_dim, n_kv_ctx, bandwidth, dtype, device) -> (best_cfg, tuned_kernel)
+
+
 _attention_sink_tune_cache: dict = {}
 
 INV_LOG_2 = 1.0 / math.log(2)
 
-# Define type aliases for Constant integers and booleans
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
+
+
+def _attention_sink_autotune_configs():
+    """
+    Iterator of autotune configurations for attention_sink kernel.
+    """
+    gpu_capability = torch.cuda.get_device_capability()
+
+    if gpu_capability[0] < 9:
+        for TILE_M in [128, 64]:
+            for TILE_N in [64]:
+                for occupancy in [1, 2]:
+                    yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
+    else:
+        for TILE_M in [256, 128, 64]:
+            for TILE_N in [128, 64]:
+                for occupancy in [1, 2, 4]:
+                    yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
 
 
 @ct.kernel(occupancy=2)
@@ -158,24 +177,6 @@ def _attention_sink_kernel(
     acc = ct.truediv(acc, z, flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, TILE_M, TILE_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
-
-
-def _attention_sink_autotune_configs():
-    """
-    Iterator of autotune configurations for attention_sink kernel.
-    """
-    gpu_capability = torch.cuda.get_device_capability()
-
-    if gpu_capability[0] < 9:
-        for TILE_M in [128, 64]:
-            for TILE_N in [64]:
-                for occupancy in [1, 2]:
-                    yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
-    else:
-        for TILE_M in [256, 128, 64]:
-            for TILE_N in [128, 64]:
-                for occupancy in [1, 2, 4]:
-                    yield SimpleNamespace(TILE_M=TILE_M, TILE_N=TILE_N, num_ctas=1, occupancy=occupancy)
 
 
 def _cutile_autotune_attention_sink(

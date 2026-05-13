@@ -30,10 +30,6 @@ _SPARSE_MLA_TILE_HS = [1, 2, 4, 8, 16, 32, 64]
 _SPARSE_MLA_TILE_NS = [16, 32, 64, 128]
 
 
-def _is_power_of_2(x):
-    return x > 0 and (x & (x - 1)) == 0
-
-
 def _validate_sparse_mla_config(cfg, topk, H, query_group_size, *, explicit=False):
     """Validate a (TILE_H, TILE_N) config. Raises ValueError/AssertionError if invalid.
 
@@ -214,6 +210,10 @@ def _sparse_mla_fwd_kernel(
     acc = ct.reshape(acc, (1, TILE_H, 1, TILE_D))
     acc = ct.astype(acc, Out.dtype)
     ct.store(Out, index=(batch_idx, h_block_idx, s_i, 0), tile=acc)
+
+
+def _is_power_of_2(x):
+    return x > 0 and (x & (x - 1)) == 0
 
 
 def _launch_sparse_mla_fwd(

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 """Forward-only chunked fused Linear + Cross-Entropy for cuTile experiments."""
 
 import cuda.tile as ct

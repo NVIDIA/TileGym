@@ -9,7 +9,6 @@ from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
-# Type aliases for constants
 ConstInt = ct.Constant[int]
 PAD_ZERO = ct.PaddingMode.ZERO
 
