@@ -35,6 +35,9 @@ def get_supported_backends():
     return [p for p in ALL_BACKENDS if p is not None]
 
 
+_BENCHMARK_N_VALS = [256, 1024, 2048, 4096, 8192, 16384]
+
+
 def create_persistent_benchmark_config(num_rows, dtype):
     """Create benchmark config for persistent layer norm test"""
     available_backends = get_supported_backends()
@@ -46,7 +49,7 @@ def create_persistent_benchmark_config(num_rows, dtype):
 
     return triton.testing.Benchmark(
         x_names=["N"],
-        x_vals=[256, 1024, 2048, 4096, 8192, 16384],
+        x_vals=_BENCHMARK_N_VALS,
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
@@ -71,7 +74,7 @@ def create_legacy_benchmark_config(num_rows, dtype):
 
     return triton.testing.Benchmark(
         x_names=["N"],
-        x_vals=[256, 1024, 2048, 4096, 8192, 16384],
+        x_vals=_BENCHMARK_N_VALS,
         line_arg="backend",
         line_vals=list(backends),
         line_names=list(names),
