@@ -80,7 +80,7 @@ def create_benchmark_config(dtype):
         line_names=labels,
         styles=styles,
         ylabel="GB/s",
-        plot_name=f"rmsnorm-{dtype_name}-M{M_DEFAULT}",
+        plot_name=f"rmsnorm-{dtype_name}-M{M_DEFAULT}-GBps",
         args={
             "dtype": dtype,
             "M": M_DEFAULT,
