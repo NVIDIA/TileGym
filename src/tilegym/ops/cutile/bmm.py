@@ -12,8 +12,6 @@ from cuda.tile.tune import exhaustive_search
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (batch_size, M, N, K, transpose_a, transpose_b, dtype, device) -> (best_cfg, tuned_kernel)
-
-
 _bmm_tune_cache: dict = {}
 
 
@@ -61,8 +59,6 @@ def _bmm_autotune_configs():
 
 
 # CuTile implementation of BMM kernel
-
-
 @ct.kernel
 def _bmm_kernel(A, B, C, TM: ct.Constant[int], TN: ct.Constant[int], TK: ct.Constant[int]):
     """CuTile kernel for batch matrix multiplication

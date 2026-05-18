@@ -13,8 +13,6 @@ from tilegym.backend import register_impl
 from tilegym.logger import get_logger
 
 # Module-level tune caches: (M, N, K, dtype, device) -> (best_cfg, tuned_kernel)
-
-
 _matmul_tune_cache: dict = {}
 _static_persistent_matmul_tune_cache: dict = {}
 

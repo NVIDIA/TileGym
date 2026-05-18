@@ -30,8 +30,6 @@ def _relu_fwd_kernel(x, y, N_ELEMENTS: ct.Constant[int], BLOCK_SIZE: ct.Constant
 
 
 # Wrapper Classes
-
-
 class _ReluCuTileFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):

@@ -22,8 +22,6 @@ INV_LOG_2 = 1.0 / math.log(2)
 # @ct.kernel() entry point so it can be reused by different kernels
 # (e.g. standalone decode attention and fused POD attention) without
 # duplicating the decode computation code.
-
-
 def attention_decode_kernel_grouped_impl(
     Q,
     K,

@@ -16,8 +16,6 @@ from .gelu import standard_normal_cdf_ct
 from .gelu import standard_normal_pdf_ct
 
 # Approximation mode constants
-
-
 GELU_EXACT = 0
 GELU_TANH = 1
 

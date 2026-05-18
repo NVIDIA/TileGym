@@ -144,8 +144,6 @@ def _softmax_kernel_chunked(
 
 
 # Launch patterns for the kernels:
-
-
 def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     """
     Launch the basic cuTile softmax kernel with static persistent scheduling

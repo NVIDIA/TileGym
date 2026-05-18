@@ -15,8 +15,6 @@ from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (batch_size, n_heads, n_ctx, head_dim, n_kv_ctx, bandwidth, dtype, device) -> (best_cfg, tuned_kernel)
-
-
 _attention_sink_tune_cache: dict = {}
 
 INV_LOG_2 = 1.0 / math.log(2)

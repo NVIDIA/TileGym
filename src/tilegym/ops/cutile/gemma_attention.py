@@ -23,8 +23,6 @@ from cuda.tile.tune import exhaustive_search
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (B, H, S_qo, S_kv, BLOCK_D, query_group_size, stage, window_size, soft_cap_val, has_soft_cap, dtype, device) -> (best_cfg, tuned_kernel)
-
-
 _gemma_fmha_tune_cache: dict = {}
 
 INV_LOG_2 = 1.0 / math.log(2)

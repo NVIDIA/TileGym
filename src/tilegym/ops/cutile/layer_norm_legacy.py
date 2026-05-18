@@ -14,8 +14,6 @@ from tilegym.backend import register_impl
 from .utils import next_power_of_2
 
 # Module-level tune cache: (N, D, BLOCK_D, IS_SWISH, TRAINING, COMPUTE_MEAN_AND_RSTD, dtype, device) -> (best_cfg, tuned_kernel)
-
-
 _layer_norm_legacy_tune_cache: dict = {}
 
 PAD_ZERO = ct.PaddingMode.ZERO

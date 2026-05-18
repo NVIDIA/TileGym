@@ -19,8 +19,6 @@ from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 # Module-level tune caches for fmha forward, dkdv backward, and dq backward
-
-
 _fmha_fwd_tune_cache: dict = {}
 _fmha_bwd_dkdv_tune_cache: dict = {}
 _fmha_bwd_dq_tune_cache: dict = {}
@@ -38,8 +36,6 @@ ConstBool = ct.Constant[bool]
 # @ct.kernel() entry point so it can be reused by different kernels
 # (e.g. standalone prefill attention and fused POD attention) without
 # duplicating the attention computation code.
-
-
 def fmha_kernel_impl(
     Q,
     K,

@@ -18,8 +18,6 @@ ConstInt = ct.Constant[int]
 
 # To be launched with grid = number of rows (batch_size)
 # each "block" computes an entire row of the ouptut
-
-
 @ct.kernel
 def _silu_and_mul_kernel_row_wise(
     input,

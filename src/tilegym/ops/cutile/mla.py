@@ -14,8 +14,6 @@ from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
 # Module-level tune cache: (S_qo, TILE_D, TILE_KPE, H, query_group_size, dtype, device) -> (best_cfg, tuned_kernel)
-
-
 _mla_tune_cache: dict = {}
 
 

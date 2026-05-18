@@ -26,8 +26,6 @@ ConstBool = ct.Constant[bool]
 # Currently uses a fixed 128x64 tile (128 rows x 64 cols per CTA).
 # Future work: support additional tile sizes (e.g. 64x64, 256x64) to enable
 # auto-tuning across tile configurations for different matrix shapes.
-
-
 @lru_cache(maxsize=None)
 def _make_nvfp4_kernel(occupancy: int):
     @experimental_kernel

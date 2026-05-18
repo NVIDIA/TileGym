@@ -124,8 +124,6 @@ def _swa_fwd_kernel(
 
 
 # -- HuggingFace model integration --
-
-
 def get_swa_fmha_interface(window_size=4096, backend=None):
     """Returns a drop-in replacement for ALL_ATTENTION_FUNCTIONS["sdpa"].
 

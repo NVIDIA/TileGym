@@ -10,8 +10,6 @@ import torch
 from tilegym.backend import register_impl
 
 # Approximation mode constants
-
-
 GELU_EXACT = 0
 GELU_TANH = 1
 
@@ -135,8 +133,6 @@ def _gelu_kernel(
 
 
 # Wrapper class for autograd integration
-
-
 class _GeluCuTileFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, approximate):
