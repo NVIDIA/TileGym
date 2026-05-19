@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 from functools import lru_cache
-from typing import Optional
 
 import cuda.tile as ct
 import numpy as np
@@ -130,7 +129,7 @@ def _make_nvfp4_kernel(occupancy: int):
 def tile_nvfp4_quantize(
     x: torch.Tensor,
     s_enc: float = 1.0,
-    occupancy: Optional[int] = None,
+    occupancy: int = 6,
     **kwargs,
 ):
     """
@@ -140,7 +139,7 @@ def tile_nvfp4_quantize(
         x:          bf16, fp16, or fp32 input tensor, shape (rows, cols).
                     cols must be divisible by 16.
         s_enc:      Global encoding scale (float, default 1.0).
-        occupancy:  CTA occupancy hint for the kernel (default: None, uses ct.kernel default).
+        occupancy:  CTA occupancy hint for the kernel (default: 6).
                     Different values compile to separate kernel variants.
 
     Returns:
