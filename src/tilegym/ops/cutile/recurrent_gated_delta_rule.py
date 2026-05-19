@@ -3,168 +3,425 @@
 # SPDX-License-Identifier: MIT
 
 import math
+import os
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
 
 from tilegym.backend import register_impl
-
-ConstInt = ct.Constant[int]
-ConstBool = ct.Constant[bool]
+from tilegym.ops.cutile.utils import next_power_of_2
 
 
-@ct.kernel
+# Naming conventions in cuda.tile DSL kernels:
+# - UPPER_CASE_SNAKE_NAMING: Compile-time constants
+# - CamelCaseNaming: Runtime vectors or tensors
+# - lower_case_snake_naming: Runtime scalars
+@ct.kernel(occupancy=2)
 def _recurrent_gated_delta_rule_fwd_kernel(
-    # Tensors — native (B, T, H, D) layout for Q/K/V; (B, T, H) for G/Beta
-    Q,
-    K,
-    V,
-    G,
-    Beta,
-    Output,  # (B, T, H, V)
-    InitState,  # (B, H, K, V) or dummy
-    FinalState,  # (B, H, K, V) or dummy
-    # Runtime scalars
+    Query,  # (B, T, H, QK)
+    Key,  # (B, T, H, QK)
+    Value,  # (B, T, HV, V)
+    Gate,  # (B, T, HV)
+    Beta,  # (B, T, HV)
+    Output,  # (B, T, HV, V)
+    StateIn,  # (B, HV, QK, V)
+    StateOut,  # (B, HV, QK, V)
     scale: float,
-    seq_len: int,
-    # Compile-time constants
-    NUM_HEADS: ConstInt,
-    HAS_INITIAL_STATE: ConstBool,
-    OUTPUT_FINAL_STATE: ConstBool,
-    USE_QK_L2NORM: ConstBool,
-    BLOCK_K: ConstInt,
-    BLOCK_V: ConstInt,
+    HAS_INITIAL_STATE: ct.Constant[bool],
+    OUTPUT_FINAL_STATE: ct.Constant[bool],
+    USE_QK_L2NORM: ct.Constant[bool],
+    T: ct.Constant[int],
+    BLOCK_K: ct.Constant[int],
+    BLOCK_V: ct.Constant[int],
+    SMALL_TILE_USE_TMA: ct.Constant[bool],
+    LARGE_TILE_USE_TMA: ct.Constant[bool],
 ):
-    """
-    Grid: (batch_size * num_heads, ceil(v_head_dim / BLOCK_V), 1)
+    """Grid: (B * Hv, ceil(V / BLOCK_V), 1)."""
+    idx_bhv = ct.bid(0)
+    idx_v = ct.bid(1)
 
-    Each program owns a (BLOCK_K, BLOCK_V) tile of recurrent state
-    and loops over timesteps sequentially.  Uses TMA for all loads/stores.
-    """
-    pid_bh = ct.bid(0)
-    pid_v = ct.bid(1)
+    H = Query.shape[2]
+    HV = Value.shape[2]
+    idx_b = idx_bhv // HV
+    idx_hv = idx_bhv % HV
+    idx_h = idx_hv // (HV // H)
 
-    b = pid_bh // NUM_HEADS
-    h = pid_bh % NUM_HEADS
-
-    _ZERO = ct.PaddingMode.ZERO
-
-    state = ct.zeros((BLOCK_K, BLOCK_V), dtype=ct.float32)
     if HAS_INITIAL_STATE:
-        state = ct.load(
-            InitState,
-            index=(b, h, 0, pid_v),
+        State = ct.load(
+            StateIn,
+            index=(idx_b, idx_hv, 0, idx_v),
             shape=(1, 1, BLOCK_K, BLOCK_V),
-            padding_mode=_ZERO,
+            padding_mode=ct.PaddingMode.ZERO,
+            allow_tma=LARGE_TILE_USE_TMA,
         ).reshape((BLOCK_K, BLOCK_V))
-        state = ct.astype(state, ct.float32)
+        State = ct.astype(State, ct.float32)
+    else:
+        State = ct.zeros((BLOCK_K, BLOCK_V), dtype=ct.float32)
 
-    for t in range(seq_len):
-        # Load q_t, k_t: (BLOCK_K,)
-        q_t = ct.load(
-            Q,
-            index=(b, t, h, 0),
+    for idx_t in range(T):
+        QueryT = ct.load(
+            Query,
+            index=(idx_b, idx_t, idx_h, 0),
             shape=(1, 1, 1, BLOCK_K),
-            padding_mode=_ZERO,
+            padding_mode=ct.PaddingMode.ZERO,
+            allow_tma=LARGE_TILE_USE_TMA,
         ).reshape((BLOCK_K,))
-        q_t = ct.astype(q_t, ct.float32)
+        QueryT = ct.astype(QueryT, ct.float32)
 
-        k_t = ct.load(
-            K,
-            index=(b, t, h, 0),
+        KeyT = ct.load(
+            Key,
+            index=(idx_b, idx_t, idx_h, 0),
             shape=(1, 1, 1, BLOCK_K),
-            padding_mode=_ZERO,
+            padding_mode=ct.PaddingMode.ZERO,
+            allow_tma=LARGE_TILE_USE_TMA,
         ).reshape((BLOCK_K,))
-        k_t = ct.astype(k_t, ct.float32)
+        KeyT = ct.astype(KeyT, ct.float32)
 
-        # Optional L2-normalize q and k
         if USE_QK_L2NORM:
-            q_t = q_t * ct.rsqrt(ct.sum(q_t * q_t, axis=0) + 1e-6)
-            k_t = k_t * ct.rsqrt(ct.sum(k_t * k_t, axis=0) + 1e-6)
+            QueryT = QueryT * ct.rsqrt(ct.sum(QueryT * QueryT, axis=0) + 1e-6)
+            KeyT = KeyT * ct.rsqrt(ct.sum(KeyT * KeyT, axis=0) + 1e-6)
+        QueryT = QueryT * scale
 
-        q_t = q_t * scale
-
-        # Load v_t: (BLOCK_V,)
-        v_t = ct.load(
-            V,
-            index=(b, t, h, pid_v),
+        ValueT = ct.load(
+            Value,
+            index=(idx_b, idx_t, idx_hv, idx_v),
             shape=(1, 1, 1, BLOCK_V),
-            padding_mode=_ZERO,
+            padding_mode=ct.PaddingMode.ZERO,
+            allow_tma=SMALL_TILE_USE_TMA,
         ).reshape((BLOCK_V,))
-        v_t = ct.astype(v_t, ct.float32)
+        ValueT = ct.astype(ValueT, ct.float32)
 
-        # Load g_t, beta_t: scalars
-        g_t = ct.astype(ct.load(G, index=(b, t, h), shape=(), padding_mode=_ZERO), ct.float32)
-        beta_t = ct.astype(ct.load(Beta, index=(b, t, h), shape=(), padding_mode=_ZERO), ct.float32)
+        gate_t = ct.astype(ct.gather(Gate, (idx_b, idx_t, idx_hv), check_bounds=False), ct.float32)
+        beta_t = ct.astype(ct.gather(Beta, (idx_b, idx_t, idx_hv), check_bounds=False), ct.float32)
 
-        # 1. Decay state
-        state = state * ct.exp(g_t)
+        State = State * ct.exp(gate_t)
+        KeyT = ct.expand_dims(KeyT, axis=1)
+        KvMemT = ct.sum(State * KeyT, axis=0)
+        DeltaT = (ValueT - KvMemT) * beta_t
+        State = State + KeyT * ct.expand_dims(DeltaT, axis=0)
+        OutT = ct.sum(State * ct.expand_dims(QueryT, axis=1), axis=0)
 
-        # 2. Retrieve from memory: kv_mem[v] = sum_k state[k,v] * k_t[k]
-        k_col = ct.expand_dims(k_t, axis=1)  # (BLOCK_K, 1)
-        kv_mem = ct.sum(state * k_col, axis=0)  # (BLOCK_V,)
-
-        # 3. Compute delta
-        delta = (v_t - kv_mem) * beta_t
-
-        # 4. Rank-1 state update: state += outer(k_t, delta)
-        state = state + k_col * ct.expand_dims(delta, axis=0)
-
-        # 5. Query: out_t[v] = sum_k state[k,v] * q_t[k]
-        out_t = ct.sum(state * ct.expand_dims(q_t, axis=1), axis=0)
-
-        # Store output (cast to output dtype)
-        out_tile = ct.astype(
-            ct.reshape(out_t, (1, 1, 1, BLOCK_V)),
-            Output.dtype,
+        ct.store(
+            Output,
+            index=(idx_b, idx_t, idx_hv, idx_v),
+            tile=ct.astype(ct.reshape(OutT, (1, 1, 1, BLOCK_V)), Output.dtype),
+            allow_tma=SMALL_TILE_USE_TMA,
         )
-        ct.store(Output, index=(b, t, h, pid_v), tile=out_tile)
 
     if OUTPUT_FINAL_STATE:
         ct.store(
-            FinalState,
-            index=(b, h, 0, pid_v),
-            tile=ct.reshape(state, (1, 1, BLOCK_K, BLOCK_V)),
+            StateOut,
+            index=(idx_b, idx_hv, 0, idx_v),
+            tile=ct.reshape(State, (1, 1, BLOCK_K, BLOCK_V)),
+            allow_tma=LARGE_TILE_USE_TMA,
         )
 
 
-class _RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, query, key, value, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel):
-        initial_dtype = query.dtype
-        B, T, H, K = query.shape
-        V = value.shape[-1]
-        scale = 1.0 / math.sqrt(K)
+@ct.kernel(occupancy=2)
+def _recurrent_gated_delta_rule_fwd_kernel_persistent(
+    Query,  # (B, T, H, QK)
+    Key,  # (B, T, H, QK)
+    Value,  # (B, T, HV, V)
+    Gate,  # (B, T, HV)
+    Beta,  # (B, T, HV)
+    Output,  # (B, T, HV, V)
+    StateIn,  # (B, HV, QK, V)
+    StateOut,  # (B, HV, QK, V)
+    scale: float,
+    HAS_INITIAL_STATE: ct.Constant[bool],
+    OUTPUT_FINAL_STATE: ct.Constant[bool],
+    USE_QK_L2NORM: ct.Constant[bool],
+    T: ct.Constant[int],
+    BLOCK_K: ct.Constant[int],
+    BLOCK_V: ct.Constant[int],
+    SMALL_TILE_USE_TMA: ct.Constant[bool],
+    LARGE_TILE_USE_TMA: ct.Constant[bool],
+):
+    """Grid: (min(NUM_SMS, B * HV * cdiv(V, BLOCK_V)),); grid-strides over (b, hv, pid_v)."""
+    idx_CGA = ct.bid(0)
+    num_CGAs = ct.num_blocks(0)
 
-        # Ensure contiguous for TMA
+    B = Query.shape[0]
+    H = Query.shape[2]
+    HV = Value.shape[2]
+    NUM_V_BLOCKS = ct.cdiv(Value.shape[3], BLOCK_V)
+    NUM_BLOCKS = B * HV * NUM_V_BLOCKS
+    H_PER_GROUP = HV // H
+
+    for idx_block in range(idx_CGA, NUM_BLOCKS, num_CGAs):
+        idx_bhv = idx_block // NUM_V_BLOCKS
+        idx_v = idx_block % NUM_V_BLOCKS
+        idx_b = idx_bhv // HV
+        idx_hv = idx_bhv % HV
+        idx_h = idx_hv // H_PER_GROUP
+
+        if HAS_INITIAL_STATE:
+            State = ct.load(
+                StateIn,
+                index=(idx_b, idx_hv, 0, idx_v),
+                shape=(1, 1, BLOCK_K, BLOCK_V),
+                padding_mode=ct.PaddingMode.ZERO,
+                allow_tma=LARGE_TILE_USE_TMA,
+            ).reshape((BLOCK_K, BLOCK_V))
+            State = ct.astype(State, ct.float32)
+        else:
+            State = ct.zeros((BLOCK_K, BLOCK_V), dtype=ct.float32)
+
+        for idx_t in range(T):
+            QueryT = ct.load(
+                Query,
+                index=(idx_b, idx_t, idx_h, 0),
+                shape=(1, 1, 1, BLOCK_K),
+                padding_mode=ct.PaddingMode.ZERO,
+                allow_tma=LARGE_TILE_USE_TMA,
+            ).reshape((BLOCK_K,))
+            QueryT = ct.astype(QueryT, ct.float32)
+
+            KeyT = ct.load(
+                Key,
+                index=(idx_b, idx_t, idx_h, 0),
+                shape=(1, 1, 1, BLOCK_K),
+                padding_mode=ct.PaddingMode.ZERO,
+                allow_tma=LARGE_TILE_USE_TMA,
+            ).reshape((BLOCK_K,))
+            KeyT = ct.astype(KeyT, ct.float32)
+
+            if USE_QK_L2NORM:
+                QueryT = QueryT * ct.rsqrt(ct.sum(QueryT * QueryT, axis=0) + 1e-6)
+                KeyT = KeyT * ct.rsqrt(ct.sum(KeyT * KeyT, axis=0) + 1e-6)
+            QueryT = QueryT * scale
+
+            ValueT = ct.load(
+                Value,
+                index=(idx_b, idx_t, idx_hv, idx_v),
+                shape=(1, 1, 1, BLOCK_V),
+                padding_mode=ct.PaddingMode.ZERO,
+                allow_tma=SMALL_TILE_USE_TMA,
+            ).reshape((BLOCK_V,))
+            ValueT = ct.astype(ValueT, ct.float32)
+
+            gate_t = ct.astype(ct.gather(Gate, (idx_b, idx_t, idx_hv), check_bounds=False), ct.float32)
+            beta_t = ct.astype(ct.gather(Beta, (idx_b, idx_t, idx_hv), check_bounds=False), ct.float32)
+
+            State = State * ct.exp(gate_t)
+            KeyT = ct.expand_dims(KeyT, axis=1)
+            KvMemT = ct.sum(State * KeyT, axis=0)
+            Delta = (ValueT - KvMemT) * beta_t
+            State = State + KeyT * ct.expand_dims(Delta, axis=0)
+            OutputT = ct.sum(State * ct.expand_dims(QueryT, axis=1), axis=0)
+
+            ct.store(
+                Output,
+                index=(idx_b, idx_t, idx_hv, idx_v),
+                tile=ct.astype(ct.reshape(OutputT, (1, 1, 1, BLOCK_V)), Output.dtype),
+                allow_tma=SMALL_TILE_USE_TMA,
+            )
+
+        if OUTPUT_FINAL_STATE:
+            ct.store(
+                StateOut,
+                index=(idx_b, idx_hv, 0, idx_v),
+                tile=ct.reshape(State, (1, 1, BLOCK_K, BLOCK_V)),
+                allow_tma=LARGE_TILE_USE_TMA,
+            )
+
+
+def _autotune_configs(V: int, B: int, Hv: int, num_sms: int):
+    # Work-aware BLOCK_V: aim for ~2x SM oversubscription on non-persistent grid
+    # (B * Hv * ceil(V / BLOCK_V)). Smaller B -> smaller BLOCK_V -> more V-blocks.
+    target_v_blocks = max(1, 2 * num_sms // max(1, B * Hv))
+    target_bv = 1 << (max(8, V // target_v_blocks) - 1).bit_length()
+    target_bv = min(V, target_bv)
+    block_v_candidates = sorted({max(8, target_bv // 2), target_bv, min(V, target_bv * 2)})
+    use_tma_small_large_resp = [(False, True), (True, True)]
+    for block_v in block_v_candidates:
+        for occupancy in (2, 3, 4, 6):
+            for small_tile_use_tma, large_tile_use_tma in use_tma_small_large_resp:
+                yield SimpleNamespace(
+                    BLOCK_V=block_v,
+                    occupancy=occupancy,
+                    SMALL_TILE_USE_TMA=small_tile_use_tma,
+                    LARGE_TILE_USE_TMA=large_tile_use_tma,
+                )
+
+
+def _grid(persistent, B, HV, V, BLOCK_V, device):
+    num_v_blocks = ct.cdiv(V, BLOCK_V)
+    if persistent:
+        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+        return (min(num_sms, B * HV * num_v_blocks),)
+    return (B * HV, num_v_blocks, 1)
+
+
+def _autotune(
+    query,
+    key,
+    value,
+    g,
+    beta,
+    output,
+    initial_state,
+    final_state,
+    scale,
+    has_initial_state,
+    output_final_state,
+    use_qk_l2norm_in_kernel,
+    B,
+    T,
+    Hv,
+    V,
+    BLOCK_K,
+    persistent,
+):
+    dummy = torch.empty(1, 1, 1, 1, device=query.device, dtype=torch.float32)
+    device = query.device
+
+    def args_fn(cfg):
+        return (
+            query,
+            key,
+            value,
+            g,
+            beta,
+            output,
+            initial_state if has_initial_state else dummy,
+            final_state if output_final_state else dummy,
+            scale,
+            has_initial_state,
+            output_final_state,
+            use_qk_l2norm_in_kernel,
+            T,
+            BLOCK_K,
+            cfg.BLOCK_V,
+            cfg.SMALL_TILE_USE_TMA,
+            cfg.LARGE_TILE_USE_TMA,
+        )
+
+    def make_grid_fn(persistent):
+        return lambda cfg: _grid(persistent, B, Hv, V, cfg.BLOCK_V, device)
+
+    def hints_fn(cfg):
+        return {"occupancy": cfg.occupancy}
+
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    kernel_candidates = {
+        False: _recurrent_gated_delta_rule_fwd_kernel,
+        True: _recurrent_gated_delta_rule_fwd_kernel_persistent,
+    }
+    if persistent is not None:
+        kernel_candidates = {persistent: kernel_candidates[persistent]}
+    best_kernel, best_config, best_is_persistent, best_time = None, None, None, float("inf")
+    for persistent, kernel in kernel_candidates.items():
+        result = ct.tune.exhaustive_search(
+            list(_autotune_configs(V, B, Hv, num_sms)),
+            torch.cuda.current_stream(),
+            make_grid_fn(persistent),
+            kernel,
+            args_fn,
+            hints_fn,
+            quiet=True,
+        )
+        if result.best.mean_us < best_time:
+            best_time = result.best.mean_us
+            best_kernel, best_config, best_is_persistent = kernel, result.best.config, persistent
+    assert best_kernel is not None
+    best_kernel = best_kernel.replace_hints(occupancy=best_config.occupancy)
+    return best_kernel, best_config, best_is_persistent
+
+
+class _RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
+    autotune_cache = {}
+
+    @staticmethod
+    def forward(
+        ctx, query, key, value, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel, persistent
+    ):
+        B, T, H, QK = query.shape
+        HV, V = value.shape[-2:]
+        assert H <= HV and HV % H == 0
+        initial_dtype = query.dtype
+        device = query.device
+
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
         g = g.contiguous()
         beta = beta.contiguous()
+        if has_initial_state := (initial_state is not None):
+            initial_state = initial_state.contiguous()
 
-        output = torch.empty(B, T, H, V, device=query.device, dtype=initial_dtype)
+        output = torch.empty(B, T, HV, V, device=device, dtype=initial_dtype)
+        final_state = torch.empty(B, HV, QK, V, device=device, dtype=torch.float32) if output_final_state else None
 
-        has_initial_state = initial_state is not None
-        if has_initial_state:
-            initial_state = initial_state.contiguous().float()
+        BLOCK_K = next_power_of_2(QK)
+        scale = 1.0 / math.sqrt(QK)
 
-        final_state = None
-        if output_final_state:
-            final_state = torch.empty(B, H, K, V, device=query.device, dtype=torch.float32)
+        if os.environ.get("DISABLE_AUTOTUNE", "0") == "1":
+            best_kernel = (
+                _recurrent_gated_delta_rule_fwd_kernel_persistent
+                if persistent
+                else _recurrent_gated_delta_rule_fwd_kernel
+            )
+            best_config = SimpleNamespace(
+                BLOCK_V=64,
+                occupancy=2,
+                SMALL_TILE_USE_TMA=True,
+                LARGE_TILE_USE_TMA=True,
+            )
+            best_is_persistent = bool(persistent)
+        else:
+            cache_key = (
+                B,
+                T,
+                H,
+                HV,
+                QK,
+                V,
+                initial_dtype,
+                has_initial_state,
+                output_final_state,
+                use_qk_l2norm_in_kernel,
+                persistent,
+                str(device),
+            )
+            if (cached := _RecurrentGatedDeltaRuleCuTile.autotune_cache.get(cache_key)) is None:
+                cached = _autotune(
+                    query,
+                    key,
+                    value,
+                    g,
+                    beta,
+                    output,
+                    initial_state,
+                    final_state,
+                    scale,
+                    has_initial_state,
+                    output_final_state,
+                    use_qk_l2norm_in_kernel,
+                    B,
+                    T,
+                    HV,
+                    V,
+                    BLOCK_K,
+                    persistent,
+                )
+                _RecurrentGatedDeltaRuleCuTile.autotune_cache[cache_key] = cached
+            best_kernel, best_config, best_is_persistent = cached
 
-        BLOCK_K = 1 << (K - 1).bit_length()
-        BLOCK_V = min(64, 1 << (V - 1).bit_length())
+        grid = _grid(best_is_persistent, B, HV, V, best_config.BLOCK_V, device)
 
-        grid = (B * H, (V + BLOCK_V - 1) // BLOCK_V, 1)
-
-        # cuTile cannot accept None — use dummy tensors for absent state
-        dummy = torch.empty(1, 1, 1, 1, device=query.device, dtype=torch.float32)
+        if has_initial_state and output_final_state:
+            init_arg, final_arg = initial_state, final_state
+        else:
+            dummy = torch.empty(1, 1, 1, 1, device=device, dtype=torch.float32)
+            init_arg = initial_state if has_initial_state else dummy
+            final_arg = final_state if output_final_state else dummy
 
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            _recurrent_gated_delta_rule_fwd_kernel,
+            best_kernel,
             (
                 query,
                 key,
@@ -172,16 +429,17 @@ class _RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
                 g,
                 beta,
                 output,
-                initial_state if has_initial_state else dummy,
-                final_state if output_final_state else dummy,
+                init_arg,
+                final_arg,
                 scale,
-                T,
-                H,
                 has_initial_state,
                 output_final_state,
                 use_qk_l2norm_in_kernel,
+                T,
                 BLOCK_K,
-                BLOCK_V,
+                best_config.BLOCK_V,
+                best_config.SMALL_TILE_USE_TMA,
+                best_config.LARGE_TILE_USE_TMA,
             ),
         )
 
@@ -194,7 +452,15 @@ class _RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
 
 @register_impl("recurrent_gated_delta_rule", backend="cutile")
 def recurrent_gated_delta_rule(
-    query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm_in_kernel=False, **kwargs
+    query,
+    key,
+    value,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    **kwargs,
 ):
     """Drop-in cuTile replacement for torch_recurrent_gated_delta_rule."""
     return _RecurrentGatedDeltaRuleCuTile.apply(
@@ -206,4 +472,5 @@ def recurrent_gated_delta_rule(
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
+        kwargs.get("persistent"),
     )
