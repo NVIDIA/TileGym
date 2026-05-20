@@ -28,6 +28,7 @@ from tilegym.transformers import apply_tilegym_kernel_to_gpt_oss
 from tilegym.transformers import apply_tilegym_kernel_to_llama
 from tilegym.transformers import apply_tilegym_kernel_to_mistral
 from tilegym.transformers import apply_tilegym_kernel_to_olmo3
+from tilegym.transformers import apply_tilegym_kernel_to_olmoe
 from tilegym.transformers import apply_tilegym_kernel_to_phi3
 from tilegym.transformers import apply_tilegym_kernel_to_qwen2
 from tilegym.transformers import apply_tilegym_kernel_to_qwen3
@@ -279,6 +280,8 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         apply_tilegym_kernel_to_gemma3(rope=True, rms_norm=True, mlp=True, attn=use_attn, use_cutile=use_cutile)
     elif "phi-3" in model_name or "phi3" in model_name:
         apply_tilegym_kernel_to_phi3(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
+    elif "olmoe" in model_name:
+        apply_tilegym_kernel_to_olmoe(rope=True, rms_norm=True, attn=use_attn, moe=True, use_cutile=use_cutile)
     elif "olmo-3" in model_name or "olmo3" in model_name:
         apply_tilegym_kernel_to_olmo3(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     else:
@@ -330,6 +333,9 @@ class KernelFilter:
             # Fused OLMo-3 cuTile kernels
             "_rms_norm_residual_add_kernel",
             "_dual_rms_norm_kernel",
+            # Fused OLMoE cuTile kernels
+            "_olmoe_residual_add_rms_norm_kernel",
+            "_olmoe_dual_rms_norm_kernel",
             # Reduce kernels
             "splitk_reduce_kernel",
             # GEMM kernels

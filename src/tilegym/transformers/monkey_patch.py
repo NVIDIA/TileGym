@@ -434,6 +434,64 @@ def apply_tilegym_kernel_to_phi3(
         ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_phi3_interface()
 
 
+def apply_tilegym_kernel_to_olmoe(
+    rope: bool = True,
+    rms_norm: bool = True,
+    attn: bool = True,
+    moe: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace OLMoE models
+    (e.g. allenai/OLMoE-1B-7B-0924).
+
+    OLMoE is a sparse Mixture-of-Experts model with 64 experts and top-8 routing.
+    Per-layer compute:
+    - Llama-style RMSNorm at five sites (input/post-attn LN, Q/K-norm, model norm)
+    - Standard RoPE (full rotation, rope_theta=10000.0)
+    - Standard FMHA: 16 Q heads, 16 KV heads (no GQA), head_dim=128, causal
+    - OlmoeSparseMoeBlock with OlmoeTopKRouter (softmax-then-topk, norm_topk_prob=False)
+      and OlmoeExperts whose gate_up_proj (E, 2I, H) and down_proj (E, H, I) are already
+      stacked in the format TileGym's fused_moe expects.
+
+    Args:
+        rope (bool): Patch `apply_rotary_pos_emb`. Default True.
+        rms_norm (bool): Patch `OlmoeRMSNorm`. Default True.
+        attn (bool): Patch `ALL_ATTENTION_FUNCTIONS["sdpa"]` with FMHA. Default True.
+        moe (bool): Patch `OlmoeSparseMoeBlock` with the TileGym fused-MoE variant. Default True.
+        model (PreTrainedModel): Unused; present for API symmetry with sibling helpers.
+        use_cutile (bool): Switch the TileGym backend to cuTile. Default False.
+    """
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_olmoe")
+    logger.info("--------------------------------")
+    from transformers.models.olmoe import modeling_olmoe
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        modeling_olmoe.apply_rotary_pos_emb = get_apply_rope_func(model="llama")
+    if rms_norm:
+        modeling_olmoe.OlmoeRMSNorm = get_rms_norm_module()
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
+    if moe:
+        from tilegym.transformers.olmoe.modeling_olmoe import OlmoeSparseMoeBlockTileGym
+
+        modeling_olmoe.OlmoeSparseMoeBlock = OlmoeSparseMoeBlockTileGym
+
+    if use_cutile:
+        from tilegym.transformers.olmoe.modeling_olmoe import _attention_forward_tilegym
+        from tilegym.transformers.olmoe.modeling_olmoe import _decoder_layer_forward_tilegym
+
+        modeling_olmoe.OlmoeAttention.forward = _attention_forward_tilegym
+        modeling_olmoe.OlmoeDecoderLayer.forward = _decoder_layer_forward_tilegym
+
+
 def apply_tilegym_kernel_to_olmo3(
     rope: bool = True,
     rms_norm: bool = True,
@@ -504,6 +562,7 @@ MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "gemma3": apply_tilegym_kernel_to_gemma3,
     "phi3": apply_tilegym_kernel_to_phi3,
     "olmo3": apply_tilegym_kernel_to_olmo3,
+    "olmoe": apply_tilegym_kernel_to_olmoe,
 }
 
 
