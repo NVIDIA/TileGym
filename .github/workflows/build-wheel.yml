@@ -131,7 +131,17 @@ jobs:
               f.write('\n'.join(deps))
           print('Auditing deps:\n' + '\n'.join(deps))
           EOF
-          pip-audit -r audit-requirements.txt --ignore-vuln CVE-2026-4539
+          # Temporary ignores for transformers==5.3.0 (no fix version yet); revisit when upstream releases a patched version.
+          pip-audit -r audit-requirements.txt \
+            --ignore-vuln CVE-2026-4539 \
+            --ignore-vuln PYSEC-2025-211 \
+            --ignore-vuln PYSEC-2025-212 \
+            --ignore-vuln PYSEC-2025-213 \
+            --ignore-vuln PYSEC-2025-214 \
+            --ignore-vuln PYSEC-2025-215 \
+            --ignore-vuln PYSEC-2025-216 \
+            --ignore-vuln PYSEC-2025-217 \
+            --ignore-vuln PYSEC-2025-218
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}
