@@ -50,6 +50,32 @@ def _softmax_kernel(
         ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=True)
 
 
+@ct.kernel
+def _softmax_kernel_multi_wave_full_row_reg_cached_ldg(
+    output,
+    input,
+    N: ConstInt,
+    TILE_SIZE: ConstInt,
+):
+    """scheduling=multi_wave | coverage=full_row | load=ldg | caching=reg_cached
+
+    Multi-wave softmax: one block per row, no grid-stride loop.
+    Uses conditional bounds check — skipped when TILE_SIZE == N (power-of-2 N)."""
+    row_idx = ct.bid(0)
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+    check_bound = TILE_SIZE != N
+
+    row = ct.gather(input, (row_idx, offsets), check_bounds=check_bound, padding_value=-math.inf)
+    row = ct.astype(row, ct.float32)
+
+    row_max = ct.max(row, 0, keepdims=True)
+    numerator = ct.exp(row - row_max)
+    denominator = ct.sum(numerator, 0, keepdims=True)
+
+    softmax_output = ct.astype(numerator / denominator, input.dtype)
+    ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=check_bound)
+
+
 # TMA version with static persistent scheduling
 @ct.kernel(occupancy=2)
 def _softmax_kernel_tma(
@@ -178,6 +204,20 @@ def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     )
 
 
+def _launch_softmax_kernel_multi_wave_full_row_reg_cached_ldg(input, output, TILE_SIZE):
+    n_rows, n_cols = input.shape
+    input = input.contiguous()
+    output = output.contiguous()
+
+    grid = (n_rows, 1, 1)
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        _softmax_kernel_multi_wave_full_row_reg_cached_ldg,
+        (output, input, n_cols, TILE_SIZE),
+    )
+
+
 def _launch_softmax_kernel_tma(
     input,
     output,
@@ -276,6 +316,7 @@ class _Softmax(torch.autograd.Function):
         x,
         use_tma=False,
         use_chunked=False,
+        use_multi_wave=False,
     ):
         assert not (use_tma and use_chunked), "Cannot use both TMA and chunked softmax at the same time"
         # TMA may be emulated on this arch; redirect to non-TMA path with a warning.
@@ -296,7 +337,9 @@ class _Softmax(torch.autograd.Function):
         # Create output tensor
         y = torch.empty_like(x)
 
-        if use_chunked:
+        if use_multi_wave:
+            _launch_softmax_kernel_multi_wave_full_row_reg_cached_ldg(x, y, TILE_SIZE=TILE_SIZE)
+        elif use_chunked:
             # Use chunked kernel (3-pass algorithm for large tensors)
             # Cap TILE_SIZE at 8192 to enable chunking for very large n_cols
             # For smaller n_cols, use next_power_of_2(n_cols) to match data size
@@ -324,14 +367,17 @@ def softmax(
         use_tma: Whether to use TMA (Tensor Memory Accelerator) implementation.
                 Requires H100+ GPU (compute capability >= 9.0)
         **kwargs: Additional arguments for backend-specific configurations
-                  (e.g., use_chunked: whether to use chunked softmax implementation)
+                  use_chunked: whether to use chunked softmax implementation
+                  use_multi_wave: whether to use multi-wave (one block per row)
 
     Returns:
         Softmax output tensor with gradient support
     """
     use_chunked = kwargs.get("use_chunked", False)
+    use_multi_wave = kwargs.get("use_multi_wave", False)
     return _Softmax.apply(
         x,
         use_tma,
         use_chunked,
+        use_multi_wave,
     )

@@ -31,11 +31,17 @@ class Test_Softmax(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
-    @pytest.mark.parametrize("use_tma", [True, False], ids=["use_tma=True", "use_tma=False"])
-    @pytest.mark.parametrize("use_chunked", [True, False], ids=["use_chunked=True", "use_chunked=False"])
-    def test_op(self, m, n, dtype, arch, backend, use_tma, use_chunked):
-        if use_chunked and use_tma:
-            pytest.skip("Cannot use both TMA and chunked softmax at the same time")
+    @pytest.mark.parametrize(
+        "use_tma,use_chunked,use_multi_wave",
+        [
+            (False, False, False),
+            (True, False, False),
+            (False, True, False),
+            (False, False, True),
+        ],
+        ids=["baseline", "use_tma", "use_chunked", "use_multi_wave"],
+    )
+    def test_op(self, m, n, dtype, arch, backend, use_tma, use_chunked, use_multi_wave):
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
             self.setUp()
@@ -61,7 +67,7 @@ class Test_Softmax(common.PyTestCase):
             tilegym.ops.softmax,
             self.reference,
             {"x": x},
-            extra_test_kwargs={"use_tma": use_tma, "use_chunked": use_chunked},
+            extra_test_kwargs={"use_tma": use_tma, "use_chunked": use_chunked, "use_multi_wave": use_multi_wave},
             gradient=dout,
             rtol=rtol,
             atol=atol,
