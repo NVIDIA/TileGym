@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
-from math import ceil
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -12,32 +10,21 @@ from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 from tilegym.kernel_utils import get_kernel_configs
+from tilegym.ops.cutile.utils import cached_replace_hints
 
 # Module-level tune cache: (M, N, K, transpose_a_int, transpose_b_int, dtype, num_sms, device) -> (best_cfg, tuned_kernel)
 _gemm_alpha_beta_tune_cache: dict = {}
 
 
-def cdiv(a, b):
-    """Ceiling division helper function."""
-    return (a + b - 1) // b
-
-
 @ct.kernel
-def gemm_alpha_beta_kernel_cutile(
-    a_ptr,  # Input matrix A [M, K] or [K, M] if transpose_a
-    b_ptr,  # Input matrix B [K, N] or [N, K] if transpose_b
-    c_ptr,  # Output/Input matrix C [M, N] - modified in place
-    alpha: ct.Constant[float],  # Alpha scaling factor
-    beta: ct.Constant[float],  # Beta scaling factor
-    M: ct.Constant[int],  # M dimension
-    N: ct.Constant[int],  # N dimension
-    K: ct.Constant[int],  # K dimension
-    total_tiles: ct.Constant[int],  # Total number of tiles
-    num_programs: ct.Constant[int],  # Number of SMs
-    num_pid_m: ct.Constant[int],  # Number of M tiles
-    num_pid_n: ct.Constant[int],  # Number of N tiles
-    transpose_a: ct.Constant[int],  # Whether A is transposed (0 or 1)
-    transpose_b: ct.Constant[int],  # Whether B is transposed (0 or 1)
+def _gemm_alpha_beta_kernel(
+    a,  # Input matrix A [M, K] or [K, M] if transpose_a
+    b,  # Input matrix B [K, N] or [N, K] if transpose_b
+    c,  # Output/Input matrix C [M, N] - modified in place
+    alpha,  # Alpha scaling factor
+    beta,  # Beta scaling factor
+    TRANSPOSE_A: ct.Constant[int],  # Whether A is transposed (0 or 1)
+    TRANSPOSE_B: ct.Constant[int],  # Whether B is transposed (0 or 1)
     BLOCK_M: ct.Constant[int],
     BLOCK_N: ct.Constant[int],
     BLOCK_K: ct.Constant[int],
@@ -45,7 +32,7 @@ def gemm_alpha_beta_kernel_cutile(
     EPILOGUE_SUBTILE: ct.Constant[int],
 ):
     """
-    CuTile kernel for GEMM with alpha/beta scaling: C = alpha * A @ B + beta * C
+    cuTile kernel for GEMM with alpha/beta scaling: C = alpha * A @ B + beta * C
 
     Features:
     - Standard GEMM with alpha and beta scaling factors
@@ -56,7 +43,15 @@ def gemm_alpha_beta_kernel_cutile(
     """
     pid = ct.bid(0)
 
-    num_k_tiles = ct.cdiv(K, BLOCK_K)
+    if TRANSPOSE_A == 1:
+        num_k_tiles = ct.num_tiles(a, axis=0, shape=(BLOCK_K, BLOCK_M))
+    else:
+        num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
+
+    num_pid_m = ct.num_tiles(c, axis=0, shape=(BLOCK_M, BLOCK_N))
+    num_pid_n = ct.num_tiles(c, axis=1, shape=(BLOCK_M, BLOCK_N))
+    total_tiles = num_pid_m * num_pid_n
+    num_programs = ct.num_blocks(0)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     zero_pad = ct.PaddingMode.ZERO
@@ -77,10 +72,10 @@ def gemm_alpha_beta_kernel_cutile(
         # K-loop for matrix multiplication using tile indices
         for k in range(num_k_tiles):
             # Load A block based on transpose_a flag with latency hint for pipelining
-            if transpose_a == 1:
+            if TRANSPOSE_A == 1:
                 # A is [K, M], load [BLOCK_K, BLOCK_M] and transpose
                 a_block_kt = ct.load(
-                    a_ptr,
+                    a,
                     index=(k, pid_m),  # tile indices
                     shape=(BLOCK_K, BLOCK_M),
                     order=(0, 1),
@@ -91,7 +86,7 @@ def gemm_alpha_beta_kernel_cutile(
             else:
                 # A is [M, K], load [BLOCK_M, BLOCK_K]
                 a_block = ct.load(
-                    a_ptr,
+                    a,
                     index=(pid_m, k),  # tile indices
                     shape=(BLOCK_M, BLOCK_K),
                     order=(0, 1),
@@ -100,10 +95,10 @@ def gemm_alpha_beta_kernel_cutile(
                 )
 
             # Load B block based on transpose_b flag with latency hint
-            if transpose_b == 1:
+            if TRANSPOSE_B == 1:
                 # B is [N, K], load [BLOCK_N, BLOCK_K] and transpose
                 b_block_nt = ct.load(
-                    b_ptr,
+                    b,
                     index=(pid_n, k),  # tile indices
                     shape=(BLOCK_N, BLOCK_K),
                     order=(0, 1),
@@ -114,7 +109,7 @@ def gemm_alpha_beta_kernel_cutile(
             else:
                 # B is [K, N], load [BLOCK_K, BLOCK_N]
                 b_block = ct.load(
-                    b_ptr,
+                    b,
                     index=(k, pid_n),  # tile indices
                     shape=(BLOCK_K, BLOCK_N),
                     order=(0, 1),
@@ -131,7 +126,7 @@ def gemm_alpha_beta_kernel_cutile(
             acc1 = ct.extract(acc, index=(0, 1), shape=(BLOCK_M, BLOCK_N // 2))
 
             c_load0 = ct.load(
-                c_ptr,
+                c,
                 index=(pid_m, pid_n * 2),
                 shape=(BLOCK_M, BLOCK_N // 2),
                 order=(0, 1),
@@ -139,16 +134,16 @@ def gemm_alpha_beta_kernel_cutile(
             )
             c_load0_f32 = ct.astype(c_load0, ct.float32)
             result0 = alpha * acc0 + beta * c_load0_f32
-            c_block0 = ct.astype(result0, c_ptr.dtype)
+            c_block0 = ct.astype(result0, c.dtype)
             ct.store(
-                c_ptr,
+                c,
                 index=(pid_m, pid_n * 2),
                 tile=c_block0,
                 order=(0, 1),
             )
 
             c_load1 = ct.load(
-                c_ptr,
+                c,
                 index=(pid_m, pid_n * 2 + 1),
                 shape=(BLOCK_M, BLOCK_N // 2),
                 order=(0, 1),
@@ -156,16 +151,16 @@ def gemm_alpha_beta_kernel_cutile(
             )
             c_load1_f32 = ct.astype(c_load1, ct.float32)
             result1 = alpha * acc1 + beta * c_load1_f32
-            c_block1 = ct.astype(result1, c_ptr.dtype)
+            c_block1 = ct.astype(result1, c.dtype)
             ct.store(
-                c_ptr,
+                c,
                 index=(pid_m, pid_n * 2 + 1),
                 tile=c_block1,
                 order=(0, 1),
             )
         else:
             c_load = ct.load(
-                c_ptr,
+                c,
                 index=(pid_m, pid_n),
                 shape=(BLOCK_M, BLOCK_N),
                 order=(0, 1),
@@ -175,10 +170,10 @@ def gemm_alpha_beta_kernel_cutile(
             c_load_f32 = ct.astype(c_load, ct.float32)
             result = alpha * acc + beta * c_load_f32
 
-            c_block = ct.astype(result, c_ptr.dtype)
+            c_block = ct.astype(result, c.dtype)
 
             ct.store(
-                c_ptr,
+                c,
                 index=(pid_m, pid_n),
                 tile=c_block,
                 order=(0, 1),
@@ -313,8 +308,8 @@ def _compute_grid_and_programs(M, N, BLOCK_M, BLOCK_N, num_sms, num_ctas, occupa
     if num_sms is not None:
         NUM_SMS = min(NUM_SMS, num_sms)
 
-    num_pid_m = cdiv(M, BLOCK_M)
-    num_pid_n = cdiv(N, BLOCK_N)
+    num_pid_m = ct.cdiv(M, BLOCK_M)
+    num_pid_n = ct.cdiv(N, BLOCK_N)
     total_tiles = num_pid_m * num_pid_n
     # Ensure num_programs >= 1: cuTile requires positive step for range() in persistent kernel.
     # When num_sms is very small (e.g., 1) and num_ctas > 1, NUM_SMS // num_ctas can be 0.
@@ -336,7 +331,7 @@ def gemm_alpha_beta(
     **kwargs,
 ):
     """
-    CuTile implementation of GEMM with alpha/beta scaling.
+    cuTile implementation of GEMM with alpha/beta scaling.
 
     Computes: C = alpha * A @ B + beta * C
 
@@ -384,31 +379,19 @@ def gemm_alpha_beta(
 
     if use_autotune:
         # Use exhaustive_search for automatic configuration selection
-        NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-
         def grid_fn(cfg):
-            num_pid_m, num_pid_n, total_tiles, num_programs = _compute_grid_and_programs(
+            num_programs = _compute_grid_and_programs(
                 M, N, cfg.BLOCK_M, cfg.BLOCK_N, num_sms, cfg.num_ctas, cfg.occupancy
-            )
+            )[3]
             return (num_programs, 1, 1)
 
         def args_fn(cfg):
-            num_pid_m, num_pid_n, total_tiles, num_programs = _compute_grid_and_programs(
-                M, N, cfg.BLOCK_M, cfg.BLOCK_N, num_sms, cfg.num_ctas, cfg.occupancy
-            )
             return (
                 a,
                 b,
                 c.clone(),  # Clone for tuning to avoid corrupting C
                 float(alpha),
                 float(beta),
-                M,
-                N,
-                K,
-                total_tiles,
-                num_programs,
-                num_pid_m,
-                num_pid_n,
                 transpose_a_int,
                 transpose_b_int,
                 cfg.BLOCK_M,
@@ -419,22 +402,12 @@ def gemm_alpha_beta(
             )
 
         def launch_args_fn(cfg):
-            num_pid_m, num_pid_n, total_tiles, num_programs = _compute_grid_and_programs(
-                M, N, cfg.BLOCK_M, cfg.BLOCK_N, num_sms, cfg.num_ctas, cfg.occupancy
-            )
             return (
                 a,
                 b,
                 c,  # Use actual C for final launch
                 float(alpha),
                 float(beta),
-                M,
-                N,
-                K,
-                total_tiles,
-                num_programs,
-                num_pid_m,
-                num_pid_n,
                 transpose_a_int,
                 transpose_b_int,
                 cfg.BLOCK_M,
@@ -444,6 +417,9 @@ def gemm_alpha_beta(
                 cfg.EPILOGUE_SUBTILE,
             )
 
+        def hints_fn(cfg):
+            return {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy}
+
         stream = torch.cuda.current_stream()
         cache_key = (M, N, K, transpose_a_int, transpose_b_int, a.dtype, num_sms, str(a.device))
         if cache_key not in _gemm_alpha_beta_tune_cache:
@@ -451,18 +427,14 @@ def gemm_alpha_beta(
                 list(_gemm_alpha_beta_autotune_configs()),
                 stream,
                 grid_fn,
-                gemm_alpha_beta_kernel_cutile,
+                _gemm_alpha_beta_kernel,
                 args_fn,
-                lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+                hints_fn,
             )
             best_cfg = result.best.config
             _gemm_alpha_beta_tune_cache[cache_key] = (
                 best_cfg,
-                ct.kernel(
-                    gemm_alpha_beta_kernel_cutile._pyfunc,
-                    num_ctas=best_cfg.num_ctas,
-                    occupancy=best_cfg.occupancy,
-                ),
+                _gemm_alpha_beta_kernel.replace_hints(**hints_fn(best_cfg)),
             )
         best_cfg, tuned_kernel = _gemm_alpha_beta_tune_cache[cache_key]
         ct.launch(stream, grid_fn(best_cfg), tuned_kernel, launch_args_fn(best_cfg))
@@ -482,16 +454,17 @@ def gemm_alpha_beta(
         occupancy = kernel_configs.get("occupancy", 1)
         epilogue_subtile = kernel_configs.get("EPILOGUE_SUBTILE", 0)
 
-        num_pid_m, num_pid_n, total_tiles, num_programs = _compute_grid_and_programs(
-            M, N, BLOCK_M, BLOCK_N, num_sms, num_ctas, occupancy
-        )
+        num_programs = _compute_grid_and_programs(M, N, BLOCK_M, BLOCK_N, num_sms, num_ctas, occupancy)[3]
 
         # 1D grid for persistent scheduling
         grid = (num_programs, 1, 1)
 
-        # Build kernel with hints
-
-        kernel = gemm_alpha_beta_kernel_cutile
+        hints = {}
+        if num_ctas is not None:
+            hints["num_ctas"] = num_ctas
+        if occupancy is not None:
+            hints["occupancy"] = occupancy
+        kernel = cached_replace_hints(_gemm_alpha_beta_kernel, **hints) if hints else _gemm_alpha_beta_kernel
 
         ct.launch(
             torch.cuda.current_stream(),
@@ -503,13 +476,6 @@ def gemm_alpha_beta(
                 c,
                 float(alpha),
                 float(beta),
-                M,
-                N,
-                K,
-                total_tiles,
-                num_programs,
-                num_pid_m,
-                num_pid_n,
                 transpose_a_int,
                 transpose_b_int,
                 BLOCK_M,

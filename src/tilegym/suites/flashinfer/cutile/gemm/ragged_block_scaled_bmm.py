@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
-from math import ceil
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -11,11 +9,7 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.kernel_utils import get_kernel_configs
-
-
-def cdiv(a, b):
-    """Ceiling division helper function."""
-    return (a + b - 1) // b
+from tilegym.ops.cutile.utils import cached_replace_hints
 
 
 def _is_large_m(total_m, Q):
@@ -26,44 +20,24 @@ def _is_large_m(total_m, Q):
 
 
 @ct.kernel
-def ragged_block_scaled_bmm_kernel_cutile(
-    a_ptr,  # Input matrix A [total_m, K] FP8
-    b_ptr,  # Input matrix B [Q, N, K] FP8
-    a_scale_ptr,  # Scale for A [total_m, k_tiles] FP32
-    b_scale_ptr,  # Scale for B [Q, n_tiles, k_tiles] FP32
-    c_ptr,  # Output matrix C [total_m, N]
+def _ragged_block_scaled_bmm_kernel(
+    a,  # Input matrix A [total_m, K] FP8
+    b,  # Input matrix B [Q, N, K] FP8
+    a_scale,  # Scale for A [total_m, k_tiles] FP32
+    b_scale,  # Scale for B [Q, n_tiles, k_tiles] FP32
+    c,  # Output matrix C [total_m, N]
     m_indptr,  # Segment offsets [Q+1], flattened 1D
-    Q: ct.Constant[int],  # Number of batches
-    max_m: ct.Constant[int],  # Max segment size
-    N: ct.Constant[int],  # Output N dimension
-    K: ct.Constant[int],  # K dimension
-    total_m: ct.Constant[int],  # Total M (for bounds checking)
-    total_tiles: ct.Constant[int],  # Total number of tiles
-    num_programs: ct.Constant[int],  # Number of SMs
-    num_k_tiles: ct.Constant[int],  # Number of K tiles
-    num_pid_m: ct.Constant[int],  # Number of M tiles per batch
-    num_pid_n: ct.Constant[int],  # Number of N tiles per batch
-    tiles_per_batch: ct.Constant[int],  # num_pid_m * num_pid_n
-    stride_a0: ct.Constant[int],  # Stride for A dim 0
-    stride_a1: ct.Constant[int],  # Stride for A dim 1
-    stride_b0: ct.Constant[int],  # Stride for B dim 0
-    stride_b1: ct.Constant[int],  # Stride for B dim 1
-    stride_b2: ct.Constant[int],  # Stride for B dim 2
-    stride_sa0: ct.Constant[int],  # Stride for a_scale dim 0
-    stride_sa1: ct.Constant[int],  # Stride for a_scale dim 1
-    stride_sb0: ct.Constant[int],  # Stride for b_scale dim 0
-    stride_sb1: ct.Constant[int],  # Stride for b_scale dim 1
-    stride_sb2: ct.Constant[int],  # Stride for b_scale dim 2
-    stride_c0: ct.Constant[int],  # Stride for C dim 0
-    stride_c1: ct.Constant[int],  # Stride for C dim 1
-    has_a_scale: ct.Constant[int],  # Whether a_scale is provided (0 or 1)
+    q,  # Number of batches
+    max_m,  # Max segment size
+    n,  # Output N dimension
+    HAS_A_SCALE: ct.Constant[int],  # Whether a_scale is provided (0 or 1)
     BLOCK_M: ct.Constant[int],
     BLOCK_N: ct.Constant[int],
     BLOCK_K: ct.Constant[int],
     GROUP_SIZE_M: ct.Constant[int],
 ):
     """
-    CuTile kernel for ragged block-scaled batched matrix multiplication.
+    cuTile kernel for ragged block-scaled batched matrix multiplication.
 
     Performs (A * a_scale) @ (B * b_scale)^T where:
     - A is flattened FP8 with segment offsets (m_indptr defines boundaries)
@@ -76,6 +50,12 @@ def ragged_block_scaled_bmm_kernel_cutile(
     """
     pid = ct.bid(0)
 
+    num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
+    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    num_pid_n = ct.cdiv(n, BLOCK_N)
+    tiles_per_batch = num_pid_m * num_pid_n
+    total_tiles = tiles_per_batch * q
+    num_programs = ct.num_blocks(0)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     # Persistent scheduling loop
@@ -102,11 +82,11 @@ def ragged_block_scaled_bmm_kernel_cutile(
         # Only process if this tile is within valid M range
         if pid_m * BLOCK_M < valid_m:
             # Create sliced views for A and C using Array.slice
-            Ai = a_ptr.slice(axis=0, start=m_start, stop=m_end)
-            Ci = c_ptr.slice(axis=0, start=m_start, stop=m_end)
+            Ai = a.slice(axis=0, start=m_start, stop=m_end)
+            Ci = c.slice(axis=0, start=m_start, stop=m_end)
 
-            if has_a_scale == 1:
-                a_scale_i = a_scale_ptr.slice(axis=0, start=m_start, stop=m_end)
+            if HAS_A_SCALE == 1:
+                a_scale_i = a_scale.slice(axis=0, start=m_start, stop=m_end)
 
             # Initialize accumulator
             acc = ct.full((BLOCK_M, BLOCK_N), 0.0, dtype=ct.float32)
@@ -132,7 +112,7 @@ def ragged_block_scaled_bmm_kernel_cutile(
 
                 # Load B block - B is [Q, N, K], we need [BLOCK_N, BLOCK_K]
                 b_block_3d = ct.load(
-                    b_ptr,
+                    b,
                     index=(pid_q, n_offset // BLOCK_N, k_offset // BLOCK_K),
                     shape=(1, BLOCK_N, BLOCK_K),
                     order=(0, 1, 2),
@@ -146,7 +126,7 @@ def ragged_block_scaled_bmm_kernel_cutile(
                 c_mma = ct.mma(a_block, b_block, acc=mma_zeros)
 
                 # Load and apply scales
-                if has_a_scale == 1:
+                if HAS_A_SCALE == 1:
                     # Load a_scale for this block using TMA
                     a_scale_block = ct.load(
                         a_scale_i,
@@ -157,7 +137,7 @@ def ragged_block_scaled_bmm_kernel_cutile(
 
                     # Load b_scale - scalar at [pid_q, offs_bsn, k]
                     b_scale_block = ct.load(
-                        b_scale_ptr,
+                        b_scale,
                         index=(pid_q, offs_bsn, k),
                         shape=(1, 1, 1),
                         order=(0, 1, 2),
@@ -171,7 +151,7 @@ def ragged_block_scaled_bmm_kernel_cutile(
                 else:
                     # Only b_scale
                     b_scale_block = ct.load(
-                        b_scale_ptr,
+                        b_scale,
                         index=(pid_q, offs_bsn, k),
                         shape=(1, 1, 1),
                         order=(0, 1, 2),
@@ -184,55 +164,41 @@ def ragged_block_scaled_bmm_kernel_cutile(
                 acc = acc + c_mma * scale_ab
 
             # Convert to output dtype
-            c_block = ct.astype(acc, c_ptr.dtype)
+            c_block = ct.astype(acc, c.dtype)
 
             # Store to output C using TMA
             ct.store(Ci, index=(pid_m, pid_n), tile=c_block)
 
 
 @ct.kernel
-def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
-    a_ptr,  # Input matrix A [total_m, K] FP8
-    b_ptr,  # Input matrix B [Q, N, K] FP8
-    a_scale_ptr,  # Scale for A [total_m, k_tiles] FP32
-    b_scale_ptr,  # Scale for B [Q, n_tiles, k_tiles] FP32
-    c_ptr,  # Output matrix C [total_m, N]
+def _ragged_block_scaled_bmm_swap_ab_kernel(
+    a,  # Input matrix A [total_m, K] FP8
+    b,  # Input matrix B [Q, N, K] FP8
+    a_scale,  # Scale for A [total_m, k_tiles] FP32
+    b_scale,  # Scale for B [Q, n_tiles, k_tiles] FP32
+    c,  # Output matrix C [total_m, N]
     m_indptr,  # Segment offsets [Q+1], flattened 1D
-    Q: ct.Constant[int],
-    max_m: ct.Constant[int],
-    N: ct.Constant[int],
-    K: ct.Constant[int],
-    total_m: ct.Constant[int],
-    total_tiles: ct.Constant[int],
-    num_programs: ct.Constant[int],
-    num_k_tiles: ct.Constant[int],
-    num_pid_m: ct.Constant[int],
-    num_pid_n: ct.Constant[int],
-    tiles_per_batch: ct.Constant[int],
-    stride_a0: ct.Constant[int],
-    stride_a1: ct.Constant[int],
-    stride_b0: ct.Constant[int],
-    stride_b1: ct.Constant[int],
-    stride_b2: ct.Constant[int],
-    stride_sa0: ct.Constant[int],
-    stride_sa1: ct.Constant[int],
-    stride_sb0: ct.Constant[int],
-    stride_sb1: ct.Constant[int],
-    stride_sb2: ct.Constant[int],
-    stride_c0: ct.Constant[int],
-    stride_c1: ct.Constant[int],
-    has_a_scale: ct.Constant[int],
+    q,
+    max_m,
+    n,
+    HAS_A_SCALE: ct.Constant[int],
     BLOCK_M: ct.Constant[int],
     BLOCK_N: ct.Constant[int],
     BLOCK_K: ct.Constant[int],
     GROUP_SIZE_M: ct.Constant[int],
 ):
     """
-    CuTile kernel for ragged block-scaled BMM with swap_ab optimization.
+    cuTile kernel for ragged block-scaled BMM with swap_ab optimization.
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
     """
     pid = ct.bid(0)
 
+    num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
+    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    num_pid_n = ct.cdiv(n, BLOCK_N)
+    tiles_per_batch = num_pid_m * num_pid_n
+    total_tiles = tiles_per_batch * q
+    num_programs = ct.num_blocks(0)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     # Persistent scheduling loop
@@ -255,11 +221,11 @@ def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
 
         if pid_m * BLOCK_M < valid_m:
             # Create sliced views for A and C using Array.slice
-            Ai = a_ptr.slice(axis=0, start=m_start, stop=m_end)
-            Ci = c_ptr.slice(axis=0, start=m_start, stop=m_end)
+            Ai = a.slice(axis=0, start=m_start, stop=m_end)
+            Ci = c.slice(axis=0, start=m_start, stop=m_end)
 
-            if has_a_scale == 1:
-                a_scale_i = a_scale_ptr.slice(axis=0, start=m_start, stop=m_end)
+            if HAS_A_SCALE == 1:
+                a_scale_i = a_scale.slice(axis=0, start=m_start, stop=m_end)
 
             acc = ct.full((BLOCK_M, BLOCK_N), 0.0, dtype=ct.float32)
 
@@ -282,7 +248,7 @@ def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
 
                 # Load B block
                 b_block_3d = ct.load(
-                    b_ptr,
+                    b,
                     index=(pid_q, n_offset // BLOCK_N, k_offset // BLOCK_K),
                     shape=(1, BLOCK_N, BLOCK_K),
                     order=(0, 1, 2),
@@ -296,7 +262,7 @@ def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
                 c_mma = ct.permute(c_swapped, (1, 0))
 
                 # Load and apply scales
-                if has_a_scale == 1:
+                if HAS_A_SCALE == 1:
                     a_scale_block = ct.load(
                         a_scale_i,
                         index=(pid_m, k),
@@ -305,7 +271,7 @@ def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
                     )
 
                     b_scale_block = ct.load(
-                        b_scale_ptr,
+                        b_scale,
                         index=(pid_q, offs_bsn, k),
                         shape=(1, 1, 1),
                         order=(0, 1, 2),
@@ -316,7 +282,7 @@ def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
                     scale_ab = ct.broadcast_to(scale_combined, (BLOCK_M, BLOCK_N))
                 else:
                     b_scale_block = ct.load(
-                        b_scale_ptr,
+                        b_scale,
                         index=(pid_q, offs_bsn, k),
                         shape=(1, 1, 1),
                         order=(0, 1, 2),
@@ -327,7 +293,7 @@ def ragged_block_scaled_bmm_kernel_cutile_swap_ab(
 
                 acc = acc + c_mma * scale_ab
 
-            c_block = ct.astype(acc, c_ptr.dtype)
+            c_block = ct.astype(acc, c.dtype)
 
             # Store to output C using TMA
             ct.store(Ci, index=(pid_m, pid_n), tile=c_block)
@@ -385,25 +351,13 @@ def _ragged_block_scaled_bmm_autotune_configs():
             (128, 2, 2),  # for small M
         ]:
             yield SimpleNamespace(
-                BLOCK_M=BM,
-                BLOCK_N=128,
-                BLOCK_K=128,
-                GROUP_SIZE_M=8,
-                swap_ab=False,
-                num_ctas=nc,
-                occupancy=occ,
+                BLOCK_M=BM, BLOCK_N=128, BLOCK_K=128, GROUP_SIZE_M=8, swap_ab=False, num_ctas=nc, occupancy=occ
             )
         # Swapped configs (for small M)
         for GM in [2, 4]:
             for BM in [16, 32, 64]:
                 yield SimpleNamespace(
-                    BLOCK_M=BM,
-                    BLOCK_N=256,
-                    BLOCK_K=128,
-                    GROUP_SIZE_M=GM,
-                    swap_ab=True,
-                    num_ctas=1,
-                    occupancy=1,
+                    BLOCK_M=BM, BLOCK_N=256, BLOCK_K=128, GROUP_SIZE_M=GM, swap_ab=True, num_ctas=1, occupancy=1
                 )
 
 
@@ -472,7 +426,7 @@ def ragged_block_scaled_bmm(
     **kwargs,
 ):
     """
-    CuTile implementation of ragged block-scaled BMM.
+    cuTile implementation of ragged block-scaled BMM.
     """
     # Validate inputs
     assert transpose_a == False and transpose_b == True, "Only NT layout is supported"
@@ -502,8 +456,6 @@ def ragged_block_scaled_bmm(
     # Determine output dtype
     if out_dtype is None:
         out_dtype = torch.bfloat16
-
-    # Allocate output
     c = torch.empty((total_m, N), device=a.device, dtype=out_dtype)
 
     # Get kernel configs
@@ -520,38 +472,29 @@ def ragged_block_scaled_bmm(
 
     # Calculate grid size for persistent scheduling
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    num_pid_m = cdiv(max_m, BLOCK_M)
-    num_pid_n = cdiv(N, BLOCK_N)
+    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    num_pid_n = ct.cdiv(N, BLOCK_N)
     tiles_per_batch = num_pid_m * num_pid_n
     total_tiles = tiles_per_batch * Q
     num_programs = min(NUM_SMS // num_ctas, total_tiles) * occupancy
-    num_k_tiles = cdiv(K_A, BLOCK_K)
 
     grid = (num_programs, 1, 1)
 
-    # Prepare strides
-    stride_a0 = a.stride(0)
-    stride_a1 = a.stride(1)
-    stride_b0 = b.stride(0)
-    stride_b1 = b.stride(1)
-    stride_b2 = b.stride(2)
-    stride_sa0 = a_scale.stride(0) if a_scale is not None else 0
-    stride_sa1 = a_scale.stride(1) if a_scale is not None else 0
-    stride_sb0 = b_scale.stride(0)
-    stride_sb1 = b_scale.stride(1)
-    stride_sb2 = b_scale.stride(2)
-    stride_c0 = c.stride(0)
-    stride_c1 = c.stride(1)
     has_a_scale = 1 if a_scale is not None else 0
 
     if a_scale is None:
-        a_scale_ptr = torch.empty(1, device=a.device, dtype=torch.float32)
+        a_scale = torch.empty(1, device=a.device, dtype=torch.float32)
     else:
-        a_scale_ptr = a_scale
+        a_scale = a_scale
 
-    kernel_fn = ragged_block_scaled_bmm_kernel_cutile_swap_ab if swap_ab else ragged_block_scaled_bmm_kernel_cutile
+    kernel_fn = _ragged_block_scaled_bmm_swap_ab_kernel if swap_ab else _ragged_block_scaled_bmm_kernel
 
-    kernel = kernel_fn
+    hints = {}
+    if num_ctas is not None:
+        hints["num_ctas"] = num_ctas
+    if occupancy is not None:
+        hints["occupancy"] = occupancy
+    kernel = cached_replace_hints(kernel_fn, **hints) if hints else kernel_fn
 
     ct.launch(
         torch.cuda.current_stream(),
@@ -560,33 +503,13 @@ def ragged_block_scaled_bmm(
         (
             a,
             b,
-            a_scale_ptr,
+            a_scale,
             b_scale,
             c,
             m_indptr,
             Q,
             max_m,
             N,
-            K_A,
-            total_m,
-            total_tiles,
-            num_programs,
-            num_k_tiles,
-            num_pid_m,
-            num_pid_n,
-            tiles_per_batch,
-            stride_a0,
-            stride_a1,
-            stride_b0,
-            stride_b1,
-            stride_b2,
-            stride_sa0,
-            stride_sa1,
-            stride_sb0,
-            stride_sb1,
-            stride_sb2,
-            stride_c0,
-            stride_c1,
             has_a_scale,
             BLOCK_M,
             BLOCK_N,

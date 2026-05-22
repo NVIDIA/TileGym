@@ -12,7 +12,7 @@ from tilegym.backend import register_impl
 ConstInt = ct.Constant[int]
 
 
-def next_power_of_2(n):
+def _next_power_of_2(n):
     """Return the smallest power of 2 greater than or equal to n."""
     if n <= 0:
         return 1
@@ -21,18 +21,18 @@ def next_power_of_2(n):
 
 @ct.kernel
 def _per_token_group_quant_8bit_kernel(
-    y_ptr,
-    y_q_ptr,
-    y_s_ptr,
-    y_stride: ConstInt,
-    N: ConstInt,
-    eps: ConstInt,
-    bit8_min: ConstInt,
-    bit8_max: ConstInt,
+    y_input,
+    y_quantized,
+    y_scale,
+    y_stride,
+    n,
+    eps,
+    bit8_min,
+    bit8_max,
     BLOCK: ConstInt,
-    y_array_size: ConstInt,
-    y_q_array_size: ConstInt,
-    y_s_array_size: ConstInt,
+    y_array_size,
+    y_q_array_size,
+    y_s_array_size,
 ):
     """Per-token-group quantization kernel (row-major scales)."""
     g_id = ct.bid(0)
@@ -43,11 +43,11 @@ def _per_token_group_quant_8bit_kernel(
 
     # Create column offsets and mask
     cols = ct.arange(BLOCK, dtype=ct.int32)
-    mask = cols < N
+    mask = cols < n
 
     # Load input values with gather (element-level access with mask)
     y_indices = y_base + cols
-    y = ct.gather(y_ptr, (y_indices,), check_bounds=True, padding_value=0.0)
+    y = ct.gather(y_input, (y_indices,), check_bounds=True, padding_value=0.0)
     y = ct.astype(y, ct.float32)
 
     # Compute absmax
@@ -61,38 +61,38 @@ def _per_token_group_quant_8bit_kernel(
 
     # Quantize: clamp(y * y_s_inv, bit8_min, bit8_max)
     y_q = ct.minimum(ct.maximum(y * y_s_inv, bit8_min), bit8_max)
-    y_q = ct.astype(y_q, y_q_ptr.dtype)
+    y_q = ct.astype(y_q, y_quantized.dtype)
 
     # Store quantized values with mask (use OOB offsets for invalid positions)
     oob_offset = ct.full((BLOCK,), y_q_array_size, dtype=ct.int32)
     y_q_indices = y_q_base + cols
     y_q_indices_masked = ct.where(mask, y_q_indices, oob_offset)
-    ct.scatter(y_q_ptr, (y_q_indices_masked,), y_q, check_bounds=True)
+    ct.scatter(y_quantized, (y_q_indices_masked,), y_q, check_bounds=True)
 
     # Store scale (single scalar per group)
     y_s_idx = g_id
     oob_scalar = ct.full((), y_s_array_size, dtype=ct.int32)
     s_idx_masked = ct.where(y_s_idx < y_s_array_size, y_s_idx, oob_scalar)
-    ct.scatter(y_s_ptr, (s_idx_masked,), y_s)
+    ct.scatter(y_scale, (s_idx_masked,), y_s)
 
 
 @ct.kernel
 def _per_token_group_quant_8bit_colmajor_kernel(
-    y_ptr,
-    y_q_ptr,
-    y_s_ptr,
-    group_size: ConstInt,
-    y_num_columns: ConstInt,
-    y_row_stride: ConstInt,
-    y_s_col_stride: ConstInt,
-    eps: ConstInt,
-    bit8_min: ConstInt,
-    bit8_max: ConstInt,
-    scale_ue8m0: ConstInt,
+    y_input,
+    y_quantized,
+    y_scale,
+    group_size,
+    y_num_columns,
+    y_row_stride,
+    y_s_col_stride,
+    eps,
+    bit8_min,
+    bit8_max,
+    scale_ue8m0,
     BLOCK: ConstInt,
-    y_array_size: ConstInt,
-    y_q_array_size: ConstInt,
-    y_s_array_size: ConstInt,
+    y_array_size,
+    y_q_array_size,
+    y_s_array_size,
 ):
     """Per-token-group quantization kernel (column-major scales)."""
     groups_per_row = y_num_columns // group_size
@@ -112,7 +112,7 @@ def _per_token_group_quant_8bit_colmajor_kernel(
 
     # Load input values
     y_indices = y_base + cols
-    y = ct.gather(y_ptr, (y_indices,), check_bounds=True, padding_value=0.0)
+    y = ct.gather(y_input, (y_indices,), check_bounds=True, padding_value=0.0)
     y = ct.astype(y, ct.float32)
 
     # Compute absmax
@@ -131,18 +131,18 @@ def _per_token_group_quant_8bit_colmajor_kernel(
 
     # Quantize: clamp(y / y_s, bit8_min, bit8_max)
     y_q = ct.minimum(ct.maximum(y / y_s, bit8_min), bit8_max)
-    y_q = ct.astype(y_q, y_q_ptr.dtype)
+    y_q = ct.astype(y_q, y_quantized.dtype)
 
     # Store quantized values with mask
     oob_offset = ct.full((BLOCK,), y_q_array_size, dtype=ct.int32)
     y_q_indices = y_q_base + cols
     y_q_indices_masked = ct.where(mask, y_q_indices, oob_offset)
-    ct.scatter(y_q_ptr, (y_q_indices_masked,), y_q, check_bounds=True)
+    ct.scatter(y_quantized, (y_q_indices_masked,), y_q, check_bounds=True)
 
     # Store scale (single scalar)
     oob_scalar = ct.full((), y_s_array_size, dtype=ct.int32)
     s_idx_masked = ct.where(y_s_offset < y_s_array_size, y_s_offset, oob_scalar)
-    ct.scatter(y_s_ptr, (s_idx_masked,), y_s)
+    ct.scatter(y_scale, (s_idx_masked,), y_s)
 
 
 def _ceil_align(x: int, align: int) -> int:
@@ -159,7 +159,7 @@ def per_token_group_quant_8bit(
     scale_tma_aligned: bool = False,
     scale_ue8m0: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Per-token group 8-bit quantization (FP8 or INT8) - CuTile implementation."""
+    """Per-token group 8-bit quantization (FP8 or INT8) - cuTile implementation."""
     if dst_dtype is None:
         dst_dtype = torch.float8_e4m3fn
     assert x.shape[-1] % group_size == 0, (
@@ -203,7 +203,7 @@ def per_token_group_quant_8bit(
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
-    BLOCK = next_power_of_2(N)
+    BLOCK = _next_power_of_2(N)
 
     stream = torch.cuda.current_stream()
     grid = (M, 1, 1)

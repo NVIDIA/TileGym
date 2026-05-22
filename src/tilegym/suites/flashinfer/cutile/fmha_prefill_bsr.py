@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from types import SimpleNamespace
 from typing import Optional
 
@@ -12,8 +11,6 @@ from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
-from tilegym.ops.cutile.utils import is_power_of_2
-from tilegym.ops.cutile.utils import next_power_of_2
 
 # Module-level tune caches for prefill kernels
 _prefill_paged_lpt_tune_cache: dict = {}
@@ -322,15 +319,15 @@ def _prefill_attention_paged_body(
     batch_id,
     head_id,
     seq_block_id,
-    q_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
+    query,
+    key_cache,
+    value_cache,
     actual_seq_lens_q,
     actual_seq_lens_kv,
     batch_offsets,
     block_tables,
-    o_ptr,
-    lse_ptr,
+    output,
+    lse_output,
     k_scale: ConstFloat,
     v_scale: ConstFloat,
     N_KV_HEADS: ConstInt,
@@ -340,7 +337,7 @@ def _prefill_attention_paged_body(
     BLOCK_D: ConstInt,
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
-    stride_block_table: ConstInt,
+    stride_block_table,
     IS_CAUSAL: ConstBool,
     LOAD_BLOCK_N: ConstInt,
 ):
@@ -359,15 +356,14 @@ def _prefill_attention_paged_body(
     if start_m >= seq_len_q:
         return
 
-    N_HEADS = N_KV_HEADS * QUERY_GROUP_SIZE
     off_kv_h = head_id // QUERY_GROUP_SIZE
     qk_scale = k_scale * INV_LOG_2
     PAD_ZERO = ct.PaddingMode.ZERO
 
     page_table_offset = batch_id * stride_block_table
 
-    q_seq = q_ptr.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
-    o_seq = o_ptr.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
+    q_seq = query.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
+    o_seq = output.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
 
     q_tile = ct.load(
         q_seq,
@@ -417,14 +413,13 @@ def _prefill_attention_paged_body(
         on_band_lo = 0
         on_band_hi = 0
 
-    # ========== Stage 1: Off-band loop (NO causal mask) ==========
     off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
     for iter_idx in range(off_band_iters):
         curr_n = iter_idx * BLOCK_N
 
         k = _load_page_wrapper_prefill(
             curr_n,
-            k_cache_ptr,
+            key_cache,
             block_tables,
             page_table_offset,
             off_kv_h,
@@ -441,7 +436,7 @@ def _prefill_attention_paged_body(
         if BLOCK_R > 0:
             k_pe = _load_page_wrapper_prefill(
                 curr_n,
-                k_cache_ptr,
+                key_cache,
                 block_tables,
                 page_table_offset,
                 off_kv_h,
@@ -455,19 +450,16 @@ def _prefill_attention_paged_body(
             qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
 
         qk_max = ct.max(qk, axis=1, keepdims=False)
-        m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-        p = ct.exp2(
-            ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True),
-            flush_to_zero=True,
-        )
+        m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+        p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
 
-        alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-        l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), ct.sum(p, axis=1, keepdims=False), flush_to_zero=True)
-        acc = ct.mul(acc, ct.reshape(alpha, (BLOCK_M, 1)), flush_to_zero=True)
+        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+        l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+        acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
 
         v = _load_page_wrapper_prefill(
             curr_n,
-            v_cache_ptr,
+            value_cache,
             block_tables,
             page_table_offset,
             off_kv_h,
@@ -482,7 +474,6 @@ def _prefill_attention_paged_body(
         acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
         m_i = m_ij
 
-    # ========== Stage 2: On-band loop (WITH causal mask) ==========
     if IS_CAUSAL:
         on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
         for iter_idx in range(on_band_iters):
@@ -490,7 +481,7 @@ def _prefill_attention_paged_body(
 
             k = _load_page_wrapper_prefill(
                 curr_n,
-                k_cache_ptr,
+                key_cache,
                 block_tables,
                 page_table_offset,
                 off_kv_h,
@@ -507,7 +498,7 @@ def _prefill_attention_paged_body(
             if BLOCK_R > 0:
                 k_pe = _load_page_wrapper_prefill(
                     curr_n,
-                    k_cache_ptr,
+                    key_cache,
                     block_tables,
                     page_table_offset,
                     off_kv_h,
@@ -525,19 +516,16 @@ def _prefill_attention_paged_body(
             qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
 
             qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-            p = ct.exp2(
-                ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True),
-                flush_to_zero=True,
-            )
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
 
-            alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-            l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), ct.sum(p, axis=1, keepdims=False), flush_to_zero=True)
-            acc = ct.mul(acc, ct.reshape(alpha, (BLOCK_M, 1)), flush_to_zero=True)
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
 
             v = _load_page_wrapper_prefill(
                 curr_n,
-                v_cache_ptr,
+                value_cache,
                 block_tables,
                 page_table_offset,
                 off_kv_h,
@@ -554,11 +542,11 @@ def _prefill_attention_paged_body(
 
     # Epilogue: normalize and store with RMd.APPROX
     l_i_rcp = ct.truediv(v_scale, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
-    acc = ct.mul(acc, ct.reshape(l_i_rcp, (BLOCK_M, 1)), flush_to_zero=True)
+    acc = acc * ct.reshape(l_i_rcp, (BLOCK_M, 1))
     lse = m_i + ct.log2(l_i)
 
     # Store output using TMA
-    acc_out = ct.astype(acc, o_ptr.dtype)
+    acc_out = ct.astype(acc, output.dtype)
     acc_3d = ct.reshape(acc_out, (BLOCK_M, 1, BLOCK_D))
     ct.store(
         o_seq,
@@ -569,30 +557,30 @@ def _prefill_attention_paged_body(
         latency=2,
     )
 
-    # Store LSE - lse_ptr is 2D [total_tokens, num_heads]
+    # Store LSE - lse_output is 2D [total_tokens, num_heads]
     lse_scaled = lse * (1.0 / INV_LOG_2)  # multiply by constant instead of dividing
     offs_m_store = ct.arange(BLOCK_M, dtype=ct.int32)
     token_indices = seq_start_index + start_m + offs_m_store
     head_indices = ct.full((BLOCK_M,), head_id, dtype=ct.int32)
-    lse_mask = ct.less(offs_m_store + start_m, seq_len_q)
+    lse_mask = offs_m_store + start_m < seq_len_q
     token_indices_masked = ct.where(lse_mask, token_indices, ct.full((BLOCK_M,), -1, dtype=ct.int32))
     lse_indices = (token_indices_masked, head_indices)
-    ct.scatter(lse_ptr, lse_indices, lse_scaled)
+    ct.scatter(lse_output, lse_indices, lse_scaled)
 
 
 @ct.kernel
 def _prefill_attention_paged_kernel(
-    q_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
+    query,
+    key_cache,
+    value_cache,
     actual_seq_lens_q,
     actual_seq_lens_kv,
     batch_offsets,
     block_tables,
-    o_ptr,
-    lse_ptr,
-    k_scale: ConstFloat,
-    v_scale: ConstFloat,
+    output,
+    lse_output,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
     N_KV_HEADS: ConstInt,
     PAGE_SIZE: ConstInt,
     BLOCK_M: ConstInt,
@@ -600,7 +588,7 @@ def _prefill_attention_paged_kernel(
     BLOCK_D: ConstInt,
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
-    stride_block_table: ConstInt,
+    stride_block_table,
     IS_CAUSAL: ConstBool,
     LOAD_BLOCK_N: ConstInt,
 ):
@@ -612,17 +600,17 @@ def _prefill_attention_paged_kernel(
         batch_id,
         head_id,
         seq_block_id,
-        q_ptr,
-        k_cache_ptr,
-        v_cache_ptr,
+        query,
+        key_cache,
+        value_cache,
         actual_seq_lens_q,
         actual_seq_lens_kv,
         batch_offsets,
         block_tables,
-        o_ptr,
-        lse_ptr,
-        k_scale,
-        v_scale,
+        output,
+        lse_output,
+        K_SCALE,
+        V_SCALE,
         N_KV_HEADS,
         PAGE_SIZE,
         BLOCK_M,
@@ -638,17 +626,17 @@ def _prefill_attention_paged_kernel(
 
 @ct.kernel
 def _prefill_attention_paged_lpt_kernel(
-    q_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
+    query,
+    key_cache,
+    value_cache,
     actual_seq_lens_q,
     actual_seq_lens_kv,
     batch_offsets,
     block_tables,
-    o_ptr,
-    lse_ptr,
-    k_scale: ConstFloat,
-    v_scale: ConstFloat,
+    output,
+    lse_output,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
     N_KV_HEADS: ConstInt,
     PAGE_SIZE: ConstInt,
     BLOCK_M: ConstInt,
@@ -656,7 +644,7 @@ def _prefill_attention_paged_lpt_kernel(
     BLOCK_D: ConstInt,
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
-    stride_block_table: ConstInt,
+    stride_block_table,
     IS_CAUSAL: ConstBool,
     LOAD_BLOCK_N: ConstInt,
     NUM_HEADS: ConstInt,
@@ -689,17 +677,17 @@ def _prefill_attention_paged_lpt_kernel(
         batch_id,
         head_id,
         seq_block_id,
-        q_ptr,
-        k_cache_ptr,
-        v_cache_ptr,
+        query,
+        key_cache,
+        value_cache,
         actual_seq_lens_q,
         actual_seq_lens_kv,
         batch_offsets,
         block_tables,
-        o_ptr,
-        lse_ptr,
-        k_scale,
-        v_scale,
+        output,
+        lse_output,
+        K_SCALE,
+        V_SCALE,
         N_KV_HEADS,
         PAGE_SIZE,
         BLOCK_M,
@@ -717,14 +705,14 @@ def _prefill_attention_ragged_body(
     batch_id,
     head_id,
     seq_block_id,
-    q_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
+    query,
+    key_cache,
+    value_cache,
     actual_seq_lens_q,
     actual_seq_lens_kv,
     batch_offsets,
-    o_ptr,
-    lse_ptr,
+    output,
+    lse_output,
     k_scale: ConstFloat,
     v_scale: ConstFloat,
     N_KV_HEADS: ConstInt,
@@ -733,19 +721,6 @@ def _prefill_attention_ragged_body(
     BLOCK_D: ConstInt,
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
-    stride_q0: ConstInt,
-    stride_q1: ConstInt,
-    stride_q2: ConstInt,
-    stride_o0: ConstInt,
-    stride_o1: ConstInt,
-    stride_o2: ConstInt,
-    stride_k_0: ConstInt,
-    stride_k_1: ConstInt,
-    stride_k_2: ConstInt,
-    stride_v_0: ConstInt,
-    stride_v_1: ConstInt,
-    stride_v_2: ConstInt,
-    lse_stride_token: ConstInt,
     IS_CAUSAL: ConstBool,
 ):
     # Load sequence info
@@ -763,17 +738,16 @@ def _prefill_attention_ragged_body(
     if start_m >= seq_len_q:
         return
 
-    N_HEADS = N_KV_HEADS * QUERY_GROUP_SIZE
     off_kv_h = head_id // QUERY_GROUP_SIZE
     qk_scale = k_scale * INV_LOG_2
     PAD_ZERO = ct.PaddingMode.ZERO
 
     # Create sliced views for ragged tensors - enables TMA with block indices
     # Slice along axis 0 to offset base pointer by seq_start_index
-    q_seq = q_ptr.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
-    k_seq = k_cache_ptr.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
-    v_seq = v_cache_ptr.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
-    o_seq = o_ptr.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
+    q_seq = query.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
+    k_seq = key_cache.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
+    v_seq = value_cache.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
+    o_seq = output.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
 
     # Load Q tile using TMA - use seq_block_id as block index
     # q_seq shape: [seq_len_q, num_heads, head_dim_qk + head_dim_rope]
@@ -826,7 +800,6 @@ def _prefill_attention_ragged_body(
         on_band_lo = 0
         on_band_hi = 0
 
-    # ========== Stage 1: Off-band loop (NO causal mask) ==========
     off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
     for iter_idx in range(off_band_iters):
         curr_n = iter_idx * BLOCK_N
@@ -858,15 +831,12 @@ def _prefill_attention_ragged_body(
             qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
 
         qk_max = ct.max(qk, axis=1, keepdims=False)
-        m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-        p = ct.exp2(
-            ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True),
-            flush_to_zero=True,
-        )
+        m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+        p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
 
-        alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-        l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), ct.sum(p, axis=1, keepdims=False), flush_to_zero=True)
-        acc = ct.mul(acc, ct.reshape(alpha, (BLOCK_M, 1)), flush_to_zero=True)
+        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+        l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+        acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
 
         v_tile = ct.load(
             v_seq,
@@ -882,7 +852,6 @@ def _prefill_attention_ragged_body(
         acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
         m_i = m_ij
 
-    # ========== Stage 2: On-band loop (WITH causal mask) ==========
     if IS_CAUSAL:
         on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
         on_band_block_start = on_band_lo // BLOCK_N
@@ -921,15 +890,12 @@ def _prefill_attention_ragged_body(
             qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
 
             qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-            p = ct.exp2(
-                ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True),
-                flush_to_zero=True,
-            )
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
 
-            alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-            l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), ct.sum(p, axis=1, keepdims=False), flush_to_zero=True)
-            acc = ct.mul(acc, ct.reshape(alpha, (BLOCK_M, 1)), flush_to_zero=True)
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
 
             v_tile = ct.load(
                 v_seq,
@@ -946,10 +912,10 @@ def _prefill_attention_ragged_body(
             m_i = m_ij
 
     l_i_rcp = ct.truediv(v_scale, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
-    acc = ct.mul(acc, ct.reshape(l_i_rcp, (BLOCK_M, 1)), flush_to_zero=True)
+    acc = acc * ct.reshape(l_i_rcp, (BLOCK_M, 1))
     lse = m_i + ct.log2(l_i)
 
-    acc_out = ct.astype(acc, o_ptr.dtype)
+    acc_out = ct.astype(acc, output.dtype)
     acc_3d = ct.reshape(acc_out, (BLOCK_M, 1, BLOCK_D))
     ct.store(
         o_seq,
@@ -964,43 +930,30 @@ def _prefill_attention_ragged_body(
     offs_m_store = ct.arange(BLOCK_M, dtype=ct.int32)
     token_indices = seq_start_index + start_m + offs_m_store
     head_indices = ct.full((BLOCK_M,), head_id, dtype=ct.int32)
-    lse_mask = ct.less(offs_m_store + start_m, seq_len_q)
+    lse_mask = offs_m_store + start_m < seq_len_q
     token_indices_masked = ct.where(lse_mask, token_indices, ct.full((BLOCK_M,), -1, dtype=ct.int32))
     lse_indices = (token_indices_masked, head_indices)
-    ct.scatter(lse_ptr, lse_indices, lse_scaled)
+    ct.scatter(lse_output, lse_indices, lse_scaled)
 
 
 @ct.kernel
 def _prefill_attention_ragged_kernel(
-    q_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
+    query,
+    key_cache,
+    value_cache,
     actual_seq_lens_q,
     actual_seq_lens_kv,
     batch_offsets,
-    o_ptr,
-    lse_ptr,
-    k_scale: ConstFloat,
-    v_scale: ConstFloat,
+    output,
+    lse_output,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
     N_KV_HEADS: ConstInt,
     BLOCK_M: ConstInt,
     BLOCK_N: ConstInt,
     BLOCK_D: ConstInt,
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
-    stride_q0: ConstInt,
-    stride_q1: ConstInt,
-    stride_q2: ConstInt,
-    stride_o0: ConstInt,
-    stride_o1: ConstInt,
-    stride_o2: ConstInt,
-    stride_k_0: ConstInt,
-    stride_k_1: ConstInt,
-    stride_k_2: ConstInt,
-    stride_v_0: ConstInt,
-    stride_v_1: ConstInt,
-    stride_v_2: ConstInt,
-    lse_stride_token: ConstInt,
     IS_CAUSAL: ConstBool,
 ):
     """
@@ -1017,70 +970,44 @@ def _prefill_attention_ragged_kernel(
         batch_id,
         head_id,
         seq_block_id,
-        q_ptr,
-        k_cache_ptr,
-        v_cache_ptr,
+        query,
+        key_cache,
+        value_cache,
         actual_seq_lens_q,
         actual_seq_lens_kv,
         batch_offsets,
-        o_ptr,
-        lse_ptr,
-        k_scale,
-        v_scale,
+        output,
+        lse_output,
+        K_SCALE,
+        V_SCALE,
         N_KV_HEADS,
         BLOCK_M,
         BLOCK_N,
         BLOCK_D,
         BLOCK_R,
         QUERY_GROUP_SIZE,
-        stride_q0,
-        stride_q1,
-        stride_q2,
-        stride_o0,
-        stride_o1,
-        stride_o2,
-        stride_k_0,
-        stride_k_1,
-        stride_k_2,
-        stride_v_0,
-        stride_v_1,
-        stride_v_2,
-        lse_stride_token,
         IS_CAUSAL,
     )
 
 
 @ct.kernel
 def _prefill_attention_ragged_lpt_kernel(
-    q_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
+    query,
+    key_cache,
+    value_cache,
     actual_seq_lens_q,
     actual_seq_lens_kv,
     batch_offsets,
-    o_ptr,
-    lse_ptr,
-    k_scale: ConstFloat,
-    v_scale: ConstFloat,
+    output,
+    lse_output,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
     N_KV_HEADS: ConstInt,
     BLOCK_M: ConstInt,
     BLOCK_N: ConstInt,
     BLOCK_D: ConstInt,
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
-    stride_q0: ConstInt,
-    stride_q1: ConstInt,
-    stride_q2: ConstInt,
-    stride_o0: ConstInt,
-    stride_o1: ConstInt,
-    stride_o2: ConstInt,
-    stride_k_0: ConstInt,
-    stride_k_1: ConstInt,
-    stride_k_2: ConstInt,
-    stride_v_0: ConstInt,
-    stride_v_1: ConstInt,
-    stride_v_2: ConstInt,
-    lse_stride_token: ConstInt,
     IS_CAUSAL: ConstBool,
     NUM_HEADS: ConstInt,
     NUM_BATCH: ConstInt,
@@ -1112,35 +1039,22 @@ def _prefill_attention_ragged_lpt_kernel(
         batch_id,
         head_id,
         seq_block_id,
-        q_ptr,
-        k_cache_ptr,
-        v_cache_ptr,
+        query,
+        key_cache,
+        value_cache,
         actual_seq_lens_q,
         actual_seq_lens_kv,
         batch_offsets,
-        o_ptr,
-        lse_ptr,
-        k_scale,
-        v_scale,
+        output,
+        lse_output,
+        K_SCALE,
+        V_SCALE,
         N_KV_HEADS,
         BLOCK_M,
         BLOCK_N,
         BLOCK_D,
         BLOCK_R,
         QUERY_GROUP_SIZE,
-        stride_q0,
-        stride_q1,
-        stride_q2,
-        stride_o0,
-        stride_o1,
-        stride_o2,
-        stride_k_0,
-        stride_k_1,
-        stride_k_2,
-        stride_v_0,
-        stride_v_1,
-        stride_v_2,
-        lse_stride_token,
         IS_CAUSAL,
     )
 
@@ -1164,7 +1078,7 @@ def prefill_attention_kv_paged(
     use_lpt_scheduler: bool = True,
 ):
     """
-    Prefill attention with paged KV cache (CuTile implementation).
+    Prefill attention with paged KV cache (cuTile implementation).
     """
     # KV cache [num_pages, page_size, num_kv_heads, head_dim_qk]
     total_num_pages = k_cache.shape[0]
@@ -1266,10 +1180,7 @@ def prefill_attention_kv_paged(
             best_cfg = result.best.config
             _prefill_paged_lpt_tune_cache[paged_lpt_cache_key] = (
                 best_cfg,
-                ct.kernel(
-                    _prefill_attention_paged_lpt_kernel._pyfunc,
-                    occupancy=best_cfg.occupancy,
-                ),
+                _prefill_attention_paged_lpt_kernel.replace_hints(occupancy=best_cfg.occupancy),
             )
         best_cfg, tuned_kernel = _prefill_paged_lpt_tune_cache[paged_lpt_cache_key]
         ct.launch(
@@ -1357,10 +1268,7 @@ def prefill_attention_kv_paged(
             best_cfg = result.best.config
             _prefill_paged_tune_cache[paged_cache_key] = (
                 best_cfg,
-                ct.kernel(
-                    _prefill_attention_paged_kernel._pyfunc,
-                    occupancy=best_cfg.occupancy,
-                ),
+                _prefill_attention_paged_kernel.replace_hints(occupancy=best_cfg.occupancy),
             )
         best_cfg, tuned_kernel = _prefill_paged_tune_cache[paged_cache_key]
         ct.launch(
@@ -1414,7 +1322,7 @@ def prefill_attention_kv_ragged(
     use_lpt_scheduler: bool = True,
 ):
     """
-    Prefill attention with ragged KV cache (CuTile implementation).
+    Prefill attention with ragged KV cache (cuTile implementation).
     """
     # KV cache [total_num_tokens, num_kv_heads, head_dim_qk]
     num_kv_heads = k_cache.shape[1]
@@ -1492,19 +1400,6 @@ def prefill_attention_kv_ragged(
                     head_dim_vo,
                     BLOCK_R,
                     QUERY_GROUP_SIZE,
-                    q.stride(0),
-                    q.stride(1),
-                    q.stride(2),
-                    outputs.stride(0),
-                    outputs.stride(1),
-                    outputs.stride(2),
-                    k_cache.stride(0),
-                    k_cache.stride(1),
-                    k_cache.stride(2),
-                    v_cache.stride(0),
-                    v_cache.stride(1),
-                    v_cache.stride(2),
-                    out_lse.stride(0),
                     is_causal,
                     num_qo_heads,
                     num_batch,
@@ -1518,10 +1413,7 @@ def prefill_attention_kv_ragged(
             best_cfg = result.best.config
             _prefill_ragged_lpt_tune_cache[ragged_lpt_cache_key] = (
                 best_cfg,
-                ct.kernel(
-                    _prefill_attention_ragged_lpt_kernel._pyfunc,
-                    occupancy=best_cfg.occupancy,
-                ),
+                _prefill_attention_ragged_lpt_kernel.replace_hints(occupancy=best_cfg.occupancy),
             )
         best_cfg, tuned_kernel = _prefill_ragged_lpt_tune_cache[ragged_lpt_cache_key]
         ct.launch(
@@ -1545,19 +1437,6 @@ def prefill_attention_kv_ragged(
                 head_dim_vo,
                 BLOCK_R,
                 QUERY_GROUP_SIZE,
-                q.stride(0),
-                q.stride(1),
-                q.stride(2),
-                outputs.stride(0),
-                outputs.stride(1),
-                outputs.stride(2),
-                k_cache.stride(0),
-                k_cache.stride(1),
-                k_cache.stride(2),
-                v_cache.stride(0),
-                v_cache.stride(1),
-                v_cache.stride(2),
-                out_lse.stride(0),
                 is_causal,
                 num_qo_heads,
                 num_batch,
@@ -1593,19 +1472,6 @@ def prefill_attention_kv_ragged(
                     head_dim_vo,
                     BLOCK_R,
                     QUERY_GROUP_SIZE,
-                    q.stride(0),
-                    q.stride(1),
-                    q.stride(2),
-                    outputs.stride(0),
-                    outputs.stride(1),
-                    outputs.stride(2),
-                    k_cache.stride(0),
-                    k_cache.stride(1),
-                    k_cache.stride(2),
-                    v_cache.stride(0),
-                    v_cache.stride(1),
-                    v_cache.stride(2),
-                    out_lse.stride(0),
                     is_causal,
                 ),
                 lambda cfg: {"occupancy": cfg.occupancy},
@@ -1613,10 +1479,7 @@ def prefill_attention_kv_ragged(
             best_cfg = result.best.config
             _prefill_ragged_tune_cache[ragged_cache_key] = (
                 best_cfg,
-                ct.kernel(
-                    _prefill_attention_ragged_kernel._pyfunc,
-                    occupancy=best_cfg.occupancy,
-                ),
+                _prefill_attention_ragged_kernel.replace_hints(occupancy=best_cfg.occupancy),
             )
         best_cfg, tuned_kernel = _prefill_ragged_tune_cache[ragged_cache_key]
         ct.launch(
@@ -1640,19 +1503,6 @@ def prefill_attention_kv_ragged(
                 head_dim_vo,
                 BLOCK_R,
                 QUERY_GROUP_SIZE,
-                q.stride(0),
-                q.stride(1),
-                q.stride(2),
-                outputs.stride(0),
-                outputs.stride(1),
-                outputs.stride(2),
-                k_cache.stride(0),
-                k_cache.stride(1),
-                k_cache.stride(2),
-                v_cache.stride(0),
-                v_cache.stride(1),
-                v_cache.stride(2),
-                out_lse.stride(0),
                 is_causal,
             ),
         )

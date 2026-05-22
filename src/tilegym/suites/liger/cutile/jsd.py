@@ -32,16 +32,16 @@ def _ensure_contiguous(fn):
 
 
 @ct.kernel(occupancy=ct.ByTarget(sm_100=4))
-def jsd_kernel_ct(
+def _jsd_kernel(
     x,  # (BT, V) log Q (student)
     y,  # (BT, V) log P (teacher)
     loss,  # (BT, V) float32 loss accumulator (pre-initialized to 0)
     dx,  # (BT, V) gradient output (input dtype)
     label,  # (BT,) label tensor, or dummy 1-elem tensor when HAS_LABEL=0
     beta: ConstFloat,
-    inv_n_non_ignore: ConstFloat,
+    inv_n_non_ignore,
     ignore_index: ConstInt,
-    n_cols: ConstInt,
+    n_cols,
     BLOCK_SIZE: ConstInt,
     HAS_LABEL: ConstInt,
 ):
@@ -139,11 +139,10 @@ def _jsd_forward(_input, target, shift_labels, beta, ignore_index, has_label):
 
     # ct.launch does not accept None; pass a dummy 1-element tensor when no labels.
     label_tensor = shift_labels if has_label else torch.empty(1, device=_input.device, dtype=torch.int64)
-
     ct.launch(
         torch.cuda.current_stream(),
         (num_rows, 1, 1),
-        jsd_kernel_ct,
+        _jsd_kernel,
         (
             _input,
             target,

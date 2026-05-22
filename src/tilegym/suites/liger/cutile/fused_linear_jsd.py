@@ -24,7 +24,7 @@ import torch
 from tilegym.backend import register_impl
 
 from .jsd import JSD_BLOCK_SIZE
-from .jsd import jsd_kernel_ct
+from .jsd import _jsd_kernel
 from .utils import next_power_of_2
 
 amp_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
@@ -49,7 +49,7 @@ def _fused_linear_jsd_forward(
 
     num_rows, hidden_size = student_input.shape
     vocab_size = student_weight.shape[0]
-    # Cap at JSD_BLOCK_SIZE to avoid register spill in jsd_kernel_ct.
+    # Cap at JSD_BLOCK_SIZE to avoid register spill in _jsd_kernel.
     BLOCK_SIZE = min(JSD_BLOCK_SIZE, next_power_of_2(vocab_size))
 
     if has_label:
@@ -107,7 +107,7 @@ def _fused_linear_jsd_forward(
         ct.launch(
             torch.cuda.current_stream(),
             (chunk_n_rows, 1, 1),
-            jsd_kernel_ct,
+            _jsd_kernel,
             (
                 log_prob_s_chunk,
                 log_prob_t_chunk,

@@ -2,46 +2,36 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
-from math import ceil
 from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
 from tilegym.kernel_utils import get_kernel_configs
+from tilegym.ops.cutile.utils import cached_replace_hints
 
 # Module-level tune cache: (Q, M, N, K, transpose_a_int, transpose_b_int, dtype, device) -> (best_cfg, tuned_kernel)
 _masked_bmm_tune_cache: dict = {}
 
 
-def cdiv(a, b):
-    """Ceiling division helper function."""
-    return (a + b - 1) // b
-
-
 @ct.kernel
-def masked_bmm_kernel_cutile(
-    a_ptr,  # Input matrix A [Q, M, K] or [Q, K, M] if transpose_a
-    b_ptr,  # Input matrix B [Q, K, N] or [Q, N, K] if transpose_b
-    c_ptr,  # Output matrix C [Q, M, N]
+def _masked_bmm_kernel(
+    a,  # Input matrix A [Q, M, K] or [Q, K, M] if transpose_a
+    b,  # Input matrix B [Q, K, N] or [Q, N, K] if transpose_b
+    c,  # Output matrix C [Q, M, N]
     masked_m,  # Per-batch M mask [Q], int32
-    total_tiles: ct.Constant[int],  # Total number of tiles
-    num_programs: ct.Constant[int],  # Number of SMs
-    num_pid_m: ct.Constant[int],  # Number of M tiles per batch
-    num_pid_n: ct.Constant[int],  # Number of N tiles per batch
-    tiles_per_batch: ct.Constant[int],  # num_pid_m * num_pid_n
-    transpose_a: ct.Constant[int],  # Whether A is transposed (0 or 1)
-    transpose_b: ct.Constant[int],  # Whether B is transposed (0 or 1)
+    TRANSPOSE_A: ct.Constant[int],  # Whether A is transposed (0 or 1)
+    TRANSPOSE_B: ct.Constant[int],  # Whether B is transposed (0 or 1)
     BLOCK_M: ct.Constant[int],
     BLOCK_N: ct.Constant[int],
     BLOCK_K: ct.Constant[int],
     GROUP_SIZE_M: ct.Constant[int],
 ):
     """
-    CuTile kernel for masked batched matrix multiplication.
+    cuTile kernel for masked batched matrix multiplication.
 
     Performs A @ B with per-batch M masking where:
     - A is batched [Q, M, K] or [Q, K, M] if transpose_a
@@ -53,17 +43,23 @@ def masked_bmm_kernel_cutile(
     """
     pid = ct.bid(0)
 
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-
     zero_pad = ct.PaddingMode.ZERO
 
     # Compute num_k_tiles from tensor shape using ct.num_tiles
     # For non-transposed A: shape is [Q, M, K], we tile K (axis=2)
     # For transposed A: shape is [Q, K, M], we tile K (axis=1)
-    if transpose_a == 1:
-        num_k_tiles = ct.num_tiles(a_ptr, axis=1, shape=(1, BLOCK_K, BLOCK_M))
+    if TRANSPOSE_A == 1:
+        num_k_tiles = ct.num_tiles(a, axis=1, shape=(1, BLOCK_K, BLOCK_M))
     else:
-        num_k_tiles = ct.num_tiles(a_ptr, axis=2, shape=(1, BLOCK_M, BLOCK_K))
+        num_k_tiles = ct.num_tiles(a, axis=2, shape=(1, BLOCK_M, BLOCK_K))
+
+    num_q = ct.num_tiles(c, axis=0, shape=(1, BLOCK_M, BLOCK_N))
+    num_pid_m = ct.num_tiles(c, axis=1, shape=(1, BLOCK_M, BLOCK_N))
+    num_pid_n = ct.num_tiles(c, axis=2, shape=(1, BLOCK_M, BLOCK_N))
+    tiles_per_batch = num_pid_m * num_pid_n
+    total_tiles = num_q * tiles_per_batch
+    num_programs = ct.num_blocks(0)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     # Persistent scheduling loop
     for current_pid in range(pid, total_tiles, num_programs):
@@ -91,10 +87,10 @@ def masked_bmm_kernel_cutile(
             for k in range(num_k_tiles):
                 # Load A block based on transpose_a flag
                 # Using tile-index based loading (k is tile index, not element offset)
-                if transpose_a == 1:
+                if TRANSPOSE_A == 1:
                     # A is [Q, K, M], load [1, BLOCK_K, BLOCK_M] using tile indices
                     a_block_3d = ct.load(
-                        a_ptr,
+                        a,
                         index=(pid_q, k, pid_m),  # tile indices
                         shape=(1, BLOCK_K, BLOCK_M),
                         order=(0, 1, 2),
@@ -105,7 +101,7 @@ def masked_bmm_kernel_cutile(
                 else:
                     # A is [Q, M, K], load [1, BLOCK_M, BLOCK_K] using tile indices
                     a_block_3d = ct.load(
-                        a_ptr,
+                        a,
                         index=(pid_q, pid_m, k),  # tile indices
                         shape=(1, BLOCK_M, BLOCK_K),
                         order=(0, 1, 2),
@@ -114,10 +110,10 @@ def masked_bmm_kernel_cutile(
                     a_block = ct.reshape(a_block_3d, (BLOCK_M, BLOCK_K))
 
                 # Load B block based on transpose_b flag
-                if transpose_b == 1:
+                if TRANSPOSE_B == 1:
                     # B is [Q, N, K], load [1, BLOCK_N, BLOCK_K] using tile indices
                     b_block_3d = ct.load(
-                        b_ptr,
+                        b,
                         index=(pid_q, pid_n, k),  # tile indices
                         shape=(1, BLOCK_N, BLOCK_K),
                         order=(0, 1, 2),
@@ -128,7 +124,7 @@ def masked_bmm_kernel_cutile(
                 else:
                     # B is [Q, K, N], load [1, BLOCK_K, BLOCK_N] using tile indices
                     b_block_3d = ct.load(
-                        b_ptr,
+                        b,
                         index=(pid_q, k, pid_n),  # tile indices
                         shape=(1, BLOCK_K, BLOCK_N),
                         order=(0, 1, 2),
@@ -140,14 +136,14 @@ def masked_bmm_kernel_cutile(
                 acc = ct.mma(a_block, b_block, acc=acc)
 
             # Convert to output dtype and store
-            c_block = ct.astype(acc, c_ptr.dtype)
+            c_block = ct.astype(acc, c.dtype)
 
             # Reshape to 3D for store [1, BLOCK_M, BLOCK_N]
             c_block_3d = ct.reshape(c_block, (1, BLOCK_M, BLOCK_N))
 
             # Store to output C [Q, M, N] using tile indices
             ct.store(
-                c_ptr,
+                c,
                 index=(pid_q, pid_m, pid_n),  # tile indices
                 tile=c_block_3d,
                 order=(0, 1, 2),
@@ -182,12 +178,7 @@ def _masked_bmm_autotune_configs():
                     # Focus on occupancy tuning: 1-4 for compute-bound GEMM
                     for occupancy in [1, 2, 4]:
                         yield SimpleNamespace(
-                            BLOCK_M=BM,
-                            BLOCK_N=BN,
-                            BLOCK_K=BK,
-                            GROUP_SIZE_M=8,
-                            num_ctas=num_ctas,
-                            occupancy=occupancy,
+                            BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, GROUP_SIZE_M=8, num_ctas=num_ctas, occupancy=occupancy
                         )
     elif gpu_capability in [(12, 0), (12, 1)]:
         # RTX 5090 (sm120/sm121)
@@ -201,12 +192,7 @@ def _masked_bmm_autotune_configs():
                 for num_ctas in [1, 2, 4]:
                     for occupancy in [1, 2, 4]:
                         yield SimpleNamespace(
-                            BLOCK_M=BM,
-                            BLOCK_N=BN,
-                            BLOCK_K=BK,
-                            GROUP_SIZE_M=8,
-                            num_ctas=num_ctas,
-                            occupancy=occupancy,
+                            BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, GROUP_SIZE_M=8, num_ctas=num_ctas, occupancy=occupancy
                         )
     else:
         # Default configurations
@@ -218,12 +204,7 @@ def _masked_bmm_autotune_configs():
                 for num_ctas in [1, 2]:
                     for occupancy in [1, 2, 4]:
                         yield SimpleNamespace(
-                            BLOCK_M=BM,
-                            BLOCK_N=BN,
-                            BLOCK_K=BK,
-                            GROUP_SIZE_M=8,
-                            num_ctas=num_ctas,
-                            occupancy=occupancy,
+                            BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, GROUP_SIZE_M=8, num_ctas=num_ctas, occupancy=occupancy
                         )
 
 
@@ -264,7 +245,7 @@ def _get_default_kernel_configs():
         }
 
 
-def _masked_bmm_autotune_launch(stream, a, b, c, masked_m, Q, M, N, transpose_a, transpose_b):
+def _masked_bmm_autotune(stream, a, b, c, masked_m, Q, M, N, transpose_a, transpose_b):
     NUM_SMS = torch.cuda.get_device_properties(a.device).multi_processor_count
 
     transpose_a_int = 1 if transpose_a else 0
@@ -276,22 +257,11 @@ def _masked_bmm_autotune_launch(stream, a, b, c, masked_m, Q, M, N, transpose_a,
         BK = cfg.BLOCK_K
         GSM = cfg.GROUP_SIZE_M
 
-        num_pid_m = cdiv(M, BM)
-        num_pid_n = cdiv(N, BN)
-        tiles_per_batch = num_pid_m * num_pid_n
-        total_tiles = tiles_per_batch * Q
-        num_programs = min(NUM_SMS // cfg.num_ctas, total_tiles) * cfg.occupancy
-
         return (
             a,
             b,
             c,
             masked_m,
-            total_tiles,
-            num_programs,
-            num_pid_m,
-            num_pid_n,
-            tiles_per_batch,
             transpose_a_int,
             transpose_b_int,
             BM,
@@ -303,12 +273,15 @@ def _masked_bmm_autotune_launch(stream, a, b, c, masked_m, Q, M, N, transpose_a,
     def grid_fn(cfg):
         BM = cfg.BLOCK_M
         BN = cfg.BLOCK_N
-        num_pid_m = cdiv(M, BM)
-        num_pid_n = cdiv(N, BN)
+        num_pid_m = ct.cdiv(M, BM)
+        num_pid_n = ct.cdiv(N, BN)
         tiles_per_batch = num_pid_m * num_pid_n
         total_tiles = tiles_per_batch * Q
         num_programs = min(NUM_SMS // cfg.num_ctas, total_tiles) * cfg.occupancy
         return (num_programs, 1, 1)
+
+    def hints_fn(cfg):
+        return {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy}
 
     K = a.shape[1] if transpose_a else a.shape[2]
     cache_key = (Q, M, N, K, transpose_a_int, transpose_b_int, a.dtype, str(a.device))
@@ -317,18 +290,14 @@ def _masked_bmm_autotune_launch(stream, a, b, c, masked_m, Q, M, N, transpose_a,
             list(_masked_bmm_autotune_configs()),
             stream,
             grid_fn,
-            masked_bmm_kernel_cutile,
+            _masked_bmm_kernel,
             args_fn,
-            lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
+            hints_fn,
         )
         best_cfg = result.best.config
         _masked_bmm_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                masked_bmm_kernel_cutile._pyfunc,
-                num_ctas=best_cfg.num_ctas,
-                occupancy=best_cfg.occupancy,
-            ),
+            _masked_bmm_kernel.replace_hints(**hints_fn(best_cfg)),
         )
     best_cfg, tuned_kernel = _masked_bmm_tune_cache[cache_key]
     ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
@@ -345,7 +314,7 @@ def masked_bmm(
     **kwargs,
 ):
     """
-    CuTile implementation of masked batched matrix multiplication.
+    cuTile implementation of masked batched matrix multiplication.
 
     Performs A @ B with per-batch M masking where:
     - A is batched [Q, M, K] or [Q, K, M] if transpose_a
@@ -376,21 +345,18 @@ def masked_bmm(
 
     assert K_A == K_B, "incompatible dimensions"
     assert Q_A == Q_B, "incompatible dimensions"
-    K = K_A
     Q = Q_A
 
     assert a.is_contiguous(), "A matrix must be contiguous"
     assert b.is_contiguous(), "B matrix must be contiguous"
     assert masked_m.is_contiguous(), "Masked matrix must be contiguous"
     assert masked_m.shape.numel() == Q, "Masked matrix must have the same shape as the number of batches"
-
-    # Allocate output
     c = torch.empty((Q, M, N), device=a.device, dtype=a.dtype)
 
-    enable_autotune = os.environ.get("DISABLE_CUTILE_TUNE", "0") != "1"
+    enable_autotune = is_autotune_enabled()
 
     if enable_autotune:
-        _masked_bmm_autotune_launch(torch.cuda.current_stream(), a, b, c, masked_m, Q, M, N, transpose_a, transpose_b)
+        _masked_bmm_autotune(torch.cuda.current_stream(), a, b, c, masked_m, Q, M, N, transpose_a, transpose_b)
     else:
         default_configs = _get_default_kernel_configs()
         kernel_configs = get_kernel_configs(default_configs, kwargs.get("kernel_configs"))
@@ -403,8 +369,8 @@ def masked_bmm(
         occupancy = kernel_configs.get("occupancy", 1)
 
         NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-        num_pid_m = cdiv(M, BLOCK_M)
-        num_pid_n = cdiv(N, BLOCK_N)
+        num_pid_m = ct.cdiv(M, BLOCK_M)
+        num_pid_n = ct.cdiv(N, BLOCK_N)
         tiles_per_batch = num_pid_m * num_pid_n
         total_tiles = tiles_per_batch * Q
         num_programs = min(NUM_SMS // num_ctas, total_tiles) * occupancy
@@ -414,9 +380,12 @@ def masked_bmm(
         transpose_a_int = 1 if transpose_a else 0
         transpose_b_int = 1 if transpose_b else 0
 
-        # Build kernel with hints
-
-        kernel = masked_bmm_kernel_cutile
+        hints = {}
+        if num_ctas is not None:
+            hints["num_ctas"] = num_ctas
+        if occupancy is not None:
+            hints["occupancy"] = occupancy
+        kernel = cached_replace_hints(_masked_bmm_kernel, **hints) if hints else _masked_bmm_kernel
 
         ct.launch(
             torch.cuda.current_stream(),
@@ -427,11 +396,6 @@ def masked_bmm(
                 b,
                 c,
                 masked_m,
-                total_tiles,
-                num_programs,
-                num_pid_m,
-                num_pid_n,
-                tiles_per_batch,
                 transpose_a_int,
                 transpose_b_int,
                 BLOCK_M,
