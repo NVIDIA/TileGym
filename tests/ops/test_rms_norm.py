@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import tilegym
+from tilegym.backend import is_backend_available
 
 from .. import common
 from ..common import markif
@@ -30,6 +31,8 @@ class Test_RMSNorm(common.PyTestCase):
         return weight * input
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(

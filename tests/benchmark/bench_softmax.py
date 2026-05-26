@@ -28,6 +28,7 @@ register_impl("softmax", "torch")(reference_softmax)
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
     ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
+    ("tilecpp", "TileCpp", ("purple", "-")) if is_backend_available("tilecpp") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 

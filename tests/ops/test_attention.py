@@ -50,6 +50,8 @@ class Test_FMHA(common.PyTestCase):
         return ref
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(

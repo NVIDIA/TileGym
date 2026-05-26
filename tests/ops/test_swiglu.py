@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from tests import common
 from tilegym import set_backend
+from tilegym.backend import is_backend_available
 from tilegym.ops import get_swiglu
 
 
@@ -20,6 +21,8 @@ class Test_SwiGLU(common.PyTestCase):
         return F.silu(a) * b
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
 
     # Regular shapes (power-of-2)
@@ -80,6 +83,12 @@ class Test_SwiGLU(common.PyTestCase):
             set_backend(backend)
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
+
+        if backend == "tilecpp" and (hidden_size % 8 != 0 or hidden_size % 16 != 0):
+            pytest.skip(
+                "tilecpp swiglu_forward gather kernel requires hidden_size divisible by 8 "
+                "(and contiguous-row stride divisible by 16) for vectorised loads/stores."
+            )
 
         a = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
         b = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
@@ -165,6 +174,12 @@ class Test_SwiGLU(common.PyTestCase):
             set_backend(backend)
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
+
+        if backend == "tilecpp" and (hidden_size % 8 != 0 or hidden_size % 16 != 0):
+            pytest.skip(
+                "tilecpp swiglu_forward gather kernel requires hidden_size divisible by 8 "
+                "(and contiguous-row stride divisible by 16) for vectorised loads/stores."
+            )
 
         device = torch.device("cuda")
         dtype = torch.float32

@@ -78,6 +78,8 @@ class Test_MLA(common.PyTestCase):
         return o
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("is_causal", [True, False])
@@ -106,6 +108,8 @@ class Test_MLA(common.PyTestCase):
 
         if backend == "cutile" and is_causal == False:
             pytest.skip("Skip non-causal due to cutile not support")
+        if backend == "tilecpp" and is_causal == False:
+            pytest.skip("Skip non-causal due to tilecpp not support")
 
         try:
             set_backend(backend)

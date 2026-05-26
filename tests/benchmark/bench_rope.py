@@ -74,6 +74,7 @@ def create_rotary_embeddings(seq_len, head_dim, dtype, device, base=10000.0):
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
     ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
+    ("tilecpp", "TileCpp", ("purple", "-")) if is_backend_available("tilecpp") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 

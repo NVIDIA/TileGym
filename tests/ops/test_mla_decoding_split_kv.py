@@ -9,6 +9,7 @@ import torch
 
 import tilegym
 from tests import common
+from tilegym.backend import is_backend_available
 
 
 class Test_MLADecodingSplitKV(common.PyTestCase):
@@ -47,6 +48,8 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         return 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("num_heads", [16, 32])

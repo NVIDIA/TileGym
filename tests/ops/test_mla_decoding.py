@@ -9,6 +9,7 @@ import torch
 
 import tilegym
 from tests import common
+from tilegym.backend import is_backend_available
 from tilegym.backend import set_backend
 
 
@@ -48,6 +49,8 @@ class Test_MLADecoding(common.PyTestCase):
         return 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
@@ -118,6 +121,17 @@ class Test_MLADecoding(common.PyTestCase):
 
             def tilegym_fn():
                 return tilegym.ops.cutile.mla_decoding.mla_decoding(
+                    q,
+                    qpe,
+                    kv,
+                    kpe,
+                    sm_scale,
+                )
+
+        elif backend == "tilecpp":
+
+            def tilegym_fn():
+                return tilegym.ops.tilecpp.mla_decoding.mla_decoding(
                     q,
                     qpe,
                     kv,
@@ -206,6 +220,8 @@ class Test_MLADecoding(common.PyTestCase):
             tilegym.set_backend(framework)
             if framework == "cutile":
                 framework_fn = lambda: tilegym.ops.cutile.mla_decoding.mla_decoding(q, qpe, kv, kpe, sm_scale)
+            elif framework == "tilecpp":
+                framework_fn = lambda: tilegym.ops.tilecpp.mla_decoding.mla_decoding(q, qpe, kv, kpe, sm_scale)
             else:
                 pytest.skip(f"Framework {framework} not supported")
         else:

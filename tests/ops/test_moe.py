@@ -9,6 +9,7 @@ import torch
 
 import tilegym
 from tilegym import set_backend
+from tilegym.backend import is_backend_available
 from tilegym.ops.moe_interface import fused_moe
 
 from .. import common
@@ -65,6 +66,8 @@ class Test_MOE(common.PyTestCase):
         return final_output
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_backends = _backends
 
     @pytest.mark.parametrize(

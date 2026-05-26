@@ -9,6 +9,7 @@ import torch
 
 import tilegym
 from tests import common
+from tilegym.backend import is_backend_available
 
 
 class Test_SplitkReduce(common.PyTestCase):
@@ -40,6 +41,8 @@ class Test_SplitkReduce(common.PyTestCase):
         return attn_out.to(attn_splitk_out.dtype)
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("batch_size", [1, 2])  # Match MLA workload
