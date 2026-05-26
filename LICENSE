@@ -6,13 +6,15 @@ This repository is distributed under two licenses:
      repository.
 
   2. The Agent License (CC-BY-4.0 AND Apache-2.0), set out in Section B
-     below, applies only to files located under the `.agents/` and
-     `.claude/` directories (recursively), if present in this repository.
+     below, applies only to files located under the `skills/` directory
+     (the canonical location), and equivalently under the `.agents/skills/`
+     and `.claude/skills/` paths (which are backward-compatibility symlinks
+     pointing to `skills/`), recursively, if present in this repository.
 
-For any file located under `.agents/` or `.claude/`, both licenses nominally
-apply; in the event of any conflict between them for those files, the Agent
-License in Section B controls. All other files in the repository are
-governed solely by the MIT License in Section A.
+For any file located under `skills/`, `.agents/skills/`, or `.claude/skills/`,
+both licenses nominally apply; in the event of any conflict between them for
+those files, the Agent License in Section B controls. All other files in the
+repository are governed solely by the MIT License in Section A.
 
 The Agent License additionally travels with the files it covers: it continues
 to apply to any copy, clone, relocation, or redistribution of those files,
@@ -20,13 +22,15 @@ including installations into different directories used by other agent tools
 (for example, to support Codex or similar). The Agent License scope follows
 the files themselves, not only the original paths listed above.
 
-If the `.agents/` or `.claude/` directories do not exist in a given checkout
-of this repository, the scoping clauses above are inert for that checkout
-and the MIT License in Section A governs the entire checkout on its own.
+If the `skills/`, `.agents/`, or `.claude/` directories do not exist in a
+given checkout of this repository, the scoping clauses above are inert for
+that checkout and the MIT License in Section A governs the entire checkout
+on its own.
 
 --------------------------------------------------------------------------
 SECTION A — MIT LICENSE
-(APPLIES TO THE ENTIRE REPOSITORY EXCEPT FILES UNDER `.agents/` OR `.claude/`)
+(APPLIES TO THE ENTIRE REPOSITORY EXCEPT FILES UNDER `skills/`,
+ `.agents/skills/`, OR `.claude/skills/`)
 --------------------------------------------------------------------------
 
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -52,7 +56,7 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------
 SECTION B — AGENT LICENSE (CC-BY-4.0 AND Apache-2.0)
-(APPLIES ONLY TO FILES UNDER `.agents/` AND `.claude/`)
+(APPLIES ONLY TO FILES UNDER `skills/`, `.agents/skills/`, AND `.claude/skills/`)
 --------------------------------------------------------------------------
 
 Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

@@ -33,11 +33,12 @@ SPDX_COPYRIGHT = (
 )
 # Default SPDX license identifier line for the main repo (MIT).
 SPDX_LICENSE = "SPDX-License-Identifier: MIT"
-# SPDX license identifier line used for skill files (under ``.agents/skills/``
-# and the ``.claude/skills`` symlink). These files are dual-licensed under
-# CC-BY-4.0 (documentation) AND Apache-2.0 (source code) per the NVIDIA
-# Skills Publishing Onboarding guide and the OSRB-approved CC-BY-4.0-Apache2
-# Dual License pattern.
+# SPDX license identifier line used for skill content files (under
+# ``skills/``, the canonical location; also accessible via the
+# ``.agents/skills`` and ``.claude/skills`` backward-compatibility symlinks).
+# These files are dual-licensed under CC-BY-4.0 (documentation) AND
+# Apache-2.0 (source code) per the OSRB-approved dual-license pattern; the
+# SPDX expression uses ``AND`` to reflect the legal scope.
 SPDX_LICENSE_SKILLS = "SPDX-License-Identifier: CC-BY-4.0 AND Apache-2.0"
 
 # Regex pattern to validate SPDX copyright lines with any valid year or year range
@@ -50,21 +51,23 @@ SPDX_COPYRIGHT_PATTERN = re.compile(
 # Public / exportable code (default): MIT only — matches the repo-wide license
 # for everything that is not a dual-licensed agent skill.
 #
-# Skill content (under ``.agents/skills/``): the dual-licensed combination
-# ``CC-BY-4.0 AND Apache-2.0`` only. We deliberately do not accept MIT here
-# so that the gate catches any skill file that was authored before the
-# relicensing or imported from elsewhere with a stale header.
+# Skill content files (under ``skills/``, non-SKILL.md): dual-licensed
+# ``CC-BY-4.0 AND Apache-2.0`` per OSRB approval. The NV-BASE validator only
+# inspects SKILL.md frontmatter (Tier 1), so the SPDX ``AND`` expression in
+# source-file headers is not seen by the validator and remains the legally
+# accurate scope marker.
 ALLOWED_LICENSES_DEFAULT: Tuple[str, ...] = ("MIT",)
 ALLOWED_LICENSES_SKILLS: Tuple[str, ...] = ("CC-BY-4.0 AND Apache-2.0",)
 
 # Directory names (anywhere under root) to skip entirely.
 #
-# ``.agents`` and ``.claude`` are skipped from the default walker because
-# they are dual-licensed and therefore cannot use the default MIT header.
-# Skill files under those directories are processed separately via
-# :func:`iter_skill_files` and :func:`iter_skill_content_files`, both of
-# which target ``.agents/skills/`` (the canonical path; ``.claude/skills``
-# is a symlink to ``../.agents/skills`` for agent-tool compatibility).
+# ``skills``, ``.agents`` and ``.claude`` are skipped from the default walker
+# because they are dual-licensed and therefore cannot use the default MIT
+# header. Skill files are processed separately via :func:`iter_skill_files`
+# and :func:`iter_skill_content_files`, both of which target the canonical
+# ``skills/`` path. ``.agents/skills`` and ``.claude/skills`` are
+# backward-compatibility symlinks pointing to ``../skills``; walking only
+# the canonical ``skills/`` avoids double-processing the same files.
 SKIP_DIRS = {
     ".git",
     "__pycache__",
@@ -75,6 +78,7 @@ SKIP_DIRS = {
     ".egg-info",
     "dist",
     "build",
+    "skills",
     ".agents",
     ".claude",
 }
@@ -196,7 +200,7 @@ def should_skip_file(file_path: Path, root_dir: Path) -> bool:
 
 
 # License field to insert into SKILL.md (and other frontmatter .md) files
-# under ``.agents/skills/``. These files are dual-licensed; the YAML
+# under ``skills/``. These files are dual-licensed; the YAML
 # ``license:`` field carries the same SPDX expression as the in-file SPDX
 # comment used for non-frontmatter files.
 SKILL_LICENSE_LINE = "license: CC-BY-4.0 AND Apache-2.0"
@@ -207,7 +211,7 @@ SKILL_LICENSE_LINE_PATTERN = re.compile(r"^\s*license\s*:.*$")
 
 
 def iter_skill_files(root_dir: Path) -> Iterator[Path]:
-    """Yield .md files with YAML frontmatter under .agents/skills/.
+    """Yield .md files with YAML frontmatter under skills/.
 
     This includes SKILL.md files and any other .md files that start with
     ``---`` frontmatter (e.g. sub-skill definitions).  All yielded files are
@@ -217,12 +221,12 @@ def iter_skill_files(root_dir: Path) -> Iterator[Path]:
     that :func:`iter_skill_content_files` can give them a standard SPDX
     comment header instead.
 
-    Note: ``.claude/skills`` is a symlink to ``../.agents/skills`` for
-    backward compatibility with agents that hard-code the ``.claude/`` path.
-    Walking the canonical ``.agents/skills/`` path avoids double-processing
-    the same files via the symlink.
+    Note: ``.agents/skills`` and ``.claude/skills`` are symlinks to
+    ``../skills`` for backward compatibility with agents that hard-code the
+    older paths. Walking the canonical ``skills/`` path avoids
+    double-processing the same files via the symlinks.
     """
-    skills_dir = root_dir / ".agents" / "skills"
+    skills_dir = root_dir / "skills"
     if not skills_dir.is_dir():
         return
     for dirpath, _dirnames, filenames in os.walk(skills_dir):
@@ -314,7 +318,7 @@ def _has_yaml_frontmatter(path: Path) -> bool:
 
 
 def iter_skill_content_files(root_dir: Path) -> Iterator[Path]:
-    """Yield .py and ``SKILL.md`` files under .agents/skills/ for SPDX headers.
+    """Yield .py and ``SKILL.md`` files under skills/ for SPDX headers.
 
     .md files with YAML frontmatter (starting with ``---``) are handled by
     :func:`iter_skill_files` using the frontmatter ``license:`` approach.
@@ -331,7 +335,7 @@ def iter_skill_content_files(root_dir: Path) -> Iterator[Path]:
     ``SKILL.md`` that has not yet been migrated to YAML frontmatter, so the
     skill itself always advertises its license one way or another.
     """
-    skills_dir = root_dir / ".agents" / "skills"
+    skills_dir = root_dir / "skills"
     if not skills_dir.is_dir():
         return
     for dirpath, _dirnames, filenames in os.walk(skills_dir):
@@ -568,14 +572,14 @@ def action_write(root_dir: Path) -> int:
             print(f"Added header to: {file_path.relative_to(root_dir)}")
             modified_count += 1
 
-    # Handle SKILL.md (and other frontmatter .md) files under .agents/skills/.
+    # Handle SKILL.md (and other frontmatter .md) files under skills/.
     # These carry the dual-license expression in the YAML ``license:`` field.
     for skill_md in iter_skill_files(root_dir):
         if add_skill_license(skill_md, license_line=SKILL_LICENSE_LINE):
             print(f"Added/updated license in frontmatter: {skill_md.relative_to(root_dir)}")
             modified_count += 1
 
-    # Handle .py and non-frontmatter .md files under .agents/skills/.
+    # Handle .py and non-frontmatter .md files under skills/.
     # These are dual-licensed under CC-BY-4.0 AND Apache-2.0.
     for content_file in iter_skill_content_files(root_dir):
         comment_style = get_comment_style(content_file)
@@ -603,7 +607,7 @@ def action_check(root_dir: Path) -> int:
         if not check_file(file_path):
             missing_headers.append(file_path)
 
-    # Check SKILL.md (and other frontmatter .md) files under .agents/skills/.
+    # Check SKILL.md (and other frontmatter .md) files under skills/.
     for skill_md in iter_skill_files(root_dir):
         try:
             with open(skill_md, "r", encoding="utf-8") as f:
@@ -613,7 +617,7 @@ def action_check(root_dir: Path) -> int:
         except Exception as e:
             print(f"Error reading {skill_md}: {e}", file=sys.stderr)
 
-    # Check .py and non-frontmatter .md files under .agents/skills/. These
+    # Check .py and non-frontmatter .md files under skills/. These
     # must carry the dual-license SPDX expression.
     for content_file in iter_skill_content_files(root_dir):
         if not check_file(content_file, allowed_licenses=ALLOWED_LICENSES_SKILLS):

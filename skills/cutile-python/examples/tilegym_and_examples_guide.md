@@ -8,7 +8,7 @@ The skill supports two installation contexts. Figure out which one applies befor
 
 ### Case 1 — skill inside a TileGym checkout
 
-Path looks like `<repo>/.agents/skills/cutile-python/` (or `<repo>/.claude/skills/cutile-python/` via the backward-compat symlink). The enclosing repo **is** TileGym. No clone needed — use it directly:
+Path looks like `<repo>/skills/cutile-python/` (or `<repo>/.agents/skills/cutile-python/` / `<repo>/.claude/skills/cutile-python/` via the backward-compat symlinks). The enclosing repo **is** TileGym. No clone needed — use it directly:
 
 ```
 <repo>/src/tilegym/ops/cutile/

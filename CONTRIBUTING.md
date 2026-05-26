@@ -148,9 +148,10 @@ To accept your contribution, we need a signed Contributor License Agreement (CLA
 3. Email the signed CLA to `TileGym@nvidia.com` with subject: `TileGym CLA Submission`.
 4. Wait for confirmation from the TileGym team before your PR can be merged.
 
-### 5. Signing your work (DCO) — required for `.agents/skills/` contributions
+### 5. Signing your work (DCO) — required for `skills/` contributions
 
-Files under `.agents/skills/` (and the `.claude/skills/` symlink) are dual-licensed under
+Files under `skills/` (also accessible via the `.agents/skills/` and `.claude/skills/`
+backward-compatibility symlinks) are dual-licensed under
 **CC-BY-4.0 AND Apache-2.0** (see [`LICENSE`](LICENSE)). All contributions to the
 dual-licensed agent-skills content must be signed off via the
 [Developer Certificate of Origin](https://developercertificate.org/) (DCO).
@@ -159,7 +160,7 @@ dual-licensed agent-skills content must be signed off via the
 
 By signing off on a commit, you certify that the contribution is your original work, or
 that you have rights to submit it under the same license, or a compatible license.
-Any commit touching files under `.agents/skills/` that is not signed off will not be accepted.
+Any commit touching files under `skills/` (or its `.agents/skills/` / `.claude/skills/` symlinks) that is not signed off will not be accepted.
 
 #### How to sign off
 
