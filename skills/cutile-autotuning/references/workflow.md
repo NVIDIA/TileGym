@@ -11,10 +11,10 @@
 3. **Check for in-place writes**: If the kernel modifies input tensors in-place, you MUST use the split-buffer pattern during `exhaustive_search` — see Pitfall #1.
    - *VERIFY*: Either the kernel is not in-place, or you have added a split-buffer scratch tensor for the search phase.
 
-4. **Select the template** from [`kernel-type-templates.md`](references/kernel-type-templates.md) based on kernel type.
+4. **Select the template** from [`kernel-type-templates.md`](kernel-type-templates.md) based on kernel type.
 
-5. **Design the search space** following [`parameter-space-design.md`](references/parameter-space-design.md):
-   - **Start from reference configs**, not from scratch. Clone configs from existing production kernels of the same type (e.g., `ops/cutile/matmul.py` for GEMM) and adapt. For GEMM-class kernels, `nvMatmulHeuristics` can suggest 8-16 high-quality candidates that reach 96-99% peak performance — see [`parameter-space-design.md`](references/parameter-space-design.md) for details.
+5. **Design the search space** following [`parameter-space-design.md`](parameter-space-design.md):
+   - **Start from reference configs**, not from scratch. Clone configs from existing production kernels of the same type (e.g., `ops/cutile/matmul.py` for GEMM) and adapt. For GEMM-class kernels, `nvMatmulHeuristics` can suggest 8-16 high-quality candidates that reach 96-99% peak performance — see [`parameter-space-design.md`](parameter-space-design.md) for details.
    - Detect the current GPU architecture with `torch.cuda.get_device_capability()`.
    - **Target one architecture at a time.** Generate configs only for the detected arch. Do NOT add branches for other architectures — they cannot be tested on this machine and untested code paths are unreliable. If multi-arch support is needed later, add it in a separate pass on the appropriate hardware.
    - **When modifying code that already has autotune configs**: see "Handling Existing Autotune Configs (Multi-Architecture)" below. The "do NOT add branches" rule means do not *invent new configs* for untested architectures — it does NOT mean remove existing configs that were previously validated.
@@ -44,7 +44,7 @@
 8. **Test**: Run correctness tests first (`pytest -k "test_op and cutile"`), then benchmark.
    - *VERIFY*: Correctness passes with autotune enabled AND with `DISABLE_AUTOTUNE=1`.
 
-9. **Validate with A/B test**: Compare autotune version vs fixed best-known config. See [`search-strategies.md`](references/search-strategies.md) for methodology.
+9. **Validate with A/B test**: Compare autotune version vs fixed best-known config. See [`search-strategies.md`](search-strategies.md) for methodology.
    - *VERIFY*: Autotune version ≥ baseline (or within noise). If worse, check that the search space includes the original fixed config, and that `replace_hints` is being used correctly.
 
 10. **Shrink the search space** — reduce compilation cost without losing performance.
