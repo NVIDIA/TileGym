@@ -1310,7 +1310,27 @@ def benchmark_fn_cupti(
     stats = torch.cuda.memory_stats()
     peak_mem_mb = stats["allocated_bytes.all.peak"] // (1024 * 1024)
 
-    return {
+    # Extract kernel names and times from the last profiler run.
+    # ``prof`` is still in scope here (the last loop iteration's profiler), so we
+    # can call key_averages() without launching an extra profiled run.
+    # All kernels with self_device_time_total > 0 are captured regardless of
+    # kernel_filter, giving a complete picture of every GPU kernel that ran.
+    # kernel_name is set to the single most time-consuming kernel overall.
+    cupti_kernel_times = []
+    for _item in prof.key_averages():
+        if _item.self_device_time_total > 0:
+            cupti_kernel_times.append(
+                {
+                    "name": _item.key,
+                    "self_time_us": _item.self_device_time_total,
+                    "total_time_us": _item.device_time_total,
+                    "count": int(_item.count),
+                }
+            )
+    cupti_kernel_times.sort(key=lambda x: x["self_time_us"], reverse=True)
+    kernel_name = cupti_kernel_times[0]["name"] if cupti_kernel_times else None
+
+    res = {
         "mean": times.mean().item(),
         "std": times.std().item(),
         "rel_std": (times.std() / times.mean()).item() * 100 if times.mean().item() > 0 else 0,
@@ -1320,6 +1340,11 @@ def benchmark_fn_cupti(
         "nrep": len(times),
         "peak_mem_mb": peak_mem_mb,
     }
+    if kernel_name is not None:
+        res["kernel_name"] = kernel_name
+    if cupti_kernel_times:
+        res["kernel_times"] = cupti_kernel_times
+    return res
 
 
 def benchmark_framework(framework_name, framework_fn, **benchmark_kwargs):
