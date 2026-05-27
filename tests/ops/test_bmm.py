@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import tilegym
+from tilegym.backend import is_backend_available
 
 from .. import common
 
@@ -22,6 +23,8 @@ class Test_BMM_FWD(common.PyTestCase):
         return torch.bmm(a, b)
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(

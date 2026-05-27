@@ -34,8 +34,9 @@ def make_missing_backend_handler(package_name, available_items):
         """Provide helpful error messages when cutile backend is not available."""
         if not is_backend_available("cutile") and name in available_items:
             raise ImportError(
-                f"'{name}' requires cutile backend. Please install cutile using the following command:\n"
-                "pip install --pre --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/nv-shared-pypi-local/simple cuda-tile"
+                f"'{name}' requires the cuTile backend. Install via:\n"
+                "    pip install cuda-tile\n"
+                "See https://github.com/nvidia/cutile-python for installation details."
             )
         raise AttributeError(f"module '{package_name}' has no attribute '{name}'")
 

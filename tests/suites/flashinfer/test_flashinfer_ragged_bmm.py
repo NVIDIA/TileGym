@@ -2,9 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
 import random
-import sys
 
 import pytest
 import torch
@@ -88,12 +86,12 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
         return c
 
     @staticmethod
-    def prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, framework="cutile"):
+    def prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend="cutile"):
         device = torch.device("cuda")
 
-        # For CuTile, we need segments aligned to BLOCK_M (128)
+        # For cuTile, we need segments aligned to BLOCK_M (128)
         # This ensures segment offsets are multiples of the tile size
-        align_to = 128 if framework == "cutile" else None
+        align_to = 128 if backend == "cutile" else None
 
         max_m, segment_offsets, actual_total_m = create_ragged_m_segments(
             num_groups=num_groups,
@@ -120,7 +118,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
         return a, b, max_m, segment_offsets
 
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
@@ -129,24 +127,24 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
     @pytest.mark.parametrize("trans_b", [False, True])
     @pytest.mark.parametrize("dtype", [(torch.bfloat16)])
     @pytest.mark.parametrize("num_groups, m, n, k", [(4, 256, 256, 256), (2, 128, 128, 128), (4, 512, 512, 512)])
-    def test_op_shapes(self, framework, trans_a, trans_b, dtype, num_groups, m, n, k):
+    def test_op_shapes(self, backend, trans_a, trans_b, dtype, num_groups, m, n, k):
         # cutile kernel only supports (trans_a=False, trans_b=True)
-        if framework == "cutile" and (trans_a or not trans_b):
+        if backend == "cutile" and (trans_a or not trans_b):
             pytest.skip("ragged_bmm only supports trans_a=False, trans_b=True")
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(0)
         random.seed(0)
         out_dtype = dtype
-        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, framework)
+        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend)
 
-        framework_fn = lambda: flashinfer.ops.ragged_bmm(
+        backend_fn = lambda: flashinfer.ops.ragged_bmm(
             a,
             b,
             segment_offsets,
@@ -157,7 +155,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
             out_dtype=out_dtype,
         )
         self.assertCorrectness(
-            framework_fn,
+            backend_fn,
             lambda: self.reference(a, b, segment_offsets, trans_a, trans_b, out_dtype),
             kwargs={},
             atol=1e-2,
@@ -165,7 +163,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
         )
 
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
@@ -173,23 +171,23 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
     @pytest.mark.parametrize("dtype", [(torch.bfloat16)])
     @pytest.mark.parametrize("m, n, k", [(256, 256, 256)])
     @pytest.mark.parametrize("num_groups", [1, 4, 8])
-    def test_op_num_groups(self, framework, dtype, m, n, k, num_groups):
+    def test_op_num_groups(self, backend, dtype, m, n, k, num_groups):
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(0)
         random.seed(0)
         trans_a = False
         trans_b = True
         out_dtype = dtype
-        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, framework)
+        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend)
 
-        framework_fn = lambda: flashinfer.ops.ragged_bmm(
+        backend_fn = lambda: flashinfer.ops.ragged_bmm(
             a,
             b,
             segment_offsets,
@@ -200,7 +198,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
             out_dtype=out_dtype,
         )
         self.assertCorrectness(
-            framework_fn,
+            backend_fn,
             lambda: self.reference(a, b, segment_offsets, trans_a, trans_b, out_dtype),
             kwargs={},
             atol=1e-2,
@@ -208,21 +206,21 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
         )
 
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
     )
     @pytest.mark.parametrize("num_groups, m, n, k", [(4, 256, 256, 256)])
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
-    def test_op_dtypes(self, framework, num_groups, m, n, k, dtype, arch):
+    def test_op_dtypes(self, backend, num_groups, m, n, k, dtype, arch):
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         if arch == "sm80" and "float8" in dtype.__repr__():
             pytest.skip("FP8 is not supported on sm80 (Ampere).")
@@ -232,9 +230,9 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
         trans_a = False
         trans_b = True
         out_dtype = torch.bfloat16
-        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, framework)
+        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend)
 
-        framework_fn = lambda: flashinfer.ops.ragged_bmm(
+        backend_fn = lambda: flashinfer.ops.ragged_bmm(
             a,
             b,
             segment_offsets,
@@ -245,7 +243,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
             out_dtype=out_dtype,
         )
         self.assertCorrectness(
-            framework_fn,
+            backend_fn,
             lambda: self.reference(a, b, segment_offsets, trans_a, trans_b, out_dtype),
             kwargs={},
             atol=1e-2,
@@ -253,7 +251,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
         )
 
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
@@ -262,24 +260,24 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
     @pytest.mark.parametrize("num_groups, m, n, k", [(4, 256, 256, 256)])
     @pytest.mark.parametrize("trans_a", [False, True])
     @pytest.mark.parametrize("trans_b", [False, True])
-    def test_op_transpose(self, framework, dtype, num_groups, m, n, k, trans_a, trans_b):
+    def test_op_transpose(self, backend, dtype, num_groups, m, n, k, trans_a, trans_b):
         # cutile kernel only supports (trans_a=False, trans_b=True)
-        if framework == "cutile" and (trans_a or not trans_b):
+        if backend == "cutile" and (trans_a or not trans_b):
             pytest.skip("ragged_bmm only supports trans_a=False, trans_b=True")
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(0)
         random.seed(0)
         out_dtype = dtype
-        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, framework)
+        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend)
 
-        framework_fn = lambda: flashinfer.ops.ragged_bmm(
+        backend_fn = lambda: flashinfer.ops.ragged_bmm(
             a,
             b,
             segment_offsets,
@@ -290,7 +288,7 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
             out_dtype=out_dtype,
         )
         self.assertCorrectness(
-            framework_fn,
+            backend_fn,
             lambda: self.reference(a, b, segment_offsets, trans_a, trans_b, out_dtype),
             kwargs={},
             atol=1e-2,

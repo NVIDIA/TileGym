@@ -28,7 +28,7 @@ def _select_block_size(vocab_size: int) -> int:
 
 
 @ct.kernel(occupancy=4)
-def _cross_entropy_kernel(
+def _liger_cross_entropy_kernel(
     input,
     target,
     weight,
@@ -36,15 +36,14 @@ def _cross_entropy_kernel(
     z_loss,
     token_accuracy,
     predicted_tokens,
-    n_cols: ConstInt,
-    inv_n_non_ignore: ConstFloat,
-    sum_non_ignore_weight: ConstFloat,
-    weight_sum: ConstFloat,
-    ignore_index: ConstInt,
-    eps: ConstFloat,
+    n_cols,
+    inv_n_non_ignore,
+    sum_non_ignore_weight,
+    weight_sum,
+    ignore_index,
     label_smoothing: ConstFloat,
     lse_square_scale: ConstFloat,
-    softcap: ConstFloat,
+    softcap,
     BLOCK_SIZE: ConstInt,
     HAS_GRADIENTS: ConstInt,
     REDUCTION_MEAN: ConstInt,
@@ -69,7 +68,6 @@ def _cross_entropy_kernel(
     sum_non_ignore_weight: Sum of non-ignored target weights in the batch.
     weight_sum: Sum of the weight tensor.
     ignore_index: Target index to ignore.
-    eps: label_smoothing / n_cols, precomputed for the kernel.
     label_smoothing: Smoothing value for the target distribution.
     lse_square_scale: Scale for the z-loss term, logsumexp(input) ** 2.
     softcap: Threshold for soft-capping logits into (-softcap, +softcap).
@@ -117,6 +115,7 @@ def _cross_entropy_kernel(
     if HAS_SOFTCAPPING:
         target_logit = ct.mul(softcap, ct.tanh(ct.mul(target_logit, 1.0 / softcap)))
 
+    eps = label_smoothing / n_cols
     num_chunks = (n_cols + BLOCK_SIZE - 1) // BLOCK_SIZE
 
     # ---- Single-pass online numerically stable logsumexp ----
@@ -340,7 +339,6 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
         )
         assert (target * target_mask).min() >= 0, f"Target {target.min()} is out of bounds. Expected >= 0"
         inv_n_non_ignore = 1.0 / max(n_non_ignore, 1)
-        eps = label_smoothing / max(vocab_size, 1)
         reduction_mean = int(reduction == "mean")
 
         has_weight = weight is not None
@@ -377,7 +375,7 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            _cross_entropy_kernel,
+            _liger_cross_entropy_kernel,
             (
                 _input,
                 target,
@@ -391,7 +389,6 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
                 float(sum_non_ignore_weight),
                 float(weight_sum),
                 int(ignore_index),
-                float(eps),
                 float(label_smoothing),
                 float(lse_square_scale),
                 float(softcap_val),

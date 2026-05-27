@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import tilegym
+from tilegym.backend import is_backend_available
 
 from ... import common
 
@@ -16,6 +17,8 @@ class Test_GeLU(common.PyTestCase):
         return torch.nn.functional.gelu(input, approximate=approximate)
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(

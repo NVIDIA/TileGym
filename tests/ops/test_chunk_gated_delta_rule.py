@@ -9,10 +9,13 @@ import torch
 import torch.nn.functional as F
 
 import tilegym
+from tilegym.backend import is_backend_available
 
 from .. import common
 
 _backends = ["cutile"]
+if is_backend_available("tilecpp"):
+    _backends = _backends + ["tilecpp"]
 _perf_frameworks = _backends + ["pytorch"]
 
 _SHAPE_CONFIGS = [

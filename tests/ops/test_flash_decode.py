@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import tilegym
+from tilegym.backend import is_backend_available
 
 from .. import common
 
@@ -21,6 +22,8 @@ class Test_FlashDecode(common.PyTestCase):
         return ref_output
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize("seq_len", [9, 119, 256, 8192])

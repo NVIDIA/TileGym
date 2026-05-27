@@ -47,6 +47,7 @@ ALL_CONFIGS = [
     ("cutile", "static_persistent", "CuTile static persistent", ("purple", "-")),
     ("cutile", "multi_wave_reload", "CuTile multi wave reload", ("blue", "-")),
     ("cutile", "multi_wave_cached", "CuTile multi wave cached", ("red", "--")),
+    ("tilecpp", None, "TileCpp", ("brown", "-")) if is_backend_available("tilecpp") else None,
     ("torch", None, "PyTorch", ("green", "-")),
 ]
 

@@ -131,6 +131,8 @@ def einsum_reference_decode(
 
 class TestGemmaAttentionDecode(common.PyTestCase):
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from types import SimpleNamespace
 from typing import Optional
 from typing import Tuple
@@ -11,9 +10,10 @@ import cuda.tile as ct
 import torch
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
+from tilegym.ops.cutile.utils import cached_replace_hints
 
-ConstFloat = ct.Constant[float]
 ConstInt = ct.Constant[int]
 PAD_ZERO = ct.PaddingMode.ZERO
 
@@ -33,7 +33,7 @@ def _default_tokens_per_block(num_tokens: int) -> int:
 
 def _rope_quantize_fp8_cutile_configs(num_tokens: int):
     candidates = [tpb for tpb in (1, 4, 8, 16, 32) if tpb <= max(32, num_tokens)]
-    if os.getenv("ENABLE_CUTILE_TUNE", "0") != "1" or os.getenv("DISABLE_AUTOTUNE") == "1":
+    if is_autotune_disabled():
         default_tpb = _default_tokens_per_block(num_tokens)
         return [SimpleNamespace(TOKENS_PER_BLOCK=default_tpb, occupancy=4)]
 
@@ -80,7 +80,7 @@ def _cutile_autotune_rope_quantize_fp8(
             list(_rope_quantize_fp8_cutile_configs(num_tokens)),
             stream,
             lambda cfg: (math.ceil(num_tokens / cfg.TOKENS_PER_BLOCK), total_blocks_y, 1),
-            rope_quantize_fp8_kernel,
+            _rope_quantize_fp8_kernel,
             lambda cfg: (
                 q_rope,
                 k_rope,
@@ -106,10 +106,7 @@ def _cutile_autotune_rope_quantize_fp8(
         best_cfg = result.best.config
         _rope_quantize_fp8_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                rope_quantize_fp8_kernel._pyfunc,
-                occupancy=best_cfg.occupancy,
-            ),
+            _rope_quantize_fp8_kernel.replace_hints(occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _rope_quantize_fp8_tune_cache[cache_key]
     ct.launch(
@@ -176,7 +173,7 @@ def _quantize_batched_tile(x_tile, out_dtype, quant_scale):
 
 
 @ct.kernel
-def rope_quantize_fp8_kernel(
+def _rope_quantize_fp8_kernel(
     q_rope,
     k_rope,
     q_nope,
@@ -187,11 +184,11 @@ def rope_quantize_fp8_kernel(
     k_rope_out,
     q_nope_out,
     k_nope_out,
-    quant_scale_q: ConstFloat,
-    quant_scale_kv: ConstFloat,
-    num_tokens: ConstInt,
-    num_qo_heads: ConstInt,
-    num_kv_heads: ConstInt,
+    quant_scale_q,
+    quant_scale_kv,
+    NUM_TOKENS: ConstInt,
+    NUM_QO_HEADS: ConstInt,
+    NUM_KV_HEADS: ConstInt,
     ROPE_DIM: ConstInt,
     NO_ROPE_DIM: ConstInt,
     TOKENS_PER_BLOCK: ConstInt,
@@ -202,9 +199,9 @@ def rope_quantize_fp8_kernel(
     HALF_DIM: ConstInt = ROPE_DIM // 2
     no_rope_chunks: ConstInt = (NO_ROPE_DIM + ROPE_DIM - 1) // ROPE_DIM
 
-    q_rope_end = num_qo_heads
-    k_rope_end = q_rope_end + num_kv_heads
-    k_nope_end = k_rope_end + num_kv_heads * no_rope_chunks
+    q_rope_end = NUM_QO_HEADS
+    k_rope_end = q_rope_end + NUM_KV_HEADS
+    k_nope_end = k_rope_end + NUM_KV_HEADS * no_rope_chunks
 
     if pid_y < q_rope_end:
         cos, sin = _load_rope_factors(pos_ids, cos_sin_cache, pid_x, TOKENS_PER_BLOCK, HALF_DIM)
@@ -332,7 +329,7 @@ def rope_quantize_fp8(
     if len(configs) == 1:
         cfg = configs[0]
         grid = (math.ceil(num_tokens / cfg.TOKENS_PER_BLOCK), total_blocks_y, 1)
-        kernel = ct.kernel(rope_quantize_fp8_kernel._pyfunc, occupancy=cfg.occupancy)
+        kernel = cached_replace_hints(_rope_quantize_fp8_kernel, occupancy=cfg.occupancy)
         args = (
             q_rope,
             k_rope,

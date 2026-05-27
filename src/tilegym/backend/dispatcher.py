@@ -17,6 +17,7 @@ from typing import Dict
 from tilegym.logger import get_logger
 
 from .selector import get_current_backend
+from .selector import is_tilecpp_available
 
 
 def _is_fallback_disabled() -> bool:
@@ -80,6 +81,15 @@ def dispatch(name: str, fallback_backend: str = "pytorch"):
                 current_backend = get_current_backend()
 
             logger.debug(f"[Backend Dispatch] Function: '{name}', Current backend: '{current_backend}'")
+
+            # Defer the tilecpp nvcc-version probe until the first actual
+            # dispatch to tilecpp. is_tilecpp_available() is cached, so the
+            # subprocess runs at most once per process. If unavailable, fall
+            # through to the registered fallback so the user gets a useful
+            # result (or a clear DISABLE_FALLBACK error below) instead of a
+            # tilecpp launch failure.
+            if current_backend == "tilecpp" and not is_tilecpp_available():
+                current_backend = fallback_backend
 
             # Try implementation from current backend
             if name in _REGISTRY and current_backend in _REGISTRY[name]:

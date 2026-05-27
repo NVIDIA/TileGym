@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import tilegym
+from tilegym.backend import is_backend_available
 
 from .. import common
 
@@ -20,6 +21,8 @@ class Test_SiLUAndMul(common.PyTestCase):
         return torch.nn.functional.silu(x1) * x2
 
     _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
@@ -50,6 +53,11 @@ class Test_SiLUAndMul(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
+
+        if backend == "tilecpp":
+            pytest.skip(
+                "tilecpp silu_and_mul does not implement backward; the gradient check would raise NotImplementedError"
+            )
 
         self.setUp()
         device = torch.device("cuda")
@@ -98,6 +106,11 @@ class Test_SiLUAndMul(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
+
+        if backend == "tilecpp":
+            pytest.skip(
+                "tilecpp silu_and_mul does not implement backward; the gradient check would raise NotImplementedError"
+            )
 
         self.setUp()
         device = torch.device("cuda")

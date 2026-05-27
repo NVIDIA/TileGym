@@ -116,7 +116,7 @@ class Test_FlashInfer_MaskedBMM(common.PyTestCase):
     @pytest.mark.parametrize("trans_a", [False, True])
     @pytest.mark.parametrize("trans_b", [False, True])
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
@@ -131,15 +131,15 @@ class Test_FlashInfer_MaskedBMM(common.PyTestCase):
         dtype,
         trans_a,
         trans_b,
-        framework: str,
+        backend: str,
     ):
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(0)
         random.seed(0)

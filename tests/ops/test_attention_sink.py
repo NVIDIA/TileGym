@@ -9,12 +9,15 @@ import torch
 
 import tilegym
 import tilegym.ops
+from tilegym.backend import is_backend_available
 from tilegym.backend import register_impl
 from tilegym.backend import set_backend
 
 from .. import common
 
 _backends = ["cutile"]
+if is_backend_available("tilecpp"):
+    _backends = _backends + ["tilecpp"]
 _perf_backends = _backends + ["pytorch"]
 
 

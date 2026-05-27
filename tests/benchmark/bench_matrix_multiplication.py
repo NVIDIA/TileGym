@@ -30,16 +30,16 @@ register_impl("matmul", "torch")(reference_matmul)
 # Available backends with their display names and plot styles
 ALL_BACKENDS = [
     ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
+    ("tilecpp", "TileCpp", ("purple", "-")) if is_backend_available("tilecpp") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 
 
 def get_supported_backends(datatype):
     """Filter backends based on datatype support and availability"""
-    if datatype == torch.float8_e5m2:
-        return ALL_BACKENDS[:-1]  # Torch cannot support FP8
-    else:
-        return [p for p in ALL_BACKENDS if p is not None]
+    # Torch cannot support FP8, so exclude it for FP8 datatypes
+    candidates = ALL_BACKENDS[:-1] if datatype == torch.float8_e5m2 else ALL_BACKENDS
+    return [p for p in candidates if p is not None]
 
 
 def create_benchmark_config(datatype):

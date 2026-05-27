@@ -98,6 +98,20 @@ def fused_experts_impl(
             _, N, K = w1.shape
             config["TILE_SIZE_N"] = N // w1_scale.shape[1]
             config["TILE_SIZE_K"] = K // w1_scale.shape[2]
+    elif _backend == "tilecpp":
+        config = {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 32,
+            "num_warps": 8,
+            "num_stages": 4,
+        }
+        # Override block sizes to match scale tensor shapes for FP8
+        if use_fp8_w8a8 and w1_scale is not None:
+            _, N, K = w1.shape
+            config["BLOCK_SIZE_N"] = N // w1_scale.shape[1]
+            config["BLOCK_SIZE_K"] = K // w1_scale.shape[2]
     device = hidden_states.device
     if not w1.is_cuda:
         w1 = w1.to(device)
@@ -177,6 +191,8 @@ def fused_experts_impl(
         _backend = get_current_backend()
         if _backend == "cutile":
             block_size = config.get("TILE_SIZE_M", 128)
+        elif _backend == "tilecpp":
+            block_size = config.get("BLOCK_SIZE_M", 128)
         (sorted_token_ids, expert_ids, num_tokens_post_padded, _, _) = moe_align_block_size(
             curr_topk_ids, block_size, E
         )

@@ -25,6 +25,10 @@ else:
 
 from . import moe_interface
 
+# Import CUDA Tile C++ backend if available
+if is_backend_available("tilecpp"):
+    from . import tilecpp
+
 # Re-export key interfaces
 from .attn_interface import attention_sink_interface
 from .attn_interface import fmha_interface
@@ -41,6 +45,7 @@ from .ops import *
 __all__ = [
     # Export all operations from ops module
     # Backend implementations
+    "tilecpp",
     # Interface modules
     "attn_interface",
     "moe_interface",

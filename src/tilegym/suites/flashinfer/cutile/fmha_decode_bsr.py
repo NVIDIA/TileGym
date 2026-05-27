@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from types import SimpleNamespace
 from typing import Optional
 
@@ -11,7 +10,9 @@ import torch
 from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
+from tilegym.ops.cutile.utils import cached_replace_hints
 from tilegym.ops.cutile.utils import is_power_of_2
 from tilegym.ops.cutile.utils import next_power_of_2
 
@@ -32,8 +33,8 @@ def _splitk_reduce_kernel(
     lse_splitk_out,
     attn_out,
     actual_seq_lens,
-    num_heads: ConstInt,
-    num_kv_len_per_split: ConstInt,
+    NUM_HEADS: ConstInt,
+    NUM_KV_LEN_PER_SPLIT: ConstInt,
     NUM_KV_SPLITS: ConstInt,
     NUM_KV_SPLITS_POW2: ConstInt,
     BLOCK_D: ConstInt,
@@ -44,7 +45,7 @@ def _splitk_reduce_kernel(
 
     seq_len_tile = ct.load(actual_seq_lens, (batch_id,), shape=(1,))
     seq_len = seq_len_tile.item()
-    actual_num_splits = (seq_len + num_kv_len_per_split - 1) // num_kv_len_per_split
+    actual_num_splits = (seq_len + NUM_KV_LEN_PER_SPLIT - 1) // NUM_KV_LEN_PER_SPLIT
     actual_num_splits = ct.minimum(actual_num_splits, NUM_KV_SPLITS)
 
     lse_vals = ct.load(lse_splitk_out, (batch_id, head_id, 0), shape=(1, 1, NUM_KV_SPLITS_POW2))
@@ -72,7 +73,7 @@ def _splitk_reduce_kernel(
     ct.store(attn_out, (batch_id, head_id, 0), ct.reshape(result, (1, 1, BLOCK_D)))
 
 
-def splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens, num_kv_len_per_split, attn_out=None):
+def _splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens, num_kv_len_per_split, attn_out=None):
     NUM_KV_SPLITS, B, num_heads, head_dim = attn_splitk_out.shape
 
     if attn_out is None:
@@ -123,7 +124,7 @@ def splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens,
     return attn_out
 
 
-def load_page(
+def _load_page(
     cache, block_tables, page_table_offset, page, token, off_kv_h, NUM_PAGES, LOAD_BLOCK_N, BLOCK_D, _PAGE_SIZE
 ):
     """
@@ -241,19 +242,19 @@ def load_page(
     return data
 
 
-def load_page_wrapper(
+def _load_page_wrapper(
     curr_n, cache, block_tables, page_table_offset, off_kv_h, PAGE_SIZE, BLOCK_N, BLOCK_D, LOAD_BLOCK_N
 ):
     """
     Load cache data (K or V) for current position.
 
-    Computes page index and token offset from curr_n, then delegates to load_page.
+    Computes page index and token offset from curr_n, then delegates to _load_page.
     """
     NUM_PAGES = BLOCK_N // LOAD_BLOCK_N
     page = curr_n // PAGE_SIZE
     token = curr_n % PAGE_SIZE
 
-    data = load_page(
+    data = _load_page(
         cache, block_tables, page_table_offset, page, token, off_kv_h, NUM_PAGES, LOAD_BLOCK_N, BLOCK_D, PAGE_SIZE
     )
     return data
@@ -266,12 +267,10 @@ def _decode_attention_kv_paged_kernel(
     v_cache,
     actual_seq_lens,
     block_tables,
-    o_ptr,
+    output,
     lse_out,
-    num_batches: ConstInt,
-    total_num_pages: ConstInt,
-    k_scale: ConstFloat,
-    v_scale: ConstFloat,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
     N_KV_HEADS: ConstInt,
     PAGE_SIZE: ConstInt,
     BLOCK_H: ConstInt,
@@ -281,7 +280,7 @@ def _decode_attention_kv_paged_kernel(
     NUM_KV_SPLITS: ConstInt,
     KV_LEN_PER_SPLIT: ConstInt,
     HAS_LSE_OUT: ConstBool,
-    stride_block_table: ConstInt,
+    stride_block_table,
     NUM_HEAD_BLOCKS: ConstInt,
     TRANS_QK: ConstBool,
     LOAD_BLOCK_N: ConstInt,
@@ -297,7 +296,7 @@ def _decode_attention_kv_paged_kernel(
     seq_len_tile = ct.gather(actual_seq_lens, (batch_id,), padding_value=0)
     seq_len = seq_len_tile.item()
 
-    qk_scale = k_scale * INV_LOG_2
+    qk_scale = K_SCALE * INV_LOG_2
     page_table_offset = batch_id * stride_block_table
 
     if KV_LEN_PER_SPLIT > 0:
@@ -354,7 +353,7 @@ def _decode_attention_kv_paged_kernel(
                     (LOAD_BLOCK_N, BLOCK_D),
                 )
             else:
-                k = load_page_wrapper(
+                k = _load_page_wrapper(
                     curr_n,
                     k_cache,
                     block_tables,
@@ -370,19 +369,17 @@ def _decode_attention_kv_paged_kernel(
 
             if curr_n >= tail_n:
                 offs_n = curr_n + offs_n_base
-                mask = ct.reshape(ct.less(offs_n, end_n), (BLOCK_N, 1))
+                mask = ct.reshape((offs_n < end_n), (BLOCK_N, 1))
                 qk = ct.where(mask, qk, mask_fill)
 
             qk_max = ct.max(qk, axis=0, keepdims=False)
-            m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-            p = ct.exp2(
-                ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (1, BLOCK_H)), flush_to_zero=True),
-                flush_to_zero=True,
-            )
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (1, BLOCK_H)), flush_to_zero=True)
 
-            alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-            l_i = ct.add(ct.mul(l_i, ct.reshape(alpha, (1, BLOCK_H)), flush_to_zero=True), p, flush_to_zero=True)
-            acc = ct.mul(acc, ct.reshape(alpha, (1, BLOCK_H)), flush_to_zero=True)
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            alpha_2d = ct.reshape(alpha, (1, BLOCK_H))
+            l_i = l_i * alpha_2d + p
+            acc = acc * alpha_2d
 
             if NUM_PAGES_PER_BLOCK == 1:
                 # Reuse page_id from K load
@@ -398,7 +395,7 @@ def _decode_attention_kv_paged_kernel(
                     (LOAD_BLOCK_N, BLOCK_D),
                 )
             else:
-                v = load_page_wrapper(
+                v = _load_page_wrapper(
                     curr_n,
                     v_cache,
                     block_tables,
@@ -415,10 +412,8 @@ def _decode_attention_kv_paged_kernel(
 
         l_i_sum = ct.sum(l_i, axis=0, keepdims=False)
         l_i_expanded = ct.reshape(l_i_sum, (1, BLOCK_H))
-        acc = ct.truediv(
-            ct.mul(acc, v_scale, flush_to_zero=True), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX
-        )
-        acc_out = ct.astype(ct.transpose(acc), o_ptr.dtype)
+        acc = ct.truediv((acc * V_SCALE), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX)
+        acc_out = ct.astype(ct.transpose(acc), output.dtype)
     else:
         m_i = neg_inf_h
         l_i = ones_h
@@ -448,7 +443,7 @@ def _decode_attention_kv_paged_kernel(
                     (LOAD_BLOCK_N, BLOCK_D),
                 )
             else:
-                k = load_page_wrapper(
+                k = _load_page_wrapper(
                     curr_n,
                     k_cache,
                     block_tables,
@@ -464,18 +459,15 @@ def _decode_attention_kv_paged_kernel(
 
             if curr_n >= tail_n:
                 offs_n = curr_n + offs_n_base
-                mask = ct.reshape(ct.less(offs_n, end_n), (1, BLOCK_N))
+                mask = ct.reshape((offs_n < end_n), (1, BLOCK_N))
                 qk = ct.where(mask, qk, mask_fill)
 
             qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-            p = ct.exp2(
-                ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (BLOCK_H, 1)), flush_to_zero=True),
-                flush_to_zero=True,
-            )
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_H, 1)), flush_to_zero=True)
 
-            alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-            l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), ct.sum(p, axis=1, keepdims=False), flush_to_zero=True)
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
 
             if NUM_PAGES_PER_BLOCK == 1:
                 # Reuse page_id from K load
@@ -491,7 +483,7 @@ def _decode_attention_kv_paged_kernel(
                     (LOAD_BLOCK_N, BLOCK_D),
                 )
             else:
-                v = load_page_wrapper(
+                v = _load_page_wrapper(
                     curr_n,
                     v_cache,
                     block_tables,
@@ -503,19 +495,17 @@ def _decode_attention_kv_paged_kernel(
                     LOAD_BLOCK_N,
                 )
 
-            acc = ct.mul(acc, ct.reshape(alpha, (BLOCK_H, 1)), flush_to_zero=True)
+            acc = acc * ct.reshape(alpha, (BLOCK_H, 1))
             acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
             m_i = m_ij
 
         l_i_expanded = ct.reshape(l_i, (BLOCK_H, 1))
-        acc = ct.truediv(
-            ct.mul(acc, v_scale, flush_to_zero=True), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX
-        )
-        acc_out = ct.astype(acc, o_ptr.dtype)
+        acc = ct.truediv((acc * V_SCALE), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX)
+        acc_out = ct.astype(acc, output.dtype)
 
     acc_4d = ct.reshape(acc_out, (1, 1, BLOCK_H, BLOCK_D))
     ct.store(
-        o_ptr,
+        output,
         index=(kv_split_id, batch_id, head_block_idx, 0),
         tile=acc_4d,
         order=(0, 1, 2, 3),
@@ -530,7 +520,7 @@ def _decode_attention_kv_paged_kernel(
         ct.scatter(lse_out, lse_indices, lse)
 
 
-def load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGES, LOAD_BLOCK_N, BLOCK_DIM, _PAGE_SIZE):
+def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGES, LOAD_BLOCK_N, BLOCK_DIM, _PAGE_SIZE):
     """
     Load data from paged MLA cache (3D: [total_num_pages, PAGE_SIZE, dim]) via TMA.
 
@@ -644,17 +634,17 @@ def load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGES
     return data
 
 
-def load_page_mla_wrapper(curr_n, cache, block_tables, page_table_offset, PAGE_SIZE, BLOCK_N, BLOCK_DIM, LOAD_BLOCK_N):
+def _load_page_mla_wrapper(curr_n, cache, block_tables, page_table_offset, PAGE_SIZE, BLOCK_N, BLOCK_DIM, LOAD_BLOCK_N):
     """
     Load MLA cache data (K, V, or K_rope) for current position.
 
-    Computes page index and token offset from curr_n, then delegates to load_page_mla.
+    Computes page index and token offset from curr_n, then delegates to _load_page_mla.
     """
     NUM_PAGES = BLOCK_N // LOAD_BLOCK_N
     page = curr_n // PAGE_SIZE
     token = curr_n % PAGE_SIZE
 
-    data = load_page_mla(
+    data = _load_page_mla(
         cache, block_tables, page_table_offset, page, token, NUM_PAGES, LOAD_BLOCK_N, BLOCK_DIM, PAGE_SIZE
     )
     return data
@@ -669,12 +659,10 @@ def _decode_mla_kv_paged_kernel(
     k_rope,
     actual_seq_lens,
     block_tables,
-    o_ptr,
+    output,
     lse_out,
-    num_batches: ConstInt,
-    total_num_pages: ConstInt,
-    k_scale: ConstFloat,
-    v_scale: ConstFloat,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
     PAGE_SIZE: ConstInt,
     BLOCK_H: ConstInt,
     BLOCK_N: ConstInt,
@@ -684,7 +672,7 @@ def _decode_mla_kv_paged_kernel(
     NUM_KV_SPLITS: ConstInt,
     KV_LEN_PER_SPLIT: ConstInt,
     HAS_LSE_OUT: ConstBool,
-    stride_block_table: ConstInt,
+    stride_block_table,
     LOAD_BLOCK_N: ConstInt,
     NUM_PAGES_PER_BLOCK: ConstInt,
 ):
@@ -695,7 +683,7 @@ def _decode_mla_kv_paged_kernel(
     seq_len_tile = ct.gather(actual_seq_lens, (batch_id,), padding_value=0)
     seq_len = seq_len_tile.item()
 
-    qk_scale = k_scale * INV_LOG_2
+    qk_scale = K_SCALE * INV_LOG_2
     page_table_offset = batch_id * stride_block_table
 
     if KV_LEN_PER_SPLIT > 0:
@@ -774,7 +762,7 @@ def _decode_mla_kv_paged_kernel(
             )
         else:
             # Multi-page path: load BLOCK_N tokens across multiple pages
-            k_tile = load_page_mla_wrapper(
+            k_tile = _load_page_mla_wrapper(
                 curr_n,
                 k_cache,
                 block_tables,
@@ -784,7 +772,7 @@ def _decode_mla_kv_paged_kernel(
                 BLOCK_D,
                 LOAD_BLOCK_N,
             )
-            k_rope_tile = load_page_mla_wrapper(
+            k_rope_tile = _load_page_mla_wrapper(
                 curr_n,
                 k_rope,
                 block_tables,
@@ -801,18 +789,15 @@ def _decode_mla_kv_paged_kernel(
 
         if curr_n >= tail_n:
             offs_n = curr_n + offs_n_base
-            mask = ct.reshape(ct.less(offs_n, end_n), (1, BLOCK_N))
+            mask = ct.reshape((offs_n < end_n), (1, BLOCK_N))
             qk = ct.where(mask, qk, ct.full((BLOCK_H, BLOCK_N), -1.0e6, dtype=ct.float32))
 
         qk_max = ct.max(qk, axis=1, keepdims=False)
-        m_ij = ct.maximum(m_i, ct.mul(qk_max, qk_scale, flush_to_zero=True))
-        p = ct.exp2(
-            ct.sub(ct.mul(qk, qk_scale, flush_to_zero=True), ct.reshape(m_ij, (BLOCK_H, 1)), flush_to_zero=True),
-            flush_to_zero=True,
-        )
+        m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+        p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_H, 1)), flush_to_zero=True)
 
-        alpha = ct.exp2(ct.sub(m_i, m_ij, flush_to_zero=True), flush_to_zero=True)
-        l_i = ct.add(ct.mul(l_i, alpha, flush_to_zero=True), ct.sum(p, axis=1, keepdims=False), flush_to_zero=True)
+        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+        l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
 
         if NUM_PAGES_PER_BLOCK == 1:
             # Reuse page_id from K load
@@ -828,7 +813,7 @@ def _decode_mla_kv_paged_kernel(
                 (BLOCK_N, BLOCK_D),
             )
         else:
-            v_tile = load_page_mla_wrapper(
+            v_tile = _load_page_mla_wrapper(
                 curr_n,
                 v_cache,
                 block_tables,
@@ -839,19 +824,17 @@ def _decode_mla_kv_paged_kernel(
                 LOAD_BLOCK_N,
             )
 
-        acc = ct.mul(acc, ct.reshape(alpha, (BLOCK_H, 1)), flush_to_zero=True)
+        acc = acc * ct.reshape(alpha, (BLOCK_H, 1))
         acc = ct.mma(ct.astype(p, q_nope.dtype), v_tile, acc=acc)
         m_i = m_ij
 
     l_i_expanded = ct.reshape(l_i, (BLOCK_H, 1))
-    acc = ct.truediv(
-        ct.mul(acc, v_scale, flush_to_zero=True), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX
-    )
-    acc_out = ct.astype(acc, o_ptr.dtype)
+    acc = ct.truediv((acc * V_SCALE), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX)
+    acc_out = ct.astype(acc, output.dtype)
 
     acc_4d = ct.reshape(acc_out, (1, 1, BLOCK_H, BLOCK_D))
     ct.store(
-        o_ptr,
+        output,
         index=(kv_split_id, batch_id, head_block_idx, 0),
         tile=acc_4d,
         order=(0, 1, 2, 3),
@@ -926,7 +909,6 @@ def _gqa_decode_autotune_base(
         num_batch,
         num_qo_heads,
         num_kv_heads,
-        total_num_pages,
         page_size,
         head_dim_qk,
         QUERY_GROUP_SIZE,
@@ -951,8 +933,6 @@ def _gqa_decode_autotune_base(
                 block_tables_flat,
                 Att_Out,
                 LSE_Out_arg,
-                num_batch,
-                total_num_pages,
                 k_scale,
                 v_scale,
                 num_kv_heads,
@@ -975,10 +955,7 @@ def _gqa_decode_autotune_base(
         best_cfg = result.best.config
         _decode_kv_paged_tune_cache[cache_key] = (
             best_cfg,
-            ct.kernel(
-                _decode_attention_kv_paged_kernel._pyfunc,
-                occupancy=best_cfg.occupancy,
-            ),
+            _decode_attention_kv_paged_kernel.replace_hints(occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _decode_kv_paged_tune_cache[cache_key]
     ct.launch(
@@ -993,8 +970,6 @@ def _gqa_decode_autotune_base(
             block_tables_flat,
             Att_Out,
             LSE_Out_arg,
-            num_batch,
-            total_num_pages,
             k_scale,
             v_scale,
             num_kv_heads,
@@ -1044,7 +1019,7 @@ def decode_attention_kv_paged(
 
     if not (is_power_of_2(head_dim_qk) and is_power_of_2(head_dim_vo)):
         raise NotImplementedError(
-            f"CuTile decode attention requires power-of-2 dimensions. Got head_dim_qk={head_dim_qk}, head_dim_vo={head_dim_vo}."
+            f"cuTile decode attention requires power-of-2 dimensions. Got head_dim_qk={head_dim_qk}, head_dim_vo={head_dim_vo}."
         )
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -1120,7 +1095,7 @@ def decode_attention_kv_paged(
     )
 
     if should_use_split_kv:
-        return splitk_reduce_with_seq_len(Att_Out, LSE_Out, actual_seq_lens_flat, kv_len_per_split, outputs)
+        return _splitk_reduce_with_seq_len(Att_Out, LSE_Out, actual_seq_lens_flat, kv_len_per_split, outputs)
     return outputs
 
 
@@ -1158,7 +1133,6 @@ def _mla_decode_autotune_base(
     mla_cache_key = (
         num_batch,
         num_qo_heads,
-        total_num_pages,
         page_size,
         head_dim_qk,
         head_dim_rope,
@@ -1185,8 +1159,6 @@ def _mla_decode_autotune_base(
                 block_tables_flat,
                 Att_Out,
                 LSE_Out_arg,
-                num_batch,
-                total_num_pages,
                 k_scale,
                 v_scale,
                 page_size,
@@ -1199,16 +1171,15 @@ def _mla_decode_autotune_base(
                 kv_len_per_split,
                 HAS_LSE_OUT,
                 stride_block_table,
+                min(cfg.BLOCK_N, page_size),
+                max(cfg.BLOCK_N // page_size, 1),
             ),
             lambda cfg: {"occupancy": cfg.occupancy},
         )
         best_cfg = result.best.config
         _decode_mla_paged_tune_cache[mla_cache_key] = (
             best_cfg,
-            ct.kernel(
-                _decode_mla_kv_paged_kernel._pyfunc,
-                occupancy=best_cfg.occupancy,
-            ),
+            _decode_mla_kv_paged_kernel.replace_hints(occupancy=best_cfg.occupancy),
         )
     best_cfg, tuned_kernel = _decode_mla_paged_tune_cache[mla_cache_key]
     ct.launch(
@@ -1225,8 +1196,6 @@ def _mla_decode_autotune_base(
             block_tables_flat,
             Att_Out,
             LSE_Out_arg,
-            num_batch,
-            total_num_pages,
             k_scale,
             v_scale,
             page_size,
@@ -1270,7 +1239,7 @@ def decode_mla_kv_paged(
 
     QUERY_GROUP_SIZE = num_qo_heads
 
-    use_autotune = os.environ.get("ENABLE_CUTILE_TUNE", "0") == "1"
+    use_autotune = is_autotune_enabled()
     if use_autotune:
         NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
         num_head_blocks = max(QUERY_GROUP_SIZE // 32, 1)
@@ -1340,7 +1309,7 @@ def decode_mla_kv_paged(
         )
 
         if should_use_split_kv:
-            return splitk_reduce_with_seq_len(Att_Out, LSE_Out, actual_seq_lens_flat, kv_len_per_split, outputs)
+            return _splitk_reduce_with_seq_len(Att_Out, LSE_Out, actual_seq_lens_flat, kv_len_per_split, outputs)
         return outputs
 
     use_large_block_h = num_batch >= 16
@@ -1375,7 +1344,7 @@ def decode_mla_kv_paged(
 
     if not (is_power_of_2(head_dim_qk) and is_power_of_2(head_dim_rope) and is_power_of_2(BLOCK_H)):
         raise NotImplementedError(
-            f"CuTile MLA decode requires power-of-2 dimensions. Got head_dim_qk={head_dim_qk}, head_dim_rope={head_dim_rope}, BLOCK_H={BLOCK_H}."
+            f"cuTile MLA decode requires power-of-2 dimensions. Got head_dim_qk={head_dim_qk}, head_dim_rope={head_dim_rope}, BLOCK_H={BLOCK_H}."
         )
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -1426,7 +1395,12 @@ def decode_mla_kv_paged(
     LSE_Out_arg = LSE_Out if LSE_Out is not None else torch.zeros(1, device=q.device, dtype=torch.float32)
     HAS_LSE_OUT = LSE_Out is not None
 
-    kernel = _decode_mla_kv_paged_kernel
+    num_ctas = 2 if (num_batch >= 16 and BLOCK_H >= 64) else None
+    kernel = (
+        cached_replace_hints(_decode_mla_kv_paged_kernel, num_ctas=num_ctas)
+        if num_ctas
+        else _decode_mla_kv_paged_kernel
+    )
 
     ct.launch(
         torch.cuda.current_stream(),
@@ -1462,5 +1436,5 @@ def decode_mla_kv_paged(
     )
 
     if should_use_split_kv:
-        return splitk_reduce_with_seq_len(Att_Out, LSE_Out, actual_seq_lens_flat, kv_len_per_split, outputs)
+        return _splitk_reduce_with_seq_len(Att_Out, LSE_Out, actual_seq_lens_flat, kv_len_per_split, outputs)
     return outputs

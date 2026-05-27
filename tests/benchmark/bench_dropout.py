@@ -36,6 +36,7 @@ register_impl("dropout", "torch")(reference_dropout)
 # Available backends for benchmarking
 ALL_BACKENDS = [
     ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
+    ("tilecpp", "TileCpp", ("purple", "-")) if is_backend_available("tilecpp") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 

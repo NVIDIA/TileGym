@@ -201,7 +201,7 @@ class Test_FlashInfer_PrefillPaged(common.PyTestCase):
         dtype,
         monkeypatch,
     ):
-        monkeypatch.setenv("DISABLE_AUTOTUNE", "1")
+        monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "1")
         # Convert string dtype to torch dtype
         dtype_map = {
             "float16": torch.float16,
@@ -337,7 +337,7 @@ class Test_FlashInfer_PrefillRagged(common.PyTestCase):
         backend,
         monkeypatch,
     ):
-        monkeypatch.setenv("DISABLE_AUTOTUNE", "1")
+        monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "1")
         # Convert string dtype to torch dtype
         dtype_map = {
             "float16": torch.float16,
