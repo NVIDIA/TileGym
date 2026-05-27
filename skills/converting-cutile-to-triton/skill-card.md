@@ -1,0 +1,46 @@
+## Description: <br>
+Converts cuTile GPU kernels (@ct.kernel) to Triton (@triton.jit), handling standard in-repo conversion, debugging, and mapping cuTile idioms to Triton equivalents. <br>
+
+This skill is ready for commercial/non-commercial use. <br>
+
+## Owner: NVIDIA <br>
+
+### License/Terms of Use: <br>
+CC-BY-4.0 AND Apache-2.0 <br>
+## Use Case: <br>
+Developers and engineers converting cuTile GPU kernels to Triton for GPU kernel development, optimization, and debugging of existing Triton translations. <br>
+
+### Deployment Geography for Use: <br>
+Global <br>
+
+## Known Risks and Mitigations: <br>
+Risk: Review before execution as proposals could introduce incorrect or misleading guidance into skills. <br>
+Mitigation: Review and scan skill before deployment. <br>
+
+## Reference(s): <br>
+- [API Mapping (cuTile to Triton)](references/api-mapping.md) <br>
+- [Debugging Guide](references/debugging.md) <br>
+- [Common Translation Gotchas](references/gotchas.md) <br>
+- [Harness Integration](references/harness-integration.md) <br>
+- [Optimization Strategy](references/optimization-strategy.md) <br>
+- [Optimizing Reference](references/optimizing-reference.md) <br>
+- [Performance Gotchas](references/performance-gotchas.md) <br>
+- [Conversion Workflow](translations/workflow.md) <br>
+- [Advanced Patterns](translations/advanced-patterns.md) <br>
+- [File Structure](translations/file-structure.md) <br>
+
+
+## Skill Output: <br>
+**Output Type(s):** [Code, Files, Shell commands] <br>
+**Output Format:** [Python source files with inline Triton kernel code] <br>
+**Output Parameters:** [1D] <br>
+**Other Properties Related to Output:** [None] <br>
+
+## Skill Version(s): <br>
+1.0.0 (source: frontmatter) <br>
+
+## Ethical Considerations: <br>
+NVIDIA believes Trustworthy AI is a shared responsibility and we have established policies and practices to enable development for a wide array of AI applications. When downloaded or used in accordance with our terms of service, developers should work with their internal team to ensure this skill meets requirements for the relevant industry and use case and addresses unforeseen product misuse. <br>
+
+(For Release on NVIDIA Platforms Only) <br>
+Please report quality, risk, security vulnerabilities or NVIDIA AI Concerns [here](https://app.intigriti.com/programs/nvidia/nvidiavdp/detail). <br>
