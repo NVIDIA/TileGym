@@ -7,7 +7,7 @@
     "ground_truth": "The agent used tilegym-adding-cutile-kernel to guide the user through all six steps: registering the dispatch interface in ops.py, implementing the cuTile backend kernel, registering in __init__.py, adding tests, adding a benchmark, and verifying with pytest and lint.",
     "expected_behavior": [
       "The agent read the tilegym-adding-cutile-kernel SKILL.md before providing instructions",
-      "The agent created a TodoWrite checklist with all six steps before writing any code",
+      "The agent organized the work into clear sequential steps (e.g., via TodoWrite, a todo list, or a numbered plan) before writing any code",
       "The agent provided code for registering the gelu dispatch in src/tilegym/ops/ops.py with @dispatch decorator and NotImplementedError body",
       "The agent provided the cuTile backend implementation file at src/tilegym/ops/cutile/gelu.py with @ct.kernel and @register_impl decorators",
       "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
@@ -15,29 +15,29 @@
   },
   {
     "id": "tilegym-adding-cutile-kernel-002",
-    "question": "I need to implement a new GPU kernel for a layer_norm operation in TileGym using the cuTile backend. It should have dispatch registration, the kernel implementation, proper exports, tests, and a benchmark. How do I do this end-to-end?",
+    "question": "Before I start coding, I just need a quick orientation: when adding a new cuTile operator to TileGym, which files in the repo do I have to touch and where do the dispatch registration, the cuTile backend, and the __init__.py export live? Just point me at the file paths and the role of each — no implementation needed yet.",
     "expected_skill": "tilegym-adding-cutile-kernel",
     "expected_script": null,
-    "ground_truth": "The agent identified this as a cuTile kernel addition task and followed the tilegym-adding-cutile-kernel workflow to produce dispatch registration in ops.py, a cuTile backend implementation, __init__.py export registration, test file, and benchmark file for the layer_norm operator.",
+    "ground_truth": "The agent consulted tilegym-adding-cutile-kernel and produced a short orientation listing the four canonical file paths a contributor must touch — src/tilegym/ops/ops.py (dispatch entry), src/tilegym/ops/cutile/<op>.py (cuTile backend), src/tilegym/ops/cutile/__init__.py (module export and __all__), and tests/ops/test_<op>.py — with a one-line role description for each. No implementation code was written.",
     "expected_behavior": [
-      "The agent created a structured checklist covering dispatch registration, cuTile implementation, __init__.py exports, tests, and benchmarks",
-      "The agent wrote the dispatch function in src/tilegym/ops/ops.py with **kwargs and NotImplementedError",
-      "The agent registered the module import in src/tilegym/ops/cutile/__init__.py inside the is_backend_available block",
-      "The agent created a test file at tests/ops/test_layer_norm.py importing from tilegym.ops (not from tilegym.ops.cutile)",
+      "The agent read the tilegym-adding-cutile-kernel SKILL.md before answering",
+      "The agent listed src/tilegym/ops/ops.py as the dispatch entry point",
+      "The agent listed src/tilegym/ops/cutile/<op>.py (or src/tilegym/ops/cutile/) as where the @ct.kernel backend implementation lives",
+      "The agent listed src/tilegym/ops/cutile/__init__.py as where the new module must be imported and added to __all__",
+      "The agent did not write a full implementation — the response was an orientation, not finished code",
       "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
     ]
   },
   {
     "id": "tilegym-adding-cutile-kernel-003",
-    "question": "Our team is extending TileGym with a fused_add_rms_norm kernel for our LLM inference pipeline. We already have a Triton version but now need the cuTile equivalent registered properly so it can be dispatched. The kernel takes two input tensors, adds them element-wise, then applies RMS normalization. Can you help me add this?",
-    "expected_skill": "tilegym-adding-cutile-kernel",
+    "question": "My existing cuTile matmul kernel in TileGym is running roughly 2x slower than the PyTorch matmul on my B200. I want to profile it, understand which stage is the bottleneck, and tune block sizes to close the gap. How do I approach this?",
+    "expected_skill": null,
     "expected_script": null,
-    "ground_truth": "The agent applied the tilegym-adding-cutile-kernel workflow to implement a fused_add_rms_norm cuTile kernel, producing all required files including dispatch registration, cuTile kernel with ct.kernel decorator, __init__.py exports with alphabetical ordering, tests with reference implementation, and a benchmark file.",
+    "ground_truth": "The agent recognized this as a performance profiling and autotuning question on an existing kernel, not a request to add a new cuTile operator, and did not invoke the tilegym-adding-cutile-kernel skill. The agent pointed the user toward profiling tools (e.g., Nsight, triton.testing.do_bench) and the autotuning workflow rather than walking through dispatch registration or backend implementation.",
     "expected_behavior": [
-      "The agent followed the execution rules by creating the TodoWrite checklist before writing any code",
-      "The agent implemented the cuTile kernel in src/tilegym/ops/cutile/fused_add_rms_norm.py using ct.kernel, ct.gather, ct.scatter, and register_impl",
-      "The agent added 'fused_add_rms_norm' to __all__ in src/tilegym/ops/cutile/__init__.py",
-      "The agent created a benchmark file in tests/benchmark for the new operator",
+      "The agent did not invoke the tilegym-adding-cutile-kernel skill",
+      "The agent did not walk through dispatch registration, @ct.kernel implementation, or __init__.py exports",
+      "The agent suggested profiling or benchmarking approaches (e.g., Nsight Compute, triton.testing.do_bench, GPU profilers) instead of adding a new operator",
       "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
     ]
   },
@@ -48,8 +48,22 @@
     "expected_script": null,
     "ground_truth": "The agent recognized this as a logging/configuration question unrelated to adding a new cuTile kernel operator and did not invoke the tilegym-adding-cutile-kernel skill.",
     "expected_behavior": [
-      "The agent did not create a TodoWrite checklist for adding a cuTile kernel",
-      "The agent addressed the logging configuration question without referencing dispatch registration or kernel implementation workflows",
+      "The agent did not invoke the tilegym-adding-cutile-kernel skill",
+      "The agent did not walk through dispatch registration, @ct.kernel implementation, or __init__.py exports",
+      "The agent addressed the logging configuration question (e.g., via environment variable, logging module, or kernel verbosity flag) without referencing the add-kernel workflow",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-adding-cutile-kernel-005",
+    "question": "I want to scale my TileGym cuTile kernels across multiple GPUs using NCCL all-reduce for distributed inference. What's the recommended way to integrate that?",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "The agent recognized this as a multi-GPU / distributed inference integration question, not a single-GPU kernel registration task, and did not invoke the tilegym-adding-cutile-kernel skill. The agent pointed the user at NCCL primitives, distributed wrappers (e.g., torch.distributed), or higher-level frameworks rather than walking through dispatch registration.",
+    "expected_behavior": [
+      "The agent did not invoke the tilegym-adding-cutile-kernel skill",
+      "The agent did not walk through dispatch registration, @ct.kernel implementation, or __init__.py exports",
+      "The agent suggested distributed/multi-GPU approaches (e.g., NCCL all-reduce, torch.distributed) instead of adding a new operator",
       "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
     ]
   }
