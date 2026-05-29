@@ -2,7 +2,7 @@
 
 Trace any PyTorch operation from the user-facing Python API through the C++ ATen library down to CUDA kernels and autograd backward passes by reading actual source code.
 
-> **Context**: This is Step O-0 of the cutile-python orchestration workflow. The trace is
+> **Context**: This is Step O-0 of the tilegym-cutile-python orchestration workflow. The trace is
 > **intermediate context** for the Analyzer Agent — not a final deliverable. After completing
 > the trace, immediately proceed to Step O-1 (spawn Analyzer Agent via Task tool).
 
@@ -146,7 +146,7 @@ Structure each trace as:
 ## Mandatory: Continue to Step O-1
 
 The trace above is **not the final result**. Your next action after completing the trace is to
-call the **Task tool** to spawn the Analyzer Agent (Step O-1 in cutile-python SKILL.md).
+call the **Task tool** to spawn the Analyzer Agent (Step O-1 in tilegym-cutile-python SKILL.md).
 
 Do NOT output the trace as a summary to the user. Do NOT stop. Do NOT wait for input.
 Pass the trace as context in the Analyzer Agent prompt and proceed immediately.

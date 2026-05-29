@@ -256,7 +256,7 @@ ct.store(Y, index=(bid, 0), tile=result, allow_tma=False)  # +30% in rms_norm!
 **Impact**: +5-50% depending on mismatch
 **When**: Current tile sizes are suboptimal for the workload or GPU architecture.
 
-For per-architecture tile size constraints and recommended search spaces, see `cutile-autotuning` skill.
+For per-architecture tile size constraints and recommended search spaces, see `tilegym-cutile-autotuning` skill.
 
 ---
 

@@ -69,7 +69,7 @@ Core methodology is to create new cuTile kernels to replace uncovered PyTorch co
 
 LOOP:
 1. Check git status: Current git branch/commit we're on
-2. Identify one piece of uncovered PyTorch code and create cuTile kernels if it's straightforward; Otherwise delegate to a code subagent and let it follow /cutile-python SKILL
+2. Identify one piece of uncovered PyTorch code and create cuTile kernels if it's straightforward; Otherwise delegate to a code subagent and let it follow /tilegym-cutile-python SKILL
 3. Integrate the new kernel to the transformers model and measure perf, coverage, and correctness (integrated model should produce meaningful results similar to baseline)
 4. If crash at any previous step, or integrated model produced garbage outputs, try to fix. If you can't get things to work after more than a few attempts, give up
 5. Git commit

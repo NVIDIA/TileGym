@@ -1,0 +1,56 @@
+[
+  {
+    "id": "tilegym-adding-cutile-kernel-001",
+    "question": "I want to use the tilegym-adding-cutile-kernel skill to add a new gelu operator to TileGym. Can you walk me through the full process?",
+    "expected_skill": "tilegym-adding-cutile-kernel",
+    "expected_script": null,
+    "ground_truth": "The agent used tilegym-adding-cutile-kernel to guide the user through all six steps: registering the dispatch interface in ops.py, implementing the cuTile backend kernel, registering in __init__.py, adding tests, adding a benchmark, and verifying with pytest and lint.",
+    "expected_behavior": [
+      "The agent read the tilegym-adding-cutile-kernel SKILL.md before providing instructions",
+      "The agent created a TodoWrite checklist with all six steps before writing any code",
+      "The agent provided code for registering the gelu dispatch in src/tilegym/ops/ops.py with @dispatch decorator and NotImplementedError body",
+      "The agent provided the cuTile backend implementation file at src/tilegym/ops/cutile/gelu.py with @ct.kernel and @register_impl decorators",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-adding-cutile-kernel-002",
+    "question": "I need to implement a new GPU kernel for a layer_norm operation in TileGym using the cuTile backend. It should have dispatch registration, the kernel implementation, proper exports, tests, and a benchmark. How do I do this end-to-end?",
+    "expected_skill": "tilegym-adding-cutile-kernel",
+    "expected_script": null,
+    "ground_truth": "The agent identified this as a cuTile kernel addition task and followed the tilegym-adding-cutile-kernel workflow to produce dispatch registration in ops.py, a cuTile backend implementation, __init__.py export registration, test file, and benchmark file for the layer_norm operator.",
+    "expected_behavior": [
+      "The agent created a structured checklist covering dispatch registration, cuTile implementation, __init__.py exports, tests, and benchmarks",
+      "The agent wrote the dispatch function in src/tilegym/ops/ops.py with **kwargs and NotImplementedError",
+      "The agent registered the module import in src/tilegym/ops/cutile/__init__.py inside the is_backend_available block",
+      "The agent created a test file at tests/ops/test_layer_norm.py importing from tilegym.ops (not from tilegym.ops.cutile)",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-adding-cutile-kernel-003",
+    "question": "Our team is extending TileGym with a fused_add_rms_norm kernel for our LLM inference pipeline. We already have a Triton version but now need the cuTile equivalent registered properly so it can be dispatched. The kernel takes two input tensors, adds them element-wise, then applies RMS normalization. Can you help me add this?",
+    "expected_skill": "tilegym-adding-cutile-kernel",
+    "expected_script": null,
+    "ground_truth": "The agent applied the tilegym-adding-cutile-kernel workflow to implement a fused_add_rms_norm cuTile kernel, producing all required files including dispatch registration, cuTile kernel with ct.kernel decorator, __init__.py exports with alphabetical ordering, tests with reference implementation, and a benchmark file.",
+    "expected_behavior": [
+      "The agent followed the execution rules by creating the TodoWrite checklist before writing any code",
+      "The agent implemented the cuTile kernel in src/tilegym/ops/cutile/fused_add_rms_norm.py using ct.kernel, ct.gather, ct.scatter, and register_impl",
+      "The agent added 'fused_add_rms_norm' to __all__ in src/tilegym/ops/cutile/__init__.py",
+      "The agent created a benchmark file in tests/benchmark for the new operator",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-adding-cutile-kernel-004",
+    "question": "How do I configure TileGym's logging level to debug mode and increase the verbosity of kernel compilation output?",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "The agent recognized this as a logging/configuration question unrelated to adding a new cuTile kernel operator and did not invoke the tilegym-adding-cutile-kernel skill.",
+    "expected_behavior": [
+      "The agent did not create a TodoWrite checklist for adding a cuTile kernel",
+      "The agent addressed the logging configuration question without referencing dispatch registration or kernel implementation workflows",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  }
+]

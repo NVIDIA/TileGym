@@ -69,7 +69,7 @@ User Request (complex task)
 When the user's request involves PyTorch ops whose internals are non-obvious (e.g., `nn.LSTM`, `nn.GRU`, fused attention), trace the op inline before running the Analyzer. This grounds the decomposition in the actual implementation rather than relying on potentially imprecise LLM knowledge.
 
 **CRITICAL**: This step runs in the **main agent context**, NOT as a sub-agent. Do NOT invoke torch-learner via the Skill tool — follow the tracing workflow inline:
-1. Read `torch-learner/tracing_workflow.md` (in the cutile-python skill directory)
+1. Read `torch-learner/tracing_workflow.md` (in the tilegym-cutile-python skill directory)
 2. Follow the Core Tracing Workflow (Steps 1–7) directly
 3. Pass the trace output to Step 1 (Analyzer Agent) as context
 

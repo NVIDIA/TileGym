@@ -8,7 +8,7 @@ The skill supports two installation contexts. Figure out which one applies befor
 
 ### Case 1 — skill inside a TileGym checkout
 
-Path looks like `<repo>/skills/cutile-python/` (or `<repo>/.agents/skills/cutile-python/` / `<repo>/.claude/skills/cutile-python/` via the backward-compat symlinks). The enclosing repo **is** TileGym. No clone needed — use it directly:
+Path looks like `<repo>/skills/tilegym-cutile-python/` (or `<repo>/.agents/skills/tilegym-cutile-python/` / `<repo>/.claude/skills/tilegym-cutile-python/` via the backward-compat symlinks). The enclosing repo **is** TileGym. No clone needed — use it directly:
 
 ```
 <repo>/src/tilegym/ops/cutile/
@@ -16,7 +16,7 @@ Path looks like `<repo>/skills/cutile-python/` (or `<repo>/.agents/skills/cutile
 
 ### Case 2 — skill installed elsewhere (e.g. `~/.agents/skills/` or `~/.claude/skills/`)
 
-Path looks like `~/.agents/skills/cutile-python/` or `~/.claude/skills/cutile-python/`, or the skill is inside some other repo that does not ship `src/tilegym/`. TileGym is not adjacent; clone it once on first use to the cache directory and use it from there:
+Path looks like `~/.agents/skills/tilegym-cutile-python/` or `~/.claude/skills/tilegym-cutile-python/`, or the skill is inside some other repo that does not ship `src/tilegym/`. TileGym is not adjacent; clone it once on first use to the cache directory and use it from there:
 
 ```
 ${TILEGYM_SKILL_CACHE_DIR:-~/.cache/tilegym}/TileGym/src/tilegym/ops/cutile/

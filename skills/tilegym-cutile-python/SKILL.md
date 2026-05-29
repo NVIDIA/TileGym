@@ -1,5 +1,5 @@
 ---
-name: "cutile-python"
+name: "tilegym-cutile-python"
 version: 1.3.0
 description: "Expert cuTile programming assistant. Write high-performance GPU kernels using cuTile's tile-based programming model with proper validation and optimization. Supports deep agent orchestration for complex multi-kernel tasks."
 license: CC-BY-4.0 AND Apache-2.0
@@ -53,8 +53,8 @@ atomics, metaprogramming, classes, enums, autotuning).
 Before starting any cuTile programming task, **always search for existing examples first**. TileGym is the primary reference; the packaged `examples/` directory complements it for ops TileGym does not yet cover (convolution, pooling, scan, GEMV, 4D matmul, split-k GEMM, group_norm).
 
 The skill supports two installation contexts:
-- **Inside a TileGym checkout** (`<repo>/skills/cutile-python/`, or `<repo>/.agents/skills/cutile-python/` / `<repo>/.claude/skills/cutile-python/` via the backward-compat symlinks) — TileGym ops are at `<repo>/src/tilegym/ops/cutile/`.
-- **Installed elsewhere** (e.g. `~/.agents/skills/cutile-python/`, `~/.claude/skills/cutile-python/`, or inside a different repo) — clone TileGym once to `${TILEGYM_SKILL_CACHE_DIR:-~/.cache/tilegym}/TileGym` and use its `src/tilegym/ops/cutile/`.
+- **Inside a TileGym checkout** (`<repo>/skills/tilegym-cutile-python/`, or `<repo>/.agents/skills/tilegym-cutile-python/` / `<repo>/.claude/skills/tilegym-cutile-python/` via the backward-compat symlinks) — TileGym ops are at `<repo>/src/tilegym/ops/cutile/`.
+- **Installed elsewhere** (e.g. `~/.agents/skills/tilegym-cutile-python/`, `~/.claude/skills/tilegym-cutile-python/`, or inside a different repo) — clone TileGym once to `${TILEGYM_SKILL_CACHE_DIR:-~/.cache/tilegym}/TileGym` and use its `src/tilegym/ops/cutile/`.
 
 See **[examples/tilegym_and_examples_guide.md](examples/tilegym_and_examples_guide.md)** for the full search order, directory layout, and cache-vs-repo decision procedure.
 
