@@ -1,14 +1,15 @@
 ## Description: <br>
-Converts cuTile GPU kernels (@ct.kernel) to Triton (@triton.jit), handling standard in-repo conversion, debugging, and mapping cuTile idioms to Triton equivalents. <br>
+Converts cuTile GPU kernels (@ct.kernel) to Triton (@triton.jit), handling standard in-repo conversion, debugging, and mapping cuTile idioms to Triton equivalents including dual-kernel layout flags. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers converting cuTile GPU kernels to Triton for GPU kernel development, optimization, and debugging of existing Triton translations. <br>
+Developers and engineers converting cuTile GPU kernels to Triton for performance optimization and cross-framework portability in GPU computing workflows. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -31,10 +32,23 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Code, Files, Shell commands] <br>
-**Output Format:** [Python source files with inline Triton kernel code] <br>
+**Output Type(s):** [Code, Shell commands] <br>
+**Output Format:** [Python source files and shell commands] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
+
+## Evaluation Tasks: <br>
+Evaluated via NVSkills-Eval (external profile): 9 Tier 1 static validation checks and 2 Tier 2 deduplication checks. <br>
+
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
 
 ## Skill Version(s): <br>
 1.0.0 (source: frontmatter) <br>

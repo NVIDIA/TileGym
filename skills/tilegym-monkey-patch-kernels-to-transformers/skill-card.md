@@ -1,14 +1,15 @@
 ## Description: <br>
-Integrate TileGym kernels into Hugging Face `transformers` models by replacing the library's submodule(s) and certain class(es)' implementations, and patching certain class(es)' init/forward/load weight methods prior to instantiating models. <br>
+Integrate TileGym kernels into Hugging Face transformers models by replacing the library's submodules and certain classes' implementations, and patching certain classes' init/forward/load weight methods prior to instantiating models. <br>
 
-This skill is for research and development only. <br>
+This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers who need to integrate TileGym GPU kernels into Hugging Face transformers models using a non-intrusive monkey-patch approach to validate end-to-end functional correctness and improve performance. <br>
+Developers and engineers integrating TileGym GPU kernels into Hugging Face transformers models for LLM training and inference performance optimization. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -18,18 +19,28 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
-- [Environment Setup](references/environment-setup.md) <br>
 - [Kernel Integration Workflow](references/kernel-integration.md) <br>
 - [Auto Kernelize](references/auto-kernelize.md) <br>
+- [Environment Setup](references/environment-setup.md) <br>
 - [Workflow Diagram](references/workflow-diagram.png) <br>
 - [CUDA Tile IR Supported Architectures](https://docs.nvidia.com/cuda/tile-ir/latest/sections/stability.html#supported-architectures) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Code, Shell commands, Configuration instructions] <br>
-**Output Format:** [Markdown with inline bash code blocks] <br>
+**Output Type(s):** [Code, Shell commands, Analysis] <br>
+**Output Format:** [Markdown with inline code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
+
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
 
 ## Skill Version(s): <br>
 2026.05.05-beta (source: frontmatter) <br>
