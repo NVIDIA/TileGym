@@ -1,14 +1,15 @@
 ## Description: <br>
-Converts cuTile Python GPU kernels (@ct.kernel) to cuTile.jl Julia equivalents, handling kernel syntax translation, 0-indexed to 1-indexed conversion, broadcasting differences, memory layout (row-major to column-major), type system mapping, and launch API differences. <br>
+Converts cuTile Python GPU kernels (@ct.kernel) to cuTile.jl Julia equivalents, handling kernel syntax translation, indexing, broadcasting, memory layout, type mapping, and launch API differences. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers who need to port cuTile Python GPU kernels to Julia cuTile.jl equivalents, enabling Julia-native GPU kernel development without a Python bridge. <br>
+Developers and engineers converting cuTile Python GPU kernels to cuTile.jl Julia equivalents for cross-language kernel portability and Julia-native GPU development. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -18,21 +19,32 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
-- [API Mapping (Python to Julia)](references/api-mapping.md) <br>
+- [Conversion Workflow](translations/workflow.md) <br>
+- [API Mapping](references/api-mapping.md) <br>
 - [Critical Rules](references/critical-rules.md) <br>
 - [Debugging Guide](references/debugging.md) <br>
-- [Testing & Verification Guide](references/testing.md) <br>
-- [Conversion Workflow](translations/workflow.md) <br>
+- [Testing Patterns](references/testing.md) <br>
+- [Julia Validator Script](scripts/validate_cutile_jl.py) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Code, Files, Shell commands] <br>
-**Output Format:** [Julia source files (.jl) with inline documentation] <br>
+**Output Type(s):** [Code, Shell commands] <br>
+**Output Format:** [Julia source files (.jl) with inline code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
+
 ## Skill Version(s): <br>
-v1.3.0 (source: git tag) <br>
+514bd49 (source: git SHA, committed 2026-05-29) <br>
 
 ## Ethical Considerations: <br>
 NVIDIA believes Trustworthy AI is a shared responsibility and we have established policies and practices to enable development for a wide array of AI applications. When downloaded or used in accordance with our terms of service, developers should work with their internal team to ensure this skill meets requirements for the relevant industry and use case and addresses unforeseen product misuse. <br>

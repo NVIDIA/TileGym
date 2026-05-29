@@ -1,14 +1,15 @@
 ## Description: <br>
-Use when adding, modifying, optimizing, or debugging CuTile autotuning code. Trigger signals: `exhaustive_search` / `replace_hints` / `hints_fn` / `cuda.tile.tune` in code, `autotune` in filenames, or correctness/performance issues in autotuned CuTile kernels. Covers: tune-once/cache/launch pattern, per-architecture configs (sm80–sm120), parameter space design (tile sizes, occupancy, num_ctas), and 7 common pitfalls with solutions. <br>
+Use when adding, modifying, optimizing, or debugging CuTile autotuning code — covers tune-once/cache/launch pattern, per-architecture configs (sm80–sm120), parameter space design, and common pitfalls with solutions. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers working with CuTile GPU kernels use this skill to add, optimize, or debug autotuning configurations for CUDA Tile kernels across NVIDIA GPU architectures (sm80–sm120). <br>
+Developers and engineers working with CuTile GPU kernels who need to add, modify, optimize, or debug autotuning configurations for tile-based CUDA programming. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -18,7 +19,7 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
-- [exhaustive_search API Reference](references/api-reference.md) <br>
+- [API Reference](references/api-reference.md) <br>
 - [Hardware Constraints](references/hardware-constraints.md) <br>
 - [Kernel Type Templates](references/kernel-type-templates.md) <br>
 - [Parameter Space Design](references/parameter-space-design.md) <br>
@@ -29,9 +30,22 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Skill Output: <br>
 **Output Type(s):** [Code, Configuration instructions] <br>
-**Output Format:** [Markdown with inline Python code blocks] <br>
+**Output Format:** [Python code with inline comments] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
+
+## Evaluation Tasks: <br>
+3-Tier Evaluation via NVSkills-Eval (static validation, deduplication, live agent evaluation). Overall verdict: FAIL. <br>
+
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
 
 ## Skill Version(s): <br>
 v1.3.0 (source: git tag) <br>

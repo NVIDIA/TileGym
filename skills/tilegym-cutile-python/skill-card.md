@@ -1,14 +1,15 @@
 ## Description: <br>
-Expert cuTile programming assistant that writes high-performance GPU kernels using cuTile's tile-based programming model with proper validation, optimization, and deep agent orchestration for complex multi-kernel tasks. <br>
+Expert cuTile programming assistant that writes high-performance GPU kernels using cuTile's tile-based programming model with proper validation and optimization, supporting deep agent orchestration for complex multi-kernel tasks. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
-<span style="color:#d73a49">MIT</span> <!-- VERIFY: Repo LICENSE file says MIT but skill frontmatter declares CC-BY-4.0 AND Apache-2.0; reviewer should confirm which applies to the skill --> <br>
+CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers use this skill to write, debug, and optimize high-performance GPU kernels using cuTile's tile-based programming model, including complex multi-kernel tasks requiring deep agent orchestration. <br>
+Developers and engineers who need to write, debug, and optimize high-performance GPU kernels using cuTile's tile-based programming model. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -22,19 +23,31 @@ Mitigation: Review and scan skill before deployment. <br>
 - [Implementation Lessons](guidelines/01_implementation_lessons.md) <br>
 - [Code Generation Rules](guidelines/02_code_generation_rules.md) <br>
 - [Core Concepts](guidelines/03_concepts.md) <br>
-- [Orchestration Workflow](orchestration/workflow.md) <br>
-- [Orchestration Overview](orchestration/overview.md) <br>
 - [TileGym and Examples Guide](examples/tilegym_and_examples_guide.md) <br>
+- [Deep Agent Orchestration Workflow](orchestration/workflow.md) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Code] <br>
-**Output Format:** [Python source code with inline validation] <br>
+**Output Type(s):** [Code, Shell commands] <br>
+**Output Format:** [Python source files with inline validation] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
+## Evaluation Tasks: <br>
+NVSkills-Eval 3-Tier Evaluation with profile `external`. Tier 1 ran 9 static validation checks; Tier 2 ran 2 deduplication checks. <br>
+
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
+
 ## Skill Version(s): <br>
-1.3.0 (source: frontmatter, git tag) <br>
+1.3.0 (source: frontmatter) <br>
 
 ## Ethical Considerations: <br>
 NVIDIA believes Trustworthy AI is a shared responsibility and we have established policies and practices to enable development for a wide array of AI applications. When downloaded or used in accordance with our terms of service, developers should work with their internal team to ensure this skill meets requirements for the relevant industry and use case and addresses unforeseen product misuse. <br>

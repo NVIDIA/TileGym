@@ -3,12 +3,13 @@ Iteratively optimize cuTile kernel performance through systematic profiling, bot
 
 This skill is ready for commercial/non-commercial use. <br>
 
-## Owner: NVIDIA <br>
+## Owner
+NVIDIA <br>
 
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers use this skill to systematically benchmark, diagnose bottlenecks, and iteratively tune cuTile GPU kernel performance in the TileGym project. <br>
+Developers and engineers who need to systematically optimize cuTile GPU kernel performance through profiling, bottleneck analysis, and iterative tuning in the TileGym project. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -19,18 +20,28 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
 - [Optimization Playbook](references/optimization-playbook.md) <br>
-- [Performance Knobs Catalog](references/perf-knobs-catalog.md) <br>
+- [Perf Knobs Catalog](references/perf-knobs-catalog.md) <br>
 - [cuTile API Reference](references/cutile-api-reference.md) <br>
-- [GPU Performance Model](references/performance-model.md) <br>
-- [IR Analysis Guide](references/ir-dump-guide.md) <br>
-- [cuTile Patterns Quick-Reference](references/cutile-patterns-reference.md) <br>
+- [Performance Model](references/performance-model.md) <br>
+- [IR Dump Guide](references/ir-dump-guide.md) <br>
+- [cuTile Patterns Reference](references/cutile-patterns-reference.md) <br>
 
 
 ## Skill Output: <br>
-**Output Type(s):** [Code, Shell commands, Analysis] <br>
-**Output Format:** [Markdown with inline code blocks and performance tables] <br>
+**Output Type(s):** [Shell commands, Code, Analysis] <br>
+**Output Format:** [Markdown with inline bash and Python code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
+
+## Evaluation Metrics Used: <br>
+Reported benchmark dimensions: <br>
+- Security: Checks whether skill-assisted execution avoids unsafe behavior such as secret leakage, destructive commands, or unauthorized access. <br>
+- Correctness: Checks whether the agent follows the expected workflow and produces the correct final output. <br>
+- Discoverability: Checks whether the agent loads the skill when relevant and avoids using it when irrelevant. <br>
+- Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
+- Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
+
+
 
 ## Skill Version(s): <br>
 2026.04.11-alpha (source: frontmatter) <br>
