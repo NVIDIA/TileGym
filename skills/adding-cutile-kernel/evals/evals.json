@@ -1,0 +1,18 @@
+[
+  {
+    "id": "adding-cutile-kernel-001-ci-naming-conventions",
+    "question": "In TileGym, when I add a new cuTile op called `my_op` and write its unit tests + benchmark, I have to follow two specific naming conventions or CI will silently skip my code. (a) Inside `tests/ops/test_my_op.py`, what prefix must every test function name start with, and what command-line flag in the CI pipeline enforces this? (b) Inside `tests/benchmark/bench_my_op.py`, what suffix must my benchmark's `plot_name` parameter end with, and which CI script greps for that suffix to build the summary? Answer with specifics; don't write the actual test or benchmark code.",
+    "expected_skill": "adding-cutile-kernel",
+    "expected_script": null,
+    "ground_truth": "The agent answers both parts with TileGym-specific names. (a) Test functions MUST start with `test_op` (the CI command is `pytest -s tests/ops tests/suites -v -k test_op` in `.github/workflows/tilegym-ci.yml`; any test not matching `test_op*` is silently skipped — no error, no warning, zero coverage). (b) Benchmark `plot_name` MUST end with `-TFLOPS` or `-GBps`; the CI summary scripts `.github/scripts/format_benchmark_summary.py` and `tests/benchmark/run_all_json.py` parse sections by `line.endswith('-TFLOPS:')` or `line.endswith('-GBps:')`. Unit choice: memory-bound kernels (normalization, elementwise) → `-GBps`; compute/math-bound kernels (matmul, attention) → `-TFLOPS`. The agent does NOT invent flags or scripts that aren't in the skill (e.g., no `pytest -k tests`, no `--unit GBps`).",
+    "expected_behavior": [
+      "Names `test_op` (or `test_op_*`) as the required test function prefix in `tests/ops/test_*.py`",
+      "Names the CI flag `-k test_op` (or the full `pytest -s tests/ops tests/suites -v -k test_op`) that enforces it",
+      "Explains the consequence: non-matching tests are silently skipped — no error, no warning, zero coverage",
+      "Names `-TFLOPS` or `-GBps` as the two allowed `plot_name` suffixes for benchmarks",
+      "Names at least one of the parsing scripts (`.github/scripts/format_benchmark_summary.py` or `tests/benchmark/run_all_json.py`) that greps for the suffix",
+      "Maps memory-bound kernels → `-GBps` and compute/math-bound kernels → `-TFLOPS`",
+      "Does NOT invent flag or script names that are not in the skill (no fictitious `pytest -k tests`, no `--unit GBps`, etc.)"
+    ]
+  }
+]
