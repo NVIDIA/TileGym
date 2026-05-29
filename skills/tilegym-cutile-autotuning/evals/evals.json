@@ -1,0 +1,66 @@
+[
+  {
+    "id": "tilegym-cutile-autotuning-001",
+    "question": "I have an existing CuTile RMSNorm kernel in TileGym that uses a fixed config in ct.launch. I want to add occupancy-only autotuning so it picks the best occupancy per shape on the first call and reuses the result on subsequent calls. Walk me through the refactor.",
+    "expected_skill": "tilegym-cutile-autotuning",
+    "expected_script": null,
+    "ground_truth": "The agent consulted tilegym-cutile-autotuning and produced the tune-once/cache/launch refactor: an autotune_configs generator yielding SimpleNamespace(occupancy=...) over [1, 2, 4, 8] (memory-bound kernel, occupancy-only search), a module-level _autotune_cache dict keyed by (shape, dtype, str(device)), an exhaustive_search call with kernel + args_fn + hints_fn(occupancy=cfg.occupancy), kernel.replace_hints(occupancy=best_cfg.occupancy) once, caching both the config and the tuned kernel object, and direct ct.launch on subsequent calls with no per-call replace_hints on the hot path.",
+    "expected_behavior": [
+      "The agent read the tilegym-cutile-autotuning SKILL.md before providing instructions",
+      "The agent recommended an occupancy-only search space (e.g., [1, 2, 4, 8]) for the memory-bound RMSNorm kernel",
+      "The agent used the tune-once/cache/launch pattern with exhaustive_search + replace_hints + cache + ct.launch, rather than calling exhaustive_search on every invocation",
+      "The agent cached the tuned kernel object alongside the config (not just the config), so subsequent calls avoid replace_hints on the hot path",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-autotuning-002",
+    "question": "I added autotuning to an in-place RoPE embedding kernel in TileGym, and now the outputs are corrupted after the first call. The fixed-config version was fine. What is most likely going wrong and how do I fix it?",
+    "expected_skill": "tilegym-cutile-autotuning",
+    "expected_script": null,
+    "ground_truth": "The agent diagnosed this as the in-place autotune corruption pitfall (Pitfall #1 in the skill): during exhaustive_search, each candidate config overwrites the input tensor, so by the time later candidates run the input is no longer the original. The fix is the split-buffer pattern — during the search phase, run candidates against a separate input/output tensor pair (scratch buffers), then use the winning config with ct.launch on the real in-place arguments.",
+    "expected_behavior": [
+      "The agent read the tilegym-cutile-autotuning SKILL.md before answering",
+      "The agent identified the in-place autotune corruption pitfall as the likely root cause",
+      "The agent recommended the split-buffer pattern (separate input/output tensors during search) as the fix",
+      "The agent kept the answer focused on the diagnosis and fix without rewriting unrelated kernel code",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-autotuning-003",
+    "question": "How do I configure TileGym's logging level to debug mode and increase the verbosity of kernel compilation output?",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "The agent recognized this as a logging/configuration question unrelated to CuTile autotuning, and answered it directly via an environment variable, Python logging module, or kernel verbosity flag without invoking the tilegym-cutile-autotuning skill.",
+    "expected_behavior": [
+      "The agent addressed the logging configuration question (e.g., via environment variable, Python logging module, or kernel verbosity flag)",
+      "The agent did not walk through exhaustive_search, search-space design, or the tune-once/cache/launch pattern",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-autotuning-004",
+    "question": "What Python and PyTorch versions does TileGym support? I'm setting up a new dev environment and want to know which versions to install.",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "The agent recognized this as an installation/environment question and answered directly from TileGym's pyproject.toml, requirements.txt, or README. The agent did not invoke the tilegym-cutile-autotuning skill because the question has nothing to do with autotuning.",
+    "expected_behavior": [
+      "The agent addressed the version question by pointing to TileGym's setup metadata (pyproject.toml, requirements.txt, or README)",
+      "The agent did not walk through exhaustive_search, search-space design, or the tune-once/cache/launch pattern",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-autotuning-005",
+    "question": "I want to scale my TileGym CuTile kernels across multiple GPUs using NCCL all-reduce for distributed inference. What's the recommended way to integrate that?",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "The agent recognized this as a multi-GPU / distributed inference integration question, not a single-GPU autotuning task, and did not invoke the tilegym-cutile-autotuning skill. The agent pointed the user at NCCL primitives, distributed wrappers (e.g., torch.distributed), or higher-level frameworks.",
+    "expected_behavior": [
+      "The agent addressed the distributed/multi-GPU integration question (e.g., NCCL all-reduce, torch.distributed)",
+      "The agent did not walk through exhaustive_search, search-space design, or the tune-once/cache/launch pattern",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  }
+]
