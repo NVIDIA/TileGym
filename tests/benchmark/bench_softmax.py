@@ -39,13 +39,14 @@ def get_supported_backends():
     return [p for p in ALL_BACKENDS if p is not None]
 
 
-def create_benchmark_config(M, use_tma=True, use_chunked=False, use_multi_wave=False):
+def create_benchmark_config(M, dtype, use_tma=True, use_chunked=False, use_multi_wave=False):
     """Create a benchmark configuration for given parameters"""
     available_backends = get_supported_backends()
     if not available_backends:
         return None
 
     backends, names, styles = zip(*available_backends)
+    dtype_name = str(dtype).split(".")[-1]
 
     return triton.testing.Benchmark(
         x_names=["N"],
@@ -55,15 +56,24 @@ def create_benchmark_config(M, use_tma=True, use_chunked=False, use_multi_wave=F
         line_names=list(names),
         styles=list(styles),
         ylabel="GB/s",
-        plot_name=f"softmax-performance-tma-{use_tma}-chunked-{use_chunked}-multi-wave-{use_multi_wave}-GBps",
-        args={"M": M, "use_tma": use_tma, "use_chunked": use_chunked, "use_multi_wave": use_multi_wave},
+        plot_name=(
+            f"softmax-performance-{dtype_name}-tma-{use_tma}-chunked-{use_chunked}-multi-wave-{use_multi_wave}-GBps"
+        ),
+        args={
+            "M": M,
+            "dtype": dtype,
+            "use_tma": use_tma,
+            "use_chunked": use_chunked,
+            "use_multi_wave": use_multi_wave,
+        },
     )
 
 
 @triton.testing.perf_report(
     [
-        create_benchmark_config(M, use_tma, use_chunked, use_multi_wave)
+        create_benchmark_config(M, dtype, use_tma, use_chunked, use_multi_wave)
         for M in [4096]
+        for dtype in [torch.float32, torch.bfloat16]
         for use_tma, use_chunked, use_multi_wave in [
             (False, False, False),  # baseline
             (True, False, False),  # TMA softmax
@@ -72,7 +82,7 @@ def create_benchmark_config(M, use_tma=True, use_chunked=False, use_multi_wave=F
         ]
     ]
 )
-def bench_softmax(M, N, backend, use_tma, use_chunked, use_multi_wave, dtype=torch.float32, device=DEVICE):
+def bench_softmax(M, N, backend, dtype, use_tma, use_chunked, use_multi_wave, device=DEVICE):
     # Create data
     x = torch.randn(M, N, dtype=dtype, device=device)
 
