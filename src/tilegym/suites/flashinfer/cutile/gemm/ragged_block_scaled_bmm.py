@@ -28,7 +28,8 @@ def _ragged_block_scaled_bmm_kernel(
     c,  # Output matrix C [total_m, N]
     m_indptr,  # Segment offsets [Q+1], flattened 1D
     q,  # Number of batches
-    max_m,  # Max segment size
+    max_m,  # Host-side max segment size hint (kept for autotune cache key)
+    max_m_device,  # 1-element int32 tensor (shape (1,)) — device-side ground truth for max(valid_m)
     n,  # Output N dimension
     HAS_A_SCALE: ct.Constant[int],  # Whether a_scale is provided (0 or 1)
     BLOCK_M: ct.Constant[int],
@@ -47,11 +48,17 @@ def _ragged_block_scaled_bmm_kernel(
 
     Uses persistent scheduling with static grid and GROUP_SIZE_M tile swizzling.
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
+
+    Defense-in-depth: the per-tile loop bound is computed from the device-side
+    `max_m_device` rather than the host-side `max_m`. This prevents silent output corruption when the caller passes
+    too small a host-side max_m hint.
     """
     pid = ct.bid(0)
 
     num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
-    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    # Override host max_m with device truth (see docstring).
+    max_m_runtime = ct.load(max_m_device, index=(0,), shape=(1,)).item()
+    num_pid_m = ct.cdiv(max_m_runtime, BLOCK_M)
     num_pid_n = ct.cdiv(n, BLOCK_N)
     tiles_per_batch = num_pid_m * num_pid_n
     total_tiles = tiles_per_batch * q
@@ -179,7 +186,8 @@ def _ragged_block_scaled_bmm_swap_ab_kernel(
     c,  # Output matrix C [total_m, N]
     m_indptr,  # Segment offsets [Q+1], flattened 1D
     q,
-    max_m,
+    max_m,  # Host-side max segment size hint (kept for autotune cache key)
+    max_m_device,  # 1-element int32 tensor (shape (1,)) — device-side ground truth for max(valid_m)
     n,
     HAS_A_SCALE: ct.Constant[int],
     BLOCK_M: ct.Constant[int],
@@ -190,11 +198,15 @@ def _ragged_block_scaled_bmm_swap_ab_kernel(
     """
     cuTile kernel for ragged block-scaled BMM with swap_ab optimization.
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
+
+    Defense-in-depth: same as `_ragged_block_scaled_bmm_kernel` — the per-tile
+    loop bound is computed from `max_m_device` (device truth), not the host hint.
     """
     pid = ct.bid(0)
 
     num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
-    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    max_m_runtime = ct.load(max_m_device, index=(0,), shape=(1,)).item()
+    num_pid_m = ct.cdiv(max_m_runtime, BLOCK_M)
     num_pid_n = ct.cdiv(n, BLOCK_N)
     tiles_per_batch = num_pid_m * num_pid_n
     total_tiles = tiles_per_batch * q
@@ -427,6 +439,12 @@ def ragged_block_scaled_bmm(
 ):
     """
     cuTile implementation of ragged block-scaled BMM.
+
+    `max_m_device` is an optional [1]-shape int tensor with the device-side
+    ground truth for max(per-batch valid_m). When provided, the kernel uses it
+    for its persistent-loop bound — preventing silent corruption if the host-side `max_m` hint
+    underestimates the actual per-batch max. When None, a fallback tensor is
+    materialized from `max_m`.
     """
     # Validate inputs
     assert transpose_a == False and transpose_b == True, "Only NT layout is supported"
@@ -457,6 +475,11 @@ def ragged_block_scaled_bmm(
     if out_dtype is None:
         out_dtype = torch.bfloat16
     c = torch.empty((total_m, N), device=a.device, dtype=out_dtype)
+
+    # Materialize fallback max_m_device if the caller didn't pass one. The
+    # kernel always reads its grid bound from a device tensor (defense-in-depth).
+    if max_m_device is None:
+        max_m_device = torch.tensor([max_m], dtype=torch.int32, device=a.device)
 
     # Get kernel configs
     default_configs = _get_default_kernel_configs(total_m, Q, VEC_SIZE)
@@ -509,6 +532,7 @@ def ragged_block_scaled_bmm(
             m_indptr,
             Q,
             max_m,
+            max_m_device,
             N,
             has_a_scale,
             BLOCK_M,

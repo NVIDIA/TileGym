@@ -25,7 +25,8 @@ def _ragged_bmm_kernel(
     c,  # Output matrix C [total_m, N]
     m_indptr,  # Segment offsets [Q+1], flattened 1D
     q,  # Number of batches
-    max_m,  # Max segment size
+    max_m,  # Host-side max segment size hint (kept for autotune cache key)
+    max_m_device,  # 1-element int32 tensor (shape (1,)) — device-side ground truth for max(valid_m)
     n,  # Output N dimension
     TRANSPOSE_A: ct.Constant[int],  # Whether A is transposed (0 or 1)
     TRANSPOSE_B: ct.Constant[int],  # Whether B is transposed (0 or 1)
@@ -44,6 +45,11 @@ def _ragged_bmm_kernel(
 
     Uses persistent scheduling with static grid and GROUP_SIZE_M tile swizzling.
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
+
+    Defense-in-depth: the per-tile loop bound is computed from the device-side
+    `max_m_device` rather than the host-side `max_m`. This prevents silent output corruption when the caller passes
+    too small a host-side max_m hint (rows beyond cdiv(max_m, BLOCK_M)*BLOCK_M
+    would otherwise never be processed).
     """
     pid = ct.bid(0)
 
@@ -51,7 +57,9 @@ def _ragged_bmm_kernel(
         num_k_tiles = ct.num_tiles(a, axis=0, shape=(BLOCK_K, BLOCK_M))
     else:
         num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
-    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    # Override host max_m with device truth (see docstring).
+    max_m_runtime = ct.load(max_m_device, index=(0,), shape=(1,)).item()
+    num_pid_m = ct.cdiv(max_m_runtime, BLOCK_M)
     num_pid_n = ct.cdiv(n, BLOCK_N)
     tiles_per_batch = num_pid_m * num_pid_n
     total_tiles = tiles_per_batch * q
@@ -157,7 +165,8 @@ def _ragged_bmm_swap_ab_kernel(
     c,  # Output matrix C [total_m, N]
     m_indptr,  # Segment offsets [Q+1], flattened 1D
     q,  # Number of batches
-    max_m,  # Max segment size
+    max_m,  # Host-side max segment size hint (kept for autotune cache key)
+    max_m_device,  # 1-element int32 tensor (shape (1,)) — device-side ground truth for max(valid_m)
     n,  # Output N dimension
     TRANSPOSE_A: ct.Constant[int],  # Whether A is transposed (0 or 1)
     TRANSPOSE_B: ct.Constant[int],  # Whether B is transposed (0 or 1)
@@ -173,6 +182,9 @@ def _ragged_bmm_swap_ab_kernel(
     when M dimension is small. Equivalent to: dot(B^T.T, A.T).T = A @ B^T
 
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
+
+    Defense-in-depth: same as `_ragged_bmm_kernel` — the per-tile loop bound
+    is computed from `max_m_device` (device truth), not the host hint.
     """
     pid = ct.bid(0)
 
@@ -180,7 +192,8 @@ def _ragged_bmm_swap_ab_kernel(
         num_k_tiles = ct.num_tiles(a, axis=0, shape=(BLOCK_K, BLOCK_M))
     else:
         num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
-    num_pid_m = ct.cdiv(max_m, BLOCK_M)
+    max_m_runtime = ct.load(max_m_device, index=(0,), shape=(1,)).item()
+    num_pid_m = ct.cdiv(max_m_runtime, BLOCK_M)
     num_pid_n = ct.cdiv(n, BLOCK_N)
     tiles_per_batch = num_pid_m * num_pid_n
     total_tiles = tiles_per_batch * q
@@ -412,7 +425,9 @@ def _get_default_kernel_configs():
         }
 
 
-def _ragged_bmm_autotune_standard(stream, a, b, c, m_indptr, Q, max_m, N, total_m, transpose_a, transpose_b):
+def _ragged_bmm_autotune_standard(
+    stream, a, b, c, m_indptr, Q, max_m, max_m_device, N, total_m, transpose_a, transpose_b
+):
     """
     Autotuned launch for standard ragged BMM kernel.
     """
@@ -434,6 +449,7 @@ def _ragged_bmm_autotune_standard(stream, a, b, c, m_indptr, Q, max_m, N, total_
             m_indptr,
             Q,
             max_m,
+            max_m_device,
             N,
             transpose_a_int,
             transpose_b_int,
@@ -475,7 +491,9 @@ def _ragged_bmm_autotune_standard(stream, a, b, c, m_indptr, Q, max_m, N, total_
     ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
 
 
-def _ragged_bmm_autotune_swap_ab(stream, a, b, c, m_indptr, Q, max_m, N, total_m, transpose_a, transpose_b):
+def _ragged_bmm_autotune_swap_ab(
+    stream, a, b, c, m_indptr, Q, max_m, max_m_device, N, total_m, transpose_a, transpose_b
+):
     """
     Autotuned launch for swap_ab ragged BMM kernel.
     """
@@ -497,6 +515,7 @@ def _ragged_bmm_autotune_swap_ab(stream, a, b, c, m_indptr, Q, max_m, N, total_m
             m_indptr,
             Q,
             max_m,
+            max_m_device,
             N,
             transpose_a_int,
             transpose_b_int,
@@ -563,8 +582,13 @@ def ragged_bmm(
         a: Input matrix A, flattened [total_m, K] or [K, total_m] if transpose_a
         b: Input matrix B, batched [Q, N, K] or [Q, K, N] if not transpose_b
         m_indptr: Segment offsets tensor [Q+1]
-        max_m: Maximum segment size
-        max_m_device: Optional device tensor with max_m (unused in cuTile, kept for API compatibility)
+        max_m: Host-side maximum segment size hint (used for grid sizing and
+            autotune cache key). Should be >= max per-batch valid_m.
+        max_m_device: Optional [1]-shape int tensor with the device-side ground
+            truth for max(valid_m). When provided, the kernel uses this value
+            for its persistent-loop bound — making the kernel robust to a
+            host-side max_m underestimate. When None, a fallback tensor is
+            materialized from `max_m`.
         transpose_a: Whether A is transposed
         transpose_b: Whether B is transposed
         out_dtype: Output dtype
@@ -594,6 +618,12 @@ def ragged_bmm(
         out_dtype = a.dtype
     c = torch.empty((total_m, N), device=a.device, dtype=out_dtype)
 
+    # Materialize fallback max_m_device if the caller didn't pass one. The
+    # kernel always reads its grid bound from a device tensor (defense-in-depth),
+    # so we keep the call sites uniform.
+    if max_m_device is None:
+        max_m_device = torch.tensor([max_m], dtype=torch.int32, device=a.device)
+
     # Check if autotune is enabled
     enable_autotune = is_autotune_enabled()
 
@@ -604,11 +634,33 @@ def ragged_bmm(
     if enable_autotune:
         if use_swap_ab:
             _ragged_bmm_autotune_swap_ab(
-                torch.cuda.current_stream(), a, b, c, m_indptr, Q, max_m, N, total_m, transpose_a, transpose_b
+                torch.cuda.current_stream(),
+                a,
+                b,
+                c,
+                m_indptr,
+                Q,
+                max_m,
+                max_m_device,
+                N,
+                total_m,
+                transpose_a,
+                transpose_b,
             )
         else:
             _ragged_bmm_autotune_standard(
-                torch.cuda.current_stream(), a, b, c, m_indptr, Q, max_m, N, total_m, transpose_a, transpose_b
+                torch.cuda.current_stream(),
+                a,
+                b,
+                c,
+                m_indptr,
+                Q,
+                max_m,
+                max_m_device,
+                N,
+                total_m,
+                transpose_a,
+                transpose_b,
             )
     else:
         # Use fixed default configs
@@ -659,6 +711,7 @@ def ragged_bmm(
                 m_indptr,
                 Q,
                 max_m,
+                max_m_device,
                 N,
                 transpose_a_int,
                 transpose_b_int,
