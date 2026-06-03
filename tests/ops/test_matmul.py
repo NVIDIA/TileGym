@@ -186,7 +186,10 @@ class Test_Matmul(common.PyTestCase):
             "use_tma": use_tma,
         }
         if backend == "pytorch":
-            backend_fn = lambda: self.reference(a, b, transpose_a, transpose_b)
+            # Detach so the output does not require grad; this keeps the benchmark to the forward pass only.
+            _a = a.detach()
+            _b = b.detach()
+            backend_fn = lambda: self.reference(_a, _b, transpose_a, transpose_b)
         elif tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
             if backend == "cutile" and transpose_b:
