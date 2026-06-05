@@ -1,0 +1,67 @@
+{
+  "axes": {
+    "H": {
+      "description": "Gate head dimension.",
+      "type": "var"
+    },
+    "N": {
+      "description": "Flattened token dimension.",
+      "type": "var"
+    }
+  },
+  "description": "Qwen3.5 gated delta rule preprocessing: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias).",
+  "inputs": {
+    "A_log": {
+      "dtype": "float32",
+      "shape": [
+        "H"
+      ]
+    },
+    "a": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "H"
+      ]
+    },
+    "b": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "H"
+      ]
+    },
+    "dt_bias": {
+      "dtype": "float32",
+      "shape": [
+        "H"
+      ]
+    }
+  },
+  "name": "qwen3_5_gdr_preprocess",
+  "op_type": "gated_delta_preprocess",
+  "outputs": {
+    "beta": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "H"
+      ]
+    },
+    "g": {
+      "dtype": "float32",
+      "shape": [
+        "N",
+        "H"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L585-L587\nimport torch\nimport torch.nn.functional as F\n\ndef run(A_log, a, b, dt_bias):\n    beta = b.sigmoid()\n    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)\n    return beta, g",
+  "tags": [
+    "model:qwen3.5",
+    "stage:prefill",
+    "stage:decode",
+    "status:verified",
+    "fused"
+  ]
+}

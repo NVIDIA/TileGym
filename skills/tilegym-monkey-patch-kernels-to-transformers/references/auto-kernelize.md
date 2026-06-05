@@ -8,6 +8,8 @@ Work with user to prepare experiment environment:
 3. Study code relating to the target transformers model:
    - modeling/transformers/bench_<submodule_name>.sh: end-to-end benchmark entrance, run PyTorch baseline perf, cuTile kernelize perf, cuTile kernel coverage
    - src/tilegym/transformers/<submodule_name>/modeling_<submodule_name>.py: Target model specific OP adapters and wrappers
+   - src/tilegym/transformers/<submodule_name>/kernel_definitions/*.json and kernel_solutions/*.json: Existing reusable kernel inventory
+   - src/tilegym/transformers/<submodule_name>/kernels/*.py: Dedicated reusable transformer-local kernel implementations
    - @src/tilegym/transformers/monkey_patch.py: Study apply_tilegym_kernel_to_<submodule_name> to understand how to kernelize
    - @modeling/transformers/infer.py: End-to-end benchmark and kernel coverage script
 4. Create sandbox/<submodule_name>_results.md to track progress. The first run will write a baseline
@@ -16,12 +18,17 @@ Work with user to prepare experiment environment:
 ## Experimentation
 Every experiment run on a NVIDIA GPU that [TileIR supported](https://docs.nvidia.com/cuda/tile-ir/latest/sections/stability.html#supported-architectures) (currently Ampere, Ada, and Blackwell architectures). Each experiment should be enforced to finish in 15 minutes. Every command should be executed within the experiment Docker container. `cd` to @modeling/transformers/ first, then `bash bench_<submodule_name>.sh` to launch one experiment.
 
+Reusable generated kernels must follow the kernel inventory schema linked from `SKILL.md`: start each experiment with a draft FlashInfer Definition, keep verified kernels in dedicated `kernels/<kernel_name>.py` files, and record matching Definition and Solution JSON metadata. The Definition `reference` must begin with `# Source:` comment(s) pointing to precise upstream `transformers` or Hugging Face remote-code regions.
+
 ### The goal
 - Improve the **core metric**: cuTile kernel coverage percentage in terms of GPU time
 - Subject to the **core constraint**: End-to-end throughput shall not drop compared to baseline
 
 ### What you can change
-- @src/tilegym/transformers/<submodule_name>/modeling_<submodule_name>.py: New cuTile DSL kernels, wrappers, and other logic relating to model itself
+- @src/tilegym/transformers/<submodule_name>/modeling_<submodule_name>.py: Model-specific wrappers, patched forward methods, and other patching glue
+- @src/tilegym/transformers/<submodule_name>/kernels/<kernel_name>.py: Preferred location for reusable new kernels and thin wrappers
+- @src/tilegym/transformers/<submodule_name>/kernel_definitions/<kernel_name>.json: FlashInfer Definition metadata for kept reusable kernels
+- @src/tilegym/transformers/<submodule_name>/kernel_solutions/<kernel_name>.json: FlashInfer Solution metadata for kept reusable kernels
 - @src/tilegym/transformers/monkey_patch.py: Only change the `apply_tilegym_kernel_to_<submodule name>` function
 - @modeling/transformers/infer.py: Only change
   * `apply_tilegym_kernel_to_<submodule name>` arguments
@@ -69,13 +76,15 @@ Core methodology is to create new cuTile kernels to replace uncovered PyTorch co
 
 LOOP:
 1. Check git status: Current git branch/commit we're on
-2. Identify one piece of uncovered PyTorch code and create cuTile kernels if it's straightforward; Otherwise delegate to a code subagent and let it follow /tilegym-cutile-python SKILL
-3. Integrate the new kernel to the transformers model and measure perf, coverage, and correctness (integrated model should produce meaningful results similar to baseline)
-4. If crash at any previous step, or integrated model produced garbage outputs, try to fix. If you can't get things to work after more than a few attempts, give up
-5. Git commit
-6. Record results to sandbox/<submodule_name>_results.md
-7. If coverage improved while throughput didn't drop and model output correct, you "advance" the branch, keeping the git commit
-8. Otherwise, you git reset back to where you started
+2. Identify one piece of uncovered PyTorch code, write a draft Definition for the compute pattern, include precise `# Source:` permalink comment(s) in `reference`, and search existing Solutions for an exact or compatible Definition match
+3. If no suitable Solution exists, create a cuTile kernel in `kernels/<kernel_name>.py` if it is straightforward; otherwise delegate to a code subagent and let it follow /cutile-python SKILL. Create or update the matching Definition and Solution metadata for the candidate
+4. If a new kernel, Definition, and Solution have been materialized in the worktree, run `pytest -q tests/transformers/test_kernel_inventory.py` and fix all inventory failures before continuing
+5. Integrate the new kernel to the transformers model and measure perf, coverage, and correctness (integrated model should produce meaningful results similar to baseline)
+6. If crash at any previous step, or integrated model produced garbage outputs, try to fix. If you can't get things to work after more than a few attempts, give up
+7. Git commit
+8. Record results to sandbox/<submodule_name>_results.md
+9. If coverage improved while throughput didn't drop and model output correct, you "advance" the branch, keeping the git commit and checking in the Definition, Solution, and dedicated kernel file. Before advancing, re-open the Definition and verify every `reference` source comment maps to a precise upstream code region, not just a whole file or high-level class
+10. Otherwise, you git reset back to where you started and keep any draft Definition/Solution only under `sandbox/`
 
 UNTIL: All target transformers model's PyTorch code was covered or user interrupted
 

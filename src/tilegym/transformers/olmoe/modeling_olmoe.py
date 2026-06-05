@@ -37,130 +37,14 @@ Routing semantics:
   sum to 1, so the un-normalized weights flow through correctly.
 """
 
-import cuda.tile as ct
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from tilegym.ops import fused_moe
 from tilegym.ops import matmul as tilegym_matmul
-
-ConstInt = ct.Constant[int]
-
-
-# ──────────────────────────────────────────────────────────────────────
-# cuTile kernel: fused residual add + (Llama-style) RMSNorm
-#
-# Computes both outputs the layer body needs:
-#   sum    = residual + x
-#   normed = sum * rsqrt(mean(sum**2) + eps) * weight
-#
-# OLMoE uses pre-norm with offset=0, so the multiplier is `weight` (not
-# `1 + weight` as in Gemma3/Qwen3.5). The kernel is structurally identical
-# to qwen3_5's `_residual_add_rms_norm_kernel` minus the offset.
-# ──────────────────────────────────────────────────────────────────────
-
-
-@ct.kernel
-def _olmoe_residual_add_rms_norm_kernel(
-    residual,  # (N, D)
-    x,  # (N, D)
-    weight,  # (D,)
-    sum_out,  # (N, D)
-    normed_out,  # (N, D)
-    eps: float,
-    D: ConstInt,
-    TILE_D: ConstInt,
-):
-    bid = ct.bid(0)
-    offs = ct.arange(TILE_D, dtype=ct.int32)
-
-    r = ct.astype(ct.gather(residual, (bid, offs), padding_value=0.0, check_bounds=True), ct.float32)
-    h = ct.astype(ct.gather(x, (bid, offs), padding_value=0.0, check_bounds=True), ct.float32)
-    w = ct.astype(ct.gather(weight, (offs,), padding_value=0.0, check_bounds=True), ct.float32)
-
-    s = r + h
-    variance = ct.sum(s * s) * ct.truediv(1.0, D)
-    normed = s * ct.rsqrt(variance + eps) * w
-
-    ct.scatter(sum_out, (bid, offs), ct.astype(s, sum_out.dtype), check_bounds=True)
-    ct.scatter(normed_out, (bid, offs), ct.astype(normed, normed_out.dtype), check_bounds=True)
-
-
-def residual_add_rms_norm_olmoe_cutile(
-    residual: torch.Tensor,
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-):
-    """Fused residual add + Llama-style (offset=0) RMSNorm. Returns (sum, normed)."""
-    D = residual.shape[-1]
-    r_flat = residual.contiguous().view(-1, D)
-    x_flat = x.contiguous().view(-1, D)
-    N = r_flat.shape[0]
-    sum_out = torch.empty_like(r_flat)
-    normed_out = torch.empty_like(r_flat)
-    TILE_D = 1 << (D - 1).bit_length()
-    ct.launch(
-        torch.cuda.current_stream(),
-        (N,),
-        _olmoe_residual_add_rms_norm_kernel,
-        (r_flat, x_flat, weight, sum_out, normed_out, eps, D, TILE_D),
-    )
-    return sum_out.view(residual.shape), normed_out.view(residual.shape)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# cuTile kernel: fused dual RMSNorm over Q and K in one launch
-# ──────────────────────────────────────────────────────────────────────
-
-
-@ct.kernel
-def _olmoe_dual_rms_norm_kernel(
-    q,  # (N, D) — projected Q; normalized in-place
-    k,  # (N, D) — projected K; normalized in-place
-    q_weight,  # (D,)
-    k_weight,  # (D,)
-    eps: float,
-    D: ConstInt,
-    TILE_D: ConstInt,
-):
-    PAD = ct.PaddingMode.ZERO
-    bid = ct.bid(0)
-
-    q_h = ct.load(q, index=(bid, 0), shape=(1, TILE_D), padding_mode=PAD).reshape((TILE_D,)).astype(ct.float32)
-    q_w = ct.load(q_weight, index=(0,), shape=(TILE_D,), padding_mode=PAD).astype(ct.float32)
-    q_var = ct.sum(q_h * q_h) * ct.truediv(1.0, D)
-    q_normed = q_h * ct.rsqrt(q_var + eps) * q_w
-    ct.store(q, index=(bid, 0), tile=q_normed.reshape((1, TILE_D)).astype(q.dtype))
-
-    k_h = ct.load(k, index=(bid, 0), shape=(1, TILE_D), padding_mode=PAD).reshape((TILE_D,)).astype(ct.float32)
-    k_w = ct.load(k_weight, index=(0,), shape=(TILE_D,), padding_mode=PAD).astype(ct.float32)
-    k_var = ct.sum(k_h * k_h) * ct.truediv(1.0, D)
-    k_normed = k_h * ct.rsqrt(k_var + eps) * k_w
-    ct.store(k, index=(bid, 0), tile=k_normed.reshape((1, TILE_D)).astype(k.dtype))
-
-
-def dual_rms_norm_olmoe_cutile(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    eps: float,
-):
-    """Fused in-place RMSNorm on Q and K in a single kernel launch."""
-    D = q.shape[-1]
-    q_flat = q.contiguous().view(-1, D)
-    k_flat = k.contiguous().view(-1, D)
-    N = q_flat.shape[0]
-    TILE_D = 1 << (D - 1).bit_length()
-    ct.launch(
-        torch.cuda.current_stream(),
-        (N,),
-        _olmoe_dual_rms_norm_kernel,
-        (q_flat, k_flat, q_weight, k_weight, eps, D, TILE_D),
-    )
-    return q, k
+from tilegym.transformers.olmoe.kernels.dual_rms_norm import dual_rms_norm_olmoe_cutile
+from tilegym.transformers.olmoe.kernels.residual_add_rms_norm import residual_add_rms_norm_olmoe_cutile
 
 
 def _linear_cutile(self, attr_name: str, x: torch.Tensor) -> torch.Tensor:

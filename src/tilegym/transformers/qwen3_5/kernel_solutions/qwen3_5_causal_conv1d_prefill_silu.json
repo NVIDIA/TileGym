@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "qwen3_5_causal_conv1d_prefill_silu",
+  "description": "cuTile fused prefill-path causal conv1d and SiLU for Qwen3.5.",
+  "name": "qwen3_5_causal_conv1d_prefill_silu_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/qwen3_5/kernels/causal_conv1d_prefill_silu.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/qwen3_5/kernels/causal_conv1d_prefill_silu.py::causal_conv1d_prefill_silu_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

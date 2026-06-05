@@ -1,0 +1,71 @@
+{
+  "axes": {
+    "D": {
+      "description": "Head dimension.",
+      "type": "var"
+    },
+    "N": {
+      "description": "Flattened leading dimensions.",
+      "type": "var"
+    }
+  },
+  "description": "OLMo3 fused in-place RMSNorm for projected query and key tensors.",
+  "inputs": {
+    "eps": {
+      "dtype": "float32",
+      "shape": null
+    },
+    "k": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "k_weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D"
+      ]
+    },
+    "q": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "q_weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D"
+      ]
+    }
+  },
+  "name": "olmo3_dual_rms_norm",
+  "op_type": "dual_rmsnorm",
+  "outputs": {
+    "k_out": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "q_out": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L179-L180\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L55-L60\nimport torch\n\ndef run(eps, k, k_weight, q, q_weight):\n    qf = q.to(torch.float32)\n    kf = k.to(torch.float32)\n    q_out = qf * torch.rsqrt((qf * qf).mean(-1, keepdim=True) + eps) * q_weight\n    k_out = kf * torch.rsqrt((kf * kf).mean(-1, keepdim=True) + eps) * k_weight\n    return k_out.to(k.dtype), q_out.to(q.dtype)",
+  "tags": [
+    "model:olmo3",
+    "stage:prefill",
+    "stage:decode",
+    "status:verified",
+    "fused"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "qwen3_5_residual_add_gemma_rms_norm",
+  "description": "cuTile fused residual add and Gemma-style RMSNorm for Qwen3.5.",
+  "name": "qwen3_5_residual_add_gemma_rms_norm_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/qwen3_5/kernels/residual_add_rms_norm.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/qwen3_5/kernels/residual_add_rms_norm.py::residual_add_rms_norm_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

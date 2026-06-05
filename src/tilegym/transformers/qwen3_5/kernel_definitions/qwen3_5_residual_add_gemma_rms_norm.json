@@ -1,0 +1,69 @@
+{
+  "axes": {
+    "D": {
+      "description": "Normalized dimension.",
+      "type": "var"
+    },
+    "N": {
+      "description": "Flattened leading dimensions.",
+      "type": "var"
+    }
+  },
+  "description": "Qwen3.5 fused residual add and Gemma-style RMSNorm with configurable offset.",
+  "inputs": {
+    "eps": {
+      "dtype": "float32",
+      "shape": null
+    },
+    "offset": {
+      "dtype": "float32",
+      "shape": null
+    },
+    "residual": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D"
+      ]
+    },
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    }
+  },
+  "name": "qwen3_5_residual_add_gemma_rms_norm",
+  "op_type": "fused_add_rmsnorm",
+  "outputs": {
+    "normed": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "sum": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L875-L881\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L814-L822\nimport torch\n\ndef run(eps, offset, residual, weight, x):\n    summed = residual + x\n    s = summed.float()\n    output = s * torch.rsqrt(s.pow(2).mean(-1, keepdim=True) + eps)\n    output = output * (offset + weight.float())\n    return output.type_as(summed), summed",
+  "tags": [
+    "model:qwen3.5",
+    "stage:prefill",
+    "stage:decode",
+    "status:verified",
+    "fused"
+  ]
+}

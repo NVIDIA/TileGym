@@ -1,0 +1,71 @@
+{
+  "axes": {
+    "B": {
+      "description": "Supported batch size.",
+      "type": "const",
+      "value": 1
+    },
+    "D": {
+      "description": "Channel dimension.",
+      "type": "var"
+    },
+    "K": {
+      "description": "Convolution kernel size.",
+      "type": "const",
+      "value": 4
+    },
+    "T": {
+      "description": "Unpadded output sequence length.",
+      "type": "var"
+    },
+    "T_padded": {
+      "description": "Padded input sequence length.",
+      "type": "var"
+    }
+  },
+  "constraints": [
+    "T_padded == T + K - 1",
+    "seq_len == T"
+  ],
+  "description": "Qwen3.5 prefill-path depthwise causal conv1d fused with SiLU.",
+  "inputs": {
+    "seq_len": {
+      "dtype": "int32",
+      "shape": null
+    },
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D",
+        "K"
+      ]
+    },
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T_padded"
+      ]
+    }
+  },
+  "name": "qwen3_5_causal_conv1d_prefill_silu",
+  "op_type": "causal_conv1d_prefill_silu",
+  "outputs": {
+    "output": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L556-L568\nimport torch\n\ndef run(seq_len, weight, x):\n    y = []\n    x2 = x[0]\n    for t in range(seq_len):\n        window = x2[:, t:t + weight.shape[1]]\n        dot = (window * weight).sum(-1)\n        y.append(dot * torch.sigmoid(dot))\n    return torch.stack(y, dim=-1).unsqueeze(0)",
+  "tags": [
+    "model:qwen3.5",
+    "stage:prefill",
+    "status:verified",
+    "fused"
+  ]
+}
