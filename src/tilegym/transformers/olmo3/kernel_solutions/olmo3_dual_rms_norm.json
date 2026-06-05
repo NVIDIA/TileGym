@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "olmo3_dual_rms_norm",
+  "description": "cuTile fused in-place Q/K RMSNorm for OLMo3 attention.",
+  "name": "olmo3_dual_rms_norm_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/olmo3/kernels/dual_rms_norm.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/olmo3/kernels/dual_rms_norm.py::dual_rms_norm_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "axes": {
+    "D": {
+      "description": "Normalized dimension.",
+      "type": "var"
+    },
+    "N": {
+      "description": "Flattened leading dimensions.",
+      "type": "var"
+    }
+  },
+  "description": "OLMo3 fused post-norm RMSNorm and residual add: output = residual + rms_norm(x).",
+  "inputs": {
+    "eps": {
+      "dtype": "float32",
+      "shape": null
+    },
+    "residual": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D"
+      ]
+    },
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    }
+  },
+  "name": "olmo3_rms_norm_residual_add",
+  "op_type": "fused_add_rmsnorm",
+  "outputs": {
+    "output": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L253-L265\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L55-L60\nimport torch\n\ndef run(eps, residual, weight, x):\n    xf = x.to(torch.float32)\n    normed = xf * torch.rsqrt((xf * xf).mean(-1, keepdim=True) + eps) * weight\n    return (residual + normed).to(residual.dtype)",
+  "tags": [
+    "model:olmo3",
+    "stage:prefill",
+    "stage:decode",
+    "status:verified",
+    "fused"
+  ]
+}

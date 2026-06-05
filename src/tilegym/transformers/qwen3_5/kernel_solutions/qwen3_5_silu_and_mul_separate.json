@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "qwen3_5_silu_and_mul_separate",
+  "description": "cuTile fused SiLU(gate) * up for Qwen3.5 MLP.",
+  "name": "qwen3_5_silu_and_mul_separate_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/qwen3_5/kernels/silu_and_mul_separate.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/qwen3_5/kernels/silu_and_mul_separate.py::silu_and_mul_separate_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

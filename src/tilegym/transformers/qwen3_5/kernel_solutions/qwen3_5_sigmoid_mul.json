@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "qwen3_5_sigmoid_mul",
+  "description": "cuTile implementation of Qwen3.5 fused sigmoid gate multiply.",
+  "name": "qwen3_5_sigmoid_mul_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/qwen3_5/kernels/sigmoid_mul.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/qwen3_5/kernels/sigmoid_mul.py::sigmoid_mul_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

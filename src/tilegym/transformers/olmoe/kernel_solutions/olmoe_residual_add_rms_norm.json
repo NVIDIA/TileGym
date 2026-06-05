@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "olmoe_residual_add_rms_norm",
+  "description": "cuTile fused OLMoE residual add and Llama-style RMSNorm.",
+  "name": "olmoe_residual_add_rms_norm_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/olmoe/kernels/residual_add_rms_norm.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/olmoe/kernels/residual_add_rms_norm.py::residual_add_rms_norm_olmoe_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

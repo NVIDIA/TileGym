@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "qwen3_5_rms_norm_gated_silu",
+  "description": "cuTile fused RMSNorm and SiLU gate for Qwen3.5.",
+  "name": "qwen3_5_rms_norm_gated_silu_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/qwen3_5/kernels/rms_norm_gated.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/qwen3_5/kernels/rms_norm_gated.py::rms_norm_gated_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}

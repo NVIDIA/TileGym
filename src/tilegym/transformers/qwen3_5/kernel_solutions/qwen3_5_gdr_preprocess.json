@@ -1,0 +1,23 @@
+{
+  "author": "tilegym-agent",
+  "definition": "qwen3_5_gdr_preprocess",
+  "description": "cuTile fused gate preprocessing for Qwen3.5 gated delta rule.",
+  "name": "qwen3_5_gdr_preprocess_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/qwen3_5/kernels/gdr_preprocess.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/qwen3_5/kernels/gdr_preprocess.py::gdr_preprocess_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "NVIDIA_B200"
+    ]
+  }
+}
