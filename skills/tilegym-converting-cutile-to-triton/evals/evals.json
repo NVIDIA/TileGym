@@ -1,0 +1,48 @@
+[
+  {
+    "id": "01-convert-matmul-cutile-to-triton",
+    "question": "Convert the cuTile matmul kernel (which uses `ct.mma` and `ct.load`/`ct.store` with TMA-style tile loads) to Triton (`@triton.jit`). Follow the converting-cutile-to-triton skill's full phase-gated workflow: read the SKILL.md and API mapping first, run pre-flight analysis on the source, then convert, validate with pytest, and benchmark. Place the Triton implementation in `triton_matmul.py` alongside the cuTile original. Don't modify the original cuTile kernel.",
+    "expected_skill": "converting-cutile-to-triton",
+    "expected_script": null,
+    "ground_truth": "Agent follows the phase-gated workflow (analyze → convert → validate → test → benchmark) from `translations/workflow.md`. Agent uses `tl.make_tensor_descriptor` for 2D+ tile loads (TMA), maps `ct.mma` to `tl.dot`, uses bracket-launch syntax, and runs `pytest tests/ops/test_matmul.py -k triton -vs` to verify correctness before declaring done. If a `transpose` flag exists, agent emits two kernels with META-grid selection.",
+    "expected_behavior": [
+      "Agent reads the converting-cutile-to-triton SKILL.md and the `references/api-mapping.md`",
+      "Agent runs the Pre-flight Analysis grep commands on the cuTile source (count `@ct.kernel`, find `ct.load`/`ct.store`, layout flags)",
+      "Agent uses `tl.make_tensor_descriptor` for 2D+ block-shaped tile loads (TMA), not raw pointer+mask loads",
+      "Agent uses Triton's bracket launch syntax `kernel[grid](args)` with normal ASCII brackets",
+      "Agent handles layout flags (e.g. `transpose=True/False`) via the dual-kernel + META-grid pattern documented in `translations/advanced-patterns.md` (if present in source)",
+      "Agent does NOT modify the original cuTile kernel file",
+      "Agent runs `pytest tests/ops/test_*.py -k triton -vs` (or equivalent) to validate before declaring done",
+      "If benchmarking shows 10-50× slowdown, agent reads the CRITICAL PERFORMANCE PATTERNS section before declaring done"
+    ]
+  },
+  {
+    "id": "02-convert-layernorm-cutile-to-triton",
+    "question": "Convert the cuTile LayerNorm kernel at `src/tilegym/ops/cutile/layer_norm_legacy.py` to Triton. Follow the converting-cutile-to-triton skill's phase-gated workflow: run pre-flight analysis, convert using the API mapping, use TMA for 2D+ tile loads, validate with pytest, and benchmark. Place the Triton implementation alongside the existing code.",
+    "expected_skill": "converting-cutile-to-triton",
+    "expected_script": null,
+    "ground_truth": "Agent follows the phase-gated workflow (analyze → convert → validate → test → benchmark). Uses `tl.make_tensor_descriptor` for 2D+ loads, maps cuTile ops to Triton equivalents, runs pytest to verify, and benchmarks.",
+    "expected_behavior": [
+      "Agent reads the converting-cutile-to-triton SKILL.md and `references/api-mapping.md`",
+      "Agent runs the Pre-flight Analysis grep commands on the cuTile source",
+      "Agent uses `tl.make_tensor_descriptor` for 2D+ block-shaped tile loads (TMA)",
+      "Agent uses Triton's bracket launch syntax",
+      "Agent does NOT modify the original cuTile kernel file",
+      "Agent runs pytest to validate correctness before declaring done"
+    ]
+  },
+  {
+    "id": "03-react-hooks-negative",
+    "question": "What is the difference between `useEffect` and `useLayoutEffect` in React? When would I use one over the other?",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "Agent explains that `useEffect` runs asynchronously after the browser paints, while `useLayoutEffect` runs synchronously before paint. Use `useLayoutEffect` only when you need to read layout from the DOM and synchronously re-render (e.g., measuring tooltip positioning). The converting-cutile-to-triton skill is NOT activated.",
+    "expected_behavior": [
+      "The converting-cutile-to-triton skill is NOT loaded",
+      "Agent explains the React `useEffect` vs `useLayoutEffect` distinction",
+      "Agent does not mention cuTile, Triton, `@ct.kernel`, or `@triton.jit`",
+      "Agent does not run destructive commands"
+    ]
+  }
+]
