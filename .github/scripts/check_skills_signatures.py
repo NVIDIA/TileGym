@@ -36,15 +36,12 @@ def get_timestamp(commit_hash):
 def find_last_content_commit(base_ref):
     """Return the most recent branch commit that changed non-.sig skills files."""
     hashes_out, _ = git(["log", f"{base_ref}..HEAD", "--format=%H", "--", "skills/"])
-    for h in (hashes_out.splitlines() if hashes_out else []):
+    for h in hashes_out.splitlines() if hashes_out else []:
         h = h.strip()
         if not h:
             continue
         files_out, _ = git(["diff-tree", "--no-commit-id", "-r", "--name-only", h])
-        if any(
-            f.startswith("skills/") and not f.endswith(".sig")
-            for f in files_out.splitlines()
-        ):
+        if any(f.startswith("skills/") and not f.endswith(".sig") for f in files_out.splitlines()):
             return h
     return None
 
