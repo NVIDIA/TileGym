@@ -6,30 +6,28 @@
 #
 # Run locally with `bash format.sh` (which installs and runs these hooks), or
 # directly with `pre-commit run --all-files`. CI runs these hooks on the files
-# changed by each pull request (see .github/workflows/pre-commit.yml).
+# changed by each pull request (see .github/workflows/tilegym-ci-infra-tests.yml).
 #
-# Skill content under `skills/` is intentionally excluded: those files are
-# signed artifacts (each skill ships a `skill.oms.sig`), so reformatting them
-# would invalidate the signature. Skills are validated and signed by the
-# NVSkills pipeline, not hand-formatted.
+# evals/evals.json files are excluded from pretty-format-json to preserve the
+# canonical key ordering (id, question, expected_skill, ...) and literal
+# non-ASCII characters (e.g. em-dashes) consistent with the NVIDIA/skills ecosystem.
+# check-json still validates them for correctness.
 
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: v3.3.0
   hooks:
   - id: trailing-whitespace
-    exclude: '^skills/|\.patch$'
+    exclude: '\.patch$'
   - id: end-of-file-fixer
-    exclude: '^skills/|\.patch$'
+    exclude: '\.patch$'
   - id: check-yaml
-    exclude: '^skills/'
   - id: check-added-large-files
-    exclude: '^skills/|\.patch$'
+    exclude: '\.patch$'
   - id: check-json
-    exclude: '^skills/'
   - id: pretty-format-json
-    args: ['--autofix', '--indent=2']
-    exclude: '^skills/'
+    args: ['--autofix', '--indent=2', '--no-sort-keys']
+    exclude: '/evals/evals\.json$'
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.9
@@ -38,8 +36,8 @@ repos:
       name: ruff-lint
       args: [--fix]
       types_or: [python]
-      exclude: '^skills/|\.patch$'
+      exclude: '\.patch$'
     - id: ruff-format
       name: ruff-format
       types_or: [python]
-      exclude: '^skills/|\.patch$'
+      exclude: '\.patch$'
