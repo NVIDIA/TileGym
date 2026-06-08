@@ -1,0 +1,120 @@
+[
+  {
+    "id": "01-rmsnorm-add-autotune-implicit",
+    "question": "Add autotuning support to the CuTile RMSNorm kernel in `/workspace/input/rmsnorm/kernel_autotune.py`. Only generate autotuning configs for the current GPU architecture. You do not need to handle other architectures.\n\nModify `run_rms_norm()` in `kernel_autotune.py`. Do NOT modify `kernel.py` or `test.py`.\n\nRun `python3 test.py` from `/workspace/input/rmsnorm/` to verify:\n    correctness: PASS\n    speedup_over_fixed: X.XXXX  (must be > 1.0)",
+    "expected_skill": "cutile-autotuning",
+    "expected_script": "kernel_autotune.py",
+    "ground_truth": "The agent edits `/workspace/input/rmsnorm/kernel_autotune.py` to implement the tune-once/cache/launch pattern using `exhaustive_search` from `cuda.tile.tune`. The search space targets occupancy variations appropriate for the current GPU architecture (≤ 30 configs, ideally ≤ 8 after pruning). After modification, `python3 test.py` prints `correctness: PASS` and `speedup_over_fixed: X` where X > 1.0. `kernel.py` and `test.py` are not modified.",
+    "expected_behavior": [
+      "Agent reads the cutile-autotuning SKILL.md before editing the kernel",
+      "Agent classifies the RMSNorm kernel as an occupancy-only / fixed-tile-size kernel (per the Decision Tree)",
+      "Agent uses `exhaustive_search` from `cuda.tile.tune` with a tune-once/cache/launch pattern",
+      "Agent caches BOTH the best config AND the kernel object (avoids Pitfall #7 — repeated `replace_hints` on the hot path)",
+      "Agent generates configs only for the current GPU architecture (does not pad with unused archs)",
+      "Agent does not run destructive commands (no `rm -rf`, no `git push --force`)",
+      "Agent does not modify `kernel.py` or `test.py`",
+      "After the agent's edit, `python3 test.py` exits 0, prints `correctness: PASS`, and `speedup_over_fixed > 1.0`"
+    ]
+  },
+  {
+    "id": "02-swiglu-fix-inplace-corruption",
+    "question": "In `/workspace/input/swiglu/`, `python3 test.py` does not pass the CuTile SwiGLU check (correctness is not PASS). Find and fix the issue.\n\nYou may edit only `kernel_autotune.py`. Do not modify `kernel.py` or `test.py`.\n\nIf you adjust autotuning, limit configs and hints to the GPU architecture given in your environment; you do not need to support other architectures.\n\nWhen you are done, `python3 test.py` (run from `/workspace/input/swiglu/`) must report:\n    correctness: PASS",
+    "expected_skill": "cutile-autotuning",
+    "expected_script": "kernel_autotune.py",
+    "ground_truth": "The agent diagnoses that SwiGLU is an in-place kernel where sequential autotuning trials corrupt the input buffer (Pitfall #1). The fix is to apply the split-buffer pattern: use separate input/output tensors during `exhaustive_search` so each trial sees fresh inputs. After the fix, `python3 test.py` prints `correctness: PASS`.",
+    "expected_behavior": [
+      "Agent reads the cutile-autotuning SKILL.md, particularly Pitfall #1 (In-Place Kernel / split-buffer)",
+      "Agent recognizes SwiGLU as an in-place kernel (writes back to one of its inputs)",
+      "Agent applies the split-buffer pattern during autotune search (separate input/output tensors for each trial)",
+      "Agent caches BOTH the best config AND the kernel object after tuning",
+      "Agent does not run destructive commands (no `rm -rf`, no `DROP TABLE`)",
+      "Agent does not modify `kernel.py` or `test.py`",
+      "After the agent's edit, `python3 test.py` exits 0 and prints `correctness: PASS`"
+    ]
+  },
+  {
+    "id": "03-matmul-production-autotune",
+    "question": "Add autotuning support to the CuTile matmul kernel in `/workspace/input/matmul-production/kernel_autotune.py`. Only generate autotuning configs for the current GPU architecture. You do not need to handle other architectures.\n\nModify `run_matmul()` in `kernel_autotune.py`. Do NOT modify `kernel.py` or `test.py`.\n\nRun `python3 test.py` from `/workspace/input/matmul-production/` to verify:\n    correctness: PASS\n    speedup_over_fixed: X.XXXX  (must be >= 1.0)",
+    "expected_skill": "cutile-autotuning",
+    "expected_script": "kernel_autotune.py",
+    "ground_truth": "The agent edits `/workspace/input/matmul-production/kernel_autotune.py` to add architecture-aware autotuning for matmul. The search space includes tile sizes (TILE_M, TILE_N, TILE_K), occupancy variants, and `num_ctas` for SM90+. Compilation cost is managed by keeping the search space ≤ 20 configs. After modification, `python3 test.py` prints `correctness: PASS` and `speedup_over_fixed >= 1.0`.",
+    "expected_behavior": [
+      "Agent reads the cutile-autotuning SKILL.md AND `references/kernel-type-templates.md` (template T3 for matmul)",
+      "Agent classifies the kernel as compute-bound matmul (full tile search + num_ctas on SM90+)",
+      "Agent generates architecture-aware configs: tile sizes + occupancy + num_ctas (when SM90+)",
+      "Agent limits the final search space to ≤ 20 configs to avoid Pitfall #2 (Compilation Timeout)",
+      "Agent uses tune-once/cache/launch pattern with both config and kernel cached",
+      "Agent does not run destructive commands (no `rm -rf`, no `git push --force`)",
+      "Agent does not modify `kernel.py` or `test.py`",
+      "After the agent's edit, `python3 test.py` exits 0, prints `correctness: PASS`, and `speedup_over_fixed >= 1.0`"
+    ]
+  },
+  {
+    "id": "04-attention-fmha-autotune",
+    "question": "Add autotuning support to the CuTile FMHA (Flash Multi-Head Attention) forward kernel in `/workspace/input/attention-fmha/kernel_autotune.py`. Only generate autotuning configs for the current GPU architecture. You do not need to handle other architectures.\n\nModify `run_fmha()` in `kernel_autotune.py`. Do NOT modify `kernel.py` or `test.py`.\n\nRun `python3 test.py` from `/workspace/input/attention-fmha/` to verify:\n    correctness: PASS\n    speedup_over_fixed: X.XXXX  (must be >= 1.0)",
+    "expected_skill": "cutile-autotuning",
+    "expected_script": "kernel_autotune.py",
+    "ground_truth": "The agent edits `/workspace/input/attention-fmha/kernel_autotune.py` to add autotuning for FMHA. The launch grid depends on TILE_M (Q block size). The search space respects FMHA tile semantics (TILE_M = Q block, TILE_N = KV streaming) and includes `num_ctas` for SM90+. Config count is managed to avoid slow FMHA compilation. After modification, `python3 test.py` prints `correctness: PASS` and `speedup_over_fixed >= 1.0`.",
+    "expected_behavior": [
+      "Agent reads the cutile-autotuning SKILL.md AND `references/kernel-type-templates.md` (template T5 for FMHA)",
+      "Agent makes the launch grid depend on TILE_M (Q block size) — Pitfall #4 (grid depends on config)",
+      "Agent respects FMHA tile semantics: TILE_M is Q block size, TILE_N is the KV streaming chunk",
+      "Agent generates architecture-aware configs including `num_ctas` for SM90+",
+      "Agent keeps the search space compact (FMHA compilation is slow) — Pitfall #2",
+      "Agent uses tune-once/cache/launch pattern with both config and kernel cached",
+      "Agent does not run destructive commands (no `rm -rf`, no `git push --force`)",
+      "Agent does not modify `kernel.py` or `test.py`",
+      "After the agent's edit, `python3 test.py` exits 0, prints `correctness: PASS`, and `speedup_over_fixed >= 1.0`"
+    ]
+  },
+  {
+    "id": "05-linear-gluact-autotune",
+    "question": "Add autotuning support to the CuTile Linear+GLUAct fused kernel in `/workspace/input/linear-gluact/kernel_autotune.py`. Only generate autotuning configs for the current GPU architecture. You do not need to handle other architectures.\n\nModify `run_linear_gluact()` in `kernel_autotune.py`. Do NOT modify `kernel.py` or `test.py`.\n\nRun `python3 test.py` from `/workspace/input/linear-gluact/` to verify:\n    correctness: PASS\n    speedup_over_fixed: X.XXXX  (must be >= 1.0)",
+    "expected_skill": "cutile-autotuning",
+    "expected_script": "kernel_autotune.py",
+    "ground_truth": "The agent edits `/workspace/input/linear-gluact/kernel_autotune.py` to add autotuning for a dual-GEMM + SiLU fused kernel. The agent recognizes the SHMEM 2× constraint (two weight tiles per K-iteration) and uses conservative tile sizing relative to standalone matmul. SM100+ configs include `num_ctas`. `GROUP_M=8` is fixed. After modification, `python3 test.py` prints `correctness: PASS` and `speedup_over_fixed >= 1.0`.",
+    "expected_behavior": [
+      "Agent reads the cutile-autotuning SKILL.md AND `references/kernel-type-templates.md` (template T9 for dual-GEMM fusion)",
+      "Agent recognizes the SHMEM 2× constraint (two weight tiles per K-iteration) and chooses conservative tile sizes",
+      "Agent makes the launch grid depend on TILE_M / TILE_N (Pitfall #4)",
+      "Agent keeps `GROUP_M=8` fixed and generates `num_ctas` configs for SM100+",
+      "Agent limits the search space to manage compilation cost (Pitfall #2)",
+      "Agent uses tune-once/cache/launch pattern with both config and kernel cached",
+      "Agent does not run destructive commands (no `rm -rf`, no `git push --force`)",
+      "Agent does not modify `kernel.py` or `test.py`",
+      "After the agent's edit, `python3 test.py` exits 0, prints `correctness: PASS`, and `speedup_over_fixed >= 1.0`"
+    ]
+  },
+  {
+    "id": "06-attention-varlen-autotune",
+    "question": "Add autotuning support to the CuTile variable-length attention (FMHA varlen) kernel in `/workspace/input/attention-varlen/kernel_autotune.py`. This kernel computes fused multi-head attention for batches where each sequence can have a different query and key-value length, with causal masking.\n\nOnly generate autotuning configs for the current GPU architecture. You do not need to handle other architectures.\n\nModify `run_attention_varlen()` in `kernel_autotune.py`. Do NOT modify `kernel.py` or `test.py`.\n\nRun `python3 test.py` from `/workspace/input/attention-varlen/` to verify:\n    correctness: PASS\n    speedup_over_fixed: X.XXXX  (must be >= 1.0)",
+    "expected_skill": "cutile-autotuning",
+    "expected_script": "kernel_autotune.py",
+    "ground_truth": "The agent edits `/workspace/input/attention-varlen/kernel_autotune.py` to add multi-dimensional autotuning (TILE_M × TILE_N × occupancy) for the variable-length FMHA. The search space covers all reasonable tile combinations, uses a `grid_fn` dependent on TILE_M, and handles occupancy via `replace_hints`. After modification, `python3 test.py` prints `correctness: PASS` and `speedup_over_fixed >= 1.0`.",
+    "expected_behavior": [
+      "Agent reads the cutile-autotuning SKILL.md AND `references/kernel-type-templates.md` (template T8 for varlen attention)",
+      "Agent generates a multi-dimensional search space covering TILE_M × TILE_N × occupancy",
+      "Agent makes the launch grid depend on TILE_M (`grid_fn(cfg)` consumes config) — Pitfall #4",
+      "Agent handles occupancy through `replace_hints` correctly (Pitfall #7: cache the replaced kernel)",
+      "Agent does not narrow the search space prematurely (Pitfall: incomplete search space — varlen needs the larger M×N matrix)",
+      "Agent uses tune-once/cache/launch pattern with both config and kernel cached",
+      "Agent does not run destructive commands (no `rm -rf`, no `git push --force`)",
+      "Agent does not modify `kernel.py` or `test.py`",
+      "After the agent's edit, `python3 test.py` exits 0, prints `correctness: PASS`, and `speedup_over_fixed >= 1.0`"
+    ]
+  },
+  {
+    "id": "07-pytorch-debugger-negative",
+    "question": "How do I attach `pdb` to a running PyTorch training job and step into the optimizer's step() method? I want to inspect the gradient values before they are applied.",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "Agent provides general PyTorch debugging guidance (pdb attach, breakpoint(), inspecting tensors via `.detach().cpu().numpy()`, etc.). The cutile-autotuning skill is NOT activated because the question is unrelated to CuTile autotuning, kernel performance, or `exhaustive_search`.",
+    "expected_behavior": [
+      "The cutile-autotuning skill is NOT loaded",
+      "Agent provides general PyTorch debugging guidance (pdb usage, breakpoint, inspecting optimizer state)",
+      "Agent does not mention `exhaustive_search`, `replace_hints`, or other cuTile autotuning APIs",
+      "Agent does not run destructive commands"
+    ]
+  }
+]
