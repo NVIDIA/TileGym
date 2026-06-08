@@ -8,6 +8,8 @@
 # directly with `pre-commit run --all-files`. CI runs these hooks on the files
 # changed by each pull request (see .github/workflows/tilegym-ci-infra-tests.yml).
 #
+# *.sig files (Sigstore bundles) are excluded from modifying hooks to prevent
+# spurious changes to signed artifacts — their content is managed by /nvskills-ci.
 # evals/evals.json files are excluded from pretty-format-json to preserve the
 # canonical key ordering (id, question, expected_skill, ...) and literal
 # non-ASCII characters (e.g. em-dashes) consistent with the NVIDIA/skills ecosystem.
@@ -18,16 +20,16 @@ repos:
   rev: v3.3.0
   hooks:
   - id: trailing-whitespace
-    exclude: '\.patch$'
+    exclude: '\.patch$|\.sig$'
   - id: end-of-file-fixer
-    exclude: '\.patch$'
+    exclude: '\.patch$|\.sig$'
   - id: check-yaml
   - id: check-added-large-files
     exclude: '\.patch$'
   - id: check-json
   - id: pretty-format-json
-    args: ['--autofix', '--indent=2', '--no-sort-keys']
-    exclude: '/evals/evals\.json$'
+    args: ['--autofix', '--indent=2']
+    exclude: '/evals/evals\.json$|\.sig$'
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.9
