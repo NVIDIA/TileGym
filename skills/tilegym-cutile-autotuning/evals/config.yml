@@ -1,0 +1,19 @@
+schema_version: 1
+
+harbor:
+  task_source: evals_json
+  custom_dockerfile_mode: rebase
+  base_image_mode: reuse
+  n_attempts: 1
+  pass_threshold: 0.50
+  stop_on_pass: true
+  n_concurrent: 4
+  max_agents: 2
+  timeout_multiplier: 1.0
+
+skill_workspace:
+  mode: isolated
+  include: []
+
+grading:
+  mode: aces_default

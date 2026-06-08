@@ -1,0 +1,48 @@
+[
+  {
+    "id": "01-port-vector-add-julia",
+    "question": "I have a cuTile Python kernel that does element-wise vector addition with an alpha scaling factor:\n\n```python\n@ct.kernel\ndef vector_add_alpha(x, y, alpha, out, N):\n    i = ct.program_id(0)\n    start = i * TILE\n    idx = start + ct.arange(TILE)\n    mask = idx < N\n    a = ct.load(x, idx, mask=mask)\n    b = ct.load(y, idx, mask=mask)\n    ct.store(out, idx, a + alpha * b, mask=mask)\n```\n\nPlease port it to cuTile.jl (Julia) under `julia/kernels/add.jl`, following TileGym's Julia layout. The Julia entry point should accept `(x::CuArray, y::CuArray, alpha::Number)` and return a `CuArray` result.",
+    "expected_skill": "converting-cutile-to-julia",
+    "expected_script": null,
+    "ground_truth": "Agent creates `julia/kernels/add.jl` containing a `function vector_add_alpha(...)` cuTile.jl kernel plus a host-side `run_vector_add_alpha(x, y, alpha)` bridge function that allocates the output, computes the grid, and launches the kernel. The conversion correctly applies the Python-to-Julia differences: 0-indexed → 1-indexed program_id, `ct.arange` → Julia `range`, row-major → column-major memory layout. The Julia function compiles via `CUDA.jl` + `cuTile.jl` and matches the Python kernel's semantics.",
+    "expected_behavior": [
+      "Agent reads the converting-cutile-to-julia SKILL.md and consults `references/api-mapping.md` for the Python→Julia API mapping",
+      "Agent inspects `julia/kernels/add.jl` (the ground-truth example) to mirror the established layout / signature pattern",
+      "Agent creates `julia/kernels/add.jl` with the cuTile.jl kernel and a host-side bridge function",
+      "Agent correctly translates the 0-indexed `program_id` to Julia's 1-indexed convention",
+      "Agent uses Julia column-major memory layout where applicable (vs Python's row-major)",
+      "Agent does not break any existing files under `julia/kernels/` or `julia/test/`",
+      "The new Julia file uses `cuTile.jl` (not `CUDA.jl` raw kernels) and follows TileGym's `Project.toml` dependency layout"
+    ]
+  },
+  {
+    "id": "02-port-softmax-julia",
+    "question": "I have a cuTile Python kernel that does row-wise softmax on a 2D tensor:\n\n```python\n@ct.kernel\ndef softmax_kernel(x, out, M, N: ct.Constant[int], BLOCK_N: ct.Constant[int]):\n    row = ct.bid(0)\n    offs = ct.arange(BLOCK_N)\n    mask = offs < N\n    row_data = ct.load(x, index=(row, 0), shape=(1, BLOCK_N))\n    row_max = ct.max(row_data, axis=1)\n    numerator = ct.exp(row_data - row_max)\n    denominator = ct.sum(numerator, axis=1)\n    result = numerator / denominator\n    ct.store(out, index=(row, 0), shape=(1, BLOCK_N), val=result)\n```\n\nPlease port it to cuTile.jl (Julia) under `julia/kernels/softmax.jl`, following TileGym's Julia layout. Include a host-side bridge function and a test file.",
+    "expected_skill": "converting-cutile-to-julia",
+    "expected_script": null,
+    "ground_truth": "Agent creates `julia/kernels/softmax.jl` with a cuTile.jl kernel and host-side bridge, correctly applying Python→Julia differences: 0-indexed → 1-indexed, broadcast operators, column-major layout. Agent also creates `julia/test/test_softmax.jl` and registers it in `runtests.jl`.",
+    "expected_behavior": [
+      "Agent reads the converting-cutile-to-julia SKILL.md and consults `references/api-mapping.md`",
+      "Agent inspects existing ground-truth examples (`julia/kernels/softmax.jl`) for patterns",
+      "Agent creates the Julia kernel file with cuTile.jl syntax",
+      "Agent correctly translates 0-indexed to 1-indexed conventions",
+      "Agent uses broadcast dot operators where needed (e.g., `max.()` instead of `max()`)",
+      "Agent creates a test file and registers it in `runtests.jl`",
+      "Agent runs the validator or tests to verify"
+    ]
+  },
+  {
+    "id": "03-django-orm-negative",
+    "question": "I have a Django model `class Order(models.Model)` with a ForeignKey to `User`. How do I query all orders for users whose email ends with `@nvidia.com`, ordered by `created_at` descending?",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "Agent provides a Django ORM query example: `Order.objects.filter(user__email__iendswith='@nvidia.com').order_by('-created_at')`. The converting-cutile-to-julia skill is NOT activated because the question is about Django ORM, not GPU kernels.",
+    "expected_behavior": [
+      "The converting-cutile-to-julia skill is NOT loaded",
+      "Agent provides a Django ORM query answer",
+      "Agent does not mention cuTile, Julia, `@ct.kernel`, or `cuTile.jl`",
+      "Agent does not run destructive commands"
+    ]
+  }
+]

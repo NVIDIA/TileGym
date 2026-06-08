@@ -1,0 +1,48 @@
+[
+  {
+    "id": "01-optimize-rmsnorm-perf",
+    "question": "The cuTile RMSNorm kernel under `src/tilegym/ops/cutile/rms_norm.py` is ~40% slower than the cuBLAS-fused baseline on H100 (`pytest tests/benchmark/bench_rms_norm.py` reports ~80 GBps vs the ~135 GBps roofline). Please iteratively optimize it. Set up a tracked experiment log, classify the kernel (likely memory-bound), and walk through the optimization playbook in order. Don't stop after the first improvement — keep iterating until gains plateau or we hit ≥95% of roofline.",
+    "expected_skill": "improve-cutile-kernel-perf",
+    "expected_script": null,
+    "ground_truth": "Agent follows the three phases (Setup → Experimentation → Iterate) from the improve-cutile-kernel-perf skill. Classifies RMSNorm as memory-bound (arithmetic intensity < 10), creates a fresh git branch (e.g. `cutile-perf-rms_norm-<date>`), and runs through the optimization playbook: tile sizes → occupancy → TMA → latency hints → autotuning. Each experiment is logged with before/after `latency (ms)` numbers. Agent stops when speedup plateaus or hits ≥95% of roofline.",
+    "expected_behavior": [
+      "Agent reads the improve-cutile-kernel-perf SKILL.md and the `references/optimization-playbook.md`",
+      "Agent creates a fresh git branch named like `cutile-perf-rms_norm-<date>`",
+      "Agent locates and reads the kernel at `src/tilegym/ops/cutile/rms_norm.py` (or wherever it actually lives)",
+      "Agent classifies the kernel: arithmetic intensity < 10 → memory-bound; optimization priority is memory bandwidth (TMA, tile sizes)",
+      "Agent maintains a tracked experiment log with before/after `latency (ms)` per change",
+      "Agent runs benchmarks on a GPU node (Blackwell / Hopper / Ampere) — not CPU-only",
+      "Agent iterates through tunable parameters in order from `references/perf-knobs-catalog.md`",
+      "Agent stops when gains plateau or hits ≥95% of roofline; does not over-tune"
+    ]
+  },
+  {
+    "id": "02-optimize-softmax-perf",
+    "question": "The cuTile softmax kernel under `src/tilegym/ops/cutile/softmax.py` is underperforming compared to the Triton baseline. Please iteratively optimize it following the improve-cutile-kernel-perf skill: set up a tracked experiment log, classify the kernel, and walk through the optimization playbook. Focus on tile sizes and TMA usage first since this is likely memory-bound.",
+    "expected_skill": "improve-cutile-kernel-perf",
+    "expected_script": null,
+    "ground_truth": "Agent follows the three phases (Setup → Experimentation → Iterate). Creates a fresh git branch, classifies softmax as memory-bound or balanced, runs baseline benchmark, and iterates through optimizations from the playbook with tracked results.",
+    "expected_behavior": [
+      "Agent reads the improve-cutile-kernel-perf SKILL.md and `references/optimization-playbook.md`",
+      "Agent creates a fresh git branch",
+      "Agent classifies the kernel's arithmetic intensity",
+      "Agent maintains a tracked experiment log with before/after latency",
+      "Agent runs benchmarks on a GPU node",
+      "Agent iterates through optimizations from the playbook in order"
+    ]
+  },
+  {
+    "id": "03-resume-formatting-negative",
+    "question": "I'm updating my LinkedIn profile and resume. Can you help me write a concise, impact-oriented bullet point for my role as a Senior ML Infrastructure Engineer at a fintech startup? Highlight a project where I reduced model inference latency by 60%.",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "Agent provides a polished resume bullet point with quantified impact (e.g. \"Reduced production model inference latency by 60% (p99: 320ms → 130ms) by introducing dynamic batching, FP16 quantization, and TensorRT optimization — saved $X/month in GPU costs\"). The improve-cutile-kernel-perf skill is NOT activated.",
+    "expected_behavior": [
+      "The improve-cutile-kernel-perf skill is NOT loaded",
+      "Agent provides a resume bullet point with quantified impact",
+      "Agent does not mention cuTile, kernel profiling, TMA, or autotune configs",
+      "Agent does not run destructive commands"
+    ]
+  }
+]
