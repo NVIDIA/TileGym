@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+# Pre-commit hooks for TileGym.
+#
+# Run locally with `bash format.sh` (which installs and runs these hooks), or
+# directly with `pre-commit run --all-files`. CI runs these hooks on the files
+# changed by each pull request (see .github/workflows/pre-commit.yml).
+#
+# Skill content under `skills/` is intentionally excluded: those files are
+# signed artifacts (each skill ships a `skill.oms.sig`), so reformatting them
+# would invalidate the signature. Skills are validated and signed by the
+# NVSkills pipeline, not hand-formatted.
+
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v3.3.0
+  hooks:
+  - id: trailing-whitespace
+    exclude: '^skills/|\.patch$'
+  - id: end-of-file-fixer
+    exclude: '^skills/|\.patch$'
+  - id: check-yaml
+    exclude: '^skills/'
+  - id: check-added-large-files
+    exclude: '^skills/|\.patch$'
+  - id: check-json
+    exclude: '^skills/'
+  - id: pretty-format-json
+    args: ['--autofix', '--indent=2']
+    exclude: '^skills/'
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.9
+  hooks:
+    - id: ruff-check
+      name: ruff-lint
+      args: [--fix]
+      types_or: [python]
+      exclude: '^skills/|\.patch$'
+    - id: ruff-format
+      name: ruff-format
+      types_or: [python]
+      exclude: '^skills/|\.patch$'

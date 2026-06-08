@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: pre-commit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run pre-commit on changed files
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+          fi
+          echo "Base SHA: ${base_sha}"
+          echo "Head SHA: ${{ github.sha }}"
+          changed=$(git diff --name-only "${base_sha}" "${{ github.sha }}" || true)
+          if [ -n "${changed}" ]; then
+            echo "Checking changed files:"
+            echo "${changed}"
+            pre-commit run --files ${changed} --show-diff-on-failure
+          else
+            echo "No changed files to check."
+          fi
