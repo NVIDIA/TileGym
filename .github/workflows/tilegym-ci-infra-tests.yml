@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. 
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
-# SPDX-License-Identifier: MIT 
+# SPDX-License-Identifier: MIT
 
 name: tilegym-ci-infra-tests
 
@@ -19,31 +19,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-      
+
       - name: Install ruff
         run: pip install ruff==0.14.9
-      
+
       - name: Run ruff import sorting check
         run: ruff check --select I .
-      
+
       - name: Run ruff format check
         run: ruff format --check --diff .
+
+      - name: Hint on failure
+        if: failure()
+        run: |
+          echo ""
+          echo "💡 Run 'bash format.sh' locally to auto-fix formatting issues, then commit the result."
 
   spdx-headers-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-      
+
       - name: Check SPDX headers
         run: python3 .github/scripts/check_spdx_headers.py --action check
 
@@ -105,10 +111,16 @@ jobs:
           if [ -n "${changed}" ]; then
             echo "Checking changed files:"
             echo "${changed}"
-            pre-commit run --files ${changed} --show-diff-on-failure
+            SKIP=ruff-check,ruff-format pre-commit run --files ${changed} --show-diff-on-failure
           else
             echo "No changed files to check."
           fi
+
+      - name: Hint on failure
+        if: failure()
+        run: |
+          echo ""
+          echo "💡 Run 'bash format.sh' locally to auto-fix formatting issues, then commit the result."
 
   check-skills-signatures:
     runs-on: ubuntu-latest
