@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+name: check-skill-naming
+
+# Run on every PR that touches the skills/ directory.
+# Verifies that any *new* skill added to skills/ uses the required
+# "tilegym-" prefix in both the directory name and the SKILL.md `name:` field.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "skills/**"
+
+permissions:
+  contents: read
+
+jobs:
+  check-skill-naming:
+    name: check-skill-naming
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history needed so git diff against base branch works correctly
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check skill naming convention
+        run: |
+          python3 .github/scripts/check_skill_naming.py \
+            --base-ref origin/${{ github.base_ref }}
