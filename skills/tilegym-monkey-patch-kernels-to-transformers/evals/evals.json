@@ -1,7 +1,7 @@
 [
   {
     "id": "01-integrate-rmsnorm-into-llama",
-    "question": "Integrate TileGym's cuTile RMSNorm kernel into the Hugging Face `transformers` Llama 3 implementation, using the monkey-patch (non-intrusive) approach. The target class is `transformers.models.llama.modeling_llama.LlamaRMSNorm`. We should replace its `forward` method (and `__init__` if needed) so that, at instantiation time, the model invokes TileGym's RMSNorm under the hood. Verify by loading a small Llama checkpoint and comparing logits before/after the patch on a fixed input.",
+    "question": "Integrate TileGym's cuTile RMSNorm kernel into the Hugging Face `transformers` Llama 3 implementation, using the monkey-patch (non-intrusive) approach. The target class is `transformers.models.llama.modeling_llama.LlamaRMSNorm`. We should replace its `forward` method (and `__init__` if needed) so that, at instantiation time, the model invokes TileGym's RMSNorm under the hood. Verify by loading a small Llama checkpoint and comparing logits before/after the patch on a fixed input. Test directly in the local Python environment; do not use Docker.",
     "expected_skill": "monkey-patch-kernels-to-transformers",
     "expected_script": null,
     "ground_truth": "Agent follows the 4-step workflow: (1) prepare experiment environment via `references/environment-setup.md`; (2) write a monkey-patch module that replaces `LlamaRMSNorm.forward` (and possibly `__init__`) to call TileGym's cuTile RMSNorm via `tilegym.ops.rms_norm`; (3) apply the patch BEFORE `AutoModelForCausalLM.from_pretrained(...)`; (4) run a logit-comparison test on a fixed input (e.g. `torch.allclose(orig_logits, patched_logits, atol=1e-2, rtol=1e-2)`). Agent does NOT modify `transformers` source code.",
@@ -16,7 +16,7 @@
   },
   {
     "id": "02-integrate-softmax-into-gemma",
-    "question": "Integrate TileGym's cuTile softmax kernel into the Hugging Face `transformers` Gemma 2 implementation using monkey-patching. Target the attention softmax computation. Apply the patch before model instantiation and verify by comparing logits on a fixed input.",
+    "question": "Integrate TileGym's cuTile softmax kernel into the Hugging Face `transformers` Gemma 2 implementation using monkey-patching. Target the attention softmax computation. Apply the patch before model instantiation and verify by comparing logits on a fixed input. Test directly in the local Python environment; do not use Docker.",
     "expected_skill": "monkey-patch-kernels-to-transformers",
     "expected_script": null,
     "ground_truth": "Agent follows the monkey-patch workflow: researches Gemma2 attention in transformers source, identifies the softmax computation, writes a monkey-patch module that replaces the relevant softmax call with `tilegym.ops.softmax`, applies it BEFORE `from_pretrained`, and verifies logits match within tolerance.",
