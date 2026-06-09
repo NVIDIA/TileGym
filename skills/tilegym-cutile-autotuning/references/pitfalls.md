@@ -113,4 +113,3 @@ ct.launch(stream, grid, tuned, ...)  # reuse compiled kernel
 ```
 
 **Rule**: Call `replace_hints` exactly once per config (immediately after `exhaustive_search`), cache the returned kernel object, and never call `replace_hints` again on the fast path.
-

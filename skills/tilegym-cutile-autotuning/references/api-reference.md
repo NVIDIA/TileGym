@@ -176,4 +176,3 @@ grid_fn=lambda cfg: (cdiv(n_elements, BLOCK_SIZE),)
 # Pattern E: Grouped GEMM persistent (grid fixed at NUM_SMS, occupancy via hints_fn only)
 grid_fn=lambda cfg: (NUM_SMS, 1, 1)
 ```
-

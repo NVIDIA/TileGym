@@ -199,4 +199,3 @@ Use `src/tilegym/autotune.py`: maps `BLOCK_SIZE_M/N/K` → `TILE_SIZE_M/N/K`; `n
 2. **Expand** (too narrow): add tile sizes, `num_ctas` (sm90+), `swap_ab`.
 3. **Prune** (too slow): remove suboptimal configs, use arch-conditional yield, add size filters.
 4. **Re-validate**: A/B test to confirm improvement.
-
