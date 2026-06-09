@@ -5,7 +5,7 @@ license: CC-BY-4.0 AND Apache-2.0
 compatibility: Verified on Claude Code with Opus-4.6 and onward, CodeX with GPT-5.5 and onward, and Cursor (Agent mode) with GPT-5.3-CodeX and stronger models.
 metadata:
   author: "TileGym Team <TileGym@nvidia.com>"
-  version: 2026.06.03-beta
+  version: "2026.06.03"
   tags:
     - tilegym
     - transformers
