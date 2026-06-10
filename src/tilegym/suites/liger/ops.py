@@ -351,6 +351,28 @@ def rope(
 
 
 @dispatch(
+    "liger.sparsemax",
+)
+def sparsemax(
+    input: torch.Tensor,
+    dim: int = -1,
+) -> torch.Tensor:
+    """
+    Sparsemax: projects input onto the probability simplex (sparse alternative to softmax).
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/sparsemax.py
+
+    Args:
+        input: Input tensor of any shape.
+        dim: Dimension along which sparsemax is computed. Default: -1
+
+    Returns:
+        Sparsemax output of same shape as input.
+    """
+    raise NotImplementedError(f"sparsemax is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.tiled_mlp",
 )
 def tiled_mlp(

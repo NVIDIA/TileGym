@@ -16,6 +16,7 @@ from . import llama4_rope  # noqa: F401
 from . import multi_token_attention  # noqa: F401
 from . import qwen2vl_mrope  # noqa: F401
 from . import rope  # noqa: F401
+from . import sparsemax  # noqa: F401
 from . import tiled_mlp  # noqa: F401
 from .cross_entropy import CrossEntropyCuTileFunction  # noqa: F401
 from .fused_linear_jsd import FusedLinearJSDCuTileFunction  # noqa: F401
@@ -28,6 +29,7 @@ from .llama4_rope import Llama4RopeCuTileFunction  # noqa: F401
 from .multi_token_attention import MultiTokenAttentionCuTileFunction  # noqa: F401
 from .qwen2vl_mrope import Qwen2VLMRopeCuTileFunction  # noqa: F401
 from .rope import RopeCuTileFunction  # noqa: F401
+from .sparsemax import SparsemaxCuTileFunction  # noqa: F401
 
 __all__ = [
     "CrossEntropyCuTileFunction",
@@ -39,6 +41,7 @@ __all__ = [
     "LayerNormCuTileFunction",
     "Llama4RopeCuTileFunction",
     "MultiTokenAttentionCuTileFunction",
+    "SparsemaxCuTileFunction",
     "cross_entropy",
     "fused_linear_jsd",
     "fused_neighborhood_attention",
@@ -53,5 +56,6 @@ __all__ = [
     "RopeCuTileFunction",
     "qwen2vl_mrope",
     "rope",
+    "sparsemax",
     "tiled_mlp",
 ]

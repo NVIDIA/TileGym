@@ -30,6 +30,7 @@ from .ops import llama4_rope
 from .ops import multi_token_attention
 from .ops import qwen2vl_mrope
 from .ops import rope
+from .ops import sparsemax
 from .ops import tiled_mlp
 
 __all__ = [
@@ -45,5 +46,6 @@ __all__ = [
     "multi_token_attention",
     "qwen2vl_mrope",
     "rope",
+    "sparsemax",
     "tiled_mlp",
 ]
