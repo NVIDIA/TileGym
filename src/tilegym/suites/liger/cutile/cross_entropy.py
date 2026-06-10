@@ -23,8 +23,10 @@ MAX_FUSED_SIZE = 65536 // 2
 LOG2E = 1.4426950408889634
 
 
-def _select_block_size(vocab_size: int) -> int:
-    return min(4096, min(MAX_FUSED_SIZE, next_power_of_2(vocab_size)))
+def _select_block_size(vocab_size: int, device=None) -> int:
+    cap = torch.cuda.get_device_capability(device)
+    max_block = 4096 if cap[0] <= 10 else 8192
+    return min(max_block, min(MAX_FUSED_SIZE, next_power_of_2(vocab_size)))
 
 
 @ct.kernel(occupancy=4)
@@ -321,7 +323,7 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
         input_requires_grad = _input.requires_grad
         num_rows, vocab_size = _input.shape
 
-        BLOCK_SIZE = _select_block_size(vocab_size)
+        BLOCK_SIZE = _select_block_size(vocab_size, _input.device)
 
         loss_1d = torch.zeros(num_rows, dtype=_input.dtype, device=_input.device)
         z_loss_1d = torch.zeros(num_rows, dtype=_input.dtype, device=_input.device) if return_z_loss else None
