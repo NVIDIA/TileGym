@@ -1,5 +1,5 @@
 ## Description: <br>
-Converts cuTile GPU kernels (@ct.kernel) to Triton (@triton.jit), handling standard in-repo conversion, debugging, and mapping cuTile idioms to Triton equivalents including dual-kernel layout flags. <br>
+Converts cuTile GPU kernels (@ct.kernel) to Triton (@triton.jit), handling standard in-repo conversion, debugging, and mapping cuTile idioms to Triton equivalents including dual-kernel layout flags and autotune grid patterns. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
@@ -9,7 +9,7 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers converting cuTile GPU kernels to Triton for performance optimization and cross-framework portability in GPU computing workflows. <br>
+Developers and engineers who need to convert cuTile GPU kernels to Triton, including debugging runtime failures and optimizing translated kernels for performance parity. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -33,12 +33,18 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Skill Output: <br>
 **Output Type(s):** [Code, Shell commands] <br>
-**Output Format:** [Python source files and shell commands] <br>
+**Output Format:** [Python source files with inline Triton kernel code] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
+## Evaluation Agents Used: <br>
+- `claude-code` <br>
+- `codex` <br>
+
+
+
 ## Evaluation Tasks: <br>
-Evaluated via NVSkills-Eval (external profile): 9 Tier 1 static validation checks and 2 Tier 2 deduplication checks. <br>
+5 evaluation tasks (1 positive skill-activation, 4 negative) in NVSkills-Eval `external` profile on `astra-sandbox` environment. <br>
 
 ## Evaluation Metrics Used: <br>
 Reported benchmark dimensions: <br>
@@ -48,7 +54,25 @@ Reported benchmark dimensions: <br>
 - Effectiveness: Checks whether the agent performs measurably better with the skill than without it. <br>
 - Efficiency: Checks whether the agent uses fewer tokens and avoids redundant work. <br>
 
+Underlying evaluation signals used in this run: <br>
+- `security`: Checks for unsafe operations, secret leakage, and unauthorized access. <br>
+- `skill_execution`: Verifies that the agent loaded the expected skill and workflow. <br>
+- `skill_efficiency`: Checks routing quality, decoy avoidance, and redundant tool usage. <br>
+- `accuracy`: Grades final-answer correctness against the reference answer. <br>
+- `goal_accuracy`: Checks whether the overall user task completed successfully. <br>
+- `behavior_check`: Verifies expected behavior steps, including safety expectations. <br>
+- `token_efficiency`: Compares token usage with and without the skill. <br>
 
+
+
+## Evaluation Results: <br>
+| Dimension | Num | `claude-code` | `codex` |
+|---|---:|---:|---:|
+| Security | 5 | 100% (+0%) | 100% (+0%) |
+| Correctness | 5 | 100% (+15%) | 99% (+12%) |
+| Discoverability | 5 | 100% (+15%) | 99% (+8%) |
+| Effectiveness | 5 | 100% (+18%) | 97% (+17%) |
+| Efficiency | 5 | 96% (+14%) | 97% (+6%) |
 
 ## Skill Version(s): <br>
 1.0.0 (source: frontmatter) <br>
