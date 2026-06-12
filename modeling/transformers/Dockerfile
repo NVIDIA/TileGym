@@ -2,122 +2,49 @@
 #
 # SPDX-License-Identifier: MIT
 
-# TileGym Transformers Inference Container
-# Multi-stage build supporting both wheel (CI) and source (development) installs
-#
-# Usage:
-#   CI (wheel):     docker build --target wheel -f modeling/transformers/Dockerfile .
-#   Dev (source):   docker build --target source -f modeling/transformers/Dockerfile .
-#   Default:        docker build -f modeling/transformers/Dockerfile .  (uses source)
-
+# Keep the runtime image at CUDA 13.2 for host-driver compatibility.
+# The uv environment installs CUDA 13.3 compiler/user-space wheels from pyproject.toml.
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu22.04
 
-####################
-# Stage 1: Base dependencies
-####################
 FROM ${BASE_IMAGE} AS base
-
-ARG TORCH_VERSION=2.9.1
 
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies and NSight Systems CLI.
-RUN \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gnupg && \
-    echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
-    apt-key adv --fetch-keys https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/nvidia.pub && \
-    apt-get update && \
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    python3-pip \
-    python3-dev \
-    python-is-python3 \
-    git \
-    wget \
-    curl \
-    build-essential \
-    nsight-systems-cli && \
-    rm -rf /var/lib/apt/lists/*
+        ca-certificates \
+        curl \
+        git \
+        gnupg \
+        python-is-python3 \
+        python3 \
+        python3-dev \
+        python3-pip && \
+    curl -fsSL https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/nvidia.pub | \
+        gpg --dearmor -o /usr/share/keyrings/nvidia-devtools.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" > \
+        /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends nsight-systems-cli && \
+    python -m pip install --no-cache-dir uv && \
+    apt-get purge -y --auto-remove curl gnupg && \
+    rm -rf /var/lib/apt/lists/* /root/.cache/pip
 
-# Upgrade pip
-RUN python -m pip install --upgrade pip setuptools wheel
-
-# Install PyTorch with CUDA 13.0 support
-RUN pip install --no-cache-dir --pre "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu130
-
-# Install additional dependencies not covered by requirements.txt
-RUN pip install --no-cache-dir --no-deps accelerate==1.13.0 && \
-    pip install --no-cache-dir sentencepiece protobuf
-
-WORKDIR /workspace/tilegym
-
-####################
-# Stage 2: Wheel install (for CI)
-####################
 FROM base AS wheel
 
-# Install runtime dependencies from requirements.txt
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm -f /tmp/requirements.txt
-
-# Copy and install pre-built wheel
-COPY wheel/*.whl /tmp/
-RUN pip install --no-cache-dir --no-deps /tmp/*.whl && \
-    rm -f /tmp/*.whl
-
-# Copy modeling scripts for inference
-# Tests are mounted at runtime in CI
-COPY modeling/ /workspace/tilegym/modeling/
-COPY README.md LICENSE /workspace/tilegym/
-
-# Set up model cache directory
 ENV HF_HOME=/workspace/.cache/huggingface \
     TILEGYM_MODEL_CACHE_DIR=/workspace/.cache
 
-# Create necessary directories
-RUN mkdir -p /workspace/.cache/huggingface/hub \
-    /logs \
-    /workspace/tilegym/modeling/transformers
+WORKDIR /workspace/tilegym-hf-bench
 
-# Set working directory to transformers modeling
-WORKDIR /workspace/tilegym/modeling/transformers
+COPY modeling/transformers/ /workspace/tilegym-hf-bench/
 
-# Expose port for potential web services
-EXPOSE 8000
+RUN uv sync --locked && \
+    mkdir -p /workspace/.cache/huggingface/hub /logs
 
-# Default command
-CMD ["/bin/bash"]
+FROM wheel AS source
 
-####################
-# Stage 3: Source install (for open source developers)
-# This is the default when no --target is specified
-####################
-FROM base AS source
-
-# Copy entire source tree
 COPY . /workspace/tilegym/
 
-# Verify repository structure
-RUN test -f setup.py || (echo "ERROR: setup.py not found! Please build from tilegym repository root." && exit 1)
-
-# Install runtime dependencies from requirements.txt, then TileGym in editable mode with dev extras
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -e ".[dev]"
-
-# Set up model cache directory
-ENV HF_HOME=/workspace/.cache/huggingface \
-    TILEGYM_MODEL_CACHE_DIR=/workspace/.cache
-
-# Create necessary directories
-RUN mkdir -p /workspace/.cache/huggingface/hub \
-    /logs \
-    /workspace/tilegym/modeling/transformers
-
-# Set working directory to transformers modeling
-WORKDIR /workspace/tilegym/modeling/transformers
-
-# Expose port for potential web services
-EXPOSE 8000
-
-# Default command
-CMD ["/bin/bash"]
+RUN uv pip uninstall --python /workspace/tilegym-hf-bench/.venv/bin/python tilegym && \
+    uv pip install --python /workspace/tilegym-hf-bench/.venv/bin/python --no-deps -e /workspace/tilegym

@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+# Dockerfile-specific ignore file for modeling/transformers/Dockerfile.
+# Keep hf-bench Docker context small without changing other image builds.
+
+# Sandbox / scratch
+sandbox/
+sandbox/**
+**/sandbox/
+
+# Git
+.git/
+.git/**
+**/.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# OS / editor noise
+**/.DS_Store
+.idea/
+.vscode/
+.cursorignore
+.claude/
+.claude/settings.local.json
+
+# Byte-compiled / optimized / DLL files
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+**/build/
+**/develop-eggs/
+**/dist/
+**/downloads/
+**/eggs/
+**/.eggs/
+**/lib/
+**/lib64/
+**/parts/
+**/sdist/
+**/var/
+**/wheels/
+**/share/python-wheels/
+**/*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+**/htmlcov/
+.cache
+.cache/
+.cache/**
+**/.cache/**
+.pytest_cache/
+**/.pytest_cache/
+.ruff_cache/
+**/.ruff_cache/
+.mypy_cache/
+**/.mypy_cache/
+.tox/
+**/.tox/
+.nox/
+**/.nox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+**/.hypothesis/
+**/cover/
+
+# Translations
+*.mo
+*.pot
+
+# Logs
+*.log
+
+# Generated / local artifacts
+src/tilegym/_cutile_kernels/
+examples/model/
+local_settings.py
+*.local
+*.local.*
+db.sqlite3
+db.sqlite3-journal
+prebuild_tools/
+instance/
+.webassets-cache
+.scrapy
+docs/_build/
+.pybuilder/
+target/
+**/.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+celerybeat-schedule
+celerybeat.pid
+*.sage.py
+.ropeproject
+/site
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+**/dump/
+**/logs/
+**/bench_results/
+**/temp/
+**/cuda-driver/
+
+# Profiling / benchmarking artifacts
+**/*.nsys-rep
+**/*.sqlite
+**/*.err
+**/*.ptx
+**/*.csv
+**/*.ncu-rep
+
+# Python environments
+.env
+.env.*
+.venv
+.venv/
+.venv/**
+**/.venv/
+env/
+**/env/
+venv/
+**/venv/
+ENV/
+**/ENV/
+env.bak/
+**/env.bak/
+venv.bak/
+**/venv.bak/
+__pypackages__/
+
+# Node
+**/node_modules/
+
+# Docker files
+.dockerignore
+Dockerfile*
+
+# hf-bench image installs TileGym from Python source and does not need to
+# vendor FlashInfer's full checked-out submodule into the image context.
+3rdparty/flashinfer/
