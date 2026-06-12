@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tilegym-hf-bench"
+version = "0.1.0"
+description = "Hugging Face inference benchmarks and profiler tooling for TileGym"
+requires-python = ">=3.10"
+dependencies = [
+  "accelerate==1.13.0",
+  "cuda-bindings>=13.2.0",
+  "cuda-core>=0.7.0",
+  "cuda-tile[tileiras]>=1.3.0",
+  "filelock>=3.20.3",
+  "huggingface-hub",
+  "matplotlib",
+  "numpy",
+  "pandas",
+  "pillow>=12.1.1",
+  "protobuf",
+  "pyyaml",
+  "sentencepiece",
+  "tilegym @ git+https://github.com/NVIDIA/TileGym.git@v1.3.0",
+  "tokenizers==0.22.2",
+  "torch==2.9.1",
+  "transformers==5.10.2",
+]
+
+[project.optional-dependencies]
+eval = [
+  "lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@1dd931087362abba74e0375c8c631295559f48b2",
+  "peft",
+]
+liger = [
+  "liger-kernel",
+]
+
+[project.scripts]
+tilegym-hf-bench = "tilegym_hf_bench._cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tilegym_hf_bench = ["kernel_filters/*.yaml"]
+
+[tool.uv]
+managed = true
+override-dependencies = [
+  "transformers==5.10.2",
+  "cuda-toolkit[tileiras,nvcc,nvvm]==13.3.0",
+  "nvidia-cuda-runtime>=13.3,<14",
+  "nvidia-nvjitlink>=13.3,<14",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
