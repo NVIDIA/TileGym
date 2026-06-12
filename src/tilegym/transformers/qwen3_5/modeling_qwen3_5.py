@@ -61,13 +61,11 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
     hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
     batch_size, seq_len, _ = hidden_states.shape
 
-    use_precomputed_states = (
-        cache_params is not None and cache_params.has_previous_state and seq_len == 1 and cache_position is not None
-    )
+    use_precomputed_states = cache_params is not None and cache_params.has_previous_state(self.layer_idx)
 
-    if cache_params is not None:
-        conv_state = cache_params.conv_states[self.layer_idx]
-        recurrent_state = cache_params.recurrent_states[self.layer_idx]
+    if use_precomputed_states:
+        conv_state = cache_params.layers[self.layer_idx].conv_states
+        recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
 
     mixed_qkv = self.in_proj_qkv(hidden_states)
     mixed_qkv = mixed_qkv.transpose(1, 2)
@@ -78,7 +76,7 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
     b = self.in_proj_b(hidden_states)
     a = self.in_proj_a(hidden_states)
 
-    if use_precomputed_states:
+    if use_precomputed_states and seq_len == 1:
         mixed_qkv = self.causal_conv1d_update(
             mixed_qkv,
             conv_state,
@@ -87,9 +85,11 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
             self.activation,
         )
     else:
+        if use_precomputed_states:
+            mixed_qkv = torch.cat([conv_state, mixed_qkv], dim=-1)
         if cache_params is not None:
-            conv_state_val = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
-            cache_params.conv_states[self.layer_idx] = conv_state_val
+            new_conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+            cache_params.update_conv_state(new_conv_state, self.layer_idx)
         if self.causal_conv1d_fn is not None:
             mixed_qkv = self.causal_conv1d_fn(
                 x=mixed_qkv,
@@ -101,7 +101,13 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
         else:
             # Fused cuTile causal conv1d + SiLU for prefill
             padded = F.pad(mixed_qkv, (self.conv_kernel_size - 1, 0))
-            mixed_qkv = causal_conv1d_prefill_silu_cutile(padded, self.conv1d.weight.squeeze(1), seq_len)
+            mixed_qkv = causal_conv1d_prefill_silu_cutile(
+                padded,
+                self.conv1d.weight.squeeze(1),
+                mixed_qkv.shape[-1],
+            )
+        if use_precomputed_states:
+            mixed_qkv = mixed_qkv[:, :, -seq_len:]
 
     mixed_qkv = mixed_qkv.transpose(1, 2)
     query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
@@ -117,18 +123,7 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
         query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
         key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
-    if not use_precomputed_states:
-        core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g=g,
-            beta=beta,
-            initial_state=None,
-            output_final_state=cache_params is not None,
-            use_qk_l2norm_in_kernel=True,
-        )
-    else:
+    if use_precomputed_states and seq_len == 1:
         core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
             query,
             key,
@@ -139,9 +134,20 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
             output_final_state=cache_params is not None,
             use_qk_l2norm_in_kernel=True,
         )
+    else:
+        core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state if use_precomputed_states else None,
+            output_final_state=cache_params is not None,
+            use_qk_l2norm_in_kernel=True,
+        )
 
     if cache_params is not None:
-        cache_params.recurrent_states[self.layer_idx] = last_recurrent_state
+        cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
 
     core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
     z = z.reshape(-1, self.head_v_dim)

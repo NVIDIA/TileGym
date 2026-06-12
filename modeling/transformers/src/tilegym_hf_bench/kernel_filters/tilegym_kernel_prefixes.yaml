@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+prefixes:
+  - "rope"
+  - "tile_rope_kernel"
+  - "prefill_fmha"
+  - "prefill_mla"
+  - "fmha_kernel"
+  - "fmha_varlen_kernel"
+  - "fmha_variant_kernel"
+  - "attention_decode_kernel"
+  - "moe"
+  - "fused_moe_kernel"
+  - "moe_align_block_size"
+  - "silu_and_mul"
+  - "_silu_and_mul_kernel"
+  - "swiglu_forward"
+  - "tile_"
+  - "cutile"
+  - "rms_norm_kernel"
+  - "naive_absorb_mla"
+  - "_mla_decoding"
+  - "recurrent_gated_delta_rule"
+  - "chunk_gated_delta_rule"
+  - "_chunk_inter_recurrence_kernel"
+  - "_intra_chunk_prepare_kernel"
+  - "_sigmoid_mul_kernel"
+  - "_gdr_preprocess_kernel"
+  - "_rms_norm_gated_silu_kernel"
+  - "_causal_conv1d_update_silu_kernel"
+  - "_silu_and_mul_separate_kernel"
+  - "_causal_conv1d_prefill_silu_kernel"
+  - "_residual_add_rms_norm_kernel"
+  - "_rms_norm_residual_add_kernel"
+  - "_dual_rms_norm_kernel"
+  - "_olmoe_residual_add_rms_norm_kernel"
+  - "_olmoe_dual_rms_norm_kernel"
+  - "splitk_reduce_kernel"
+  - "static_persistent_matmul_kernel"
+  - "group_gemm"
+  - "matmul"
+  # Legacy profiler substrings intentionally omitted after checking current kernel names:
+  # rope_partial_kernel -> rope/tile_rope_kernel
+  # static_persistent_gemm_kernel -> static_persistent_matmul_kernel
+  # gemm_kernel -> matmul/group_gemm
+
+blacklist:
+  - "aten::matmul"

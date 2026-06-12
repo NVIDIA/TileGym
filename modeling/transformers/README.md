@@ -1,84 +1,51 @@
-<!--- SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. --->
+<!--- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. --->
 
 <!--- SPDX-License-Identifier: MIT --->
 
-# TileGym Transformers Inference
+# TileGym HF Bench
 
-End-to-end inference examples for transformer language models accelerated with TileGym kernels. Optimized for NVIDIA Blackwell Architecture.
+`modeling/transformers` is a uv-compatible subproject for Hugging Face inference benchmarks, PyTorch profiler traces, and nsys cuTile kernel coverage reports.
 
-## Supported Models
+The distribution name is `tilegym-hf-bench`; the Python package is `tilegym_hf_bench`.
 
-| Model | Model ID | Features |
-|-------|----------|----------|
-| LLaMA-3.1-8B | `meta-llama/Meta-Llama-3.1-8B` | RoPE, SwiGLU, RMSNorm, Attention*, Flash Decoding* |
-| DeepSeek-V2-Lite-Chat | `deepseek-ai/DeepSeek-V2-Lite-Chat` | RoPE, SwiGLU, RMSNorm, MoE, MLADecoding*, Attention* |
-| Qwen2-7B | `Qwen/Qwen2-7B` | RoPE, SwiGLU, RMSNorm, Attention* |
-| Gemma-3-4B-IT | `google/gemma-3-4b-it` | RoPE, GEGLU, RMSNorm, Attention* |
-| GPT-OSS | `openai/gpt-oss-20b` | RoPE, RMSNorm, Attention Sink* |
-| Mistral-7B-Instruct-v0.3 | `mistralai/Mistral-7B-Instruct-v0.3` | RoPE, SwiGLU, RMSNorm, Attention* |
-| Phi-3-mini-4k-instruct | `microsoft/Phi-3-mini-4k-instruct` | RoPE, SwiGLU, RMSNorm, Attention* |
-
-*Optional: Enable with `--use_attn`, we can use attention provided in TileGym
-
-B200 can support both models. Due to memory constraints, RTX 5090 GPUs only support LLaMA-3.1-8B models. DeepSeek-V2-Lite-Chat requires higher memory capacity.
-
-## Docker Support
+## Setup
 
 ```bash
-# Option 1: Use the build script
 cd modeling/transformers
-./build_docker.sh
-
-# Option 2: Build manually (must run from tilegym repository root)
-cd /path/to/tilegym
-docker build -t tilegym-transformers -f modeling/transformers/Dockerfile .
-
-# Enter interactive mode
-docker run --gpus all -it tilegym-transformers bash
-
-# Or run inference directly
-docker run --gpus all -it tilegym-transformers \
-    python infer.py --model_id deepseek-ai/DeepSeek-V2-Lite-Chat --use_tilegym --use_cutile --use_attn --show_outputs
+uv sync --locked
 ```
 
-## Quick Start
-
-### Basic Inference
+The legacy command remains available:
 
 ```bash
-# Transformer baseline
-python infer.py --model_id meta-llama/Meta-Llama-3.1-8B --show_outputs
-
-# With CUTILE backend
-python infer.py --model_id meta-llama/Meta-Llama-3.1-8B --use_tilegym --use_cutile --use_attn --show_outputs
+python infer.py --help
 ```
 
-### Using Custom Inputs
+The preferred CLI is:
 
 ```bash
-# From file
-python infer.py \
+uv run tilegym-hf-bench --help
+```
+
+## Basic Inference
+
+```bash
+uv run tilegym-hf-bench \
     --model_id meta-llama/Meta-Llama-3.1-8B \
-    --use_tilegym \
-    --use_attn \
-    --sentence_file sample_inputs/input_prompt_32K.txt \
-    --output_length 100
+    --show_outputs
 
-# From command line
-python infer.py \
+uv run tilegym-hf-bench \
     --model_id meta-llama/Meta-Llama-3.1-8B \
     --use_tilegym \
     --use_cutile \
     --use_attn \
-    --input_text "Explain machine learning" \
     --show_outputs
 ```
 
-### Performance Profiling
+## Profiling
 
-Will provide results using Torch Profiler.
 ```bash
-python infer.py \
+uv run tilegym-hf-bench \
     --model_id meta-llama/Meta-Llama-3.1-8B \
     --sentence_file sample_inputs/input_prompt_32K.txt \
     --use_tilegym \
@@ -88,12 +55,12 @@ python infer.py \
     --num_runs 5
 ```
 
-### Kernel Coverage Report
+## Kernel Coverage
 
-Report the fraction of GPU time and kernel launches covered by TileGym cuTile kernels. Runs the model under NSight Systems (`nsys profile`) and analyzes the trace automatically.
+`--report_kernel_coverage` runs the model under `nsys profile` and reports the fraction of GPU time and launches attributed to TileGym/cuTile kernels.
 
 ```bash
-python infer.py \
+uv run tilegym-hf-bench \
     --model_id meta-llama/Meta-Llama-3.1-8B \
     --use_tilegym \
     --use_cutile \
@@ -103,208 +70,39 @@ python infer.py \
     --output_length 100
 ```
 
-Example output:
-```text
-===== NSYS KERNEL GPU TIME ANALYSIS =====
+Kernel-name matching is configured in `src/tilegym_hf_bench/kernel_filters/tilegym_kernel_prefixes.yaml`.
 
-Kernel Name                                                   # Calls   GPU Time (ms)   % of Total
-------------------------------------------------------------  --------  -------------   ----------
-fmha_kernel                                                       ...          54.507        10.5%
-rms_norm_kernel_gather                                            ...           9.788         1.9%
-...
-------------------------------------------------------------  --------  -------------   ----------
-TileGym Total                                                    9676          95.147        18.3%
-All Kernels Total                                              104858         520.725       100.0%
+## Benchmark Script
 
->>> cuTile Kernel Coverage (GPU Time):    18.3% <<<
->>> cuTile Kernel Coverage (# Launches):  9.2% <<<
-```
-
-## Performance Benchmark
-
-Benchmark TileGym's CUTILE-optimized kernels against standard PyTorch implementation. The `--profile` flag enables detailed performance metrics including throughput (tokens/sec) and generation latency.
-
-### Quick Start
-
-Run benchmark scripts for automated comparison:
+Use one consolidated script for model presets:
 
 ```bash
-# LLaMA-3.1-8B benchmark
-./bench_llama.sh
-
-# DeepSeek-V2-Lite benchmark
-./bench_deepseek.sh
-
-# Qwen2-7B benchmark
-./bench_qwen.sh
-
-# Gemma-3-4B-IT benchmark
-./bench_gemma3.sh
-
-# GPT-OSS benchmark
-./bench_gpt_oss.sh
-
-# Mistral-7B benchmark
-./bench_mistral.sh
-
-# Phi-3-mini-4k-instruct benchmark
-./bench_phi3.sh
+./scripts/benchmark_hf_model.sh --model-key llama
+./scripts/benchmark_hf_model.sh --model-key deepseek
+./scripts/benchmark_hf_model.sh --model-key qwen
+./scripts/benchmark_hf_model.sh --model-key qwen3_5
+./scripts/benchmark_hf_model.sh --model-key gemma3
+./scripts/benchmark_hf_model.sh --model-key gpt_oss
+./scripts/benchmark_hf_model.sh --model-key mistral
+./scripts/benchmark_hf_model.sh --model-key phi3
 ```
 
-### Manual Benchmark
-
-#### LLaMA-3.1-8B Benchmark
+Useful overrides:
 
 ```bash
-# PyTorch baseline
-python infer.py \
-    --model_id meta-llama/Meta-Llama-3.1-8B \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_32K.txt \
-    --output_length 100
-
-# TileGym CUTILE backend
-python infer.py \
-    --model_id meta-llama/Meta-Llama-3.1-8B \
-    --use_tilegym \
-    --use_cutile \
-    --use_attn \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_32K.txt \
-    --output_length 100
+./scripts/benchmark_hf_model.sh \
+    --model-key qwen3_5 \
+    --output-length 16 \
+    --batch-size 1 \
+    --log-dir /logs/qwen3_5
 ```
 
-#### DeepSeek-V2-Lite Benchmark
+## Docker
 
 ```bash
-# PyTorch baseline
-python infer.py \
-    --model_id deepseek-ai/DeepSeek-V2-Lite-Chat \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_small.txt \
-    --output_length 100
-
-# TileGym CUTILE backend
-python infer.py \
-    --model_id deepseek-ai/DeepSeek-V2-Lite-Chat \
-    --use_tilegym \
-    --use_cutile \
-    --use_attn \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_small.txt \
-    --output_length 100
+cd /path/to/tilegym
+docker build -t tilegym-transformers -f modeling/transformers/Dockerfile .
+docker run --gpus all -it tilegym-transformers bash
 ```
 
-#### Qwen2-7B Benchmark
-```bash
-# PyTorch baseline
-python infer.py \
-    --model_id Qwen/Qwen2-7B \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_small.txt \
-    --batch_size 16 \
-    --output_length 100
-
-# TileGym CUTILE backend
-python infer.py \
-    --model_id Qwen/Qwen2-7B \
-    --use_tilegym \
-    --use_cutile \
-    --use_attn \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_small.txt \
-    --batch_size 16 \
-    --output_length 100
-```
-
-#### Gemma-3-4B-IT Benchmark
-```bash
-# PyTorch baseline
-python infer.py \
-    --model_id google/gemma-3-4b-it \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_small.txt \
-    --output_length 100
-
-# TileGym CUTILE backend
-python infer.py \
-    --model_id google/gemma-3-4b-it \
-    --use_tilegym \
-    --use_cutile \
-    --use_attn \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_small.txt \
-    --output_length 100
-```
-
-#### Mistral-7B Benchmark
-```bash
-# PyTorch baseline
-python infer.py \
-    --model_id mistralai/Mistral-7B-Instruct-v0.3 \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_32K.txt \
-    --output_length 100
-
-# TileGym CUTILE backend
-python infer.py \
-    --model_id mistralai/Mistral-7B-Instruct-v0.3 \
-    --use_tilegym \
-    --use_cutile \
-    --use_attn \
-    --profile \
-    --sentence_file sample_inputs/input_prompt_32K.txt \
-    --output_length 100
-```
-
-## Command Line Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--model_id` | HuggingFace model ID or local path | `meta-llama/Meta-Llama-3.1-8B` |
-| `--use_tilegym` | Enable TileGym optimization | `False` |
-| `--use_cutile` | Use CUTILE backend | `False` |
-| `--use_attn` | Enable attention optimization | `False` |
-| `--input_text` | Input prompt text | - |
-| `--sentence_file` | Input file path | - |
-| `--output_length` | Number of tokens to generate | `100` |
-| `--batch_size` | Batch size | `1` |
-| `--precision` | `bfloat16` or `float32` | `bfloat16` |
-| `--num_runs` | Benchmark iterations | `5` |
-| `--warmup_runs` | Warmup iterations | `2` |
-| `--profile` | Enable profiling | `False` |
-| `--report_kernel_coverage` | Report cuTile kernel GPU time and launch count coverage via nsys | `False` |
-| `--show_outputs` | Print generated text | `False` |
-
-
-## Using Local Models
-
-You can use locally cached models by specifying the path directly:
-
-```bash
-# Use local model path
-python infer.py \
-    --model_id /path/to/local/model \
-    --use_tilegym \
-    --use_attn \
-    --use_cutile \
-    --show_outputs
-```
-
-## Troubleshooting
-
-**CUDA Out of Memory**
-- Reduce `--batch_size` or use smaller inputs
-- Use `--precision bfloat16`
-
-**Model Download Issues**
-- Set up [HuggingFace authentication](https://huggingface.co/docs/huggingface_hub/quick-start#authentication)
-- Ensure your account has access to the model (e.g., [Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B))
-- Check network connectivity
-
-**Slow Performance**
-- Disable `--use_tilegym` flag to see whether naive version has output
-- Sometimes, it may take more than one minute to get the output when your output sentence is too long. Try to use shorter input and reduce `--output_length`
-
-**Import Errors**
-- Install TileGym: `pip install -e .` (from repo root)
+The Docker image installs this subproject through uv and keeps `tilegym-hf-bench` on `PATH`.
