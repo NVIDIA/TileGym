@@ -242,7 +242,7 @@ jobs:
         with:
           context: .
           file: ./modeling/transformers/Dockerfile
-          target: wheel  # Use wheel target for CI builds
+          target: source
           tags: ${{ steps.tags.outputs.tags }}
           push: true
           provenance: false
@@ -319,14 +319,15 @@ jobs:
             -e DISABLE_AUTOTUNE=1 \
             -v ${{ github.workspace }}/tests:/workspace/tilegym/tests \
             -v ${{ github.workspace }}/test-results:/test-results \
-            -w /workspace/tilegym \
+            -w /workspace/tilegym/modeling/transformers \
             ${IMAGE} \
-            bash -c "pip install --no-cache-dir pytest-xdist pytest-html && \
-              pytest -s tests/ops tests/suites -v -k test_op \
+            uv run --locked --no-sync python -m pytest \
+                /workspace/tilegym/tests/ops /workspace/tilegym/tests/suites \
+                -v -k test_op \
                 -n 12 \
                 --junitxml=/test-results/ops-results.xml \
                 --html=/test-results/ops-report.html \
-                --self-contained-html"
+                --self-contained-html
 
       - name: Upload test results
         if: always()
@@ -419,9 +420,9 @@ jobs:
             --gpus all \
             -v ${{ github.workspace }}/tests/benchmark:/workspace/tilegym/tests/benchmark \
             -v ${{ github.workspace }}/test-results:/test-results \
-            -w /workspace/tilegym/tests/benchmark \
+            -w /workspace/tilegym/modeling/transformers \
             ${IMAGE} \
-            ./run_all.sh /test-results --json
+            uv run --locked --no-sync bash /workspace/tilegym/tests/benchmark/run_all.sh /test-results --json
 
       # Compare current results against baseline with three zones:
       # - Regression zone (< -5%): Build fails
