@@ -30,21 +30,14 @@ RUN apt-get update && \
     apt-get purge -y --auto-remove curl gnupg && \
     rm -rf /var/lib/apt/lists/* /root/.cache/pip
 
-FROM base AS wheel
+FROM base AS source
 
 ENV HF_HOME=/workspace/.cache/huggingface \
     TILEGYM_MODEL_CACHE_DIR=/workspace/.cache
 
-WORKDIR /workspace/tilegym-hf-bench
-
-COPY modeling/transformers/ /workspace/tilegym-hf-bench/
-
-RUN uv sync --locked && \
-    mkdir -p /workspace/.cache/huggingface/hub /logs
-
-FROM wheel AS source
-
 COPY . /workspace/tilegym/
 
-RUN uv pip uninstall --python /workspace/tilegym-hf-bench/.venv/bin/python tilegym && \
-    uv pip install --python /workspace/tilegym-hf-bench/.venv/bin/python --no-deps -e /workspace/tilegym
+WORKDIR /workspace/tilegym/modeling/transformers
+
+RUN uv sync --locked --extra dev && \
+    mkdir -p /workspace/.cache/huggingface/hub /logs
