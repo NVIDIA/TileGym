@@ -2,15 +2,22 @@
 #
 # SPDX-License-Identifier: MIT
 
+from types import SimpleNamespace
+
 import cuda.tile as ct
 import torch
+from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
+from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
 PAD_ZERO = ct.PaddingMode.ZERO
+_ROPE_OCCUPANCY_CONFIGS = tuple(SimpleNamespace(occupancy=occ) for occ in (1, 7, 9, 12))
+_ROPE_TUNE_CACHE = {}
 
 
 @ct.kernel
@@ -151,10 +158,11 @@ def _rope_forward(q, k, cos, sin, rope_dim=None):
 
     n_row = batch_size * seq_len
     grid = (n_row, 1, 1)
+    kernel = _select_rope_kernel(q, k, cos, sin, rope_dim, grid, TILE_QH, TILE_KH, TILE_RD)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        _rope_kernel,
+        kernel,
         (
             q,
             k,
@@ -169,6 +177,73 @@ def _rope_forward(q, k, cos, sin, rope_dim=None):
     )
 
     return q, k, cos, sin
+
+
+def _rope_tune_cache_key(q, k, cos, sin, rope_dim, grid, tile_qh, tile_kh, tile_rd):
+    return (
+        tuple(q.shape),
+        tuple(k.shape),
+        tuple(cos.shape),
+        tuple(sin.shape),
+        q.dtype,
+        k.dtype,
+        cos.dtype,
+        sin.dtype,
+        str(q.device),
+        rope_dim,
+        grid,
+        tile_qh,
+        tile_kh,
+        tile_rd,
+    )
+
+
+def _select_rope_kernel(q, k, cos, sin, rope_dim, grid, tile_qh, tile_kh, tile_rd):
+    if is_autotune_disabled():
+        # Performance-oriented fallback: occ=9 keeps the common large full-RoPE
+        # shape close to 13.3. The default path still autotunes per shape.
+        return cached_replace_hints(_rope_kernel, occupancy=9)
+
+    cache_key = _rope_tune_cache_key(q, k, cos, sin, rope_dim, grid, tile_qh, tile_kh, tile_rd)
+    cached = _ROPE_TUNE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # RoPE mutates q/k in-place, so autotune trials must operate on throwaway
+    # clones. Only the selected kernel is launched on the caller's tensors.
+    def args_fn(cfg):
+        q_trial = q.clone()
+        k_trial = k.clone()
+        return (
+            q_trial,
+            k_trial,
+            cos,
+            sin,
+            cos.shape[0],
+            q.shape[2],
+            tile_qh,
+            tile_kh,
+            tile_rd,
+        )
+
+    def grid_fn(cfg):
+        return grid
+
+    def hints_fn(cfg):
+        return {"occupancy": cfg.occupancy}
+
+    result = exhaustive_search(
+        list(_ROPE_OCCUPANCY_CONFIGS),
+        torch.cuda.current_stream(),
+        grid_fn,
+        _rope_kernel,
+        args_fn,
+        hints_fn,
+    )
+    best_cfg = result.best.config
+    tuned_kernel = cached_replace_hints(_rope_kernel, occupancy=best_cfg.occupancy)
+    _ROPE_TUNE_CACHE[cache_key] = tuned_kernel
+    return tuned_kernel
 
 
 class _TileRopeFunction(torch.autograd.Function):
