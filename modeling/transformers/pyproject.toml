@@ -25,13 +25,17 @@ dependencies = [
   "protobuf",
   "pyyaml",
   "sentencepiece",
-  "tilegym @ git+https://github.com/NVIDIA/TileGym.git@v1.3.0",
+  "tilegym",
   "tokenizers==0.22.2",
   "torch==2.9.1",
   "transformers==5.10.2",
 ]
 
 [project.optional-dependencies]
+dev = [
+  "pytest-html",
+  "pytest-xdist",
+]
 eval = [
   "lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@1dd931087362abba74e0375c8c631295559f48b2",
   "peft",
@@ -64,4 +68,5 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
+tilegym = { path = "../..", editable = true }
 torch = { index = "pytorch-cu130" }
