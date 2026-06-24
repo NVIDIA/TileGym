@@ -24,9 +24,12 @@ register_impl("layer_norm_legacy", "torch")(reference_persistent_layer_norm)
 
 
 # Available backends for benchmarking
+# Note: tilecpp is intentionally excluded here. Its kernels are JIT-compiled
+# (via nvcc) and autotuned per shape, so sweeping the full benchmark shape grid
+# makes this benchmark run for tens of minutes. tilecpp remains covered by the
+# ops tests.
 ALL_BACKENDS = [
     ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
-    ("tilecpp", "TileCpp", ("purple", "-")) if is_backend_available("tilecpp") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
 

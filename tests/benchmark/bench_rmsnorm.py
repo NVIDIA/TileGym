@@ -43,11 +43,14 @@ register_impl("rms_norm", "torch")(reference_rms_norm)
 
 # Available configs with their display names and plot styles
 # (backend, mode, display label, plot style)
+# Note: tilecpp is intentionally excluded here. Its kernels are JIT-compiled
+# (via nvcc) and autotuned per shape, so sweeping the full benchmark shape grid
+# makes this benchmark run for tens of minutes. tilecpp remains covered by the
+# ops tests.
 ALL_CONFIGS = [
     ("cutile", "static_persistent", "CuTile static persistent", ("purple", "-")),
     ("cutile", "multi_wave_reload", "CuTile multi wave reload", ("blue", "-")),
     ("cutile", "multi_wave_cached", "CuTile multi wave cached", ("red", "--")),
-    ("tilecpp", None, "TileCpp", ("brown", "-")) if is_backend_available("tilecpp") else None,
     ("torch", None, "PyTorch", ("green", "-")),
 ]
 
