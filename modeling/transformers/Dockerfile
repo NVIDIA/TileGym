@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Keep the runtime image at CUDA 13.2 for host-driver compatibility.
-# The uv environment installs CUDA 13.3 compiler/user-space wheels from pyproject.toml.
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.2.0-devel-ubuntu22.04
+# Use the CUDA 13.3 / Ubuntu 24.04 base image, which ships a newer default
+# toolchain (GCC 13) and Python 3.12 for building the user-space environment.
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.3.0-devel-ubuntu24.04
 
 FROM ${BASE_IMAGE} AS base
 
@@ -20,13 +20,13 @@ RUN apt-get update && \
         python3 \
         python3-dev \
         python3-pip && \
-    curl -fsSL https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/nvidia.pub | \
+    curl -fsSL https://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64/nvidia.pub | \
         gpg --dearmor -o /usr/share/keyrings/nvidia-devtools.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" > \
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64/ /" > \
         /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends nsight-systems-cli && \
-    python -m pip install --no-cache-dir uv && \
+    python -m pip install --no-cache-dir --break-system-packages uv && \
     apt-get purge -y --auto-remove curl gnupg && \
     rm -rf /var/lib/apt/lists/* /root/.cache/pip
 

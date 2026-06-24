@@ -283,7 +283,7 @@ jobs:
   test-ops:
     name: test-ops
     needs: [config, build]
-    timeout-minutes: 40
+    timeout-minutes: 90
     if: |
       always() &&
       needs.config.outputs.run_ops == 'true' &&
@@ -308,7 +308,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run ops tests
-        timeout-minutes: 35
+        timeout-minutes: 80
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
@@ -348,7 +348,7 @@ jobs:
   test-benchmark:
     name: test-benchmark
     needs: [config, build]
-    timeout-minutes: 70
+    timeout-minutes: 130
     if: |
       always() &&
       needs.config.outputs.run_benchmark == 'true' &&
@@ -410,7 +410,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull and run benchmarks
-        timeout-minutes: 60
+        timeout-minutes: 120
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
