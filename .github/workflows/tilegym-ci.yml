@@ -295,7 +295,7 @@ jobs:
       # this list to scale out further; --splits tracks strategy.job-total.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - name: Checkout code (sparse - need ops tests and shared utilities)
         uses: actions/checkout@v4
