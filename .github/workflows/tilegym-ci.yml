@@ -333,7 +333,7 @@ jobs:
                 /workspace/tilegym/tests/ops /workspace/tilegym/tests/suites \
                 -v -k test_op \
                 --splits ${{ strategy.job-total }} --group ${{ matrix.shard }} \
-                --store-durations --durations-path /test-results/durations_${{ matrix.shard }}.json \
+                --durations-path /workspace/tilegym/.test_durations \
                 -n 8 \
                 --junitxml=/test-results/ops-results-${{ matrix.shard }}.xml \
                 --html=/test-results/ops-report-${{ matrix.shard }}.html \
@@ -344,9 +344,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ops-test-results-${{ matrix.shard }}
-          path: |
-            test-results/ops-*
-            test-results/durations_*.json
+          path: test-results/ops-*
           retention-days: 30
 
       - name: Publish test results
