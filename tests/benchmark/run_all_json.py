@@ -256,13 +256,33 @@ def setup_output_directory() -> Path:
 
 
 def find_benchmark_files() -> List[Path]:
-    """Find all benchmark files recursively under the benchmark directory."""
+    """Find all benchmark files recursively under the benchmark directory.
+
+    Supports optional sharding for parallel CI via environment variables:
+      BENCH_NUM_SHARDS - total number of shards (default 1 = no sharding)
+      BENCH_SHARD      - this shard's index, 1-based
+    Files are assigned round-robin across shards so the mix of small/large
+    benchmarks is spread evenly.
+    """
     benchmark_dir = Path(__file__).parent
     benchmark_files = sorted(benchmark_dir.rglob("bench_*.py"))
 
     if not benchmark_files:
         logger.error("No benchmark files found")
         sys.exit(1)
+
+    num_shards = int(os.environ.get("BENCH_NUM_SHARDS", "1") or "1")
+    shard = int(os.environ.get("BENCH_SHARD", "1") or "1")
+    if num_shards > 1:
+        if not (1 <= shard <= num_shards):
+            logger.error(f"BENCH_SHARD={shard} is out of range 1..{num_shards}")
+            sys.exit(1)
+        selected = benchmark_files[shard - 1 :: num_shards]
+        logger.info(
+            f"Sharding enabled: shard {shard}/{num_shards} -> "
+            f"{len(selected)}/{len(benchmark_files)} benchmark files"
+        )
+        benchmark_files = selected
 
     return benchmark_files
 

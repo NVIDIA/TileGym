@@ -356,25 +356,115 @@ jobs:
           comment_mode: off
 
   test-benchmark:
-    name: test-benchmark
+    name: test-benchmark (shard ${{ matrix.shard }})
     needs: [config, build]
-    timeout-minutes: 130
+    timeout-minutes: 90
     if: |
       always() &&
       needs.config.outputs.run_benchmark == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
+    strategy:
+      # Shard benchmark files across parallel GPU runners. run_all_json.py
+      # assigns files round-robin via BENCH_NUM_SHARDS/BENCH_SHARD. Add shards
+      # to this list as more benchmarks/backends are added; BENCH_NUM_SHARDS
+      # tracks strategy.job-total automatically.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
-      - name: Checkout code (sparse - need scripts and benchmarks)
+      - name: Checkout code (sparse - need benchmarks)
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            .github/scripts
             tests/benchmark
           sparse-checkout-cone-mode: false
 
       - name: Create test results directory
         run: mkdir -p ${{ github.workspace }}/test-results
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and run benchmarks (shard ${{ matrix.shard }})
+        timeout-minutes: 80
+        run: |
+          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
+
+          docker pull ${IMAGE}
+          docker run --rm \
+            --gpus all \
+            -e BENCH_NUM_SHARDS=${{ strategy.job-total }} \
+            -e BENCH_SHARD=${{ matrix.shard }} \
+            -v ${{ github.workspace }}/tests/benchmark:/workspace/tilegym/tests/benchmark \
+            -v ${{ github.workspace }}/test-results:/test-results \
+            -w /workspace/tilegym/modeling/transformers \
+            ${IMAGE} \
+            uv run --locked --no-sync bash /workspace/tilegym/tests/benchmark/run_all.sh /test-results --json
+
+      - name: Upload shard benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-shard-results-${{ matrix.shard }}
+          path: test-results/*.json
+          retention-days: 30
+
+  benchmark-aggregate:
+    name: benchmark-aggregate
+    needs: [config, test-benchmark]
+    timeout-minutes: 15
+    if: |
+      always() &&
+      needs.config.outputs.run_benchmark == 'true' &&
+      (needs.test-benchmark.result == 'success' || needs.test-benchmark.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code (sparse - need scripts)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Download all shard benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-shard-results-*
+          path: ${{ github.workspace }}/shard-artifacts
+
+      - name: Merge shard results
+        run: |
+          python3 - <<'PY'
+          import json, glob, os, shutil
+          os.makedirs("test-results", exist_ok=True)
+          benches, ts, sysinfo = [], None, None
+          shard_dirs = sorted(glob.glob("shard-artifacts/*/"))
+          print(f"Found {len(shard_dirs)} shard artifact dir(s)")
+          for d in shard_dirs:
+              # Copy each per-benchmark result file (unique names across shards)
+              for f in glob.glob(os.path.join(d, "*_results.json")):
+                  shutil.copy(f, os.path.join("test-results", os.path.basename(f)))
+              # Union the per-shard combined files
+              ab = os.path.join(d, "all_benchmarks.json")
+              if os.path.exists(ab):
+                  data = json.load(open(ab))
+                  benches += data.get("benchmarks", [])
+                  ts = ts or data.get("timestamp")
+              si = os.path.join(d, "system_info.json")
+              if sysinfo is None and os.path.exists(si):
+                  sysinfo = open(si).read()
+          json.dump({"timestamp": ts, "benchmarks": benches},
+                    open("test-results/all_benchmarks.json", "w"), indent=2)
+          if sysinfo:
+              open("test-results/system_info.json", "w").write(sysinfo)
+          print(f"Merged {len(benches)} benchmark file result(s) from {len(shard_dirs)} shard(s)")
+          PY
 
       # Download previous baseline for regression detection
       # Uses GitHub CLI instead of dawidd6 action (more reliable, no third-party dependencies)
@@ -411,28 +501,6 @@ jobs:
           else
             echo "⚠️  No baseline artifact found (this may be the first run)"
           fi
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull and run benchmarks
-        timeout-minutes: 120
-        run: |
-          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
-
-          docker pull ${IMAGE}
-          docker run --rm \
-            --gpus all \
-            -v ${{ github.workspace }}/tests/benchmark:/workspace/tilegym/tests/benchmark \
-            -v ${{ github.workspace }}/test-results:/test-results \
-            -w /workspace/tilegym/modeling/transformers \
-            ${IMAGE} \
-            uv run --locked --no-sync bash /workspace/tilegym/tests/benchmark/run_all.sh /test-results --json
 
       # Compare current results against baseline with three zones:
       # - Regression zone (< -5%): Build fails
@@ -576,6 +644,16 @@ jobs:
               fi
             fi
           fi
+
+      # A benchmark *run* failure (a benchmark errored out) must fail the
+      # pipeline. We run this last so the regression report / summary above
+      # are still produced and uploaded first.
+      - name: Propagate benchmark shard failure
+        if: needs.test-benchmark.result == 'failure'
+        run: |
+          echo "❌ One or more benchmark shards failed (a benchmark errored)."
+          echo "   See the test-benchmark shard logs for details."
+          exit 1
 
   publish-wheel:
     name: publish-verified-wheel
