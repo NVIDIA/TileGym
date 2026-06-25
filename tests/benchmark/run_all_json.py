@@ -279,8 +279,7 @@ def find_benchmark_files() -> List[Path]:
             sys.exit(1)
         selected = benchmark_files[shard - 1 :: num_shards]
         logger.info(
-            f"Sharding enabled: shard {shard}/{num_shards} -> "
-            f"{len(selected)}/{len(benchmark_files)} benchmark files"
+            f"Sharding enabled: shard {shard}/{num_shards} -> {len(selected)}/{len(benchmark_files)} benchmark files"
         )
         benchmark_files = selected
 
