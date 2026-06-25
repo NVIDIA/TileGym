@@ -295,7 +295,7 @@ jobs:
       # this list to scale out further; --splits tracks strategy.job-total.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3]
     steps:
       - name: Checkout code (sparse - need ops tests and shared utilities)
         uses: actions/checkout@v4
@@ -333,7 +333,8 @@ jobs:
                 /workspace/tilegym/tests/ops /workspace/tilegym/tests/suites \
                 -v -k test_op \
                 --splits ${{ strategy.job-total }} --group ${{ matrix.shard }} \
-                -n 10 \
+                --store-durations --durations-path /test-results/durations_${{ matrix.shard }}.json \
+                -n 8 \
                 --junitxml=/test-results/ops-results-${{ matrix.shard }}.xml \
                 --html=/test-results/ops-report-${{ matrix.shard }}.html \
                 --self-contained-html
@@ -343,7 +344,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ops-test-results-${{ matrix.shard }}
-          path: test-results/ops-*
+          path: |
+            test-results/ops-*
+            test-results/durations_*.json
           retention-days: 30
 
       - name: Publish test results
