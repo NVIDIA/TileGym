@@ -111,18 +111,20 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
 
                 # Following lines are data rows until we hit empty line or next benchmark.
                 # Triton perf_report prints a pandas DataFrame whose rows always start
-                # with an integer RangeIndex (0, 1, 2, ...). Other stdout that may be
-                # interleaved before the blank separator -- e.g. autotuner logs like
-                # "namespace(TILE_SIZE_M=128, ...): 17.5±0.2 us" or "succeeded, 0 failed"
-                # -- does NOT start with an integer, so we skip it instead of mis-parsing
-                # it into the results table.
+                # with an integer RangeIndex (0, 1, 2, ...) followed by exactly one value
+                # per header column. Other stdout that may be interleaved before the blank
+                # separator -- e.g. autotuner logs like
+                # "namespace(TILE_SIZE_M=128, ...): 17.5±0.2 us" or "<n> succeeded, 0 failed"
+                # -- has a different shape, so we skip any line that does not start with an
+                # integer index and have exactly len(header_row) + 1 whitespace columns.
+                expected_cols = len(header_row) + 1 if header_row else 0
                 data_rows = []
                 while i < len(lines):
                     data_line = lines[i].strip()
                     if not data_line or data_line.endswith("-TFLOPS:") or data_line.endswith("-GBps:"):
                         break
                     tokens = data_line.split()
-                    if tokens and tokens[0].isdigit():
+                    if tokens and tokens[0].isdigit() and len(tokens) == expected_cols:
                         data_rows.append(tokens)
                     i += 1
 
