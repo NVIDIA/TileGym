@@ -125,14 +125,24 @@ def _splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens
 
 
 def _load_page(
-    cache, block_tables, page_table_offset, page, token, off_kv_h, NUM_PAGES, LOAD_BLOCK_N, BLOCK_D, _PAGE_SIZE
+    cache,
+    block_tables,
+    page_table_offset,
+    page,
+    token,
+    off_kv_h,
+    NUM_PAGES,
+    LOAD_BLOCK_N,
+    BLOCK_D,
+    _PAGE_SIZE,
 ):
     """
     Load data from paged cache via TMA.
 
     For single page, issues one TMA load.
-    For multiple pages, issues N independent TMA loads and concatenates via ct.cat.
-    Each individual load still uses TMA, loading one page at a time.
+    For multiple pages, uses ct.load_advanced_indexing (gather TMA) with the 4D
+    cache [total_pages, PAGE_SIZE, N_KV_HEADS, BLOCK_D] directly, issuing
+    NUM_PAGES gather transactions instead of NUM_PAGES*LOAD_BLOCK_N individual ones.
 
     Args:
         cache: cache array [total_num_pages, PAGE_SIZE, N_KV_HEADS, BLOCK_D]
@@ -141,14 +151,15 @@ def _load_page(
         page: starting page index in the page table
         token: token offset within page
         off_kv_h: KV head index
-        NUM_PAGES: number of pages to load (1, 2, or 4)
+        NUM_PAGES: number of pages to load
         LOAD_BLOCK_N: tokens per page load (== PAGE_SIZE)
         BLOCK_D: feature dimension
-        _PAGE_SIZE: tokens per page (unused; LOAD_BLOCK_N is used instead)
+        _PAGE_SIZE: tokens per page
 
     Returns:
         Loaded tensor of shape [NUM_PAGES * LOAD_BLOCK_N, BLOCK_D]
     """
+    PAD_ZERO = ct.PaddingMode.ZERO
     if NUM_PAGES == 1:
         page_id = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
         data = ct.reshape(
@@ -162,88 +173,30 @@ def _load_page(
             ),
             (LOAD_BLOCK_N, BLOCK_D),
         )
-    elif NUM_PAGES == 2:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
+    else:
+        p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
+        page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
+        data = ct.reshape(
+            ct.load_advanced_indexing(
                 cache,
-                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, 0),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=2,
+                (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(off_kv_h, 1), ct.Slice(0, BLOCK_D)),
+                padding_mode=PAD_ZERO,
             ),
-            (LOAD_BLOCK_N, BLOCK_D),
+            (NUM_PAGES * LOAD_BLOCK_N, BLOCK_D),
         )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, off_kv_h, 0),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        data = ct.cat((d0, d1), 0)
-    elif NUM_PAGES == 4:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, 0),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, off_kv_h, 0),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg2 = ct.gather(block_tables, (page_table_offset + page + 2,), padding_value=0).item()
-        d2 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg2, 0, off_kv_h, 0),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg3 = ct.gather(block_tables, (page_table_offset + page + 3,), padding_value=0).item()
-        d3 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg3, 0, off_kv_h, 0),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        # ct.cat takes exactly a pair; chain for 4 pages
-        data = ct.cat((ct.cat((d0, d1), 0), ct.cat((d2, d3), 0)), 0)
     return data
 
 
 def _load_page_wrapper(
-    curr_n, cache, block_tables, page_table_offset, off_kv_h, PAGE_SIZE, BLOCK_N, BLOCK_D, LOAD_BLOCK_N
+    curr_n,
+    cache,
+    block_tables,
+    page_table_offset,
+    off_kv_h,
+    PAGE_SIZE,
+    BLOCK_N,
+    BLOCK_D,
+    LOAD_BLOCK_N,
 ):
     """
     Load cache data (K or V) for current position.
@@ -255,7 +208,16 @@ def _load_page_wrapper(
     token = curr_n % PAGE_SIZE
 
     data = _load_page(
-        cache, block_tables, page_table_offset, page, token, off_kv_h, NUM_PAGES, LOAD_BLOCK_N, BLOCK_D, PAGE_SIZE
+        cache,
+        block_tables,
+        page_table_offset,
+        page,
+        token,
+        off_kv_h,
+        NUM_PAGES,
+        LOAD_BLOCK_N,
+        BLOCK_D,
+        PAGE_SIZE,
     )
     return data
 
@@ -525,7 +487,8 @@ def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGE
     Load data from paged MLA cache (3D: [total_num_pages, PAGE_SIZE, dim]) via TMA.
 
     For single page, issues one TMA load.
-    For multiple pages, issues N independent TMA loads and concatenates via ct.cat.
+    For multiple pages, uses ct.load_advanced_indexing (gather TMA) on the 3D
+    cache directly, issuing NUM_PAGES transactions instead of NUM_PAGES*LOAD_BLOCK_N.
 
     Args:
         cache: cache array [total_num_pages, PAGE_SIZE, dim]
@@ -533,14 +496,15 @@ def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGE
         page_table_offset: offset into block_tables for current batch
         page: starting page index in the page table
         token: token offset within page
-        NUM_PAGES: number of pages to load (1, 2, or 4)
+        NUM_PAGES: number of pages to load
         LOAD_BLOCK_N: tokens per page load (== PAGE_SIZE)
         BLOCK_DIM: feature dimension (BLOCK_D or BLOCK_R)
-        _PAGE_SIZE: tokens per page (unused; LOAD_BLOCK_N is used instead)
+        _PAGE_SIZE: tokens per page
 
     Returns:
         Loaded tensor of shape [NUM_PAGES * LOAD_BLOCK_N, BLOCK_DIM]
     """
+    PAD_ZERO = ct.PaddingMode.ZERO
     if NUM_PAGES == 1:
         page_id = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
         data = ct.reshape(
@@ -554,83 +518,17 @@ def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGE
             ),
             (LOAD_BLOCK_N, BLOCK_DIM),
         )
-    elif NUM_PAGES == 2:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
+    else:
+        p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
+        page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
+        data = ct.reshape(
+            ct.load_advanced_indexing(
                 cache,
-                index=(pg0, token // LOAD_BLOCK_N, 0),
-                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
+                (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(0, BLOCK_DIM)),
+                padding_mode=PAD_ZERO,
             ),
-            (LOAD_BLOCK_N, BLOCK_DIM),
+            (NUM_PAGES * LOAD_BLOCK_N, BLOCK_DIM),
         )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, 0),
-                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_DIM),
-        )
-        data = ct.cat((d0, d1), 0)
-    elif NUM_PAGES == 4:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg0, token // LOAD_BLOCK_N, 0),
-                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_DIM),
-        )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, 0),
-                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_DIM),
-        )
-        pg2 = ct.gather(block_tables, (page_table_offset + page + 2,), padding_value=0).item()
-        d2 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg2, 0, 0),
-                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_DIM),
-        )
-        pg3 = ct.gather(block_tables, (page_table_offset + page + 3,), padding_value=0).item()
-        d3 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg3, 0, 0),
-                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-            ),
-            (LOAD_BLOCK_N, BLOCK_DIM),
-        )
-        # ct.cat takes exactly a pair; chain for 4 pages
-        data = ct.cat((ct.cat((d0, d1), 0), ct.cat((d2, d3), 0)), 0)
     return data
 
 
@@ -675,6 +573,7 @@ def _decode_mla_kv_paged_kernel(
     stride_block_table,
     LOAD_BLOCK_N: ConstInt,
     NUM_PAGES_PER_BLOCK: ConstInt,
+    TRANS_QK: ConstBool,
 ):
     batch_id = ct.bid(0)
     head_block_id = ct.bid(1)
@@ -726,13 +625,18 @@ def _decode_mla_kv_paged_kernel(
 
     m_i = ct.full((BLOCK_H,), -math.inf, dtype=ct.float32)
     l_i = ct.full((BLOCK_H,), 1.0, dtype=ct.float32)
-    acc = ct.full((BLOCK_H, BLOCK_D), 0.0, dtype=ct.float32)
+    # TRANS_QK=True: swap Q/K operands in MMA so the M-dim = BLOCK_N (128) instead of BLOCK_H (16/32),
+    # matching the WGMMA tile size on B200 and achieving full tensor-core utilisation.
+    if TRANS_QK:
+        acc = ct.full((BLOCK_D, BLOCK_H), 0.0, dtype=ct.float32)
+    else:
+        acc = ct.full((BLOCK_H, BLOCK_D), 0.0, dtype=ct.float32)
 
     for iter_idx in range(num_iters):
         curr_n = start_n + iter_idx * BLOCK_N
 
         if NUM_PAGES_PER_BLOCK == 1:
-            # Single-page path: share page_id between K, K_rope, and V loads
+            # Single-page path: load K, K_rope, V together (same page_id known upfront)
             page_idx = curr_n // PAGE_SIZE
             token_block_idx = (curr_n % PAGE_SIZE) // BLOCK_N
             page_id = ct.gather(block_tables, (page_table_offset + page_idx,), padding_value=0).item()
@@ -760,47 +664,8 @@ def _decode_mla_kv_paged_kernel(
                 ),
                 (BLOCK_N, BLOCK_R),
             )
-        else:
-            # Multi-page path: load BLOCK_N tokens across multiple pages
-            k_tile = _load_page_mla_wrapper(
-                curr_n,
-                k_cache,
-                block_tables,
-                page_table_offset,
-                PAGE_SIZE,
-                BLOCK_N,
-                BLOCK_D,
-                LOAD_BLOCK_N,
-            )
-            k_rope_tile = _load_page_mla_wrapper(
-                curr_n,
-                k_rope,
-                block_tables,
-                page_table_offset,
-                PAGE_SIZE,
-                BLOCK_N,
-                BLOCK_R,
-                LOAD_BLOCK_N,
-            )
 
-        qk = ct.mma(q_nope_tile, ct.transpose(k_tile), acc=ct.full((BLOCK_H, BLOCK_N), 0.0, dtype=ct.float32))
-        if BLOCK_R > 0:
-            qk = ct.mma(q_rope_tile, ct.transpose(k_rope_tile), acc=qk)
-
-        if curr_n >= tail_n:
-            offs_n = curr_n + offs_n_base
-            mask = ct.reshape((offs_n < end_n), (1, BLOCK_N))
-            qk = ct.where(mask, qk, ct.full((BLOCK_H, BLOCK_N), -1.0e6, dtype=ct.float32))
-
-        qk_max = ct.max(qk, axis=1, keepdims=False)
-        m_ij = ct.maximum(m_i, (qk_max * qk_scale))
-        p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_H, 1)), flush_to_zero=True)
-
-        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
-        l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
-
-        if NUM_PAGES_PER_BLOCK == 1:
-            # Reuse page_id from K load
+            # Prefetch V before QK computation so TMA can overlap V load with QK+softmax
             v_tile = ct.reshape(
                 ct.load(
                     v_cache,
@@ -808,29 +673,94 @@ def _decode_mla_kv_paged_kernel(
                     shape=(1, BLOCK_N, BLOCK_D),
                     order=(0, 1, 2),
                     allow_tma=True,
-                    latency=2,
+                    latency=4,
                 ),
                 (BLOCK_N, BLOCK_D),
             )
         else:
-            v_tile = _load_page_mla_wrapper(
-                curr_n,
-                v_cache,
-                block_tables,
-                page_table_offset,
-                PAGE_SIZE,
-                BLOCK_N,
-                BLOCK_D,
-                LOAD_BLOCK_N,
+            # Multi-page path: compute page_ids once, share across K / K_rope / V loads
+            PAD_ZERO = ct.PaddingMode.ZERO
+            page = curr_n // PAGE_SIZE
+            token = curr_n % PAGE_SIZE
+            p_idx = ct.arange(NUM_PAGES_PER_BLOCK, dtype=ct.int32)
+            page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
+
+            k_tile = ct.reshape(
+                ct.load_advanced_indexing(
+                    k_cache,
+                    (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(0, BLOCK_D)),
+                    padding_mode=PAD_ZERO,
+                ),
+                (BLOCK_N, BLOCK_D),
+            )
+            k_rope_tile = ct.reshape(
+                ct.load_advanced_indexing(
+                    k_rope,
+                    (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(0, BLOCK_R)),
+                    padding_mode=PAD_ZERO,
+                ),
+                (BLOCK_N, BLOCK_R),
+            )
+            # Prefetch V before QK computation (same page_ids, overlap with QK+softmax)
+            v_tile = ct.reshape(
+                ct.load_advanced_indexing(
+                    v_cache,
+                    (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(0, BLOCK_D)),
+                    padding_mode=PAD_ZERO,
+                ),
+                (BLOCK_N, BLOCK_D),
             )
 
-        acc = acc * ct.reshape(alpha, (BLOCK_H, 1))
-        acc = ct.mma(ct.astype(p, q_nope.dtype), v_tile, acc=acc)
+        # QK computation — TRANS_QK swaps operands: M=BLOCK_N (large) instead of M=BLOCK_H (small)
+        if TRANS_QK:
+            # qk: [BLOCK_N, BLOCK_H]  (M=BLOCK_N fills WGMMA tile on B200)
+            qk = ct.mma(k_tile, ct.transpose(q_nope_tile), acc=ct.full((BLOCK_N, BLOCK_H), 0.0, dtype=ct.float32))
+            if BLOCK_R > 0:
+                qk = ct.mma(k_rope_tile, ct.transpose(q_rope_tile), acc=qk)
+        else:
+            # qk: [BLOCK_H, BLOCK_N]
+            qk = ct.mma(q_nope_tile, ct.transpose(k_tile), acc=ct.full((BLOCK_H, BLOCK_N), 0.0, dtype=ct.float32))
+            if BLOCK_R > 0:
+                qk = ct.mma(q_rope_tile, ct.transpose(k_rope_tile), acc=qk)
+
+        if curr_n >= tail_n:
+            offs_n = curr_n + offs_n_base
+            if TRANS_QK:
+                mask = ct.reshape((offs_n < end_n), (BLOCK_N, 1))
+                qk = ct.where(mask, qk, ct.full((BLOCK_N, BLOCK_H), -1.0e6, dtype=ct.float32))
+            else:
+                mask = ct.reshape((offs_n < end_n), (1, BLOCK_N))
+                qk = ct.where(mask, qk, ct.full((BLOCK_H, BLOCK_N), -1.0e6, dtype=ct.float32))
+
+        if TRANS_QK:
+            # reduce over axis 0 (N-dim) → [BLOCK_H]
+            qk_max = ct.max(qk, axis=0, keepdims=False)
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (1, BLOCK_H)), flush_to_zero=True)
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            l_i = l_i * alpha + ct.sum(p, axis=0, keepdims=False)
+            # acc: [BLOCK_D, BLOCK_H]
+            acc = acc * ct.reshape(alpha, (1, BLOCK_H))
+            acc = ct.mma(ct.transpose(v_tile), ct.astype(p, q_nope.dtype), acc=acc)
+        else:
+            # reduce over axis 1 (N-dim) → [BLOCK_H]
+            qk_max = ct.max(qk, axis=1, keepdims=False)
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_H, 1)), flush_to_zero=True)
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+            # acc: [BLOCK_H, BLOCK_D]
+            acc = acc * ct.reshape(alpha, (BLOCK_H, 1))
+            acc = ct.mma(ct.astype(p, q_nope.dtype), v_tile, acc=acc)
         m_i = m_ij
 
-    l_i_expanded = ct.reshape(l_i, (BLOCK_H, 1))
-    acc = ct.truediv((acc * V_SCALE), l_i_expanded, flush_to_zero=True, rounding_mode=RMd.APPROX)
-    acc_out = ct.astype(acc, output.dtype)
+    if TRANS_QK:
+        # acc: [BLOCK_D, BLOCK_H] → divide by l_i, transpose to [BLOCK_H, BLOCK_D], then store
+        acc = ct.truediv((acc * V_SCALE), ct.reshape(l_i, (1, BLOCK_H)), flush_to_zero=True, rounding_mode=RMd.APPROX)
+        acc_out = ct.astype(ct.transpose(acc), output.dtype)  # [BLOCK_H, BLOCK_D]
+    else:
+        acc = ct.truediv((acc * V_SCALE), ct.reshape(l_i, (BLOCK_H, 1)), flush_to_zero=True, rounding_mode=RMd.APPROX)
+        acc_out = ct.astype(acc, output.dtype)  # [BLOCK_H, BLOCK_D]
 
     acc_4d = ct.reshape(acc_out, (1, 1, BLOCK_H, BLOCK_D))
     ct.store(
@@ -1099,9 +1029,12 @@ def decode_attention_kv_paged(
     return outputs
 
 
-def _mla_decode_autotune_configs():
+def _mla_decode_autotune_configs(trans_qk: bool = False):
     for bh in [16, 32]:
         for bn in [16, 32, 64, 128]:
+            if trans_qk and bn < 64:
+                # With TRANS_QK=True, QK GEMM M-dim = BLOCK_N. B200 WGMMA needs M≥64; skip small BLOCK_N.
+                continue
             for occupancy in [1, 2]:
                 yield SimpleNamespace(BLOCK_H=bh, BLOCK_N=bn, occupancy=occupancy)
 
@@ -1129,6 +1062,7 @@ def _mla_decode_autotune_base(
     kv_len_per_split,
     HAS_LSE_OUT,
     stride_block_table,
+    TRANS_QK,
 ):
     mla_cache_key = (
         num_batch,
@@ -1140,12 +1074,13 @@ def _mla_decode_autotune_base(
         NUM_KV_SPLITS,
         kv_len_per_split,
         HAS_LSE_OUT,
+        TRANS_QK,
         q.dtype,
         str(q.device),
     )
     if mla_cache_key not in _decode_mla_paged_tune_cache:
         result = exhaustive_search(
-            list(_mla_decode_autotune_configs()),
+            list(_mla_decode_autotune_configs(trans_qk=TRANS_QK)),
             stream,
             lambda cfg: (num_batch, (num_qo_heads + cfg.BLOCK_H - 1) // cfg.BLOCK_H, NUM_KV_SPLITS),
             _decode_mla_kv_paged_kernel,
@@ -1163,7 +1098,7 @@ def _mla_decode_autotune_base(
                 v_scale,
                 page_size,
                 cfg.BLOCK_H,
-                min(cfg.BLOCK_N, page_size),
+                cfg.BLOCK_N,
                 head_dim_qk,
                 head_dim_rope,
                 QUERY_GROUP_SIZE,
@@ -1173,6 +1108,7 @@ def _mla_decode_autotune_base(
                 stride_block_table,
                 min(cfg.BLOCK_N, page_size),
                 max(cfg.BLOCK_N // page_size, 1),
+                TRANS_QK,
             ),
             lambda cfg: {"occupancy": cfg.occupancy},
         )
@@ -1200,7 +1136,7 @@ def _mla_decode_autotune_base(
             v_scale,
             page_size,
             best_cfg.BLOCK_H,
-            min(best_cfg.BLOCK_N, page_size),
+            best_cfg.BLOCK_N,
             head_dim_qk,
             head_dim_rope,
             QUERY_GROUP_SIZE,
@@ -1210,6 +1146,7 @@ def _mla_decode_autotune_base(
             stride_block_table,
             min(best_cfg.BLOCK_N, page_size),
             max(best_cfg.BLOCK_N // page_size, 1),
+            TRANS_QK,
         ),
     )
     return Att_Out
@@ -1238,6 +1175,7 @@ def decode_mla_kv_paged(
     page_size = kv_cache.shape[1]
 
     QUERY_GROUP_SIZE = num_qo_heads
+    TRANS_QK = QUERY_GROUP_SIZE < 64
 
     use_autotune = is_autotune_enabled()
     if use_autotune:
@@ -1306,6 +1244,7 @@ def decode_mla_kv_paged(
             kv_len_per_split,
             HAS_LSE_OUT,
             stride_block_table,
+            TRANS_QK,
         )
 
         if should_use_split_kv:
@@ -1337,7 +1276,11 @@ def decode_mla_kv_paged(
         if BLOCK_H == 0:
             BLOCK_H = 1
 
-    BLOCK_N = page_size if page_size >= 16 else 16
+    if TRANS_QK:
+        # With TRANS_QK=True, QK GEMM M-dim = BLOCK_N. B200 WGMMA needs M≥64; use 128 for best utilization.
+        BLOCK_N = 128
+    else:
+        BLOCK_N = page_size if page_size >= 16 else 16
     LOAD_BLOCK_N = min(BLOCK_N, page_size)
     NUM_PAGES_PER_BLOCK = max(BLOCK_N // page_size, 1)
     num_head_blocks = max(QUERY_GROUP_SIZE // BLOCK_H, 1)
@@ -1416,8 +1359,6 @@ def decode_mla_kv_paged(
             block_tables_flat,
             Att_Out,
             LSE_Out_arg,
-            num_batch,
-            total_num_pages,
             k_scale,
             v_scale,
             page_size,
@@ -1432,6 +1373,7 @@ def decode_mla_kv_paged(
             stride_block_table,
             LOAD_BLOCK_N,
             NUM_PAGES_PER_BLOCK,
+            TRANS_QK,
         ),
     )
 

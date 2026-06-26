@@ -46,9 +46,14 @@ def _get_prefill_autotune_configs(page_size=None):
         )
 
     for cfg in configs:
-        if page_size is not None and cfg.BLOCK_N > page_size:
-            continue
-        yield cfg
+        if page_size is not None:
+            if cfg.BLOCK_N <= page_size:
+                yield cfg
+            elif cfg.BLOCK_N % page_size == 0 and cfg.BLOCK_N <= 8 * page_size:
+                # Allow multi-page configs where BLOCK_N spans multiple pages
+                yield cfg
+        else:
+            yield cfg
 
 
 def _load_page_prefill(
@@ -68,10 +73,14 @@ def _load_page_prefill(
     """
     Load data from paged cache via TMA for prefill attention.
 
-    For single page, issues one TMA load.
-    For multiple pages, issues N independent TMA loads and concatenates via ct.cat.
+    For single page, issues one TMA box load.
+    For multiple pages, uses ct.load_advanced_indexing with sparse_dim=0 (page dimension).
+    This generates a page-level gather TMA with tile (NUM_PAGES, LOAD_BLOCK_N, 1, BLOCK_D);
+    each gathered page contributes a (LOAD_BLOCK_N, 1, BLOCK_D) box — NUM_PAGES TMA transactions total vs
+    BLOCK_N transactions with the old token-level 2D scatter approach.
     """
     PAD_ZERO = ct.PaddingMode.ZERO
+    col_start = dim3_offset * BLOCK_D
     if NUM_PAGES == 1:
         page_id = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
         data = ct.reshape(
@@ -86,199 +95,22 @@ def _load_page_prefill(
             ),
             (LOAD_BLOCK_N, BLOCK_D),
         )
-    elif NUM_PAGES == 2:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
+    else:
+        # Multi-page: page-level gather TMA on the original 4D cache tensor.
+        # sparse_dim=0: each page_id selects a different page (base address).
+        # Dense dims: Slice(token, LOAD_BLOCK_N) for tokens, Slice(off_kv_h, 1) for head,
+        # Slice(col_start, BLOCK_D) for features.
+        # Result shape: [NUM_PAGES, LOAD_BLOCK_N, 1, BLOCK_D] -> reshape to [BLOCK_N, BLOCK_D].
+        # In multi-page case token==0 (curr_n is BLOCK_N-aligned, BLOCK_N > PAGE_SIZE).
+        p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
+        page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
+        data = ct.reshape(
+            ct.load_advanced_indexing(
                 cache,
-                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
+                (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(off_kv_h, 1), ct.Slice(col_start, BLOCK_D)),
                 padding_mode=PAD_ZERO,
             ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        data = ct.cat((d0, d1), 0)
-    elif NUM_PAGES == 4:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg2 = ct.gather(block_tables, (page_table_offset + page + 2,), padding_value=0).item()
-        d2 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg2, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg3 = ct.gather(block_tables, (page_table_offset + page + 3,), padding_value=0).item()
-        d3 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg3, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        data = ct.cat((ct.cat((d0, d1), 0), ct.cat((d2, d3), 0)), 0)
-    elif NUM_PAGES == 8:
-        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
-        d0 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
-        d1 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg1, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg2 = ct.gather(block_tables, (page_table_offset + page + 2,), padding_value=0).item()
-        d2 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg2, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg3 = ct.gather(block_tables, (page_table_offset + page + 3,), padding_value=0).item()
-        d3 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg3, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg4 = ct.gather(block_tables, (page_table_offset + page + 4,), padding_value=0).item()
-        d4 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg4, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg5 = ct.gather(block_tables, (page_table_offset + page + 5,), padding_value=0).item()
-        d5 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg5, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg6 = ct.gather(block_tables, (page_table_offset + page + 6,), padding_value=0).item()
-        d6 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg6, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        pg7 = ct.gather(block_tables, (page_table_offset + page + 7,), padding_value=0).item()
-        d7 = ct.reshape(
-            ct.load(
-                cache,
-                index=(pg7, 0, off_kv_h, dim3_offset),
-                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2, 3),
-                allow_tma=True,
-                latency=LATENCY,
-                padding_mode=PAD_ZERO,
-            ),
-            (LOAD_BLOCK_N, BLOCK_D),
-        )
-        data = ct.cat(
-            (
-                ct.cat((ct.cat((d0, d1), 0), ct.cat((d2, d3), 0)), 0),
-                ct.cat((ct.cat((d4, d5), 0), ct.cat((d6, d7), 0)), 0),
-            ),
-            0,
+            (NUM_PAGES * LOAD_BLOCK_N, BLOCK_D),
         )
     return data
 
@@ -400,21 +232,20 @@ def _prefill_attention_paged_body(
     offs_n_base = ct.arange(BLOCK_N, dtype=ct.int32)
     offs_m = start_m + ct.arange(BLOCK_M, dtype=ct.int32)
 
-    # Compute bounds for two-stage causal split
+    # Unified KV loop: iterate over all KV positions up to the causal boundary.
+    # For IS_CAUSAL, the loop covers [0, min(seq_len_kv, start_m + BLOCK_M)).
+    # The causal mask is applied conditionally only in the diagonal region
+    # (curr_n >= start_m); the fully-unmasked prefix runs without mask overhead.
+    # For non-causal, the loop covers [0, seq_len_kv) with no mask at all.
+    # curr_n >= start_m is a uniform (scalar) branch across all threads in a CTA,
+    # so there is no warp divergence.
     if IS_CAUSAL:
-        # Off-band: everything before the diagonal block (fully unmasked)
-        off_band_hi = ct.minimum(seq_len_kv, start_m)
-        # On-band: the diagonal block itself
-        on_band_lo = start_m
-        on_band_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
+        loop_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
     else:
-        # Non-causal: process everything in off-band loop
-        off_band_hi = seq_len_kv
-        on_band_lo = 0
-        on_band_hi = 0
+        loop_hi = seq_len_kv
 
-    off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
-    for iter_idx in range(off_band_iters):
+    total_iters = (loop_hi + BLOCK_N - 1) // BLOCK_N
+    for iter_idx in range(total_iters):
         curr_n = iter_idx * BLOCK_N
 
         k = _load_page_wrapper_prefill(
@@ -449,6 +280,14 @@ def _prefill_attention_paged_body(
             )
             qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
 
+        # Apply causal mask only in the diagonal region (curr_n >= start_m).
+        # IS_CAUSAL is ConstBool so the outer branch is elided at compile time.
+        if IS_CAUSAL:
+            if curr_n >= start_m:
+                offs_n = curr_n + offs_n_base
+                causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
+                qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
+
         qk_max = ct.max(qk, axis=1, keepdims=False)
         m_ij = ct.maximum(m_i, (qk_max * qk_scale))
         p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
@@ -473,72 +312,6 @@ def _prefill_attention_paged_body(
 
         acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
         m_i = m_ij
-
-    if IS_CAUSAL:
-        on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
-        for iter_idx in range(on_band_iters):
-            curr_n = on_band_lo + iter_idx * BLOCK_N
-
-            k = _load_page_wrapper_prefill(
-                curr_n,
-                key_cache,
-                block_tables,
-                page_table_offset,
-                off_kv_h,
-                PAGE_SIZE,
-                BLOCK_N,
-                BLOCK_D,
-                LOAD_BLOCK_N,
-                0,
-                3,
-            )
-
-            qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
-
-            if BLOCK_R > 0:
-                k_pe = _load_page_wrapper_prefill(
-                    curr_n,
-                    key_cache,
-                    block_tables,
-                    page_table_offset,
-                    off_kv_h,
-                    PAGE_SIZE,
-                    BLOCK_N,
-                    BLOCK_R,
-                    LOAD_BLOCK_N,
-                    BLOCK_D // BLOCK_R,
-                    3,
-                )
-                qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
-
-            offs_n = curr_n + offs_n_base
-            causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
-            qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
-
-            qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
-            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
-
-            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
-            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
-            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
-
-            v = _load_page_wrapper_prefill(
-                curr_n,
-                value_cache,
-                block_tables,
-                page_table_offset,
-                off_kv_h,
-                PAGE_SIZE,
-                BLOCK_N,
-                BLOCK_D,
-                LOAD_BLOCK_N,
-                0,
-                4,
-            )
-
-            acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
-            m_i = m_ij
 
     # Epilogue: normalize and store with RMd.APPROX
     l_i_rcp = ct.truediv(v_scale, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
@@ -787,21 +560,16 @@ def _prefill_attention_ragged_body(
     offs_n_base = ct.arange(BLOCK_N, dtype=ct.int32)
     offs_m = start_m + ct.arange(BLOCK_M, dtype=ct.int32)
 
-    # Compute bounds for two-stage causal split
+    # Unified KV loop: single loop over all KV positions up to the causal boundary.
+    # IS_CAUSAL is ConstBool — the outer branch compiles away.
+    # curr_n >= start_m is a uniform scalar branch (no warp divergence).
     if IS_CAUSAL:
-        # Off-band: everything before the diagonal block (fully unmasked)
-        off_band_hi = ct.minimum(seq_len_kv, start_m)
-        # On-band: the diagonal block itself
-        on_band_lo = start_m
-        on_band_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
+        loop_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
     else:
-        # Non-causal: process everything in off-band loop
-        off_band_hi = seq_len_kv
-        on_band_lo = 0
-        on_band_hi = 0
+        loop_hi = seq_len_kv
 
-    off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
-    for iter_idx in range(off_band_iters):
+    total_iters = (loop_hi + BLOCK_N - 1) // BLOCK_N
+    for iter_idx in range(total_iters):
         curr_n = iter_idx * BLOCK_N
 
         k_tile = ct.load(
@@ -830,6 +598,13 @@ def _prefill_attention_ragged_body(
             k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
             qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
 
+        # Apply causal mask only in the diagonal region (curr_n >= start_m).
+        if IS_CAUSAL:
+            if curr_n >= start_m:
+                offs_n = curr_n + offs_n_base
+                causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
+                qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
+
         qk_max = ct.max(qk, axis=1, keepdims=False)
         m_ij = ct.maximum(m_i, (qk_max * qk_scale))
         p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
@@ -851,65 +626,6 @@ def _prefill_attention_ragged_body(
 
         acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
         m_i = m_ij
-
-    if IS_CAUSAL:
-        on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
-        on_band_block_start = on_band_lo // BLOCK_N
-        for iter_idx in range(on_band_iters):
-            curr_n = on_band_lo + iter_idx * BLOCK_N
-            block_idx = on_band_block_start + iter_idx
-
-            k_tile = ct.load(
-                k_seq,
-                index=(block_idx, off_kv_h, 0),
-                shape=(BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-                padding_mode=PAD_ZERO,
-            )
-            k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
-
-            qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
-
-            if BLOCK_R > 0:
-                k_pe_tile = ct.load(
-                    k_seq,
-                    index=(block_idx, off_kv_h, BLOCK_D // BLOCK_R),
-                    shape=(BLOCK_N, 1, BLOCK_R),
-                    order=(0, 1, 2),
-                    allow_tma=True,
-                    latency=2,
-                    padding_mode=PAD_ZERO,
-                )
-                k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
-                qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
-
-            offs_n = curr_n + offs_n_base
-            causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
-            qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
-
-            qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
-            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
-
-            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
-            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
-            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
-
-            v_tile = ct.load(
-                v_seq,
-                index=(block_idx, off_kv_h, 0),
-                shape=(BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-                padding_mode=PAD_ZERO,
-            )
-            v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
-
-            acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
-            m_i = m_ij
 
     l_i_rcp = ct.truediv(v_scale, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc * ct.reshape(l_i_rcp, (BLOCK_M, 1))
@@ -958,9 +674,9 @@ def _prefill_attention_ragged_kernel(
 ):
     """
     Prefill attention kernel with ragged (contiguous) KV cache.
-    Optimized with two-stage causal loop split:
-    - Stage 1 (off-band): Fully unmasked region before diagonal - no causal mask needed
-    - Stage 2 (on-band): Diagonal block where causal mask matters
+    Uses a unified single loop over all KV positions; causal mask is applied
+    conditionally only in the diagonal region (curr_n >= start_m), eliminating
+    duplicated loop body and reducing register pressure.
     """
     seq_block_id = ct.bid(0)
     batch_id = ct.bid(1)
