@@ -12,6 +12,29 @@ from tilegym.backend import is_backend_available
 
 from .. import common
 
+# Base matmul input metadata: (m, n, k, offset_a, offset_b, transpose_a, transpose_b, dtype)
+_MATMUL_BASE_INPUTS = [
+    (1024, 1024, 1024, 0, 0, False, False, torch.bfloat16),
+    (1024, 1024, 1023, 0, 0, False, False, torch.bfloat16),
+    (16384, 16384, 16384, 0, 0, False, False, torch.bfloat16),
+    (8, 8, 8, 0, 0, False, False, torch.bfloat16),
+    (3072, 6144, 2720, 0, 0, False, False, torch.bfloat16),
+]
+
+
+def _build_matmul_test_op_params(backends):
+    """(backend, use_tma, static_persistent, m, n, k, offset_a, offset_b, transpose_a, transpose_b, dtype) params."""
+    params = [
+        (backend, use_tma, static_persistent, *inp)
+        for backend in backends
+        for use_tma in (True, False)
+        for static_persistent in (True, False)
+        for inp in _MATMUL_BASE_INPUTS
+        # cutile only exposes the TMA matmul kernel; its use_tma=False path is unused.
+        if not (backend == "cutile" and not use_tma)
+    ]
+    return params
+
 
 class Test_Matmul(common.PyTestCase):
     @staticmethod
@@ -65,27 +88,16 @@ class Test_Matmul(common.PyTestCase):
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
+    _test_op_params = _build_matmul_test_op_params(_backends)
 
     @pytest.mark.parametrize(
-        "m, n, k, offset_a, offset_b, dtype",
-        [
-            (1024, 1024, 1024, 0, 0, torch.bfloat16),
-            (1024, 1024, 1023, 0, 0, torch.bfloat16),
-            (16384, 16384, 16384, 0, 0, torch.bfloat16),
-            (8, 8, 8, 0, 0, torch.bfloat16),
-            (3072, 6144, 2720, 0, 0, torch.bfloat16),
+        "backend, use_tma, static_persistent, m, n, k, offset_a, offset_b, transpose_a, transpose_b, dtype",
+        _test_op_params,
+        ids=[
+            f"{p[0]}-use_tma={p[1]}-static_persistent={p[2]}-" + "-".join(str(x) for x in p[3:])
+            for p in _test_op_params
         ],
-        ids=lambda x: (
-            str(x) if isinstance(x, list) else f"{x.__module__}.{x.__name__}" if hasattr(x, "__name__") else str(x)
-        ),
     )
-    @pytest.mark.parametrize(
-        "static_persistent",
-        [True, False],
-        ids=["static_persistent=True", "static_persistent=False"],
-    )
-    @pytest.mark.parametrize("use_tma", [True, False], ids=["use_tma=True", "use_tma=False"])
-    @pytest.mark.parametrize("backend", _backends)
     def test_op(
         self,
         m,
@@ -93,6 +105,8 @@ class Test_Matmul(common.PyTestCase):
         k,
         offset_a,
         offset_b,
+        transpose_a,
+        transpose_b,
         dtype,
         static_persistent,
         use_tma,
@@ -109,15 +123,15 @@ class Test_Matmul(common.PyTestCase):
         if k == 1023:
             pytest.skip("Skip matmul due to result mismatch when cannot divide BLOCK")
         self.setUp()
-        a, b = self.prepare_data(m, n, k, False, False, offset_a, offset_b, dtype)
+        a, b = self.prepare_data(m, n, k, transpose_a, transpose_b, offset_a, offset_b, dtype)
         self.assertCorrectness(
             tilegym.ops.matmul,
             self.reference,
             {
                 "a": a,
                 "b": b,
-                "trans_a": False,
-                "trans_b": False,
+                "trans_a": transpose_a,
+                "trans_b": transpose_b,
             },
             extra_test_kwargs={
                 "static_persistent": static_persistent,
