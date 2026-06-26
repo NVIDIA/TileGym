@@ -74,6 +74,16 @@ def get_gpu_info() -> Dict[str, Any]:
     return gpu_info
 
 
+def _all_numeric(tokens: List[str]) -> bool:
+    """Return True if every token parses as a number (int/float)."""
+    for t in tokens:
+        try:
+            float(t)
+        except ValueError:
+            return False
+    return True
+
+
 def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
     """
     Parse benchmark output and extract structured data.
@@ -110,13 +120,14 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
                 i += 1
 
                 # Following lines are data rows until we hit empty line or next benchmark.
-                # Triton perf_report prints a pandas DataFrame whose rows always start
-                # with an integer RangeIndex (0, 1, 2, ...) followed by exactly one value
-                # per header column. Other stdout that may be interleaved before the blank
-                # separator -- e.g. autotuner logs like
-                # "namespace(TILE_SIZE_M=128, ...): 17.5±0.2 us" or "<n> succeeded, 0 failed"
-                # -- has a different shape, so we skip any line that does not start with an
-                # integer index and have exactly len(header_row) + 1 whitespace columns.
+                # Triton perf_report prints a pandas DataFrame whose rows are an integer
+                # RangeIndex (0, 1, 2, ...) followed by exactly one numeric value per header
+                # column (x-axis params and per-backend measurements are all numbers).
+                # Other stdout that may be interleaved before the blank separator -- e.g.
+                # autotuner logs like "namespace(TILE_SIZE_M=128, ...): 17.5±0.2 us" or
+                # "<n> succeeded, 0 failed" -- contains non-numeric tokens, so we keep only
+                # lines whose tokens are an integer index plus all-numeric columns of the
+                # expected width.
                 expected_cols = len(header_row) + 1 if header_row else 0
                 data_rows = []
                 while i < len(lines):
@@ -124,7 +135,7 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
                     if not data_line or data_line.endswith("-TFLOPS:") or data_line.endswith("-GBps:"):
                         break
                     tokens = data_line.split()
-                    if tokens and tokens[0].isdigit() and len(tokens) == expected_cols:
+                    if tokens and tokens[0].isdigit() and len(tokens) == expected_cols and _all_numeric(tokens):
                         data_rows.append(tokens)
                     i += 1
 
