@@ -320,6 +320,16 @@ jobs:
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
 
+          # PR builds read the committed durations map to balance shards. Nightly
+          # builds (main/schedule) instead record fresh per-test timings to an
+          # uploaded file, which the update-test-durations job merges and commits
+          # back so the committed map stays current as tests are added.
+          if [ "${{ needs.config.outputs.is_pr }}" == "false" ]; then
+            DURATIONS_ARGS="--durations-path /test-results/durations-${{ matrix.shard }}.json --store-durations"
+          else
+            DURATIONS_ARGS="--durations-path /workspace/tilegym/.github/.test_durations"
+          fi
+
           docker pull ${IMAGE}
           docker run --rm \
             --gpus all \
@@ -333,7 +343,7 @@ jobs:
                 /workspace/tilegym/tests/ops /workspace/tilegym/tests/suites \
                 -v -k test_op \
                 --splits ${{ strategy.job-total }} --group ${{ matrix.shard }} \
-                --durations-path /workspace/tilegym/.test_durations \
+                ${DURATIONS_ARGS} \
                 -n 8 \
                 --junitxml=/test-results/ops-results-${{ matrix.shard }}.xml \
                 --html=/test-results/ops-report-${{ matrix.shard }}.html \
@@ -344,7 +354,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ops-test-results-${{ matrix.shard }}
-          path: test-results/ops-*
+          path: |
+            test-results/ops-*
+            test-results/durations-*.json
           retention-days: 30
 
       - name: Publish test results
@@ -354,6 +366,69 @@ jobs:
           files: test-results/ops-results-${{ matrix.shard }}.xml
           check_name: Ops Test Results (shard ${{ matrix.shard }})
           comment_mode: off
+
+  update-test-durations:
+    name: update-test-durations
+    needs: [config, test-ops]
+    # Nightly only: after a successful main/scheduled run, merge the freshly
+    # recorded per-shard timings and commit the updated .github/.test_durations
+    # so shard balancing stays current as tests are added. Skipped on PRs.
+    # Reuses the same nightly test-ops run -- no extra GPU time.
+    if: |
+      needs.config.outputs.is_pr == 'false' &&
+      needs.test-ops.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: |
+            .github
+          sparse-checkout-cone-mode: false
+
+      - name: Download ops shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ops-test-results-*
+          path: ${{ github.workspace }}/ops-artifacts
+
+      - name: Merge durations into committed map
+        run: |
+          python3 - <<'PY'
+          import json, glob
+          merged = {}
+          files = sorted(glob.glob("ops-artifacts/*/durations-*.json"))
+          for f in files:
+              try:
+                  merged.update(json.load(open(f)))
+              except Exception as e:
+                  print(f"skip {f}: {e}")
+          print(f"merged {len(merged)} test durations from {len(files)} shard file(s)")
+          if not merged:
+              print("No durations collected; nothing to update.")
+              raise SystemExit(0)
+          merged = {k: merged[k] for k in sorted(merged)}
+          with open(".github/.test_durations", "w") as fh:
+              json.dump(merged, fh, indent=0)
+              fh.write("\n")
+          PY
+
+      - name: Commit updated durations (if changed)
+        continue-on-error: true
+        run: |
+          if git diff --quiet -- .github/.test_durations; then
+            echo "No change to .github/.test_durations"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/.test_durations
+          git commit -m "ci: refresh .test_durations from nightly run [skip ci]"
+          # Push may be rejected if main is protected; do not fail the pipeline.
+          git push origin HEAD:main || echo "::warning::Could not push refreshed .test_durations (branch protection?)."
 
   test-benchmark:
     name: test-benchmark (shard ${{ matrix.shard }})
