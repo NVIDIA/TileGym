@@ -462,10 +462,33 @@ jobs:
           git commit -m "ci: refresh .test_durations (ops test set changed: +${{ steps.refresh.outputs.added }}/-${{ steps.refresh.outputs.removed }})"
           # Rolling branch: force-push so an existing PR updates in place.
           git push -f origin "${BRANCH}"
+          # Build the PR body from the repo's pull_request_template.md, filling in
+          # the Description while preserving the CI Configuration block and Checklist.
+          {
+            echo "## Description"
+            echo "Automated refresh of \`.github/.test_durations\` (pytest-split shard balancing for test-ops)."
+            echo ""
+            echo "Triggered because the **ops test set changed** in the nightly run:"
+            echo "**+${{ steps.refresh.outputs.added }}** test(s) added, **-${{ steps.refresh.outputs.removed }}** removed."
+            echo "Pure timing drift does not trigger this PR. Review and merge to keep the shards balanced."
+            echo ""
+            echo "## CI Configuration"
+            echo '```yaml'
+            echo "config:"
+            echo "  build: false"
+            echo "  # valid options are \"ops\", \"benchmark\", and \"sanity\""
+            echo "  test: []"
+            echo '```'
+            echo ""
+            echo "## Checklist"
+            echo "- [x] Code formatted and imports sorted via repo specifications (\`./format.sh\`) — N/A, data-only change"
+            echo "- [x] Documentation updated (if needed) — N/A"
+            echo "- [ ] CI configuration reviewed"
+          } > pr_body.md
           if [ -z "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')" ]; then
             gh pr create --base main --head "${BRANCH}" \
               --title "ci: refresh pytest-split .test_durations" \
-              --body "Automated refresh of \`.github/.test_durations\` triggered because the **ops test set changed** (+${{ steps.refresh.outputs.added }} / -${{ steps.refresh.outputs.removed }}) in the nightly run. Timing-only drift does not trigger this. Please review and merge to keep shard balancing current."
+              --body-file pr_body.md
           else
             echo "Existing PR for ${BRANCH} updated in place."
           fi
