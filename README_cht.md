@@ -31,7 +31,7 @@ TileGym 是一個 CUDA Tile 核心函式庫，提供了豐富的基於 Tile 的 
 
 ### 前置需求
 
-> **GPU 支援**：TileGym 需要 **CUDA 13.1+** 和 **Blackwell GPU**（如 B200、RTX 5080、RTX 5090）。**NVIDIA Ampere**（如 A100）也受支援，但需要 **CUDA 13.2+**。所有已發布的 cuTile 核心均在兩種架構上經過驗證。請從 [NVIDIA CUDA 下載頁面](https://developer.nvidia.com/cuda-downloads) 下載 CUDA。
+> **GPU 支援**：TileGym 需要 **CUDA 13.1+** 和 **Blackwell GPU**（如 B200、RTX 5080、RTX 5090）。**NVIDIA Ampere**（如 A100）也受支援，但需要 **CUDA 13.2+**。所有已發布的核心均在兩種架構上經過驗證。請從 [NVIDIA CUDA 下載頁面](https://developer.nvidia.com/cuda-downloads) 下載 CUDA。
 
 - PyTorch（版本 2.9.1 或相容版本）
 - **[CUDA 13.1+](https://developer.nvidia.com/cuda-downloads)**（必需 - TileGym 僅在 CUDA 13.1+ 上建構和測試）
@@ -80,6 +80,24 @@ pip install .[tileiras]   # 或者: pip install .  (如果您已有系統級 til
 所有執行時期依賴均宣告於 [`requirements.txt`](requirements.txt) 中，透過 `pip install tilegym` 和 `pip install .` 都會自動安裝。
 
 我們還提供了 Dockerfile，您可以參考 [modeling/transformers/README.md](modeling/transformers/README.md)。
+
+### 後端
+
+TileGym 為以下後端提供核心，每個後端的核心位於 `src/tilegym/ops/` 下各自的目錄中：
+
+- **cuTile**（預設）—— [`src/tilegym/ops/cutile`](src/tilegym/ops/cutile)，更多詳情請參閱 [cutile-python](https://github.com/nvidia/cutile-python)。
+- **CUDA Tile C++** —— [`src/tilegym/ops/tilecpp`](src/tilegym/ops/tilecpp)，更多詳情請參閱 [README.tilecpp.md](README.tilecpp.md)。
+- **Triton CUDA Tile IR** —— [`src/tilegym/ops/triton`](src/tilegym/ops/triton)，更多詳情請參閱 [Triton-to-tile-IR](https://github.com/triton-lang/Triton-to-tile-IR)。
+
+若要使用 Triton CUDA Tile IR 後端，請將其 wheel 套件安裝到一個獨立的目錄中，並在執行時透過 `ENABLE_TILE=1` 選擇該後端。[發布頁面](https://github.com/triton-lang/Triton-to-tile-IR/releases) 上提供了適用於 CPython 3.12 和 3.13 的 wheel 套件：
+
+```bash
+# 安裝到一個獨立的目錄，與預設環境隔離
+pip install --target /opt/nvtriton <nvtriton-wheel-for-your-python>.whl
+
+# 在執行時選擇 Triton CUDA Tile IR 後端
+PYTHONPATH=/opt/nvtriton ENABLE_TILE=1 python your_script.py
+```
 
 ## 快速開始
 

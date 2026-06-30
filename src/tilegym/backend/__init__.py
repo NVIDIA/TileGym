@@ -13,6 +13,7 @@ from .dispatcher import print_registry_info
 from .dispatcher import register_impl
 from .selector import assert_backend_available
 from .selector import get_available_backends
+from .selector import get_available_triton_backend
 from .selector import get_current_backend
 from .selector import is_backend_available
 from .selector import set_backend
@@ -50,6 +51,7 @@ __all__ = [
     "set_backend",
     "is_backend_available",
     "assert_backend_available",
+    "get_available_triton_backend",
     # Backend dispatcher
     "dispatch",
     "register_impl",

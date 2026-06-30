@@ -26,6 +26,7 @@ from tilegym.backend import get_current_backend
 
 @dispatch(
     "get_apply_rope_func",
+    fallback_backend="triton",
 )
 def get_apply_rope_func(model: str = "llama"):
     """
@@ -42,6 +43,7 @@ def get_apply_rope_func(model: str = "llama"):
 
 @dispatch(
     "apply_rope_base",
+    fallback_backend="triton",
 )
 def apply_rope_base(
     q: torch.Tensor,
@@ -131,6 +133,7 @@ def get_fused_swiglu_module():
 
 @dispatch(
     "rms_norm",
+    fallback_backend="triton",
 )
 def rms_norm(
     input: torch.Tensor,
@@ -192,6 +195,7 @@ def silu_and_mul(
 
 @dispatch(
     "dropout",
+    fallback_backend="triton",
 )
 def dropout(
     x: torch.Tensor,
@@ -242,6 +246,7 @@ def softmax(
 
 @dispatch(
     "layer_norm_legacy",
+    fallback_backend="triton",
 )
 def layer_norm_legacy(
     x: torch.Tensor,
@@ -272,6 +277,7 @@ def layer_norm_legacy(
 
 @dispatch(
     "persistent_layer_norm",
+    fallback_backend="triton",
 )
 def persistent_layer_norm(
     input: torch.Tensor,

@@ -31,7 +31,7 @@ Ce dépôt vise à fournir des tutoriels et des exemples de noyaux utiles pour l
 
 ### Prérequis
 
-> **Support GPU** : TileGym nécessite **CUDA 13.1+** et un **GPU Blackwell** (ex. B200, RTX 5080, RTX 5090). Les **GPU NVIDIA Ampere** (ex. A100) sont également supportés avec **CUDA 13.2+**. Tous les noyaux cuTile publiés sont validés sur les deux architectures. Téléchargez CUDA depuis [Téléchargements NVIDIA CUDA](https://developer.nvidia.com/cuda-downloads).
+> **Support GPU** : TileGym nécessite **CUDA 13.1+** et un **GPU Blackwell** (ex. B200, RTX 5080, RTX 5090). Les **GPU NVIDIA Ampere** (ex. A100) sont également supportés avec **CUDA 13.2+**. Tous les noyaux publiés sont validés sur les deux architectures. Téléchargez CUDA depuis [Téléchargements NVIDIA CUDA](https://developer.nvidia.com/cuda-downloads).
 
 - PyTorch (version 2.9.1 ou compatible)
 - **[CUDA 13.1+](https://developer.nvidia.com/cuda-downloads)** (Requis - TileGym est construit et testé exclusivement sur CUDA 13.1+)
@@ -80,6 +80,24 @@ Pour le mode éditable (développement), utilisez `pip install -e .` ou `pip ins
 Toutes les dépendances d'exécution sont déclarées dans [`requirements.txt`](requirements.txt) et sont installées automatiquement par `pip install tilegym` et `pip install .`.
 
 Nous fournissons également un Dockerfile, vous pouvez consulter [modeling/transformers/README.md](modeling/transformers/README.md).
+
+### Backends
+
+TileGym fournit des noyaux pour les backends suivants, chacun dans son propre répertoire sous `src/tilegym/ops/` :
+
+- **cuTile** (par défaut) — [`src/tilegym/ops/cutile`](src/tilegym/ops/cutile), voir plus de détails dans [cutile-python](https://github.com/nvidia/cutile-python).
+- **CUDA Tile C++** — [`src/tilegym/ops/tilecpp`](src/tilegym/ops/tilecpp), voir plus de détails dans [README.tilecpp.md](README.tilecpp.md).
+- **Triton CUDA Tile IR** — [`src/tilegym/ops/triton`](src/tilegym/ops/triton), voir plus de détails dans [Triton-to-tile-IR](https://github.com/triton-lang/Triton-to-tile-IR).
+
+Pour utiliser le backend Triton CUDA Tile IR, installez son wheel dans un répertoire séparé et sélectionnez-le à l'exécution avec `ENABLE_TILE=1`. Des wheels pour CPython 3.12 et 3.13 sont disponibles sur la [page des versions](https://github.com/triton-lang/Triton-to-tile-IR/releases) :
+
+```bash
+# Installez dans un répertoire séparé, à l'écart de l'environnement par défaut
+pip install --target /opt/nvtriton <nvtriton-wheel-for-your-python>.whl
+
+# Sélectionnez le backend Triton CUDA Tile IR à l'exécution
+PYTHONPATH=/opt/nvtriton ENABLE_TILE=1 python your_script.py
+```
 
 ## Démarrage rapide
 
