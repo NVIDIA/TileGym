@@ -29,6 +29,7 @@ register_impl("layer_norm_legacy", "torch")(reference_persistent_layer_norm)
 # makes this benchmark run for tens of minutes. tilecpp remains covered by the
 # ops tests.
 ALL_BACKENDS = [
+    ("triton", "Triton", ("red", "-")),
     ("cutile", "CuTile", ("blue", "-")) if is_backend_available("cutile") else None,
     ("torch", "PyTorch", ("green", "-")),
 ]
