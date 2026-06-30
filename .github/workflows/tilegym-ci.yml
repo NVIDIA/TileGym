@@ -314,6 +314,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify nv-triton (TileIR) backend is active
+        run: |
+          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
+
+          # Fail loudly if ENABLE_TILE=1 + PYTHONPATH=/opt/nvtriton did NOT actually
+          # activate the nv-triton (TileIR) backend (e.g. a silent fallback to the
+          # torch-bundled Triton). is_nvt_available() requires triton.backends.tileir,
+          # which only the nv-triton package provides.
+          docker pull ${IMAGE}
+          docker run --rm \
+            --gpus all \
+            -e ENABLE_TILE=1 \
+            -e PYTHONPATH=/opt/nvtriton \
+            -w /workspace/tilegym/modeling/transformers \
+            ${IMAGE} \
+            uv run --locked --no-sync python -c "import triton; from tilegym.backend.selector import is_nvt_available, get_available_triton_backend; assert is_nvt_available(), 'ENABLE_TILE=1 but nv-triton (TileIR) is NOT active; triton=' + triton.__file__; print('nv-triton (TileIR) active: triton=' + triton.__file__ + ', get_available_triton_backend=' + get_available_triton_backend())"
+
       - name: Pull and run ops tests (shard ${{ matrix.shard }})
         timeout-minutes: 50
         run: |
@@ -334,6 +352,8 @@ jobs:
           docker run --rm \
             --gpus all \
             -e DISABLE_AUTOTUNE=1 \
+            -e ENABLE_TILE=1 \
+            -e PYTHONPATH=/opt/nvtriton \
             -e PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8 \
             -v ${{ github.workspace }}/tests:/workspace/tilegym/tests \
             -v ${{ github.workspace }}/test-results:/test-results \
@@ -344,7 +364,7 @@ jobs:
                 -v -k test_op \
                 --splits ${{ strategy.job-total }} --group ${{ matrix.shard }} \
                 ${DURATIONS_ARGS} \
-                -n 8 \
+                -n 4 \
                 --junitxml=/test-results/ops-results-${{ matrix.shard }}.xml \
                 --html=/test-results/ops-report-${{ matrix.shard }}.html \
                 --self-contained-html

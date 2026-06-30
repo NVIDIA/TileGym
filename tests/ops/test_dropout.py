@@ -16,7 +16,7 @@ class Test_Dropout(common.PyTestCase):
     def reference(x, p, training=True, inplace=False):
         return torch.nn.functional.dropout(x, p, training, inplace)
 
-    _backends = ["cutile"]
+    _backends = ["cutile", "triton"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]

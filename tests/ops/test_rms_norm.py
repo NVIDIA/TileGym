@@ -30,7 +30,7 @@ class Test_RMSNorm(common.PyTestCase):
 
         return weight * input
 
-    _backends = ["cutile"]
+    _backends = ["cutile", "triton"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]

@@ -41,3 +41,11 @@ WORKDIR /workspace/tilegym/modeling/transformers
 
 RUN uv sync --locked --extra dev && \
     mkdir -p /workspace/.cache/huggingface/hub /logs
+
+# Install the prebuilt Triton TileIR backend wheel
+# (github.com/triton-lang/Triton-to-tile-IR) side-by-side at /opt/nvtriton.
+# It is selected only at test time via PYTHONPATH=/opt/nvtriton + ENABLE_TILE=1,
+# so the default environment keeps the upstream Triton that torch depends on.
+# The wheel is built for CPython 3.12, matching the Ubuntu 24.04 interpreter.
+ARG NVTRITON_WHEEL=https://github.com/triton-lang/Triton-to-tile-IR/releases/download/cuda_tile_v13.3.0/nvtriton-3.6.0-cp312-cp312-linux_x86_64.whl
+RUN uv pip install --no-deps --target /opt/nvtriton "${NVTRITON_WHEEL}"

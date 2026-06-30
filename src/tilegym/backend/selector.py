@@ -16,6 +16,17 @@ from tilegym.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+def is_nvt_available():
+    try:
+        import triton.backends.tileir
+
+        tileir_exists = True
+    except ImportError:
+        tileir_exists = False
+    return tileir_exists and int(os.environ.get("ENABLE_TILE", -1)) == 1
+
+
 try:
     import cuda.tile as ct
 
@@ -134,6 +145,7 @@ _CURRENT_BACKENDS: str = "cutile"
 def _check_backends_availability() -> Dict[str, bool]:
     availability = {
         "cutile": is_cutile_available(),
+        "triton": True,
         "tilecpp": _TILECPP_MODULE_IMPORTABLE,
     }
     return availability
@@ -161,6 +173,12 @@ def _load_from_environment():
 
 def get_available_backends() -> Set[str]:
     return _AVAILABLE_BACKENDS
+
+
+def get_available_triton_backend() -> str:
+    if is_nvt_available():
+        return "nvt"
+    return "oait"
 
 
 def get_current_backend() -> str:
