@@ -48,6 +48,7 @@ register_impl("rms_norm", "torch")(reference_rms_norm)
 # makes this benchmark run for tens of minutes. tilecpp remains covered by the
 # ops tests.
 ALL_CONFIGS = [
+    ("triton", None, "Triton", ("orange", "-")),
     ("cutile", "static_persistent", "CuTile static persistent", ("purple", "-")),
     ("cutile", "multi_wave_reload", "CuTile multi wave reload", ("blue", "-")),
     ("cutile", "multi_wave_cached", "CuTile multi wave cached", ("red", "--")),
