@@ -44,7 +44,7 @@ class Test_RoPE(common.PyTestCase):
         k_rot = (k_rot * cos) + (Test_RoPE.rotate_half(k_rot) * sin)
         return torch.cat([q_rot, q_pass], dim=-1), torch.cat([k_rot, k_pass], dim=-1)
 
-    _backends = ["cutile"]
+    _backends = ["cutile", "triton"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
     _perf_backends = _backends + ["pytorch"]
