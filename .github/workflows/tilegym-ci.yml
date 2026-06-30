@@ -451,6 +451,9 @@ jobs:
 
       - name: Open / update PR with refreshed durations
         if: steps.refresh.outputs.changed == 'true'
+        # Best-effort: a refresh-PR hiccup (e.g. PR-creation policy) must never
+        # turn the nightly run red. The committed map stays valid until refreshed.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
