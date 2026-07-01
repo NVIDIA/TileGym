@@ -76,7 +76,8 @@ def _launch_mla_decoding_kernel(
     kernel, _, _ = kernel_wrapper.get_kernel(
         dtype=dtype,
         template_params=[BLOCK_D, BLOCK_H, BLOCK_N, BLOCK_KPE],
-        signature="{T}*, {T}*, {T}*, {T}*, {T}*, float*, float, int, int, int, int, int, int, int, int, int, int, int, int, int",
+        signature="{T}*, {T}*, {T}*, {T}*, {T}*, float*, float, "
+        "long long, int, long long, int, long long, int, long long, int, long long, int, int, int, int",
     )
 
     # Calculate grid
@@ -95,15 +96,15 @@ def _launch_mla_decoding_kernel(
             np.uint64(out.data_ptr()),
             np.uint64(l.data_ptr()),
             np.float32(sm_scale),
-            np.int32(q.stride(0)),
+            np.int64(q.stride(0)),
             np.int32(q.stride(1)),
-            np.int32(qpe.stride(0)),
+            np.int64(qpe.stride(0)),
             np.int32(qpe.stride(1)),
-            np.int32(kv.stride(0)),
+            np.int64(kv.stride(0)),
             np.int32(kv.stride(1)),
-            np.int32(kpe.stride(0)),
+            np.int64(kpe.stride(0)),
             np.int32(kpe.stride(1)),
-            np.int32(out.stride(0)),
+            np.int64(out.stride(0)),
             np.int32(out.stride(1)),
             np.int32(B),
             np.int32(num_head),
