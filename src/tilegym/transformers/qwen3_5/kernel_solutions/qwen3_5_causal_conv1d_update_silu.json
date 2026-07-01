@@ -17,7 +17,8 @@
     "entry_point": "src/tilegym/transformers/qwen3_5/kernels/causal_conv1d_update_silu.py::causal_conv1d_update_silu_cutile",
     "language": "cuda-tile",
     "target_hardware": [
-      "NVIDIA_B200"
+      "NVIDIA_B200",
+      "NVIDIA_GB300"
     ]
   }
 }

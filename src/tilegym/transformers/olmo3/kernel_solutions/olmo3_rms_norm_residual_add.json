@@ -17,7 +17,8 @@
     "entry_point": "src/tilegym/transformers/olmo3/kernels/rms_norm_residual_add.py::rms_norm_residual_add_cutile",
     "language": "cuda-tile",
     "target_hardware": [
-      "NVIDIA_B200"
+      "NVIDIA_B200",
+      "NVIDIA_GB300"
     ]
   }
 }

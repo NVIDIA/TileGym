@@ -11,9 +11,9 @@ The metadata files live under transformer model submodules:
 - ``kernels/*.py`` for reusable kernel implementations referenced by Solution
   source paths.
 
-This module intentionally avoids a flashinfer-bench runtime dependency. It
-validates the fields needed for in-repo inventory and can materialize
-path-only sources into content-bearing Solution objects for external export.
+This module intentionally avoids importing flashinfer-bench at module import
+time. Schema validation uses FlashInfer-Bench lazily when called, and Ocean
+keeps a few repo-local checks around source permalinks and path-only sources.
 """
 
 from __future__ import annotations
@@ -25,24 +25,14 @@ from pathlib import Path
 from typing import Any
 from typing import Iterator
 
+from tilegym.transformers.inventory_common import SourceContractError
+from tilegym.transformers.inventory_common import resolve_repo_relative_path
+from tilegym.transformers.inventory_common import validate_reference_source_contract
+
 DEFINITION_SCHEMA_URL = (
     "https://github.com/flashinfer-ai/flashinfer-bench/blob/main/docs/flashinfer-trace/definition.mdx"
 )
 SOLUTION_SCHEMA_URL = "https://github.com/flashinfer-ai/flashinfer-bench/blob/main/docs/flashinfer-trace/solution.mdx"
-
-_VALID_DTYPES = {
-    "float32",
-    "float16",
-    "bfloat16",
-    "float8_e4m3fn",
-    "float8_e5m2",
-    "float4_e2m1",
-    "int64",
-    "int32",
-    "int16",
-    "int8",
-    "bool",
-}
 
 
 class KernelInventoryError(ValueError):
@@ -74,35 +64,51 @@ def iter_kernel_python_paths(root: str | Path) -> Iterator[Path]:
 
 
 def validate_definition(definition: dict[str, Any]) -> None:
-    """Validate required FlashInfer Definition fields used by Ocean."""
+    """Validate a transformer kernel Definition with FIB and Ocean checks."""
     _require_mapping(definition, "Definition")
-    _require_keys(definition, ["name", "op_type", "axes", "inputs", "outputs", "reference"], "Definition")
-    _require_str(definition, "name", "Definition")
-    _require_str(definition, "op_type", "Definition")
-    _validate_optional_string_array(definition, "tags", "Definition")
-    _validate_optional_string_array(definition, "constraints", "Definition")
-    _validate_axes(definition["axes"])
-    _validate_tensor_specs(definition["inputs"], "Definition.inputs")
-    _validate_tensor_specs(definition["outputs"], "Definition.outputs")
-    _require_str(definition, "reference", "Definition")
-    _validate_reference_run(definition["reference"])
+    try:
+        from tilegym.transformers.inventory_generation import validate_ocean_definition_model
+
+        validate_ocean_definition_model(definition)
+    except ImportError as exc:
+        raise KernelInventoryError(
+            "flashinfer-bench is required to validate transformer kernel Definitions. "
+            "Install the tilegym-hf-bench dev environment with `uv sync --extra dev` "
+            "from modeling/transformers."
+        ) from exc
+    except Exception as exc:
+        raise KernelInventoryError(f"Definition schema invalid: {exc}") from exc
+
+    _validate_reference_run(definition["reference"], list(definition["inputs"]))
 
 
 def validate_solution(solution: dict[str, Any], repo_root: str | Path | None = None) -> None:
-    """Validate required Solution fields and optional source path existence."""
+    """Validate a transformer kernel Solution with FIB and Ocean checks."""
     _require_mapping(solution, "Solution")
-    _require_keys(solution, ["name", "definition", "author", "spec", "sources"], "Solution")
-    _require_str(solution, "name", "Solution")
-    _require_str(solution, "definition", "Solution")
-    _require_str(solution, "author", "Solution")
-    _validate_solution_spec(solution["spec"])
     source_paths = normalize_solution_source_paths(solution)
     if repo_root is not None:
         root = Path(repo_root).resolve()
         for source_path in source_paths:
-            path = _resolve_repo_relative_path(root, source_path, "Solution source path")
+            path = _resolve_inventory_path(root, source_path, "Solution source path")
             if not path.is_file():
                 raise KernelInventoryError(f"Solution source path does not exist: {source_path}")
+        spec = solution.get("spec")
+        if isinstance(spec, dict) and isinstance(spec.get("entry_point"), str) and "::" in spec["entry_point"]:
+            entry_file = spec["entry_point"].split("::", 1)[0]
+            _resolve_inventory_path(root, entry_file, "Solution entry point path")
+
+    try:
+        from tilegym.transformers.inventory_generation import validate_ocean_solution_model
+
+        validate_ocean_solution_model(solution, repo_root)
+    except ImportError as exc:
+        raise KernelInventoryError(
+            "flashinfer-bench is required to validate transformer kernel Solutions. "
+            "Install the tilegym-hf-bench dev environment with `uv sync --extra dev` "
+            "from modeling/transformers."
+        ) from exc
+    except Exception as exc:
+        raise KernelInventoryError(f"Solution schema invalid: {exc}") from exc
 
 
 def validate_solution_entry_point(solution: dict[str, Any], repo_root: str | Path) -> None:
@@ -113,7 +119,7 @@ def validate_solution_entry_point(solution: dict[str, Any], repo_root: str | Pat
     if not file_path.endswith(".py"):
         return
     root = Path(repo_root).resolve()
-    source_path = _resolve_repo_relative_path(root, file_path, "Solution entry point path")
+    source_path = _resolve_inventory_path(root, file_path, "Solution entry point path")
     if not source_path.is_file():
         raise KernelInventoryError(f"Solution entry point path does not exist: {file_path}")
     module_ast = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
@@ -164,16 +170,18 @@ def materialize_solution_sources(solution: dict[str, Any], repo_root: str | Path
     materialized["sources"] = [
         {
             "path": source_path,
-            "content": _resolve_repo_relative_path(root, source_path, "Solution source path").read_text(
-                encoding="utf-8"
-            ),
+            "content": _resolve_inventory_path(root, source_path, "Solution source path").read_text(encoding="utf-8"),
         }
         for source_path in normalize_solution_source_paths(solution)
     ]
     return materialized
 
 
-def _validate_reference_run(reference: str) -> None:
+def _validate_reference_run(reference: str, input_names: list[str]) -> None:
+    try:
+        validate_reference_source_contract(reference)
+    except SourceContractError as exc:
+        raise KernelInventoryError(str(exc)) from exc
     try:
         module_ast = ast.parse(reference, filename="<Definition.reference>")
     except SyntaxError as exc:
@@ -186,95 +194,23 @@ def _validate_reference_run(reference: str) -> None:
     ]
     if len(run_nodes) != 1:
         raise KernelInventoryError("Definition.reference must contain exactly one global run function")
+    run_args = run_nodes[0].args
+    if run_args.vararg is not None or run_args.kwarg is not None:
+        raise KernelInventoryError("Definition.reference run function must not use *args or **kwargs")
+    arg_names = [arg.arg for arg in (*run_args.posonlyargs, *run_args.args, *run_args.kwonlyargs)]
+    if arg_names != input_names:
+        raise KernelInventoryError(
+            f"Definition.reference run arguments {arg_names} must match Definition.inputs {input_names}"
+        )
 
 
-def _resolve_repo_relative_path(root: Path, path: str, label: str) -> Path:
-    raw_path = Path(path)
-    if not path or raw_path.is_absolute() or ".." in raw_path.parts:
-        raise KernelInventoryError(f"{label} must be a repo-relative path: {path}")
-
-    resolved = (root / raw_path).resolve()
+def _resolve_inventory_path(root: Path, path: str, label: str) -> Path:
     try:
-        resolved.relative_to(root)
+        return resolve_repo_relative_path(root, path, label)
     except ValueError as exc:
-        raise KernelInventoryError(f"{label} must stay inside repo root: {path}") from exc
-    return resolved
+        raise KernelInventoryError(str(exc)) from exc
 
 
 def _require_mapping(value: Any, label: str) -> None:
     if not isinstance(value, dict):
         raise KernelInventoryError(f"{label} must be an object")
-
-
-def _require_keys(data: dict[str, Any], keys: list[str], label: str) -> None:
-    missing = [key for key in keys if key not in data]
-    if missing:
-        raise KernelInventoryError(f"{label} missing required fields: {', '.join(missing)}")
-
-
-def _require_str(data: dict[str, Any], key: str, label: str) -> None:
-    if not isinstance(data.get(key), str) or not data[key]:
-        raise KernelInventoryError(f"{label}.{key} must be a non-empty string")
-
-
-def _validate_optional_string_array(data: dict[str, Any], key: str, label: str) -> None:
-    if key not in data or data[key] is None:
-        return
-    if not isinstance(data[key], list) or not all(isinstance(item, str) for item in data[key]):
-        raise KernelInventoryError(f"{label}.{key} must be an array of strings")
-
-
-def _validate_axes(axes: Any) -> None:
-    _require_mapping(axes, "Definition.axes")
-    if not axes:
-        raise KernelInventoryError("Definition.axes must not be empty")
-    for name, axis in axes.items():
-        if not isinstance(name, str) or not name:
-            raise KernelInventoryError("Definition.axes keys must be non-empty strings")
-        _require_mapping(axis, f"Definition.axes.{name}")
-        axis_type = axis.get("type")
-        if axis_type == "const":
-            if not isinstance(axis.get("value"), int):
-                raise KernelInventoryError(f"Definition.axes.{name}.value must be an integer")
-        elif axis_type != "var":
-            raise KernelInventoryError(f"Definition.axes.{name}.type must be 'const' or 'var'")
-        if "description" in axis and not isinstance(axis["description"], str):
-            raise KernelInventoryError(f"Definition.axes.{name}.description must be a string")
-
-
-def _validate_tensor_specs(tensors: Any, label: str) -> None:
-    _require_mapping(tensors, label)
-    if not tensors:
-        raise KernelInventoryError(f"{label} must not be empty")
-    for name, spec in tensors.items():
-        if not isinstance(name, str) or not name:
-            raise KernelInventoryError(f"{label} keys must be non-empty strings")
-        _require_mapping(spec, f"{label}.{name}")
-        _require_keys(spec, ["shape", "dtype"], f"{label}.{name}")
-        shape = spec["shape"]
-        if shape is not None and (
-            not isinstance(shape, list) or not all(isinstance(axis_name, str) for axis_name in shape)
-        ):
-            raise KernelInventoryError(f"{label}.{name}.shape must be null or an array of strings")
-        dtype = spec["dtype"]
-        if dtype not in _VALID_DTYPES:
-            raise KernelInventoryError(f"{label}.{name}.dtype is unsupported: {dtype}")
-
-
-def _validate_solution_spec(spec: Any) -> None:
-    _require_mapping(spec, "Solution.spec")
-    _require_keys(spec, ["language", "target_hardware", "entry_point"], "Solution.spec")
-    _require_str(spec, "language", "Solution.spec")
-    _require_str(spec, "entry_point", "Solution.spec")
-    if "::" not in spec["entry_point"]:
-        raise KernelInventoryError("Solution.spec.entry_point must use file_path::function_name")
-    if not isinstance(spec["target_hardware"], list) or not all(
-        isinstance(item, str) for item in spec["target_hardware"]
-    ):
-        raise KernelInventoryError("Solution.spec.target_hardware must be an array of strings")
-    if "destination_passing_style" in spec and not isinstance(spec["destination_passing_style"], bool):
-        raise KernelInventoryError("Solution.spec.destination_passing_style must be a bool")
-    if "dependencies" in spec and (
-        not isinstance(spec["dependencies"], list) or not all(isinstance(item, str) for item in spec["dependencies"])
-    ):
-        raise KernelInventoryError("Solution.spec.dependencies must be an array of strings")

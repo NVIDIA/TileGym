@@ -33,9 +33,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "flashinfer-bench==0.1.2",
   "pytest-html",
   "pytest-split",
   "pytest-xdist",
+  "ruff",
 ]
 eval = [
   "lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@1dd931087362abba74e0375c8c631295559f48b2",
