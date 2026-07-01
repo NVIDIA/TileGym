@@ -17,7 +17,8 @@
     "entry_point": "src/tilegym/transformers/qwen3_5/kernels/silu_and_mul_separate.py::silu_and_mul_separate_cutile",
     "language": "cuda-tile",
     "target_hardware": [
-      "NVIDIA_B200"
+      "NVIDIA_B200",
+      "NVIDIA_GB300"
     ]
   }
 }
