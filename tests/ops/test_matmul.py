@@ -187,6 +187,8 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip("32768x32768 matmul takes too long on sm121")
         if torch.cuda.get_device_capability() == (12, 0) and m == 32768:
             pytest.skip("Skip OOM on B20X (sm120): 32768³ matmul exceeds 32 GiB VRAM")
+        if torch.cuda.get_device_capability()[0] == 8 and m == 32768:
+            pytest.skip("Skip 32768x32768 matmul on A100 (sm80) due to OOM")
         if dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip due to sm80 not support fp8 type")
         if backend == "cutile" and not static_persistent and transpose_a:

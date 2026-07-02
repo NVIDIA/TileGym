@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 import math
-import os
 from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from types import SimpleNamespace
 import cuda.tile as ct
 import torch
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.ops.cutile.utils import next_power_of_2
 
@@ -530,7 +530,7 @@ class _RecurrentGatedDeltaRuleCuTile(torch.autograd.Function):
         BLOCK_K = next_power_of_2(QK)
         scale = 1.0 / math.sqrt(QK)
 
-        if os.environ.get("DISABLE_AUTOTUNE", "0") == "1":
+        if is_autotune_disabled():
             if T == 1 and 32 <= V:
                 best_kernel = _recurrent_gated_delta_rule_fwd_kernel_decode_vstream
                 best_config = SimpleNamespace(

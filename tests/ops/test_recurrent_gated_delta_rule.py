@@ -109,7 +109,8 @@ class Test_RecurrentGatedDeltaRule(common.PyTestCase):
         _SHAPE_CONFIGS,
     )
     @pytest.mark.parametrize("backend", _backends)
-    def test_op(self, B, T, H, K, V, use_init, out_final, use_l2, dtype, backend, arch):
+    def test_op(self, B, T, H, K, V, use_init, out_final, use_l2, dtype, backend, arch, monkeypatch):
+        monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "1")
         if not tilegym.is_backend_available(backend):
             pytest.skip(f"Backend {backend} is not available")
         try:
