@@ -334,6 +334,35 @@ def _ragged_block_scaled_bmm_autotune_configs():
                         num_ctas=1,
                         occupancy=occupancy,
                     )
+    elif gpu_capability[0] == 10:
+        # SM100 tuning space:
+        # - Keep large-M non-swapped paths (better arithmetic intensity)
+        # - Add swapped small-M paths (better utilization for sparse/ragged tails)
+        # - Explore occupancy=2 variants aggressively to hide ragged scheduling overhead
+        for BM, BN, swap_ab, GROUP_M, num_ctas in [
+            (256, 128, False, 8, 2),
+            (256, 128, False, 8, 1),
+            (128, 128, False, 8, 1),
+            (128, 128, False, 8, 2),
+            (128, 256, False, 4, 1),
+            (64, 128, False, 8, 1),
+            (64, 128, True, 4, 1),
+            (32, 128, True, 4, 1),
+            (64, 256, True, 2, 1),
+            (32, 256, True, 2, 1),
+            (16, 256, True, 2, 1),
+        ]:
+            for BK in [128]:
+                for occupancy in [1, 2]:
+                    yield SimpleNamespace(
+                        BLOCK_M=BM,
+                        BLOCK_N=BN,
+                        BLOCK_K=BK,
+                        GROUP_SIZE_M=GROUP_M,
+                        swap_ab=swap_ab,
+                        num_ctas=num_ctas,
+                        occupancy=occupancy,
+                    )
     elif gpu_capability == (9, 0):
         for BM, BN, swap_ab in [
             (256, 128, False),
@@ -379,6 +408,7 @@ def _get_default_kernel_configs(total_m, Q, VEC_SIZE):
     """
     gpu_capability = torch.cuda.get_device_capability()
     is_large_m = _is_large_m(total_m, Q)
+    average_m = total_m / Q if Q > 0 else 0
 
     if gpu_capability in [(12, 0), (12, 1)]:
         return {
@@ -390,8 +420,10 @@ def _get_default_kernel_configs(total_m, Q, VEC_SIZE):
             "num_ctas": 1,
             "occupancy": 2,
         }
-    elif gpu_capability == (9, 0):
-        if is_large_m:
+    elif gpu_capability[0] == 10:
+        # SM100 ragged workloads are sensitive to tail waste at BLOCK_M=256.
+        # Use 256 only for clearly large average segment sizes.
+        if is_large_m and average_m >= 640:
             return {
                 "BLOCK_M": 256,
                 "BLOCK_N": 128,
@@ -399,7 +431,38 @@ def _get_default_kernel_configs(total_m, Q, VEC_SIZE):
                 "GROUP_SIZE_M": 8,
                 "swap_ab": False,
                 "num_ctas": 2,
-                "occupancy": 1,
+                "occupancy": 2,
+            }
+        elif is_large_m:
+            return {
+                "BLOCK_M": 128,
+                "BLOCK_N": 128,
+                "BLOCK_K": VEC_SIZE,
+                "GROUP_SIZE_M": 8,
+                "swap_ab": False,
+                "num_ctas": 2,
+                "occupancy": 2,
+            }
+        else:
+            return {
+                "BLOCK_M": 64,
+                "BLOCK_N": 128,
+                "BLOCK_K": VEC_SIZE,
+                "GROUP_SIZE_M": 8,
+                "swap_ab": True,
+                "num_ctas": 1,
+                "occupancy": 2,
+            }
+    elif gpu_capability == (9, 0):
+        if is_large_m:
+            return {
+                "BLOCK_M": 32,
+                "BLOCK_N": 256,
+                "BLOCK_K": VEC_SIZE,
+                "GROUP_SIZE_M": 4,
+                "swap_ab": True,
+                "num_ctas": 1,
+                "occupancy": 2,
             }
         else:
             return {
