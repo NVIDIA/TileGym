@@ -77,29 +77,62 @@ def _static_persistent_matmul_autotune_configs():
     """
     gpu_capability = torch.cuda.get_device_capability()
 
+    # LOAD_LATENCY = ct.load cost hint (1..10, -1 = compiler-inferred). Only sm90 tunes it
+    # today; all other arches pass -1 (compiler-inferred = original behavior), but every
+    # config must carry the field since the kernel reads cfg.LOAD_LATENCY unconditionally.
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4)
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4)
-        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
+        yield SimpleNamespace(
+            TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
     elif gpu_capability[0] < 9:
         # sm80 (A100)
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(
+            TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
     else:
         # sm100+ (Blackwell)
-        yield SimpleNamespace(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1)
-        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1)
-        yield SimpleNamespace(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)
         yield SimpleNamespace(
-            TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1
+            TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1, LOAD_LATENCY=-1
         )
 
 
@@ -191,6 +224,7 @@ def _static_persistent_matmul_kernel(
     TRANSPOSE_A: ct.Constant[bool],
     TRANSPOSE_B: ct.Constant[bool],
     GROUP_SIZE_M: ct.Constant[int],
+    LOAD_LATENCY: ct.Constant[int],
 ):
     """CuTile static persistent matmul kernel: C = A @ B with static scheduling"""
     start_bid = ct.bid(0)
@@ -212,25 +246,65 @@ def _static_persistent_matmul_kernel(
         # Initialize accumulator
         accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=ct.float32)
 
-        # K-dimension loop
+        # K-dimension loop. LOAD_LATENCY (constexpr) in 1..10 sets the ct.load cost
+        # hint on BOTH operand loads; <=0 means "compiler-inferred" (omit the kwarg,
+        # since ct.load rejects -1). Explicit constexpr if/else (same pattern as
+        # TRANSPOSE_*) — the cuTile tracer does NOT support **kwargs unpacking.
         for k_tile in range(k_tiles):
-            # Load A tile
+            # Load A tile (tuned: A's load cost is also on the critical path — tuning
+            # both A and B reaches 6.74 ms vs 7.27 ms for B-only, ~7-8% better)
             if TRANSPOSE_A:
                 # A is transposed: load from (K, M) layout
-                a = ct.load(A, index=(k_tile, bid_m), shape=(TILE_SIZE_K, TILE_SIZE_M), padding_mode=zero_pad)
+                if LOAD_LATENCY >= 1:
+                    a = ct.load(
+                        A,
+                        index=(k_tile, bid_m),
+                        shape=(TILE_SIZE_K, TILE_SIZE_M),
+                        padding_mode=zero_pad,
+                        latency=LOAD_LATENCY,
+                    )
+                else:
+                    a = ct.load(A, index=(k_tile, bid_m), shape=(TILE_SIZE_K, TILE_SIZE_M), padding_mode=zero_pad)
                 a = ct.transpose(a)  # Convert to (TILE_SIZE_M, TILE_SIZE_K)
             else:
                 # A is normal: load from (M, K) layout
-                a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad)
+                if LOAD_LATENCY >= 1:
+                    a = ct.load(
+                        A,
+                        index=(bid_m, k_tile),
+                        shape=(TILE_SIZE_M, TILE_SIZE_K),
+                        padding_mode=zero_pad,
+                        latency=LOAD_LATENCY,
+                    )
+                else:
+                    a = ct.load(A, index=(bid_m, k_tile), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad)
 
             # Load B tile
             if TRANSPOSE_B:
                 # B is transposed: load from (N, K) layout
-                b = ct.load(B, index=(bid_n, k_tile), shape=(TILE_SIZE_N, TILE_SIZE_K), padding_mode=zero_pad)
+                if LOAD_LATENCY >= 1:
+                    b = ct.load(
+                        B,
+                        index=(bid_n, k_tile),
+                        shape=(TILE_SIZE_N, TILE_SIZE_K),
+                        padding_mode=zero_pad,
+                        latency=LOAD_LATENCY,
+                    )
+                else:
+                    b = ct.load(B, index=(bid_n, k_tile), shape=(TILE_SIZE_N, TILE_SIZE_K), padding_mode=zero_pad)
                 b = ct.transpose(b)  # Convert to (TILE_SIZE_K, TILE_SIZE_N)
             else:
                 # B is normal: load from (K, N) layout
-                b = ct.load(B, index=(k_tile, bid_n), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad)
+                if LOAD_LATENCY >= 1:
+                    b = ct.load(
+                        B,
+                        index=(k_tile, bid_n),
+                        shape=(TILE_SIZE_K, TILE_SIZE_N),
+                        padding_mode=zero_pad,
+                        latency=LOAD_LATENCY,
+                    )
+                else:
+                    b = ct.load(B, index=(k_tile, bid_n), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad)
 
             # Convert fp32 to tf32 to use tensorcore
             dtype = ct.tfloat32 if A.dtype == ct.float32 else A.dtype
@@ -301,6 +375,7 @@ def _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a,
                     trans_a,
                     trans_b,
                     cfg.GROUP_SIZE_M,
+                    cfg.LOAD_LATENCY,
                 ),
                 lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
             )
@@ -332,6 +407,7 @@ def _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a,
             trans_a,
             trans_b,
             best_cfg.GROUP_SIZE_M,
+            best_cfg.LOAD_LATENCY,
         ),
     )
     return c
