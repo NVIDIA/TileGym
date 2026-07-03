@@ -367,6 +367,70 @@ jobs:
           check_name: Ops Test Results (shard ${{ matrix.shard }})
           comment_mode: off
 
+  test-transformer-kernel-inventory:
+    name: test-transformer-kernel-inventory
+    needs: [config, build]
+    timeout-minutes: 60
+    if: |
+      always() &&
+      needs.config.outputs.run_ops == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: linux-amd64-gpu-rtxpro6000-latest-1
+    steps:
+      - name: Checkout code (sparse - transformer kernel inventory tests)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tests/transformers
+          sparse-checkout-cone-mode: false
+
+      - name: Create test results directory
+        run: mkdir -p ${{ github.workspace }}/test-results
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run transformer kernel inventory tests
+        timeout-minutes: 50
+        run: |
+          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
+
+          docker pull ${IMAGE}
+          docker run --rm \
+            --gpus all \
+            -v ${{ github.workspace }}/tests/transformers:/workspace/tilegym/tests/transformers \
+            -v ${{ github.workspace }}/test-results:/test-results \
+            -w /workspace/tilegym/modeling/transformers \
+            ${IMAGE} \
+            uv run --locked --no-sync python -m pytest \
+                /workspace/tilegym/tests/transformers/test_kernel_inventory.py \
+                /workspace/tilegym/tests/transformers/test_kernel_definition_solution_runtime.py \
+                -v \
+                --junitxml=/test-results/transformer-kernel-inventory-results.xml \
+                --html=/test-results/transformer-kernel-inventory-report.html \
+                --self-contained-html
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transformer-kernel-inventory-test-results
+          path: test-results/transformer-kernel-inventory-*
+          retention-days: 30
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results/transformer-kernel-inventory-results.xml
+          check_name: Transformer Kernel Inventory Test Results
+          comment_mode: off
+
   update-test-durations:
     name: update-test-durations
     needs: [config, test-ops]
@@ -798,12 +862,13 @@ jobs:
 
   publish-wheel:
     name: publish-verified-wheel
-    needs: [config, build-wheel, sanity-check, test-ops, test-benchmark]
+    needs: [config, build-wheel, sanity-check, test-ops, test-transformer-kernel-inventory, test-benchmark]
     if: |
       always() &&
       needs.build-wheel.result == 'success' &&
       needs.sanity-check.result == 'success' &&
       needs.test-ops.result == 'success' &&
+      needs.test-transformer-kernel-inventory.result == 'success' &&
       needs.test-benchmark.result == 'success'
     # Note: Only marks the py310-x86_64 wheel as "verified" because that's the wheel
     # actually tested in Docker. Other wheels (py311, py312, arm64) are available but unverified.
@@ -817,13 +882,14 @@ jobs:
 
   promote-to-latest:
     name: promote-to-latest
-    needs: [config, build, sanity-check, test-ops, test-benchmark]
+    needs: [config, build, sanity-check, test-ops, test-transformer-kernel-inventory, test-benchmark]
     if: |
       always() &&
       needs.config.outputs.is_pr == 'false' &&
       needs.build.result == 'success' &&
       needs.sanity-check.result == 'success' &&
       needs.test-ops.result == 'success' &&
+      needs.test-transformer-kernel-inventory.result == 'success' &&
       needs.test-benchmark.result == 'success'
     runs-on: ubuntu-latest
     steps:
