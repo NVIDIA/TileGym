@@ -18,7 +18,8 @@
     "language": "cuda-tile",
     "target_hardware": [
       "NVIDIA_B200",
-      "NVIDIA_GB300"
+      "NVIDIA_GB300",
+      "NVIDIA_RTX_PRO_6000_BLACKWELL_SERVER_EDITION"
     ]
   }
 }
