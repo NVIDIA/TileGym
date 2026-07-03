@@ -16,10 +16,12 @@ class Test_GroupGemm(common.PyTestCase):
     @staticmethod
     def reference(group_A, group_B, transpose_b=False):
         dtype = group_A[0].dtype
+        # Use fp32 computation to avoid cuBLAS fp16 reduced-precision accumulation
+        # artifacts that cause false mismatches at large K (e.g. K=8192).
         return [
             torch.matmul(
-                a.to(torch.half),
-                b.to(torch.half).t() if transpose_b else b.to(torch.half),
+                a.float(),
+                b.float().t() if transpose_b else b.float(),
             ).to(dtype)
             for a, b in zip(group_A, group_B)
         ]
