@@ -48,6 +48,8 @@ def _get_cpp_type(dtype: torch.dtype) -> str:
         torch.float32: "float",
         torch.float16: "__half",
         torch.bfloat16: "__nv_bfloat16",
+        torch.float8_e5m2: "__nv_fp8_e5m2",
+        torch.float8_e4m3fn: "__nv_fp8_e4m3",
     }
     if dtype not in type_map:
         raise ValueError(f"TileCpp MLA does not support dtype {dtype}")

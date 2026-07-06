@@ -25,6 +25,7 @@
 #include <cuda_tile.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 // 1/ln(2) for exp2 optimization
 constexpr float MLA_INV_LOG_2 = 1.442695040888963f;
