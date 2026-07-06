@@ -49,7 +49,9 @@ def _get_cpp_type(dtype: torch.dtype) -> str:
         torch.float16: "__half",
         torch.bfloat16: "__nv_bfloat16",
     }
-    return type_map.get(dtype, "float")
+    if dtype not in type_map:
+        raise ValueError(f"TileCpp MLA does not support dtype {dtype}")
+    return type_map[dtype]
 
 
 def _launch_prefill_mla_kernel(

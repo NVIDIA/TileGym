@@ -200,6 +200,8 @@ class Test_MLA(common.PyTestCase):
                 pytest.skip("Skip non-causal case for cutile")
         if dtype == torch.float8_e5m2 and torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip case due to sm80 not support float8")
+        if backend == "tilecpp" and dtype in (torch.float8_e5m2, torch.float8_e4m3fn):
+            pytest.skip("cuda::tiles does not support fp8 tile element types")
         if seq_len == 8192 and torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip case on ampere due to OOM")
         if torch.cuda.get_device_capability() == (12, 0) and seq_len == 8192:
