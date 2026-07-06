@@ -59,4 +59,23 @@ echo "✨ Formatting code..."
 python3 -m ruff format .
 
 echo ""
+echo "🦀 Formatting Rust (.rs) files..."
+# rustfmt is optional: most contributors are Python-only and have no Rust
+# toolchain. Skip (with a hint) when it is absent instead of force-installing.
+# Run rustfmt per-file rather than `cargo fmt` so standalone .rs (cutile-rs
+# skill examples, per-op kernel.rs/ffi.rs) are covered, not just crate members.
+if command -v rustfmt >/dev/null 2>&1; then
+    rs_files=$(git ls-files '*.rs')
+    if [ -n "$rs_files" ]; then
+        echo "$rs_files" | xargs rustfmt --edition 2024
+        echo "✅ rustfmt formatted $(printf '%s\n' "$rs_files" | wc -l) .rs file(s)."
+    else
+        echo "No tracked .rs files; skipping rustfmt."
+    fi
+else
+    echo "⚠️  rustfmt not found — skipping .rs formatting."
+    echo "    Install with: rustup component add rustfmt   (see https://rustup.rs)"
+fi
+
+echo ""
 echo "✅ Done! SPDX headers added, code is formatted, and imports are sorted."
