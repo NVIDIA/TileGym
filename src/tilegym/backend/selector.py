@@ -138,6 +138,41 @@ def is_tilecpp_available() -> bool:
     return True
 
 
+def is_cutile_rs_available() -> bool:
+    """Check if the cutile-rs (Rust FFI) backend is available.
+
+    All cutile-rs kernels build into ONE cdylib
+    ``ops/cutile_rs/cutile_kernels/target/release/libcutile_kernels.so``
+    (crates.io ``cutile`` deps; per-op sources are pure-.rs in
+    ``ops/cutile_rs/<op>_kernel/``). No shared cutile-rs checkout, no
+    ``CUTILE_RS_DIR``.
+
+    Permissive probe (Rule 35): available if ``cargo`` is on PATH (the wrapper
+    builds the crate lazily at dispatch) OR an up-to-date prebuilt
+    ``libcutile_kernels.so`` already exists. libclang / CUDA headers / ``tileiras``
+    are validated lazily at dispatch, not here.
+    """
+    import shutil
+
+    from .cutile_rs.utils import _autobuild_enabled
+    from .cutile_rs.utils import _kernels_crate_dir
+    from .cutile_rs.utils import _shared_so_path
+    from .cutile_rs.utils import _so_stale
+
+    crate_dir = _kernels_crate_dir()
+    if crate_dir is None:
+        return False
+    so_path = _shared_so_path(crate_dir)
+    if not _autobuild_enabled():
+        # Auto-build disabled (CUTILE_RS_AUTOBUILD=0): only a present, pinned .so is usable.
+        return os.path.isfile(so_path)
+    # Auto-build enabled: buildable if cargo is on PATH; otherwise accept a prebuilt
+    # .so only when present AND not stale (it cannot be rebuilt without cargo).
+    if shutil.which("cargo") is not None:
+        return True
+    return not _so_stale(so_path)
+
+
 _AVAILABLE_BACKENDS: Set[str] = set()
 _CURRENT_BACKENDS: str = "cutile"
 
@@ -147,6 +182,7 @@ def _check_backends_availability() -> Dict[str, bool]:
         "cutile": is_cutile_available(),
         "triton": True,
         "tilecpp": _TILECPP_MODULE_IMPORTABLE,
+        "cutile-rs": is_cutile_rs_available(),
     }
     return availability
 

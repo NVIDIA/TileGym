@@ -156,6 +156,60 @@ julia --project=julia/ julia/test/runtests.jl
 
 完整依赖列表请参阅 `julia/Project.toml`。
 
+### 5. 启用 cuTile-rs (Rust) 后端 (可选)
+
+部分算子在 [`src/tilegym/ops/cutile_rs`](src/tilegym/ops/cutile_rs) 下额外提供了
+**cuTile-rs** 后端——内核用 Rust 基于 [`cutile-rs`](https://github.com/NVlabs/cutile-rs)
+编写，并通过 C-ABI 的 `libcutile_kernels.so` 加载。该后端为可选项，且仅在源码安装模式下可用。
+
+**前置要求**（在上述基础安装之外），与 [cuTile-rs](https://github.com/NVlabs/cutile-rs) 保持一致：
+
+- **Rust 1.89+**——`cargo` 和 `rustc` 需在 `PATH` 中：
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup default stable
+  ```
+
+- **CUDA toolkit 并包含头文件**——Rust 构建会用 `bindgen` 处理 `cuda.h`。请将
+  `CUDA_TOOLKIT_PATH` 指向你的安装目录；若未设置，cuTile-rs 会回退到 `/usr/local/cuda`：
+
+  ```bash
+  export CUDA_TOOLKIT_PATH=/usr/local/cuda   # 必须包含 include/cuda.h
+  ```
+
+**使用方法。** 后端加载器会在首次使用时延迟构建共享库（`cargo build --release`），因此无需手动构建：
+
+```python
+import tilegym
+tilegym.set_backend("cutile-rs")
+
+from tilegym.backend.selector import get_available_backends
+print(get_available_backends())        # 应包含 "cutile-rs"
+
+from tilegym.ops import bmm             # 与后端无关的导入
+# ... bmm(...) 现在会分发到 cuTile-rs 内核
+```
+
+**可选环境变量：**
+
+```bash
+export CUTILE_RS_AUTOBUILD=0                          # 跳过延迟重建；使用预构建的 .so
+export CUTILE_RS_KERNELS_DIR=/abs/path/to/cutile_kernels   # 覆盖 crate 位置
+```
+
+> 若 `cargo` 不在 `PATH` 中且没有预构建的 `libcutile_kernels.so`，该后端会报告为不可用，
+> cuTile-rs 相关测试会被跳过而非失败。
+
+**cuTile-rs 性能测试。** 测量 cuTile-rs 性能时,建议用 **`CUPTI=1`** 运行 perf 测试
+(使用 CUPTI / `torch.profiler` 的 device time,而非 CUDA events)。cuTile-rs 内核与参考
+实现的 host/launch 开销通常不同,CUDA-event 墙钟计时在亚微秒级小内核上会高估这部分开销;
+CUPTI 测的是纯 GPU 内核时间,给出更稳定、可对比的结果:
+
+```bash
+CUPTI=1 pytest tests/ops/test_bmm.py -k "test_perf and cutile_rs" --print-record
+```
+
 ## 贡献
 
 我们欢迎各种形式的贡献。请阅读我们的 [CONTRIBUTING.md](CONTRIBUTING.md) 了解指南，包括贡献者许可协议（CLA）流程。

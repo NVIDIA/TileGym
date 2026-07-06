@@ -25,6 +25,8 @@ class Test_BMM_FWD(common.PyTestCase):
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
+    if is_backend_available("cutile-rs"):
+        _backends = _backends + ["cutile-rs"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
@@ -71,6 +73,8 @@ class Test_BMM_FWD(common.PyTestCase):
 
         if backend == "cutile" and not static_persistent and (transpose_a or transpose_b):
             pytest.skip("CuTile non-persistent kernel doesn't support transpose")
+        if backend == "cutile-rs" and not static_persistent and (transpose_a or transpose_b):
+            pytest.skip("cutile-rs bmm non-persistent variant does not support transpose")
 
         if transpose_a:
             a_shape = (batch_size, k, m)

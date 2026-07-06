@@ -23,6 +23,8 @@ class Test_SiLUAndMul(common.PyTestCase):
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
+    if is_backend_available("cutile-rs"):
+        _backends = _backends + ["cutile-rs"]
     _perf_frameworks = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(

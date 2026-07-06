@@ -18,6 +18,8 @@ from .. import common
 _backends = ["cutile"]
 if is_backend_available("tilecpp"):
     _backends = _backends + ["tilecpp"]
+if is_backend_available("cutile-rs"):
+    _backends = _backends + ["cutile-rs"]
 _perf_backends = _backends + ["pytorch"]
 
 

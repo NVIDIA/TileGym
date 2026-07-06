@@ -156,6 +156,68 @@ julia --project=julia/ julia/test/runtests.jl
 
 See `julia/Project.toml` for the full dependency list.
 
+### 5. Enable the cuTile-rs (Rust) backend (Optional)
+
+A subset of ops ships an additional **cuTile-rs** backend under
+[`src/tilegym/ops/cutile_rs`](src/tilegym/ops/cutile_rs) — kernels authored in
+Rust with [`cutile-rs`](https://github.com/NVlabs/cutile-rs) and loaded through
+a C-ABI `libcutile_kernels.so`. It is opt-in and only usable from a source
+checkout.
+
+**Prerequisites** (in addition to the base install above), matching
+[cuTile-rs](https://github.com/NVlabs/cutile-rs):
+
+- **Rust 1.89+** — `cargo` and `rustc` on `PATH`:
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup default stable
+  ```
+
+- **CUDA toolkit with headers** — the Rust build runs `bindgen` against
+  `cuda.h`. Set `CUDA_TOOLKIT_PATH` to your install; if unset, cuTile-rs falls
+  back to `/usr/local/cuda`:
+
+  ```bash
+  export CUDA_TOOLKIT_PATH=/usr/local/cuda   # must contain include/cuda.h
+  ```
+
+**Use it.** The backend loader builds the shared library lazily on first use
+(`cargo build --release`), so no manual build step is required:
+
+```python
+import tilegym
+tilegym.set_backend("cutile-rs")
+
+from tilegym.backend.selector import get_available_backends
+print(get_available_backends())        # should include "cutile-rs"
+
+from tilegym.ops import bmm             # backend-agnostic import
+# ... bmm(...) now dispatches to the cuTile-rs kernel
+```
+
+**Optional environment knobs:**
+
+```bash
+export CUTILE_RS_AUTOBUILD=0                          # skip the lazy rebuild; use a prebuilt .so
+export CUTILE_RS_KERNELS_DIR=/abs/path/to/cutile_kernels   # override the crate location
+```
+
+> If `cargo` is not on `PATH` and no prebuilt `libcutile_kernels.so` is present,
+> the backend reports itself unavailable and cuTile-rs tests are skipped rather
+> than failing.
+
+**Benchmarking cuTile-rs.** When comparing cuTile-rs perf against the
+cuTile-Python baseline, run the perf tests with **`CUPTI=1`** (uses CUPTI /
+`torch.profiler` device time instead of CUDA events). cuTile-rs kernels often
+have different host/launch overhead than the reference, which CUDA-event wall
+timing over-counts on small (sub-microsecond) kernels; CUPTI measures pure GPU
+kernel time and gives a stable, apples-to-apples ratio:
+
+```bash
+CUPTI=1 pytest tests/ops/test_bmm.py -k "test_perf and cutile_rs" --print-record
+```
+
 ## Contributing
 
 We welcome contributions of all kinds. Please read our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, including the Contributor License Agreement (CLA) process.

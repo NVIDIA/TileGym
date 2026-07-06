@@ -156,6 +156,63 @@ julia --project=julia/ julia/test/runtests.jl
 
 依存関係の詳細は `julia/Project.toml` を参照してください。
 
+### 5. cuTile-rs (Rust) バックエンドの有効化 (オプション)
+
+一部の演算子は [`src/tilegym/ops/cutile_rs`](src/tilegym/ops/cutile_rs) の下に追加の
+**cuTile-rs** バックエンドを提供します。カーネルは [`cutile-rs`](https://github.com/NVlabs/cutile-rs)
+を用いて Rust で記述され、C-ABI の `libcutile_kernels.so` を介して読み込まれます。
+これはオプションであり、ソースからのインストール時のみ利用できます。
+
+**前提条件**（上記の基本インストールに加えて）、[cuTile-rs](https://github.com/NVlabs/cutile-rs) に準拠：
+
+- **Rust 1.89+** — `cargo` と `rustc` が `PATH` にあること：
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup default stable
+  ```
+
+- **CUDA toolkit（ヘッダー付き）** — Rust ビルドは `bindgen` で `cuda.h` を処理します。
+  `CUDA_TOOLKIT_PATH` をインストール先に設定してください。未設定の場合、cuTile-rs は
+  `/usr/local/cuda` にフォールバックします：
+
+  ```bash
+  export CUDA_TOOLKIT_PATH=/usr/local/cuda   # include/cuda.h を含む必要があります
+  ```
+
+**使い方。** バックエンドローダーは初回使用時に共有ライブラリを遅延ビルドする（`cargo build --release`）ため、手動ビルドは不要です：
+
+```python
+import tilegym
+tilegym.set_backend("cutile-rs")
+
+from tilegym.backend.selector import get_available_backends
+print(get_available_backends())        # "cutile-rs" が含まれるはずです
+
+from tilegym.ops import bmm             # バックエンド非依存のインポート
+# ... bmm(...) が cuTile-rs カーネルにディスパッチされます
+```
+
+**オプションの環境変数：**
+
+```bash
+export CUTILE_RS_AUTOBUILD=0                          # 遅延リビルドをスキップし、ビルド済み .so を使用
+export CUTILE_RS_KERNELS_DIR=/abs/path/to/cutile_kernels   # crate の場所を上書き
+```
+
+> `cargo` が `PATH` になく、ビルド済みの `libcutile_kernels.so` も存在しない場合、
+> バックエンドは利用不可として報告され、cuTile-rs のテストは失敗せずスキップされます。
+
+**cuTile-rs のベンチマーク。** cuTile-rs の性能を測定する際は、**`CUPTI=1`** を付けて perf
+テストを実行してください(CUDA events ではなく CUPTI / `torch.profiler` のデバイス時間を使用)。
+cuTile-rs カーネルは参照実装と host/launch オーバーヘッドが異なることが多く、CUDA-event の
+実時間計測はサブマイクロ秒の小さなカーネルでこれを過大に数えます。CUPTI は純粋な GPU カーネル
+時間を測定し、安定した比較可能な結果を与えます:
+
+```bash
+CUPTI=1 pytest tests/ops/test_bmm.py -k "test_perf and cutile_rs" --print-record
+```
+
 ## コントリビューション
 
 あらゆる種類のコントリビューションを歓迎します。ガイドラインについては、コントリビューターライセンス契約（CLA）プロセスを含む [CONTRIBUTING.md](CONTRIBUTING.md) をお読みください。

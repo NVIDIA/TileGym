@@ -87,6 +87,8 @@ class Test_Matmul(common.PyTestCase):
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
+    if is_backend_available("cutile-rs"):
+        _backends = _backends + ["cutile-rs"]
     _perf_backends = _backends + ["pytorch"]
     _test_op_params = _build_matmul_test_op_params(_backends)
 
@@ -118,6 +120,11 @@ class Test_Matmul(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
+        if backend == "cutile-rs":
+            if transpose_a or transpose_b:
+                pytest.skip("cutile-rs matmul does not support transpose")
+            if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                pytest.skip(f"cutile-rs matmul does not support dtype {dtype}")
         if arch in ["sm120", "sm121"] and n >= 6144:
             pytest.skip("Skip due to global memory OOM")
         if k == 1023:
@@ -172,6 +179,11 @@ class Test_Matmul(common.PyTestCase):
         record_property,
     ):
         self.setUp()
+        if backend == "cutile-rs":
+            if transpose_a or transpose_b:
+                pytest.skip("cutile-rs matmul does not support transpose")
+            if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                pytest.skip(f"cutile-rs matmul does not support dtype {dtype}")
         # Enforce SM80 restrictions: use_tma=False, static_persistent=False, dtype=float16 only
         if torch.cuda.get_device_capability()[0] == 8:
             if use_tma != False or static_persistent != False or dtype != torch.float16:
@@ -276,6 +288,8 @@ class Test_Matmul(common.PyTestCase):
         record_property,
     ):
         self.setUp()
+        if backend == "cutile-rs" and dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            pytest.skip(f"cutile-rs matmul does not support dtype {dtype}")
         if torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip on sm80")
 

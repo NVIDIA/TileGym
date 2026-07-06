@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Single cdylib for ALL cutile-rs kernels. Each op's device kernel + host FFI
+# live as pure-.rs under ../<op>_kernel/ (kernel.rs + ffi.rs) and are pulled in
+# by src/lib.rs. Builds one libcutile_kernels.so exporting every cutile_<op>
+# C-ABI symbol. One Cargo.toml + one (gitignored) Cargo.lock + one target/ for
+# every kernel — no per-kernel crate, no shared cutile-rs checkout.
+[package]
+name = "cutile-kernels"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "cutile_kernels"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+# crates.io registry deps (self-contained). `cutile` transitively pulls
+# cutile-ir; cuda-bindings comes in via cuda-core. Pinned for reproducibility
+# even though Cargo.lock is not committed.
+[dependencies]
+cutile = "=0.2.0"
+cutile-compiler = "=0.2.0"
+cutile-macro = "=0.2.0"
+cuda-core = "=0.2.0"
+cuda-async = "=0.2.0"

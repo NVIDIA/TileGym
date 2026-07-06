@@ -156,6 +156,67 @@ julia --project=julia/ julia/test/runtests.jl
 
 Consultez `julia/Project.toml` pour la liste complète des dépendances.
 
+### 5. Activer le backend cuTile-rs (Rust) (Optionnel)
+
+Un sous-ensemble d'opérateurs fournit un backend **cuTile-rs** supplémentaire sous
+[`src/tilegym/ops/cutile_rs`](src/tilegym/ops/cutile_rs) — des noyaux écrits en Rust
+avec [`cutile-rs`](https://github.com/NVlabs/cutile-rs) et chargés via une
+`libcutile_kernels.so` à ABI C. Il est optionnel et utilisable uniquement depuis une
+installation depuis les sources.
+
+**Prérequis** (en plus de l'installation de base ci-dessus), conformes à
+[cuTile-rs](https://github.com/NVlabs/cutile-rs) :
+
+- **Rust 1.89+** — `cargo` et `rustc` dans le `PATH` :
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup default stable
+  ```
+
+- **CUDA toolkit avec les en-têtes** — la compilation Rust exécute `bindgen` sur
+  `cuda.h`. Définissez `CUDA_TOOLKIT_PATH` vers votre installation ; s'il n'est pas
+  défini, cuTile-rs utilise `/usr/local/cuda` par défaut :
+
+  ```bash
+  export CUDA_TOOLKIT_PATH=/usr/local/cuda   # doit contenir include/cuda.h
+  ```
+
+**Utilisation.** Le chargeur du backend compile la bibliothèque partagée de façon paresseuse
+lors de la première utilisation (`cargo build --release`), aucune étape de compilation manuelle n'est donc requise :
+
+```python
+import tilegym
+tilegym.set_backend("cutile-rs")
+
+from tilegym.backend.selector import get_available_backends
+print(get_available_backends())        # doit inclure "cutile-rs"
+
+from tilegym.ops import bmm             # import indépendant du backend
+# ... bmm(...) est désormais dispatché vers le noyau cuTile-rs
+```
+
+**Variables d'environnement optionnelles :**
+
+```bash
+export CUTILE_RS_AUTOBUILD=0                          # ignorer la recompilation paresseuse ; utiliser un .so pré-compilé
+export CUTILE_RS_KERNELS_DIR=/abs/path/to/cutile_kernels   # remplacer l'emplacement du crate
+```
+
+> Si `cargo` n'est pas dans le `PATH` et qu'aucune `libcutile_kernels.so` pré-compilée n'est présente,
+> le backend se déclare indisponible et les tests cuTile-rs sont ignorés plutôt qu'échoués.
+
+**Benchmark de cuTile-rs.** Pour mesurer les performances de cuTile-rs, exécutez les tests
+de perf avec **`CUPTI=1`** (utilise le temps GPU de CUPTI / `torch.profiler` au lieu des
+CUDA events). Les noyaux cuTile-rs ont souvent une surcharge host/launch différente de la
+référence, que le chronométrage en temps réel des CUDA events surestime sur les petits
+noyaux (sous la microseconde) ; CUPTI mesure le temps GPU pur du noyau et donne un ratio
+stable et comparable :
+
+```bash
+CUPTI=1 pytest tests/ops/test_bmm.py -k "test_perf and cutile_rs" --print-record
+```
+
 ## Contribution
 
 Nous accueillons les contributions de toutes sortes. Veuillez lire notre [CONTRIBUTING.md](CONTRIBUTING.md) pour les directives, y compris le processus d'accord de licence de contributeur (CLA).

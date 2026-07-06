@@ -23,6 +23,8 @@ class Test_SwiGLU(common.PyTestCase):
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
+    if is_backend_available("cutile-rs"):
+        _backends = _backends + ["cutile-rs"]
     _perf_backends = _backends + ["pytorch"]
 
     # Regular shapes (power-of-2)
@@ -116,6 +118,8 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward(self, batch_size, seq_len, hidden_size, dtype, backend, arch):
         """Test backward pass of SwiGLU (SiLUMulFunction)."""
+        if backend == "cutile-rs":
+            pytest.skip(f"{backend} backend does not support the backward pass")
         self.setUp()
         try:
             set_backend(backend)
@@ -169,6 +173,8 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward_irregular(self, batch_size, seq_len, hidden_size, backend, arch):
         """Test backward pass with irregular (non-power-of-2) shapes."""
+        if backend == "cutile-rs":
+            pytest.skip(f"{backend} backend does not support the backward pass")
         self.setUp()
         try:
             set_backend(backend)
