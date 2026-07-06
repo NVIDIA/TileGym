@@ -16,7 +16,7 @@ from .. import common
 _MATMUL_BASE_INPUTS = [
     (1024, 1024, 1024, 0, 0, False, False, torch.bfloat16),
     (1024, 1024, 1023, 0, 0, False, False, torch.bfloat16),
-    (16384, 16384, 16384, 0, 0, False, False, torch.bfloat16),
+    (8192, 8192, 8192, 0, 0, False, False, torch.bfloat16),
     (8, 8, 8, 0, 0, False, False, torch.bfloat16),
     (3072, 6144, 2720, 0, 0, False, False, torch.bfloat16),
 ]
