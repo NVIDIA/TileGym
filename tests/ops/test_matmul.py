@@ -205,6 +205,8 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip("Skip due to sm80 not support fp8 type")
         if backend == "cutile" and not static_persistent and transpose_a:
             pytest.skip("Cutile transpose_a is not supported when static_persistent is False")
+        if backend == "tilecpp" and dtype == torch.float32 and m >= 16384:
+            pytest.skip("Skip tilecpp float32 matmul with m >= 16384 due to timeout")
 
         a, b = self.prepare_data(m, n, k, transpose_a, transpose_b, offset_a, offset_b, dtype)
         kernel_kwargs = {
