@@ -13,48 +13,71 @@ from tilegym.ops.cutile.utils import next_power_of_2
 @ct.kernel
 def _moe_align_block_size_stage1_kernel(
     topk_ids,
-    token_counts,
+    tokens_cnts,
     NUM_EXPERTS: ct.Constant[int],
     NUMEL: ct.Constant[int],
+    TOKENS_PER_THREAD: ct.Constant[int],
 ):
-    """Stage 1: Count tokens per expert using parallel atomic increments.
-    Grid: (NUMEL,) — one CTA per token for maximum parallelism.
-    Replaces the serial gather-modify-scatter loop (was O(NUMEL/E) per CTA).
-    """
-    bid = ct.bid(0)  # token index in [0, NUMEL)
-    bid_tile = ct.full((1,), bid, dtype=ct.int32)
-    expert = ct.gather(topk_ids, bid_tile, padding_value=0)
-    ct.atomic_add(token_counts, expert, ct.ones((1,), dtype=ct.int32))
+    bid = ct.bid(0)
+
+    start_idx = bid * TOKENS_PER_THREAD
+    off_c = (bid + 1) * NUM_EXPERTS
+    token_cnt = ct.zeros((1,), dtype=ct.int32)
+
+    limit = max(0, min(TOKENS_PER_THREAD, NUMEL - start_idx))
+    for i in range(limit):
+        current_idx = start_idx + i
+        current_idx_tile = ct.full((1,), current_idx, dtype=ct.int32)
+        idx = ct.gather(topk_ids, current_idx_tile, padding_value=0)
+
+        off_c_tile = ct.full((1,), off_c, dtype=ct.int32)
+        cnt_offset = off_c_tile + idx
+        token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
+
+        new_cnt = token_cnt + ct.ones((1,), dtype=ct.int32)
+        ct.scatter(tokens_cnts, cnt_offset, new_cnt)
 
 
 @ct.kernel
 def _moe_align_block_size_stage2_kernel(
+    tokens_cnts,
+    NUM_EXPERTS: ct.Constant[int],
+    NUM_EXPERTS_POW2: ct.Constant[int],
+):
+    bid = ct.bid(0)
+
+    base_offset = NUM_EXPERTS + bid
+    offsets = ct.arange(NUM_EXPERTS_POW2, dtype=ct.int32) * NUM_EXPERTS + base_offset
+    token_cnts_vec = ct.gather(tokens_cnts, offsets, padding_value=0)
+    cumsum = ct.cumsum(token_cnts_vec, axis=0)
+    ct.scatter(tokens_cnts, offsets, cumsum)
+
+
+@ct.kernel
+def _moe_align_block_size_stage3_kernel(
     total_tokens_post_pad,
     max_expert_cnt,
-    token_counts,
+    tokens_cnts,
     cumsum,
     NUM_EXPERTS: ct.Constant[int],
     BLOCK_SIZE: ct.Constant[int],
 ):
-    """Stage 2: Compute padded cumulative sums and metadata.
-    Grid: (1,) — single CTA, O(NUM_EXPERTS) work (small).
-    Combines old stage2 (histogram prefix sum) + stage3 (cumsum/total/max).
-    """
     last_cumsum = ct.zeros((1,), dtype=ct.int32)
+    off_cnt = NUM_EXPERTS * NUM_EXPERTS
     max_cnt = ct.zeros((1,), dtype=ct.int32)
 
-    for i in range(NUM_EXPERTS):
-        i_tile = ct.full((1,), i, dtype=ct.int32)
-        token_cnt = ct.gather(token_counts, i_tile, padding_value=0)
+    for i in range(1, NUM_EXPERTS + 1):
+        cnt_offset = off_cnt + i - 1 + ct.arange(1, dtype=ct.int32)
+        token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
         max_cnt = ct.maximum(max_cnt, token_cnt)
 
-        block_size_tile = ct.full((1,), BLOCK_SIZE, dtype=ct.int32)
+        block_size_tile = ct.full((1,), BLOCK_SIZE, dtype=token_cnt.dtype)
         div_result = token_cnt + (block_size_tile - ct.ones((1,), dtype=token_cnt.dtype))
         ceiled_div = div_result // block_size_tile
         padded_cnt = ceiled_div * block_size_tile
         last_cumsum = last_cumsum + padded_cnt
 
-        cumsum_offset = ct.full((1,), i + 1, dtype=ct.int32)
+        cumsum_offset = ct.full((1,), i, dtype=ct.int32)
         ct.scatter(cumsum, cumsum_offset, last_cumsum)
 
     zero_offset = ct.zeros((1,), dtype=ct.int32)
@@ -63,15 +86,19 @@ def _moe_align_block_size_stage2_kernel(
 
 
 @ct.kernel
-def _moe_align_block_size_stage3_kernel(
+def _moe_align_block_size_stage4_kernel(
+    topk_ids,
+    sorted_token_ids,
     expert_ids,
+    tokens_cnts,
     cumsum,
+    NUM_EXPERTS: ct.Constant[int],
     BLOCK_SIZE: ct.Constant[int],
+    NUMEL: ct.Constant[int],
+    TOKENS_PER_THREAD: ct.Constant[int],
 ):
-    """Stage 3: Fill expert_ids array.
-    Grid: (NUM_EXPERTS,) — one CTA per expert.
-    """
-    bid = ct.bid(0)  # expert index
+    bid = ct.bid(0)
+    off_t = bid * NUM_EXPERTS
 
     start_idx_cumsum = ct.gather(cumsum, bid, padding_value=0)
     end_idx_cumsum = ct.gather(cumsum, bid + 1, padding_value=0)
@@ -83,31 +110,23 @@ def _moe_align_block_size_stage3_kernel(
         block_idx = start_block + i
         ct.scatter(expert_ids, block_idx, bid)
 
+    start_idx_tokens = bid * TOKENS_PER_THREAD
+    limit = max(0, min(TOKENS_PER_THREAD, NUMEL - start_idx_tokens))
+    for i in range(limit):
+        current_idx = start_idx_tokens + i
+        current_idx_tile = ct.full((1,), current_idx, dtype=ct.int32)
+        expert_id = ct.gather(topk_ids, current_idx_tile, padding_value=0)
 
-@ct.kernel
-def _moe_align_block_size_stage4_kernel(
-    topk_ids,
-    sorted_token_ids,
-    cumsum,
-    NUMEL: ct.Constant[int],
-):
-    """Stage 4: Fill sorted_token_ids by scanning tokens sequentially per expert.
-    Grid: (NUM_EXPERTS,) — one CTA per expert.
-    Scans tokens 0..NUMEL-1 in order, so tokens within each expert block are
-    written in ascending token-index order — matching the reference implementation.
-    """
-    bid = ct.bid(0)  # expert index
-    bid_tile = ct.full((1,), bid, dtype=ct.int32)
-    base = ct.gather(cumsum, bid_tile, padding_value=0)
-    slot = ct.zeros((1,), dtype=ct.int32)
+        off_t_tile = ct.full((1,), off_t, dtype=ct.int32)
+        cnt_offset = off_t_tile + expert_id
+        token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
 
-    for i in range(NUMEL):
-        i_tile = ct.full((1,), i, dtype=ct.int32)
-        token_expert = ct.gather(topk_ids, i_tile, padding_value=-1)
-        is_mine = token_expert == bid_tile
-        pos = base + slot
-        ct.scatter(sorted_token_ids, pos, i_tile, mask=is_mine)
-        slot = slot + ct.astype(is_mine, ct.int32)
+        cumsum_val = ct.gather(cumsum, expert_id, padding_value=0)
+        rank_post_pad = token_cnt + cumsum_val
+
+        ct.scatter(sorted_token_ids, rank_post_pad, current_idx_tile)
+        new_token_cnt = token_cnt + ct.ones((1,), dtype=ct.int32)
+        ct.scatter(tokens_cnts, cnt_offset, new_token_cnt)
 
 
 def _ceil_div(a, b):
@@ -123,47 +142,61 @@ def _moe_align_block_size(
     num_tokens_post_pad: torch.Tensor,
     max_expert_cnt: torch.Tensor,
 ) -> torch.Tensor:
-    # Flatten topk_ids to 1D for gather/scatter operations
+    # Flatten topk_ids and tokens_cnts to 1D for gather/scatter operations
     topk_ids_flat = topk_ids.reshape(-1)
 
     numel = topk_ids.numel()
-    stream = torch.cuda.current_stream()
-
-    # Flat count array: token_counts[e] = number of tokens routed to expert e
-    token_counts = torch.zeros(num_experts, dtype=torch.int32, device=topk_ids.device)
+    grid = (num_experts,)
+    tokens_cnts = torch.zeros(
+        (num_experts + 1, num_experts),
+        dtype=torch.int32,
+        device=topk_ids.device,
+    )
+    tokens_cnts_flat = tokens_cnts.reshape(-1)
     cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
+    tokens_per_thread = _ceil_div(numel, num_experts)
 
-    # Stage 1: Count tokens per expert (fully parallel, O(1) per CTA, grid=NUMEL)
+    # Launch stage 1
     ct.launch(
-        stream,
-        (numel,),
+        torch.cuda.current_stream(),
+        grid,
         _moe_align_block_size_stage1_kernel,
-        (topk_ids_flat, token_counts, num_experts, numel),
+        (topk_ids_flat, tokens_cnts_flat, num_experts, numel, tokens_per_thread),
     )
 
-    # Stage 2: Compute padded cumsum, total tokens post pad, max expert count
+    # Launch stage 2
+    num_experts_pow2 = next_power_of_2(num_experts)
     ct.launch(
-        stream,
-        (1,),
+        torch.cuda.current_stream(),
+        grid,
         _moe_align_block_size_stage2_kernel,
-        (num_tokens_post_pad, max_expert_cnt, token_counts, cumsum, num_experts, block_size),
+        (tokens_cnts_flat, num_experts, num_experts_pow2),
     )
 
-    # Stage 3: Fill expert_ids (one CTA per expert, O(tokens_per_expert/block_size) loop)
+    # Launch stage 3
     ct.launch(
-        stream,
-        (num_experts,),
+        torch.cuda.current_stream(),
+        (1,),
         _moe_align_block_size_stage3_kernel,
-        (expert_ids, cumsum, block_size),
+        (num_tokens_post_pad, max_expert_cnt, tokens_cnts_flat, cumsum, num_experts, block_size),
     )
 
-    # Stage 4: Fill sorted_token_ids (sequential per expert, O(NUMEL) per CTA, grid=NUM_EXPERTS)
-    # Processes tokens 0..NUMEL-1 in order so output is sorted within each expert block.
+    # Launch stage 4
     ct.launch(
-        stream,
-        (num_experts,),
+        torch.cuda.current_stream(),
+        grid,
         _moe_align_block_size_stage4_kernel,
-        (topk_ids_flat, sorted_token_ids, cumsum, numel),
+        (
+            topk_ids_flat,
+            sorted_token_ids,
+            expert_ids,
+            tokens_cnts_flat,
+            cumsum,
+            num_experts,
+            block_size,
+            numel,
+            tokens_per_thread,
+        ),
     )
 
     return cumsum
