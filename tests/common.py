@@ -105,7 +105,13 @@ class PyTestCase:
         r"""
         Automatically resets random seed to the value provided in config before
         running each test case.
+
+        Also runs gc.collect() + empty_cache() before each test to release GPU
+        memory held by previous tests, reducing OOM risk on memory-constrained
+        platforms (e.g. GB200 NVL with fragmented allocator state).
         """
+        gc.collect()
+        torch.cuda.empty_cache()
         torch.manual_seed(Config.seed)
         torch.cuda.manual_seed(Config.seed)
         random.seed(Config.seed)
