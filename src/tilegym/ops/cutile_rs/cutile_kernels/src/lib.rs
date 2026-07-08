@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+//
+// SPDX-License-Identifier: MIT
+
 //
 // Single cdylib aggregating every cutile-rs kernel. Each op contributes a
 // pure-.rs pair under ../<op>_kernel/ (kernel.rs = device module `<op>_module`,
