@@ -19,7 +19,7 @@ use cutile::half::{bf16, f16};
 use cutile::prelude::*;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, dtype_str};
+use crate::ffi_util::{TensorDesc, rc};
 use silu_and_mul_module::silu_and_mul_kernel;
 
 #[unsafe(no_mangle)]
@@ -38,28 +38,14 @@ pub unsafe extern "C" fn cutile_silu_and_mul(
     device_id: i32,
     raw_stream: u64,
 ) -> i32 {
-    if out.is_null() || inp.is_null() {
-        return -5;
-    }
-    let (out_d, in_d) = unsafe { (&*out, &*inp) };
-
-    let dty: &'static str = match dtype_str(out_d.dtype) {
-        Some(s) => s,
-        None => return -2,
-    };
+    let (out_d, in_d) = crate::deref_descs!(out, inp);
+    let dty: &'static str = crate::resolve_dtype!(out_d);
     let hidden_size = out_d.dim(1);
     let n_rows = out_d.dim(0); // grid: one tile-block per row
     let in_row_stride = in_d.strides[0] as i32;
     let out_row_stride = out_d.strides[0] as i32;
 
-    let device = match Device::new(device_id.max(0) as usize) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("cutile_silu_and_mul: Device::new failed: {e:?}");
-            return -4;
-        }
-    };
-    let stream = unsafe { Stream::borrow_raw(raw_stream as *mut c_void, &device) };
+    crate::setup_device_stream!(device, stream, device_id, raw_stream);
 
     macro_rules! dispatch {
         ($E:ty) => {{
@@ -69,13 +55,7 @@ pub unsafe extern "C" fn cutile_silu_and_mul(
             // generics: <E, BLOCK_SIZE>
             let generics = vec![dty.to_string(), block_size.to_string()];
 
-            let mut opts = CompileOptions::default();
-            if occupancy > 0 {
-                opts = opts.occupancy(occupancy);
-            }
-            if num_cta_in_cga > 0 {
-                opts = opts.num_cta_in_cga(num_cta_in_cga);
-            }
+            let opts = crate::compile_options!(occupancy, num_cta_in_cga);
 
             let op = unsafe {
                 silu_and_mul_kernel(out_dp, in_dp, hidden_size, in_row_stride, out_row_stride)
@@ -84,19 +64,14 @@ pub unsafe extern "C" fn cutile_silu_and_mul(
             .grid((n_rows as u32, 1, 1))
             .compile_options(opts);
             match op.sync_on(&stream) {
-                Ok(_) => 0,
+                Ok(_) => rc::OK,
                 Err(e) => {
                     eprintln!("cutile_silu_and_mul: launch failed: {e:?}");
-                    -3
+                    rc::LAUNCH_FAILED
                 }
             }
         }};
     }
 
-    match dty {
-        "f32" => dispatch!(f32),
-        "f16" => dispatch!(f16),
-        "bf16" => dispatch!(bf16),
-        _ => -2,
-    }
+    crate::dispatch_by_dtype!(dty, dispatch, f32, f16, bf16)
 }

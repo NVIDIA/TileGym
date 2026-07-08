@@ -21,7 +21,7 @@ use cutile::half::{bf16, f16};
 use cutile::prelude::*;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, borrow_tensor, cast_tf32, dtype_str};
+use crate::ffi_util::{TensorDesc, borrow_tensor, cast_tf32, rc};
 use matmul_module::{non_persistent_matmul_kernel, static_persistent_matmul_kernel};
 
 #[unsafe(no_mangle)]
@@ -49,27 +49,13 @@ pub unsafe extern "C" fn cutile_matmul(
     device_id: i32,
     raw_stream: u64,
 ) -> i32 {
-    if a.is_null() || b.is_null() || c.is_null() {
-        return -5;
-    }
-    let (a_d, b_d, c_d) = unsafe { (&*a, &*b, &*c) };
-
-    let dty: &'static str = match dtype_str(a_d.dtype) {
-        Some(s) => s,
-        None => return -2,
-    };
+    let (a_d, b_d, c_d) = crate::deref_descs!(a, b, c);
+    let dty: &'static str = crate::resolve_dtype!(a_d);
     let cast = cast_tf32(a_d.dtype);
     // logical dims from shapes: A[m, k], B[k, n], C[m, n].
     let (m, k, n) = (a_d.dim(0), a_d.dim(1), b_d.dim(1));
 
-    let device = match Device::new(device_id.max(0) as usize) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("cutile_matmul: Device::new failed: {e:?}");
-            return -4;
-        }
-    };
-    let stream = unsafe { Stream::borrow_raw(raw_stream as *mut c_void, &device) };
+    crate::setup_device_stream!(device, stream, device_id, raw_stream);
 
     macro_rules! dispatch {
         ($E:ty) => {{
@@ -78,13 +64,7 @@ pub unsafe extern "C" fn cutile_matmul(
             let b_t = unsafe { borrow_tensor::<$E>(b_d) };
             let c_t = unsafe { borrow_tensor::<$E>(c_d) };
 
-            let mut opts = CompileOptions::default();
-            if occupancy > 0 {
-                opts = opts.occupancy(occupancy);
-            }
-            if num_cta_in_cga > 0 {
-                opts = opts.num_cta_in_cga(num_cta_in_cga);
-            }
+            let opts = crate::compile_options!(occupancy, num_cta_in_cga);
 
             if persistent != 0 {
                 // generics: <E, BM, BN, BK, GROUP_SIZE_M, CAST_TF32>
@@ -101,10 +81,10 @@ pub unsafe extern "C" fn cutile_matmul(
                     .grid((num_programs as u32, 1, 1))
                     .compile_options(opts);
                 match op.sync_on(&stream) {
-                    Ok(_) => 0,
+                    Ok(_) => rc::OK,
                     Err(e) => {
                         eprintln!("cutile_matmul static_persistent launch failed: {e:?}");
-                        -3
+                        rc::LAUNCH_FAILED
                     }
                 }
             } else {
@@ -121,10 +101,10 @@ pub unsafe extern "C" fn cutile_matmul(
                     .grid((num_programs as u32, 1, 1))
                     .compile_options(opts);
                 match op.sync_on(&stream) {
-                    Ok(_) => 0,
+                    Ok(_) => rc::OK,
                     Err(e) => {
                         eprintln!("cutile_matmul non_persistent launch failed: {e:?}");
-                        -3
+                        rc::LAUNCH_FAILED
                     }
                 }
             }
@@ -133,10 +113,5 @@ pub unsafe extern "C" fn cutile_matmul(
         }};
     }
 
-    match dty {
-        "f32" => dispatch!(f32),
-        "f16" => dispatch!(f16),
-        "bf16" => dispatch!(bf16),
-        _ => -2,
-    }
+    crate::dispatch_by_dtype!(dty, dispatch, f32, f16, bf16)
 }
