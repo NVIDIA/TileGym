@@ -7,7 +7,7 @@
 """
 CUPTI-based autotuner for cutile-rs FFI kernels.
 
-INSTALLATION (one-time, for a fresh ocean / tilegym checkout):
+INSTALLATION (one-time, for a fresh tilegym checkout):
     1. Copy this file to:
          {TILEGYM_PATH}/src/tilegym/backend/cutile_rs/autotuner.py
     2. Ensure {TILEGYM_PATH}/src/tilegym/backend/cutile_rs/__init__.py
@@ -19,7 +19,7 @@ WHY CUPTI (not torch.cuda.Event):
     time which includes JIT + ctypes FFI + Python marshalling, producing
     phantom 1.5–2.5x perf gaps that don't exist at the GPU kernel level.
     CUPTI (via torch.profiler) measures pure GPU kernel execution time, which
-    is the ONLY apples-to-apples comparison vs cuTile-py / NVT.
+    is the ONLY apples-to-apples comparison vs cuTile-py / Triton-TileIR.
 
     Verified empirically: layer_norm 2D showed 1.5x with cuda.Event but 0.96x
     with CUPTI (rs actually faster).

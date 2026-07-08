@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+//
+// SPDX-License-Identifier: MIT
+
 //
 // FFI export for the silu_and_mul kernel — one C-ABI symbol `cutile_silu_and_mul`.
 //

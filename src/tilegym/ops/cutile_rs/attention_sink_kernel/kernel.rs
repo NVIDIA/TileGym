@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+//
+// SPDX-License-Identifier: MIT
+
 //
 // attention_sink — flash-attention forward with attention-sink tokens.
 // cutile-rs port of cuTile-Python `_attention_sink_kernel`. Online softmax with

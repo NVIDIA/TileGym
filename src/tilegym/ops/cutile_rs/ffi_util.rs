@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+//
+// SPDX-License-Identifier: MIT
+
 //
 // Shared FFI marshalling for every cutile-rs op (the Rust "unpacker").
 //

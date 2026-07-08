@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+//
+// SPDX-License-Identifier: MIT
+
 //
 // matmul — cutile-rs device kernel. Variants: non_persistent, static_persistent.
 // f32 inputs cast to tf32 before mmaf; f32 accumulator.

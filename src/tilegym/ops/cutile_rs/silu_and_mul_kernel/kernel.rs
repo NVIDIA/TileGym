@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+//
+// SPDX-License-Identifier: MIT
+
 //
 // silu_and_mul — row-wise elementwise (pointer scatter/gather).
 //   out[row, c] = silu(a) * b,   a = input[row, c], b = input[row, hidden_size + c]

@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+//
 // SPDX-License-Identifier: CC-BY-4.0 AND Apache-2.0
+
 //
 // FFI export for the bmm (batched matmul) kernel — one C-ABI symbol `cutile_bmm`.
 //
