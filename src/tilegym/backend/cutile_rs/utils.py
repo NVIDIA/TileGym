@@ -213,23 +213,31 @@ _cffi_kernel_libs: dict[str, tuple] = {}
 
 # Generic C-ABI tensor descriptor shared by all cutile-rs ops (the "packer"
 # side). MUST stay in sync with `TensorDesc` in ops/cutile_rs/ffi_util.rs
-# (#[repr(C)], MAX_DIMS=4, strides in ELEMENTS, dtype: 0=f32/1=f16/2=bf16). It is
-# prepended to every op's cdef in bind_kernel_function_cffi, so an op signature
-# can just take `const TensorDesc*` args.
-_TENSORDESC_MAX_DIMS = 4
+# (#[repr(C)], MAX_DIMS=5, strides in ELEMENTS, dtype: 0=f32/1=f16/2=bf16/3=i32/
+# 4=i64/5=f8e5m2). It is prepended to every op's cdef in bind_kernel_function_cffi,
+# so an op signature can just take `const TensorDesc*` args.
+_TENSORDESC_MAX_DIMS = 5
 _TENSORDESC_CDEF = """
 typedef struct {
     uint64_t ptr;
     int32_t  ndim;
-    int64_t  shape[4];
-    int64_t  strides[4];
+    int64_t  shape[5];
+    int64_t  strides[5];
     int32_t  dtype;
 } TensorDesc;
 """
 
 # torch.dtype -> TensorDesc.dtype code. Keep in sync with ffi_util::dtype_str.
-# int32 (code 3) is for integer index tensors (e.g. attention start offsets).
-_DTYPE_CODE = {"torch.float32": 0, "torch.float16": 1, "torch.bfloat16": 2, "torch.int32": 3}
+# int32 (code 3) / int64 (code 4) are integer tensors (index / descriptor-table
+# entries); float8_e5m2 (code 5) is a low-precision element type.
+_DTYPE_CODE = {
+    "torch.float32": 0,
+    "torch.float16": 1,
+    "torch.bfloat16": 2,
+    "torch.int32": 3,
+    "torch.int64": 4,
+    "torch.float8_e5m2": 5,
+}
 
 
 def make_tensor_desc(ffi, t):
@@ -306,7 +314,21 @@ def next_power_of_2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
+# FFI return-code messages. Keep in sync with the `rc` module in
+# ops/cutile_rs/ffi_util.rs (0=ok, -2=unsupported dtype, -3=launch, -4=device,
+# -5=null ptr, -6=invalid arguments). -1 is not a return code (it is the
+# auto/default compile-option sentinel, _AUTO_COMPILE_OPTION).
+_RC_MESSAGES = {
+    -2: "unsupported dtype",
+    -3: "kernel launch failed",
+    -4: "device init failed",
+    -5: "null tensor pointer",
+    -6: "invalid arguments",
+}
+
+
 def check_rc(rc: int, fn_name: str) -> None:
     """Assert FFI return code is 0; raise RuntimeError otherwise."""
     if rc != 0:
-        raise RuntimeError(f"{fn_name} returned error code {rc}")
+        msg = _RC_MESSAGES.get(rc, "unknown error")
+        raise RuntimeError(f"{fn_name} failed (rc={rc}): {msg}")

@@ -19,7 +19,7 @@ use cutile::half::{bf16, f16};
 use cutile::prelude::*;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, borrow_tensor, dtype_str};
+use crate::ffi_util::{TensorDesc, borrow_tensor, rc};
 use attention_sink_module::attention_sink_kernel;
 
 #[unsafe(no_mangle)]
@@ -53,31 +53,10 @@ pub unsafe extern "C" fn cutile_attention_sink(
     device_id: i32,
     raw_stream: u64,
 ) -> i32 {
-    if out.is_null()
-        || q.is_null()
-        || k.is_null()
-        || v.is_null()
-        || sinks.is_null()
-        || start_q.is_null()
-    {
-        return -5;
-    }
     let (out_d, q_d, k_d, v_d, sinks_d, start_q_d) =
-        unsafe { (&*out, &*q, &*k, &*v, &*sinks, &*start_q) };
-
-    let dty: &'static str = match dtype_str(q_d.dtype) {
-        Some(s) => s,
-        None => return -2,
-    };
-
-    let device = match Device::new(device_id.max(0) as usize) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("cutile_attention_sink: Device::new failed: {e:?}");
-            return -4;
-        }
-    };
-    let stream = unsafe { Stream::borrow_raw(raw_stream as *mut c_void, &device) };
+        crate::deref_descs!(out, q, k, v, sinks, start_q);
+    let dty: &'static str = crate::resolve_dtype!(q_d);
+    crate::setup_device_stream!(device, stream, device_id, raw_stream);
 
     macro_rules! dispatch {
         ($E:ty) => {{
@@ -101,13 +80,7 @@ pub unsafe extern "C" fn cutile_attention_sink(
                 bandwidth.to_string(),
             ];
 
-            let mut opts = CompileOptions::default();
-            if occupancy > 0 {
-                opts = opts.occupancy(occupancy);
-            }
-            if num_cta_in_cga > 0 {
-                opts = opts.num_cta_in_cga(num_cta_in_cga);
-            }
+            let opts = crate::compile_options!(occupancy, num_cta_in_cga);
 
             let op = unsafe {
                 attention_sink_kernel(
@@ -125,20 +98,15 @@ pub unsafe extern "C" fn cutile_attention_sink(
             .compile_options(opts);
 
             match op.sync_on(&stream) {
-                Ok(_) => 0,
+                Ok(_) => rc::OK,
                 Err(e) => {
                     eprintln!("cutile_attention_sink: launch failed: {e:?}");
-                    -3
+                    rc::LAUNCH_FAILED
                 }
             }
             // borrowed ManuallyDrop tensors -> never free PyTorch memory.
         }};
     }
 
-    match dty {
-        "f32" => dispatch!(f32),
-        "f16" => dispatch!(f16),
-        "bf16" => dispatch!(bf16),
-        _ => -2,
-    }
+    crate::dispatch_by_dtype!(dty, dispatch, f32, f16, bf16)
 }
