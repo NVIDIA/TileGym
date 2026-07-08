@@ -721,7 +721,7 @@ def matmul(
     trans_a: Optional[bool] = None,
     trans_b: Optional[bool] = None,
     static_persistent: Optional[bool] = True,
-    use_tma: Optional[bool] = True,
+    use_tma: Optional[bool] = None,
     **kwargs: Any,
 ):
     """
@@ -733,7 +733,7 @@ def matmul(
         trans_a: Whether to transpose matrix A (None uses backend default)
         trans_b: Whether to transpose matrix B (None uses backend default)
         static_persistent: Whether to use static persistent mode (default: True)
-        use_tma: Whether to use TMA (default: True)
+        use_tma: Whether to force TMA. None lets supported backends autotune TMA vs non-TMA.
         **kwargs: Additional arguments, including kernel_configs if needed
     Returns:
         torch.Tensor: Matrix multiplication result
