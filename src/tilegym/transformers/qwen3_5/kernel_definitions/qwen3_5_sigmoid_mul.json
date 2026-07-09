@@ -37,7 +37,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L785-L786\nimport torch\n\ndef run(gate, x):\n    return x * torch.sigmoid(gate)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L785-L786\nimport torch\n\ndef run(x, gate):\n    return x * torch.sigmoid(gate)",
   "tags": [
     "model:qwen3.5",
     "stage:prefill",

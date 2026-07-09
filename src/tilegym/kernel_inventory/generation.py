@@ -2,15 +2,17 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""FIB-backed helpers for transformer kernel inventory generation.
+"""FIB-shaped helpers for TileGym kernel inventory generation.
 
 This module is intentionally imported lazily by ``kernel_inventory`` so normal
-TileGym runtime imports do not require FlashInfer-Bench.
+TileGym runtime imports do not require FlashInfer-Bench. FIB validates the data
+schema; TileGym owns execution of the checked-in metadata.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 from typing import Sequence
@@ -25,31 +27,31 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import model_validator
 
-from tilegym.transformers.inventory_common import resolve_repo_relative_path as _resolve_repo_relative_path
-from tilegym.transformers.inventory_common import validate_reference_source_contract
+from tilegym.kernel_inventory.source_contract import resolve_repo_relative_path as _resolve_repo_relative_path
+from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
 
-OCEAN_CUTILE_LANGUAGE = "cuda-tile"
-_FIB_LANGUAGE_BY_OCEAN_LANGUAGE = {
-    OCEAN_CUTILE_LANGUAGE: SupportedLanguages.PYTHON.value,
+TILEGYM_CUTILE_LANGUAGE = "cuda-tile"
+_FIB_LANGUAGE_BY_TILEGYM_LANGUAGE = {
+    TILEGYM_CUTILE_LANGUAGE: SupportedLanguages.PYTHON.value,
 }
 
 
-class OceanSourceFile(BaseModel):
-    """Ocean source reference that may omit content in checked-in JSON."""
+class TileGymSourceFile(BaseModel):
+    """TileGym source reference that may omit content in checked-in JSON."""
 
     path: str
     content: str | None = None
 
     @model_validator(mode="after")
-    def _validate_source_path(self) -> "OceanSourceFile":
+    def _validate_source_path(self) -> "TileGymSourceFile":
         raw_path = Path(self.path)
         if not self.path or raw_path.is_absolute() or ".." in raw_path.parts:
             raise ValueError(f"Invalid source path: {self.path}")
         return self
 
 
-class OceanBuildSpec(BaseModel):
-    """Build spec compatible with Ocean's cuTile language label."""
+class TileGymBuildSpec(BaseModel):
+    """Build spec compatible with TileGym's cuTile language label."""
 
     language: str
     target_hardware: list[str] = Field(min_length=1)
@@ -59,30 +61,35 @@ class OceanBuildSpec(BaseModel):
     binding: str | None = None
 
     @model_validator(mode="after")
-    def _validate_spec(self) -> "OceanBuildSpec":
+    def _validate_spec(self) -> "TileGymBuildSpec":
         supported_languages = {language.value for language in SupportedLanguages}
-        supported_languages.add(OCEAN_CUTILE_LANGUAGE)
+        supported_languages.add(TILEGYM_CUTILE_LANGUAGE)
         if self.language not in supported_languages:
             raise ValueError(f"Unsupported Solution.spec.language: {self.language}")
         if self.entry_point.count("::") != 1:
             raise ValueError(
                 f'Invalid entry point format: {self.entry_point}. Expected "<file_path>::<function_name>".'
             )
+        invalid_targets = [label for label in self.target_hardware if re.fullmatch(r"SM\d{2,}", label) is None]
+        if invalid_targets:
+            raise ValueError(
+                f"Solution.spec.target_hardware entries must use the SM<major><minor> format: {invalid_targets}"
+            )
         return self
 
     def fib_language(self) -> str:
         """Return the closest FIB language for schema validation."""
-        return _FIB_LANGUAGE_BY_OCEAN_LANGUAGE.get(self.language, self.language)
+        return _FIB_LANGUAGE_BY_TILEGYM_LANGUAGE.get(self.language, self.language)
 
 
-class OceanSolution(BaseModel):
-    """Ocean Solution schema with path-only source support."""
+class TileGymSolution(BaseModel):
+    """TileGym Solution schema with path-only source support."""
 
     name: str
     definition: str
     author: str
-    spec: OceanBuildSpec
-    sources: list[OceanSourceFile] = Field(min_length=1)
+    spec: TileGymBuildSpec
+    sources: list[TileGymSourceFile] = Field(min_length=1)
     description: str | None = None
 
     @model_validator(mode="before")
@@ -105,7 +112,7 @@ class OceanSolution(BaseModel):
         return normalized
 
     @model_validator(mode="after")
-    def _validate_source_path_entry_point(self) -> "OceanSolution":
+    def _validate_source_path_entry_point(self) -> "TileGymSolution":
         seen_paths: set[str] = set()
         for source in self.sources:
             if source.path in seen_paths:
@@ -145,8 +152,8 @@ class OceanSolution(BaseModel):
         fib_data["sources"] = sources
         return Solution.model_validate(fib_data)
 
-    def to_ocean_dict(self, *, path_only_sources: bool = True) -> dict[str, Any]:
-        """Return stable Ocean JSON data."""
+    def to_tilegym_dict(self, *, path_only_sources: bool = True) -> dict[str, Any]:
+        """Return stable TileGym JSON data."""
         data = self.model_dump(mode="json", exclude_none=True)
         if path_only_sources:
             data["sources"] = {"path": [source.path for source in self.sources]}
@@ -180,7 +187,7 @@ def make_definition(
     description: str | None = None,
     constraints: Sequence[str] | None = None,
 ) -> Definition:
-    """Create a Definition after enforcing Ocean's source permalink contract."""
+    """Create a Definition after enforcing TileGym's source permalink contract."""
     validate_reference_source_contract(reference)
     return Definition(
         name=name,
@@ -200,12 +207,12 @@ def make_solution(
     name: str,
     definition: str,
     author: str,
-    spec: dict[str, Any] | OceanBuildSpec,
-    sources: dict[str, Any] | Sequence[str | dict[str, Any] | OceanSourceFile],
+    spec: dict[str, Any] | TileGymBuildSpec,
+    sources: dict[str, Any] | Sequence[str | dict[str, Any] | TileGymSourceFile],
     repo_root: str | Path | None = None,
     description: str | None = None,
-) -> OceanSolution:
-    """Create an Ocean Solution and validate it through FIB Solution."""
+) -> TileGymSolution:
+    """Create a TileGym Solution and validate it through FIB Solution."""
     normalized_sources: Any
     if isinstance(sources, dict):
         normalized_sources = sources
@@ -214,12 +221,12 @@ def make_solution(
     else:
         normalized_sources = [{"path": source} if isinstance(source, str) else source for source in sources]
 
-    solution = OceanSolution.model_validate(
+    solution = TileGymSolution.model_validate(
         {
             "name": name,
             "definition": definition,
             "author": author,
-            "spec": spec.model_dump(mode="json") if isinstance(spec, OceanBuildSpec) else spec,
+            "spec": spec.model_dump(mode="json") if isinstance(spec, TileGymBuildSpec) else spec,
             "sources": normalized_sources,
             "description": description,
         }
@@ -228,48 +235,48 @@ def make_solution(
     return solution
 
 
-def source_path(path: str) -> OceanSourceFile:
-    """Create a path-only Ocean source reference."""
-    return OceanSourceFile(path=path)
+def source_path(path: str) -> TileGymSourceFile:
+    """Create a path-only TileGym source reference."""
+    return TileGymSourceFile(path=path)
 
 
-def validate_ocean_definition_model(definition: dict[str, Any]) -> Definition:
-    """Validate an Ocean Definition with FIB Definition."""
+def validate_tilegym_definition_model(definition: dict[str, Any]) -> Definition:
+    """Validate a TileGym Definition with FIB Definition."""
     model = Definition.model_validate(definition)
     validate_reference_source_contract(model.reference)
     return model
 
 
-def validate_ocean_solution_model(solution: dict[str, Any], repo_root: str | Path | None = None) -> OceanSolution:
-    """Validate an Ocean Solution with Ocean and FIB schema checks."""
-    model = OceanSolution.model_validate(solution)
+def validate_tilegym_solution_model(solution: dict[str, Any], repo_root: str | Path | None = None) -> TileGymSolution:
+    """Validate a TileGym Solution with TileGym and FIB schema checks."""
+    model = TileGymSolution.model_validate(solution)
     model.to_fib_solution(repo_root, allow_placeholder_content=repo_root is None)
     return model
 
 
 def materialize_solution_for_fib(solution: dict[str, Any], repo_root: str | Path) -> Solution:
-    """Return a FIB Solution with source contents materialized from Ocean JSON."""
-    return OceanSolution.model_validate(solution).to_fib_solution(repo_root)
+    """Return a FIB Solution with source contents materialized from TileGym JSON."""
+    return TileGymSolution.model_validate(solution).to_fib_solution(repo_root)
 
 
-def definition_to_ocean_json(definition: Definition) -> dict[str, Any]:
-    """Return stable Ocean JSON data for a Definition."""
+def definition_to_tilegym_json(definition: Definition) -> dict[str, Any]:
+    """Return stable TileGym JSON data for a Definition."""
     return _drop_none_except_shape(definition.model_dump(mode="json"))
 
 
-def solution_to_ocean_json(solution: OceanSolution, *, path_only_sources: bool = True) -> dict[str, Any]:
-    """Return stable Ocean JSON data for a Solution."""
-    return solution.to_ocean_dict(path_only_sources=path_only_sources)
+def solution_to_tilegym_json(solution: TileGymSolution, *, path_only_sources: bool = True) -> dict[str, Any]:
+    """Return stable TileGym JSON data for a Solution."""
+    return solution.to_tilegym_dict(path_only_sources=path_only_sources)
 
 
 def write_definition_json(definition: Definition, path: str | Path) -> None:
-    """Write a Definition JSON file using Ocean's stable formatting."""
-    _write_stable_json(definition_to_ocean_json(definition), path)
+    """Write a Definition JSON file using TileGym's stable formatting."""
+    _write_stable_json(definition_to_tilegym_json(definition), path)
 
 
-def write_solution_json(solution: OceanSolution, path: str | Path, *, path_only_sources: bool = True) -> None:
-    """Write a Solution JSON file using Ocean's stable formatting."""
-    _write_stable_json(solution_to_ocean_json(solution, path_only_sources=path_only_sources), path)
+def write_solution_json(solution: TileGymSolution, path: str | Path, *, path_only_sources: bool = True) -> None:
+    """Write a Solution JSON file using TileGym's stable formatting."""
+    _write_stable_json(solution_to_tilegym_json(solution, path_only_sources=path_only_sources), path)
 
 
 def _drop_none_except_shape(value: Any, *, key: str | None = None) -> Any:

@@ -60,6 +60,7 @@ tilegym_hf_bench = ["kernel_filters/*.yaml"]
 managed = true
 override-dependencies = [
   "transformers==5.10.2",
+  "triton==3.7.1",
   "cuda-toolkit[tileiras,nvcc,nvvm]==13.3.0",
   "nvidia-cuda-runtime>=13.3,<14",
   "nvidia-nvjitlink>=13.3,<14",

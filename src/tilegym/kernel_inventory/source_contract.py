@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Shared dependency-light checks for transformer kernel inventory metadata."""
+"""Shared dependency-light checks for kernel inventory metadata."""
 
 from __future__ import annotations
 

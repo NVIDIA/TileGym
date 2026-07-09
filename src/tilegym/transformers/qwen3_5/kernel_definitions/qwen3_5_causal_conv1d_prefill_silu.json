@@ -61,7 +61,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L556-L568\nimport torch\n\ndef run(seq_len, weight, x):\n    y = []\n    x2 = x[0]\n    for t in range(seq_len):\n        window = x2[:, t:t + weight.shape[1]]\n        dot = (window * weight).sum(-1)\n        y.append(dot * torch.sigmoid(dot))\n    return torch.stack(y, dim=-1).unsqueeze(0)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L556-L568\nimport torch\n\ndef run(x, weight, seq_len):\n    y = []\n    x2 = x[0]\n    for t in range(seq_len):\n        window = x2[:, t:t + weight.shape[1]]\n        dot = (window * weight).sum(-1)\n        y.append(dot * torch.sigmoid(dot))\n    return torch.stack(y, dim=-1).unsqueeze(0)",
   "tags": [
     "model:qwen3.5",
     "stage:prefill",

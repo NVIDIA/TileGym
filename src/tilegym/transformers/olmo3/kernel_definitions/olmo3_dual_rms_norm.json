@@ -60,7 +60,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L179-L180\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L55-L60\nimport torch\n\ndef run(eps, k, k_weight, q, q_weight):\n    qf = q.to(torch.float32)\n    kf = k.to(torch.float32)\n    q_out = qf * torch.rsqrt((qf * qf).mean(-1, keepdim=True) + eps) * q_weight\n    k_out = kf * torch.rsqrt((kf * kf).mean(-1, keepdim=True) + eps) * k_weight\n    q.copy_(q_out.to(q.dtype))\n    k.copy_(k_out.to(k.dtype))\n    return q, k",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L179-L180\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/olmo3/modeling_olmo3.py#L55-L60\nimport torch\n\ndef run(q, k, q_weight, k_weight, eps):\n    qf = q.to(torch.float32)\n    kf = k.to(torch.float32)\n    q_out = qf * torch.rsqrt((qf * qf).mean(-1, keepdim=True) + eps) * q_weight\n    k_out = kf * torch.rsqrt((kf * kf).mean(-1, keepdim=True) + eps) * k_weight\n    q.copy_(q_out.to(q.dtype))\n    k.copy_(k_out.to(k.dtype))\n    return q, k",
   "tags": [
     "model:olmo3",
     "stage:prefill",

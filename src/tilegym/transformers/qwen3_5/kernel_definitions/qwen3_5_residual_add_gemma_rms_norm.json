@@ -58,7 +58,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L875-L881\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L814-L822\nimport torch\n\ndef run(eps, offset, residual, weight, x):\n    summed = residual + x\n    s = summed.float()\n    output = s * torch.rsqrt(s.pow(2).mean(-1, keepdim=True) + eps)\n    output = output * (offset + weight.float())\n    return summed, output.type_as(summed)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L875-L881\n# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L814-L822\nimport torch\n\ndef run(residual, x, weight, eps, offset=1.0):\n    summed = residual + x\n    s = summed.float()\n    output = s * torch.rsqrt(s.pow(2).mean(-1, keepdim=True) + eps)\n    output = output * (offset + weight.float())\n    return summed, output.type_as(summed)",
   "tags": [
     "model:qwen3.5",
     "stage:prefill",

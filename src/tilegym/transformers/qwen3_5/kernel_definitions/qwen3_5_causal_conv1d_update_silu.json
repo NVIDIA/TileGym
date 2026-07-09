@@ -66,7 +66,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L545-L554\nimport torch\n\ndef run(conv_state, hidden_states, weight):\n    x = hidden_states[:, :, 0]\n    full = torch.cat([conv_state, x.unsqueeze(-1)], dim=-1)\n    dot = (full * weight.unsqueeze(0)).sum(-1)\n    output = dot * torch.sigmoid(dot)\n    conv_state[:, :, 0] = conv_state[:, :, 1]\n    conv_state[:, :, 1] = conv_state[:, :, 2]\n    conv_state[:, :, 2] = x\n    return output.unsqueeze(-1)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L545-L554\nimport torch\n\ndef run(hidden_states, conv_state, weight, bias=None, activation=None):\n    x = hidden_states[:, :, 0]\n    full = torch.cat([conv_state, x.unsqueeze(-1)], dim=-1)\n    dot = (full * weight.unsqueeze(0)).sum(-1)\n    output = dot * torch.sigmoid(dot)\n    conv_state[:, :, 0] = conv_state[:, :, 1]\n    conv_state[:, :, 1] = conv_state[:, :, 2]\n    conv_state[:, :, 2] = x\n    return output.unsqueeze(-1)",
   "tags": [
     "model:qwen3.5",
     "stage:decode",

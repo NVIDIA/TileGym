@@ -2,18 +2,18 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Helpers for FlashInfer-style transformer kernel inventory metadata.
+"""Helpers for FlashInfer-Bench -shaped, TileGym-executed kernel inventory metadata.
 
-The metadata files live under transformer model submodules:
+The metadata files live under an inventory-owning package or suite:
 
 - ``kernel_definitions/*.json`` for FlashInfer Trace Definition objects.
 - ``kernel_solutions/*.json`` for Solution objects.
 - ``kernels/*.py`` for reusable kernel implementations referenced by Solution
   source paths.
 
-This module intentionally avoids importing flashinfer-bench at module import
-time. Schema validation uses FlashInfer-Bench lazily when called, and Ocean
-keeps a few repo-local checks around source permalinks and path-only sources.
+Shared schema fields use FlashInfer-Bench validation lazily, while
+TileGym owns runtime invocation, source paths, and entry points. The checked-in
+metadata is not a standalone FlashInfer-Bench runtime bundle.
 """
 
 from __future__ import annotations
@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any
 from typing import Iterator
 
-from tilegym.transformers.inventory_common import SourceContractError
-from tilegym.transformers.inventory_common import resolve_repo_relative_path
-from tilegym.transformers.inventory_common import validate_reference_source_contract
+from tilegym.kernel_inventory.return_contract import ReturnContractError
+from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+from tilegym.kernel_inventory.source_contract import SourceContractError
+from tilegym.kernel_inventory.source_contract import resolve_repo_relative_path
+from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
 
 DEFINITION_SCHEMA_URL = (
     "https://github.com/flashinfer-ai/flashinfer-bench/blob/main/docs/flashinfer-trace/definition.mdx"
@@ -36,7 +38,7 @@ SOLUTION_SCHEMA_URL = "https://github.com/flashinfer-ai/flashinfer-bench/blob/ma
 
 
 class KernelInventoryError(ValueError):
-    """Raised when transformer kernel inventory metadata is invalid."""
+    """Raised when kernel inventory metadata is invalid."""
 
 
 def load_json(path: str | Path) -> dict[str, Any]:
@@ -49,30 +51,75 @@ def load_json(path: str | Path) -> dict[str, Any]:
 
 
 def iter_kernel_definition_paths(root: str | Path) -> Iterator[Path]:
-    """Yield all transformer kernel Definition JSON files under ``root``."""
-    yield from sorted(Path(root).glob("src/tilegym/transformers/*/kernel_definitions/*.json"))
+    """Yield checked-in kernel Definition JSON files under ``root``.
+
+    Transformer inventories keep Definitions and Solutions in sibling
+    directories. Suite inventories keep public Definitions at the root of
+    ``kernel_definitions`` and backend-specific Solutions in the sibling
+    ``kernel_solutions`` directory.
+    """
+    root_path = Path(root)
+    transformer_paths = root_path.glob("src/tilegym/transformers/*/kernel_definitions/*.json")
+    suite_paths = root_path.glob("src/tilegym/suites/*/kernel_definitions/*.json")
+    paths = set(transformer_paths)
+    paths.update(
+        path
+        for path in suite_paths
+        if any((path.parent.parent / "kernel_solutions" / backend).is_dir() for backend in ("triton", "cutile"))
+    )
+    yield from sorted(paths)
 
 
 def iter_kernel_solution_paths(root: str | Path) -> Iterator[Path]:
-    """Yield all transformer kernel Solution JSON files under ``root``."""
-    yield from sorted(Path(root).glob("src/tilegym/transformers/*/kernel_solutions/*.json"))
+    """Yield checked-in backend-specific Solution JSON files under ``root``."""
+    root_path = Path(root)
+    patterns = (
+        "src/tilegym/transformers/*/kernel_solutions/*.json",
+        "src/tilegym/suites/*/kernel_solutions/triton/*.json",
+        "src/tilegym/suites/*/kernel_solutions/cutile/*.json",
+    )
+    yield from _iter_paths(root_path, patterns)
 
 
 def iter_kernel_python_paths(root: str | Path) -> Iterator[Path]:
-    """Yield all dedicated transformer kernel Python modules under ``root``."""
+    """Yield dedicated transformer kernel Python modules under ``root``.
+
+    Suite solutions refer to their checked-in backend implementation modules,
+    whose importability is tested through their Solution entry points instead.
+    """
     yield from sorted(Path(root).glob("src/tilegym/transformers/*/kernels/*.py"))
 
 
+def iter_solution_paths_for_definition(definition_path: str | Path) -> Iterator[Path]:
+    """Yield checked-in Solutions that implement one Definition.
+
+    The function supports both current inventory layouts without requiring
+    callers to infer a Solution path from a transformer-only convention.
+    """
+    definition = Path(definition_path)
+    if definition.parent.name != "kernel_definitions":
+        raise KernelInventoryError(f"Definition must live in kernel_definitions: {definition}")
+
+    transformer_solution = definition.parent.parent / "kernel_solutions" / definition.name
+    if transformer_solution.is_file():
+        yield transformer_solution
+
+    for backend in ("triton", "cutile"):
+        suite_solution = definition.parent.parent / "kernel_solutions" / backend / definition.name
+        if suite_solution.is_file():
+            yield suite_solution
+
+
 def validate_definition(definition: dict[str, Any]) -> None:
-    """Validate a transformer kernel Definition with FIB and Ocean checks."""
+    """Validate a kernel Definition with FIB and TileGym checks."""
     _require_mapping(definition, "Definition")
     try:
-        from tilegym.transformers.inventory_generation import validate_ocean_definition_model
+        from tilegym.kernel_inventory.generation import validate_tilegym_definition_model
 
-        validate_ocean_definition_model(definition)
+        validate_tilegym_definition_model(definition)
     except ImportError as exc:
         raise KernelInventoryError(
-            "flashinfer-bench is required to validate transformer kernel Definitions. "
+            "flashinfer-bench is required to validate kernel Definitions. "
             "Install the tilegym-hf-bench dev environment with `uv sync --extra dev` "
             "from modeling/transformers."
         ) from exc
@@ -80,10 +127,18 @@ def validate_definition(definition: dict[str, Any]) -> None:
         raise KernelInventoryError(f"Definition schema invalid: {exc}") from exc
 
     _validate_reference_run(definition["reference"], list(definition["inputs"]))
+    try:
+        instrument_reference_returns(
+            definition["reference"],
+            list(definition["outputs"]),
+            allow_no_return="runtime:unsupported" in definition.get("tags", []),
+        )
+    except ReturnContractError as exc:
+        raise KernelInventoryError(str(exc)) from exc
 
 
 def validate_solution(solution: dict[str, Any], repo_root: str | Path | None = None) -> None:
-    """Validate a transformer kernel Solution with FIB and Ocean checks."""
+    """Validate a kernel Solution with FIB and TileGym checks."""
     _require_mapping(solution, "Solution")
     source_paths = normalize_solution_source_paths(solution)
     if repo_root is not None:
@@ -98,12 +153,12 @@ def validate_solution(solution: dict[str, Any], repo_root: str | Path | None = N
             _resolve_inventory_path(root, entry_file, "Solution entry point path")
 
     try:
-        from tilegym.transformers.inventory_generation import validate_ocean_solution_model
+        from tilegym.kernel_inventory.generation import validate_tilegym_solution_model
 
-        validate_ocean_solution_model(solution, repo_root)
+        validate_tilegym_solution_model(solution, repo_root)
     except ImportError as exc:
         raise KernelInventoryError(
-            "flashinfer-bench is required to validate transformer kernel Solutions. "
+            "flashinfer-bench is required to validate kernel Solutions. "
             "Install the tilegym-hf-bench dev environment with `uv sync --extra dev` "
             "from modeling/transformers."
         ) from exc
@@ -133,7 +188,7 @@ def validate_solution_entry_point(solution: dict[str, Any], repo_root: str | Pat
 def normalize_solution_source_paths(solution: dict[str, Any]) -> list[str]:
     """Return source paths from either path-list or file-object Solution sources.
 
-    Ocean transformer inventory stores source references by path and does not
+    TileGym inventory stores source references by path and does not
     require embedded ``content``. This accepts both ``{"path": [...]}`` and the
     file-object array shape used by current flashinfer-bench examples.
     """
@@ -195,12 +250,30 @@ def _validate_reference_run(reference: str, input_names: list[str]) -> None:
     if len(run_nodes) != 1:
         raise KernelInventoryError("Definition.reference must contain exactly one global run function")
     run_args = run_nodes[0].args
-    if run_args.vararg is not None or run_args.kwarg is not None:
-        raise KernelInventoryError("Definition.reference run function must not use *args or **kwargs")
-    arg_names = [arg.arg for arg in (*run_args.posonlyargs, *run_args.args, *run_args.kwonlyargs)]
-    if arg_names != input_names:
+    if run_args.vararg is not None:
+        raise KernelInventoryError("Definition.reference run function must not use *args")
+
+    parameters = [*run_args.posonlyargs, *run_args.args, *run_args.kwonlyargs]
+    parameter_names = [parameter.arg for parameter in parameters]
+    unknown_inputs = [name for name in input_names if name not in parameter_names]
+    if run_args.kwarg is not None:
+        unknown_inputs = []
+    if unknown_inputs:
         raise KernelInventoryError(
-            f"Definition.reference run arguments {arg_names} must match Definition.inputs {input_names}"
+            f"Definition.inputs contains names not accepted by Definition.reference run: {unknown_inputs}"
+        )
+
+    positional_parameters = [*run_args.posonlyargs, *run_args.args]
+    positional_required_count = len(positional_parameters) - len(run_args.defaults)
+    required_names = [parameter.arg for parameter in positional_parameters[:positional_required_count]]
+    required_names.extend(
+        parameter.arg for parameter, default in zip(run_args.kwonlyargs, run_args.kw_defaults) if default is None
+    )
+    missing_required_inputs = [name for name in required_names if name not in input_names]
+    if missing_required_inputs:
+        raise KernelInventoryError(
+            "Definition.inputs must include every required Definition.reference run parameter: "
+            f"{missing_required_inputs}"
         )
 
 
@@ -214,3 +287,8 @@ def _resolve_inventory_path(root: Path, path: str, label: str) -> Path:
 def _require_mapping(value: Any, label: str) -> None:
     if not isinstance(value, dict):
         raise KernelInventoryError(f"{label} must be an object")
+
+
+def _iter_paths(root: Path, patterns: tuple[str, ...]) -> Iterator[Path]:
+    paths = {path for pattern in patterns for path in root.glob(pattern)}
+    yield from sorted(paths)
