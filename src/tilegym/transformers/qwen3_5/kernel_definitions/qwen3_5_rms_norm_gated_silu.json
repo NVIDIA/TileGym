@@ -47,7 +47,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L271-L280\nimport torch\nimport torch.nn.functional as F\n\ndef run(eps, gate, hidden_states, weight):\n    input_dtype = hidden_states.dtype\n    hidden_states = hidden_states.to(torch.float32)\n    variance = hidden_states.pow(2).mean(-1, keepdim=True)\n    hidden_states = hidden_states * torch.rsqrt(variance + eps)\n    hidden_states = weight * hidden_states.to(input_dtype)\n    hidden_states = hidden_states * F.silu(gate.to(torch.float32))\n    return hidden_states.to(input_dtype)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L271-L280\nimport torch\nimport torch.nn.functional as F\n\ndef run(hidden_states, gate, weight, eps):\n    input_dtype = hidden_states.dtype\n    hidden_states = hidden_states.to(torch.float32)\n    variance = hidden_states.pow(2).mean(-1, keepdim=True)\n    hidden_states = hidden_states * torch.rsqrt(variance + eps)\n    hidden_states = weight * hidden_states.to(input_dtype)\n    hidden_states = hidden_states * F.silu(gate.to(torch.float32))\n    return hidden_states.to(input_dtype)",
   "tags": [
     "model:qwen3.5",
     "stage:prefill",

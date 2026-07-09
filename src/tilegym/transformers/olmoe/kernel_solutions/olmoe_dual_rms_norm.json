@@ -17,8 +17,8 @@
     "entry_point": "src/tilegym/transformers/olmoe/kernels/dual_rms_norm.py::dual_rms_norm_olmoe_cutile",
     "language": "cuda-tile",
     "target_hardware": [
-      "NVIDIA_B200",
-      "NVIDIA_RTX_PRO_6000_BLACKWELL_SERVER_EDITION"
+      "SM100",
+      "SM120"
     ]
   }
 }

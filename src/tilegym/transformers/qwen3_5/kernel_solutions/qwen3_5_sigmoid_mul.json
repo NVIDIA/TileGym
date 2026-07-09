@@ -17,9 +17,9 @@
     "entry_point": "src/tilegym/transformers/qwen3_5/kernels/sigmoid_mul.py::sigmoid_mul_cutile",
     "language": "cuda-tile",
     "target_hardware": [
-      "NVIDIA_B200",
-      "NVIDIA_GB300",
-      "NVIDIA_RTX_PRO_6000_BLACKWELL_SERVER_EDITION"
+      "SM100",
+      "SM103",
+      "SM120"
     ]
   }
 }

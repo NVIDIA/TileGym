@@ -56,7 +56,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L585-L587\nimport torch\nimport torch.nn.functional as F\n\ndef run(A_log, a, b, dt_bias):\n    beta = b.sigmoid()\n    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)\n    return beta, g",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L585-L587\nimport torch\nimport torch.nn.functional as F\n\ndef run(b, a, A_log, dt_bias):\n    beta = b.sigmoid()\n    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)\n    return beta, g",
   "tags": [
     "model:qwen3.5",
     "stage:prefill",
