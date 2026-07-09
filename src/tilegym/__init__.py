@@ -17,19 +17,6 @@ def _check_torch_dependencies():
         ) from None
 
 
-def _check_ct_tune_dependency():
-    """Verify that cuda-tile with tune support is installed with helpful error message."""
-    try:
-        import cuda.tile.tune  # noqa: F401
-    except (ImportError, ModuleNotFoundError):
-        raise ImportError(
-            "\n\n[TileGym] cuda.tile.tune is required but not available.\n"
-            "Please install or upgrade cuda-tile:\n\n"
-            "  pip install cuda-tile\n\n"
-            "See: https://github.com/NVIDIA/cutile-python"
-        ) from None
-
-
 # Check dependencies before any imports
 _check_torch_dependencies()
 
@@ -54,7 +41,6 @@ from .backend import set_backend
 
 # Setup cutile integration
 if is_backend_available("cutile"):
-    _check_ct_tune_dependency()
     # Apply experimental kernel tracking patch
     from .experimental import _apply_patch as _apply_experimental_patch
 

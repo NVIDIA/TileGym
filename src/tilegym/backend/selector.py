@@ -29,17 +29,25 @@ def is_nvt_available():
 
 try:
     import cuda.tile as ct
+    import cuda.tile.tune  # noqa: F401  # required by every op under ops/cutile/
 
     CUTILE_AVAILABLE = True
 
 except ImportError:
     import warnings
 
-    warnings.warn("Failed to import cuda_tile_compiler, CUDA Tile backend is not available")
+    warnings.warn(
+        "Failed to import cuda.tile / cuda.tile.tune, CUDA Tile backend is not available. "
+        "To enable it: `pip install cuda-tile` "
+        "(see https://github.com/NVIDIA/cutile-python)"
+    )
     CUTILE_AVAILABLE = False
 
 
 def is_cutile_available():
+    if os.environ.get("TILEGYM_DISABLE_CUTILE") == "1":
+        print("[TileGym] TILEGYM_DISABLE_CUTILE=1; CUDA Tile backend force-disabled")
+        return False
     return CUTILE_AVAILABLE
 
 
