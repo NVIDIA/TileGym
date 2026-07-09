@@ -52,7 +52,11 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
         _backends = _backends + ["tilecpp"]
     _perf_frameworks = _backends + ["pytorch"]
 
-    @pytest.mark.parametrize("num_heads", [16, 32])
+    # num_heads 8 and 24 are regression shapes: head counts that are not a
+    # multiple of the kernel's head-tile size (16) previously wrote LSE rows
+    # out of bounds (DeepSeek head counts under tensor parallelism, e.g.
+    # 128/TP16 = 8, hit this).
+    @pytest.mark.parametrize("num_heads", [8, 16, 24, 32])
     @pytest.mark.parametrize("seq_len", [129, 1024, 8192, 11049])
     @pytest.mark.parametrize("kv_len_per_split", [128, 512])
     @pytest.mark.parametrize("dtype", [torch.float16])
