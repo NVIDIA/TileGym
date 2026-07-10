@@ -108,7 +108,13 @@ __tile_global__ void prefill_fmha_fwd_kernel(
     auto Out_view = ct::partition_view(Out_span, ct::shape<1, 1, BLOCK_M, BLOCK_D>{});
 
     // Load Q block: [BLOCK_M, BLOCK_D]
-    T_4D_M q_4d = Q_view.load(batch_idx, head_idx, pid_x, 0);
+    constexpr bool EVEN_Q = (S_QO % BLOCK_M) == 0;
+    T_4D_M q_4d;
+    if constexpr (EVEN_Q) {
+        q_4d = Q_view.load(batch_idx, head_idx, pid_x, 0);
+    } else {
+        q_4d = Q_view.load_masked(batch_idx, head_idx, pid_x, 0);
+    }
     auto q = ct::reshape(q_4d, ct::shape<BLOCK_M, BLOCK_D>{});
 
     using f32_Mx1 = ct::tile<float, ct::shape<BLOCK_M, 1>>;
@@ -140,7 +146,6 @@ __tile_global__ void prefill_fmha_fwd_kernel(
     auto offs_n_2d   = ct::reshape(offs_n_1d, ct::shape<1, BLOCK_N>{});
 
     auto neg_inf_2d = ct::full<f32_MxN>(-INFINITY);
-    auto zero_2d    = ct::full<f32_MxN>(0.0f);
 
     constexpr bool NEEDS_MASK = IS_CAUSAL || !EVEN_K;
     int unmasked_end = NEEDS_MASK ? (mask_start < num_kv_blocks ? mask_start : num_kv_blocks)
@@ -189,8 +194,13 @@ __tile_global__ void prefill_fmha_fwd_kernel(
             int curr_n = kv_block * BLOCK_N;
 
             T_4D_N k_raw;
-            [[ using cutile : hint(1000, latency=2) ]]
-            k_raw = K_view.load(batch_idx, off_kv_h, kv_block, 0);
+            if constexpr (EVEN_K) {
+                [[ using cutile : hint(1000, latency=2) ]]
+                k_raw = K_view.load(batch_idx, off_kv_h, kv_block, 0);
+            } else {
+                [[ using cutile : hint(1000, latency=2) ]]
+                k_raw = K_view.load_masked(batch_idx, off_kv_h, kv_block, 0);
+            }
             auto k_4d_T = ct::permute(k_raw, ct::dimension_map<0, 1, 3, 2>{});
             auto k_t    = ct::reshape(k_4d_T, ct::shape<BLOCK_D, BLOCK_N>{});
 
@@ -200,16 +210,13 @@ __tile_global__ void prefill_fmha_fwd_kernel(
                                      ct::shape<1, BLOCK_N>{});
             if constexpr (IS_CAUSAL && !EVEN_K) {
                 auto valid_bool = (n_pos < ct::full<i32_1xN>(S_KV)) & (offs_m_2d >= n_pos);
-                auto mask_val = ct::select(valid_bool, zero_2d, neg_inf_2d);
-                qk = qk + mask_val;
+                qk = ct::select(valid_bool, qk, neg_inf_2d);
             } else if constexpr (IS_CAUSAL) {
                 auto valid_bool = (offs_m_2d >= n_pos);
-                auto mask_val = ct::select(valid_bool, zero_2d, neg_inf_2d);
-                qk = qk + mask_val;
+                qk = ct::select(valid_bool, qk, neg_inf_2d);
             } else {
                 auto valid_bool = n_pos < ct::full<i32_1xN>(S_KV);
-                auto mask_val = ct::select(valid_bool, zero_2d, neg_inf_2d);
-                qk = qk + mask_val;
+                qk = ct::select(valid_bool, qk, neg_inf_2d);
             }
 
             auto qk_max_2d = ct::reduce_max(qk, ct::integral_constant<1>{});
@@ -224,8 +231,13 @@ __tile_global__ void prefill_fmha_fwd_kernel(
             acc = acc * alpha;
 
             T_4D_N v_4d;
-            [[ using cutile : hint(1000, latency=4) ]]
-            v_4d = V_view.load(batch_idx, off_kv_h, kv_block, 0);
+            if constexpr (EVEN_K) {
+                [[ using cutile : hint(1000, latency=4) ]]
+                v_4d = V_view.load(batch_idx, off_kv_h, kv_block, 0);
+            } else {
+                [[ using cutile : hint(1000, latency=4) ]]
+                v_4d = V_view.load_masked(batch_idx, off_kv_h, kv_block, 0);
+            }
             auto v = ct::reshape(v_4d, ct::shape<BLOCK_N, BLOCK_D>{});
 
             auto p_T = ct::element_cast<T>(p);
