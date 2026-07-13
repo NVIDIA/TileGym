@@ -1,5 +1,5 @@
 ## Description: <br>
-Integrate TileGym kernels into Hugging Face `transformers` models by replacing the library's submodule(s) and certain class(es)' implementations, and patching certain class(es)' init/forward/load weight methods prior to instantiating models. <br>
+Integrate TileGym kernels into Hugging Face transformers models by replacing the library's submodule(s) and certain class(es)' implementations, and patching certain class(es)' init/forward/load weight methods prior to instantiating models. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
@@ -9,7 +9,7 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 CC-BY-4.0 AND Apache-2.0 <br>
 ## Use Case: <br>
-Developers and engineers who need to integrate high-performance TileGym CUDA Tile kernels into Hugging Face transformers models for LLM training and inference optimization. <br>
+Developers and engineers who need to integrate TileGym CUDA Tile kernels into Hugging Face transformers models for LLM training and inference performance optimization. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -25,10 +25,11 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
+- [Auto Kernelize](references/auto-kernelize.md) <br>
 - [Environment Setup](references/environment-setup.md) <br>
 - [Kernel Integration](references/kernel-integration.md) <br>
-- [Auto Kernelize](references/auto-kernelize.md) <br>
 - [Kernel Inventory Schema](references/kernel-inventory-schema.md) <br>
+- [Workflow Diagram](references/workflow-diagram.png) <br>
 - [CUDA Tile IR Documentation](https://docs.nvidia.com/cuda/tile-ir/latest/) <br>
 - [FlashInfer-Bench Definition Schema](https://github.com/flashinfer-ai/flashinfer-bench/blob/main/docs/flashinfer-trace/definition.mdx) <br>
 - [FlashInfer-Bench Solution Schema](https://github.com/flashinfer-ai/flashinfer-bench/blob/main/docs/flashinfer-trace/solution.mdx) <br>
@@ -36,7 +37,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 ## Skill Output: <br>
 **Output Type(s):** [Code, Shell commands, Configuration instructions] <br>
-**Output Format:** [Markdown with inline bash code blocks] <br>
+**Output Format:** [Markdown with inline code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
@@ -47,7 +48,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Evaluation Tasks: <br>
-Evaluated against 5 evaluation tasks (1 positive, 4 negative) in astra-sandbox environment using NVSkills-Eval external profile. <br>
+Evaluated against 5 tasks (1 positive activation, 4 negative activation) in the NVSkills-Eval external profile. <br>
 
 ## Evaluation Metrics Used: <br>
 Reported benchmark dimensions: <br>
@@ -72,10 +73,10 @@ Underlying evaluation signals used in this run: <br>
 | Dimension | Num | `claude-code` | `codex` |
 |---|---:|---:|---:|
 | Security | 5 | 100% (+0%) | 100% (+0%) |
-| Correctness | 5 | 100% (+15%) | 99% (+14%) |
-| Discoverability | 5 | 100% (+15%) | 99% (+11%) |
-| Effectiveness | 5 | 98% (+17%) | 99% (+16%) |
-| Efficiency | 5 | 96% (+14%) | 98% (+9%) |
+| Correctness | 5 | 100% (+20%) | 99% (+14%) |
+| Discoverability | 5 | 100% (+20%) | 99% (+9%) |
+| Effectiveness | 5 | 100% (+20%) | 99% (+17%) |
+| Efficiency | 5 | 96% (+13%) | 97% (+7%) |
 
 ## Skill Version(s): <br>
 2026.06.03 (source: frontmatter) <br>
