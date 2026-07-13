@@ -428,8 +428,8 @@ jobs:
             -w /workspace/tilegym/modeling/transformers \
             ${IMAGE} \
             uv run --locked --no-sync python -m pytest \
-                /workspace/tilegym/tests/kernel_inventory/test_kernel_inventory.py \
-                /workspace/tilegym/tests/kernel_inventory/test_kernel_definition_solution_runtime.py \
+                /workspace/tilegym/tests/kernel_inventory \
+                -n 2 \
                 -v \
                 --junitxml=/test-results/transformer-kernel-inventory-results.xml \
                 --html=/test-results/transformer-kernel-inventory-report.html \
