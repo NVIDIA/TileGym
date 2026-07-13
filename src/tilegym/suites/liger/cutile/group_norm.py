@@ -223,8 +223,10 @@ class GroupNormCuTileFunction(torch.autograd.Function):
         # Reshape to 2D: (batch_size * num_channels, hidden_size)
         X_2d = X.view(batch_size * num_channels, hidden_size).contiguous()
         Y_2d = torch.empty_like(X_2d)
-        mean_stats = torch.empty(batch_size * num_groups, dtype=X.dtype, device=X.device)
-        rstd_stats = torch.empty(batch_size * num_groups, dtype=X.dtype, device=X.device)
+        # Stats kept in fp32 (matches upstream Liger). bf16 stats round-trip through
+        # forward -> backward and lose precision in the (x - mean) * rstd step.
+        mean_stats = torch.empty(batch_size * num_groups, dtype=torch.float32, device=X.device)
+        rstd_stats = torch.empty(batch_size * num_groups, dtype=torch.float32, device=X.device)
 
         grid = (batch_size, num_groups, 1)
         ct.launch(

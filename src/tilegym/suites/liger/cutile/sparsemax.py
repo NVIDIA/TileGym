@@ -28,7 +28,6 @@ def _sparsemax_bsearch_kernel(
     n_chunks = (N_COLS + BLOCK_SIZE - 1) // BLOCK_SIZE
 
     x_max = ct.full((1,), -1e38, dtype=ct.float32)
-    x_sum = ct.full((1,), 0.0, dtype=ct.float32)
 
     for ci in range(n_chunks):
         col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
@@ -36,12 +35,9 @@ def _sparsemax_bsearch_kernel(
             ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=-1e38),
             ct.float32,
         )
-        valid_mask = ct.astype(col_idx < N_COLS, ct.float32)
-        x_sum = x_sum + ct.sum(x_tile * valid_mask, 0, keepdims=True)
         x_max = ct.maximum(x_max, ct.max(x_tile, 0, keepdims=True))
 
-    n_cols_f = ct.full((1,), float(N_COLS), dtype=ct.float32)
-    tau_lo = (x_sum - ct.full((1,), 1.0, ct.float32)) / n_cols_f
+    tau_lo = x_max - ct.full((1,), 1.0, ct.float32)
     tau_hi = x_max
 
     one = ct.full((1,), 1.0, ct.float32)
@@ -77,66 +73,7 @@ def _sparsemax_bsearch_kernel(
         ct.scatter(y_output, (row_idx, col_idx), ct.astype(y_tile, y_output.dtype), check_bounds=True)
 
 
-@ct.kernel(occupancy=2)
-def _sparsemax_bsearch_kernel_large(
-    y_output,
-    x_input,
-    N_COLS: ct.Constant[int],
-    BLOCK_SIZE: ct.Constant[int],
-    BSEARCH_ITER: ct.Constant[int],
-):
-    """occupancy=2: at N>16384 high occupancy thrashes L2 (7×128KB/SM); occ=2 keeps rows in L2."""
-    row_idx = ct.bid(0)
-    n_chunks = (N_COLS + BLOCK_SIZE - 1) // BLOCK_SIZE
-
-    x_max = ct.full((1,), -1e38, dtype=ct.float32)
-    x_sum = ct.full((1,), 0.0, dtype=ct.float32)
-
-    for ci in range(n_chunks):
-        col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
-        x_tile = ct.astype(
-            ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=-1e38),
-            ct.float32,
-        )
-        valid_mask = ct.astype(col_idx < N_COLS, ct.float32)
-        x_sum = x_sum + ct.sum(x_tile * valid_mask, 0, keepdims=True)
-        x_max = ct.maximum(x_max, ct.max(x_tile, 0, keepdims=True))
-
-    n_cols_f = ct.full((1,), float(N_COLS), dtype=ct.float32)
-    tau_lo = (x_sum - ct.full((1,), 1.0, ct.float32)) / n_cols_f
-    tau_hi = x_max
-
-    one = ct.full((1,), 1.0, ct.float32)
-    half = ct.full((1,), 0.5, ct.float32)
-
-    for _ in range(BSEARCH_ITER):
-        tau_mid = half * (tau_lo + tau_hi)
-        f = ct.full((1,), 0.0, ct.float32)
-
-        for ci in range(n_chunks):
-            col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
-            x_tile = ct.astype(
-                ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=-1e38),
-                ct.float32,
-            )
-            valid_mask = ct.astype(col_idx < N_COLS, ct.float32)
-            in_supp = ct.astype(x_tile > tau_mid, ct.float32) * valid_mask
-            f = f + ct.sum(in_supp * (x_tile - tau_mid), 0, keepdims=True)
-
-        tau_lo = ct.where(f >= one, tau_mid, tau_lo)
-        tau_hi = ct.where(f < one, tau_mid, tau_hi)
-
-    tau = half * (tau_lo + tau_hi)
-
-    zero = ct.full((BLOCK_SIZE,), 0.0, ct.float32)
-    for ci in range(n_chunks):
-        col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
-        x_tile = ct.astype(
-            ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=0.0),
-            ct.float32,
-        )
-        y_tile = ct.maximum(x_tile - tau, zero)
-        ct.scatter(y_output, (row_idx, col_idx), ct.astype(y_tile, y_output.dtype), check_bounds=True)
+_sparsemax_bsearch_kernel_large = _sparsemax_bsearch_kernel.replace_hints(occupancy=2)
 
 
 @ct.kernel

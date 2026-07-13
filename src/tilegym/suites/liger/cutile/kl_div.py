@@ -154,7 +154,7 @@ def _kldiv_bwd_ct(
     GT,  # (BT, V) target (probs or log-probs)
     GRADS,  # (BT, V) output gradient
     n_cols: ct.Constant[int],
-    scale: ct.Constant[float],  # combined grad_output * reduction_normalizer — fused to avoid extra kernel launches
+    scale,
     BLOCK_SIZE: ct.Constant[int],
     LOG_TARGET: ct.Constant[int],
     N_FULL_CHUNKS: ct.Constant[int],  # number of full (non-tail) chunks; use check_bounds=False

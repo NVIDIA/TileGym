@@ -59,6 +59,11 @@ class _TiledMLPFunctionCT(torch.autograd.Function):
         # previous retain_graph=True + second backward() approach.
         if x_requires_grad:
             x_grad = torch.zeros_like(x_detached)
+            # torch.chunk on dim=-2 of a contiguous tensor returns views that share
+            # storage with x_grad, so assigning each view as x_shard_leaf.grad lets
+            # backward() write per-shard gradients in-place into x_grad with no extra
+            # copy. This only holds when the buffer is contiguous.
+            assert x_detached.is_contiguous(), "x must be contiguous for x_grad view chunking"
             x_grad_shards = list(torch.chunk(x_grad, chunks=shards, dim=-2))
         else:
             x_grad = None

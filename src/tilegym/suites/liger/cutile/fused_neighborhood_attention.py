@@ -575,7 +575,6 @@ def _fused_fwd_autotune_configs():
                 yield SimpleNamespace(BLOCK_M=bm, BLOCK_N=bn, occupancy=occ)
 
 
-# Module-level cache: (batch*heads, seq_len, head_dim, dtype, device_str) -> (cfg, tuned_kernel)
 _fwd_autotune_cache: dict = {}
 
 

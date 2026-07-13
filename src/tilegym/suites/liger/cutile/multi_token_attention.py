@@ -268,18 +268,24 @@ class MultiTokenAttentionCuTileFunction(torch.autograd.Function):
         if stride == (1, 1) and padding == (0, 0) and dilation == (1, 1) and groups == 1:
             grad_probs, grad_weight = _conv1x1_backward(grad_conv, probs, weight)
         else:
-            grad_probs = F.conv_transpose2d(
-                grad_conv, weight, None, stride=stride, padding=padding, dilation=dilation, groups=groups
-            )
-            grad_weight = torch.nn.grad.conv2d_weight(
-                input=probs,
-                weight_size=weight.shape,
-                grad_output=grad_conv,
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-                groups=groups,
-            )
+            # cudnn.benchmark=True is critical here: with the default heuristic, cuDNN
+            # picks a pathologically slow algorithm for the weight-gradient on large
+            # spatial dims (>=4096) — we measured 1.3s at L=4096 and 5.5s at L=8192
+            # with the default vs 10ms / 40ms with benchmark enabled (~130x speedup).
+            with torch.backends.cudnn.flags(benchmark=True):
+                grad_probs, grad_weight, _ = torch.ops.aten.convolution_backward(
+                    grad_conv,
+                    probs,
+                    weight,
+                    None,
+                    list(stride),
+                    list(padding),
+                    list(dilation),
+                    False,
+                    [0, 0],
+                    groups,
+                    [True, True, False],
+                )
 
         grad_bias = None
         if bias is not None:

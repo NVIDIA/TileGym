@@ -67,42 +67,23 @@ def _rope_4d_ct(
 
     # Load first TILE_HD elements of cos/sin: these are the rotation values for this token.
     # Index (cos_batch_idx, seq_idx, 0) loads COS[cos_batch_idx, seq_idx, 0:TILE_HD].
-    cos_row = ct.astype(
-        ct.load(COS, index=(cos_batch_idx, seq_idx, 0), shape=(1, 1, TILE_HD)).reshape((1, TILE_HD)),
-        ct.float32,
-    )
-    sin_row = (
-        ct.astype(
-            ct.load(SIN, index=(cos_batch_idx, seq_idx, 0), shape=(1, 1, TILE_HD)).reshape((1, TILE_HD)),
-            ct.float32,
-        )
-        * sin_sign
-    )
+    # COS/SIN are kept in their original (typically fp32) dtype -- no on-chip cast here,
+    # the multiply below implicitly promotes to fp32; cast back to Q/K.dtype at store time.
+    cos_row = ct.load(COS, index=(cos_batch_idx, seq_idx, 0), shape=(1, 1, TILE_HD)).reshape((1, TILE_HD))
+    sin_row = ct.load(SIN, index=(cos_batch_idx, seq_idx, 0), shape=(1, 1, TILE_HD)).reshape((1, TILE_HD)) * sin_sign
 
     # Q in (bsz, n_q_heads, seq_len, head_dim): index (b, h, s, 0) = real half,
     # index (b, h, s, 1) = imag half (block 1 starts at element TILE_HD = head_dim_half).
-    q_r = ct.astype(
-        ct.load(Q, index=(batch_idx, 0, seq_idx, 0), shape=(1, TILE_QH, 1, TILE_HD)).reshape((TILE_QH, TILE_HD)),
-        ct.float32,
-    )
-    q_i = ct.astype(
-        ct.load(Q, index=(batch_idx, 0, seq_idx, 1), shape=(1, TILE_QH, 1, TILE_HD)).reshape((TILE_QH, TILE_HD)),
-        ct.float32,
-    )
+    q_r = ct.load(Q, index=(batch_idx, 0, seq_idx, 0), shape=(1, TILE_QH, 1, TILE_HD)).reshape((TILE_QH, TILE_HD))
+    q_i = ct.load(Q, index=(batch_idx, 0, seq_idx, 1), shape=(1, TILE_QH, 1, TILE_HD)).reshape((TILE_QH, TILE_HD))
     new_q_r = q_r * cos_row - q_i * sin_row
     new_q_i = q_i * cos_row + q_r * sin_row
     ct.store(Q, index=(batch_idx, 0, seq_idx, 0), tile=new_q_r.reshape((1, TILE_QH, 1, TILE_HD)).astype(Q.dtype))
     ct.store(Q, index=(batch_idx, 0, seq_idx, 1), tile=new_q_i.reshape((1, TILE_QH, 1, TILE_HD)).astype(Q.dtype))
 
     # K in (bsz, n_k_heads, seq_len, head_dim)
-    k_r = ct.astype(
-        ct.load(K, index=(batch_idx, 0, seq_idx, 0), shape=(1, TILE_KH, 1, TILE_HD)).reshape((TILE_KH, TILE_HD)),
-        ct.float32,
-    )
-    k_i = ct.astype(
-        ct.load(K, index=(batch_idx, 0, seq_idx, 1), shape=(1, TILE_KH, 1, TILE_HD)).reshape((TILE_KH, TILE_HD)),
-        ct.float32,
-    )
+    k_r = ct.load(K, index=(batch_idx, 0, seq_idx, 0), shape=(1, TILE_KH, 1, TILE_HD)).reshape((TILE_KH, TILE_HD))
+    k_i = ct.load(K, index=(batch_idx, 0, seq_idx, 1), shape=(1, TILE_KH, 1, TILE_HD)).reshape((TILE_KH, TILE_HD))
     new_k_r = k_r * cos_row - k_i * sin_row
     new_k_i = k_i * cos_row + k_r * sin_row
     ct.store(K, index=(batch_idx, 0, seq_idx, 0), tile=new_k_r.reshape((1, TILE_KH, 1, TILE_HD)).astype(K.dtype))

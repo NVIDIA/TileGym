@@ -10,7 +10,7 @@ Qwen2VL Multimodal Rotary Position Embedding (M-RoPE) kernel (CuTile backend).
 Half-split layout: left half of head_dim = real part, right half = imaginary part.
 Three RoPE sections: temporal [0, t_end), height [t_end, h_end), width [h_end, hd//2).
 cos/sin shape: (3, bsz, seq_len, head_dim).
-Grid: (bsz * seq_len,) — one program per token.
+Grid: (bsz, seq_len) — one program per token (2D grid avoids divmod on pid).
 """
 
 import cuda.tile as ct
@@ -21,137 +21,123 @@ from tilegym.backend import register_impl
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
-PAD_ZERO = ct.PaddingMode.ZERO
 
 
 @ct.kernel
 def _qwen2vl_mrope_kernel(
-    query,  # (bsz, seq_len, n_qh, 2, head_dim_half)
-    key,  # (bsz, seq_len, n_kh, 2, head_dim_half)
-    cos,  # (3, bsz, seq_len, hd)
-    sin,  # (3, bsz, seq_len, hd)
+    query,  # 1D flat, len = bsz*sl*n_qh*hd
+    key,  # 1D flat, len = bsz*sl*n_kh*hd
+    cos,  # 1D flat, len = 3*bsz*sl*hd
+    sin,  # 1D flat
     sl,
+    BS_SL,  # bsz * sl  (slab stride = BS_SL * HEAD_DIM, computed in-kernel)
     N_QH: ConstInt,
     N_KH: ConstInt,
     MROPE_SECTION_T: ConstInt,
     MROPE_SECTION_H: ConstInt,
-    sin_sign,
+    BACKWARD: ct.Constant[bool],
+    HEAD_DIM: ConstInt,
     HEAD_DIM_HALF: ConstInt,
     TILE_HD: ConstInt,
     TILE_QH: ConstInt,
     TILE_KH: ConstInt,
-    ALIGNED: ct.Constant[bool],
+    HD_POW2: ct.Constant[bool],
 ):
-    pid = ct.bid(0)
-    batch_idx = pid // sl
-    seq_idx = pid % sl
+    batch_idx = ct.bid(0)
+    seq_idx = ct.bid(1)
 
     t_end = MROPE_SECTION_T
     h_end = t_end + MROPE_SECTION_H
 
-    # Load cos/sin for 3 sections: temporal, height, width.
-    # When ALIGNED (TILE_HD == head_dim_half, i.e. power-of-2), skip zero-padding
-    # for the hardware TMA fast path. Otherwise use PAD_ZERO for safety.
-    if ALIGNED:
-        t_cos = ct.load(cos, index=(0, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
-        t_sin = ct.load(sin, index=(0, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
-        h_cos = ct.load(cos, index=(1, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
-        h_sin = ct.load(sin, index=(1, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
-        w_cos = ct.load(cos, index=(2, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
-        w_sin = ct.load(sin, index=(2, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    FLAT = TILE_QH * TILE_HD
+    row_1d = ct.arange(TILE_QH, dtype=ct.int32)
+    col_1d = ct.arange(TILE_HD, dtype=ct.int32)
+    flat_row = ct.broadcast_to(row_1d[:, None], (TILE_QH, TILE_HD)).reshape((FLAT,))
+    flat_col = ct.broadcast_to(col_1d[None, :], (TILE_QH, TILE_HD)).reshape((FLAT,))
+
+    # Issue Q+K gathers first to start DRAM fetch, then cos/sin gathers can overlap.
+    q_token_off = (batch_idx * sl + seq_idx) * (N_QH * HEAD_DIM)
+    q_r_idx = q_token_off + flat_row * HEAD_DIM + flat_col
+    q_i_idx = q_r_idx + HEAD_DIM_HALF
+    if HD_POW2:
+        q_mask = flat_row < N_QH
     else:
-        t_cos = ct.load(cos, index=(0, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO).reshape(
-            (1, TILE_HD)
-        )
-        t_sin = ct.load(sin, index=(0, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO).reshape(
-            (1, TILE_HD)
-        )
-        h_cos = ct.load(cos, index=(1, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO).reshape(
-            (1, TILE_HD)
-        )
-        h_sin = ct.load(sin, index=(1, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO).reshape(
-            (1, TILE_HD)
-        )
-        w_cos = ct.load(cos, index=(2, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO).reshape(
-            (1, TILE_HD)
-        )
-        w_sin = ct.load(sin, index=(2, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD), padding_mode=PAD_ZERO).reshape(
-            (1, TILE_HD)
-        )
+        q_mask = (flat_row < N_QH) & (flat_col < HEAD_DIM_HALF)
+    q_r = ct.gather(query, q_r_idx, mask=q_mask, check_bounds=False, latency=2)
+    q_i = ct.gather(query, q_i_idx, mask=q_mask, check_bounds=False, latency=2)
 
-    # Section masks
-    d_idx = ct.arange(TILE_HD, dtype=ct.int32)
-    t_mask = d_idx < t_end
-    h_mask = ct.bitwise_and((d_idx >= t_end), (d_idx < h_end))
-    w_mask = ct.bitwise_and((d_idx >= h_end), (d_idx < HEAD_DIM_HALF))
-
-    t_f = ct.astype(t_mask, ct.float32)
-    h_f = ct.astype(h_mask, ct.float32)
-    w_f = ct.astype(w_mask, ct.float32)
-
-    cos_row = t_cos * t_f + h_cos * h_f + w_cos * w_f
-    sin_row = (t_sin * t_f + h_sin * h_f + w_sin * w_f) * sin_sign
-
-    # Process Q: load all heads at once
-    if ALIGNED:
-        q_r = ct.load(query, index=(batch_idx, seq_idx, 0, 0, 0), shape=(1, 1, TILE_QH, 1, TILE_HD)).reshape(
-            (TILE_QH, TILE_HD)
-        )
-        q_i = ct.load(query, index=(batch_idx, seq_idx, 0, 1, 0), shape=(1, 1, TILE_QH, 1, TILE_HD)).reshape(
-            (TILE_QH, TILE_HD)
-        )
+    # K indices (computed early so K gathers can fire right after Q's)
+    FLAT_K = TILE_KH * TILE_HD
+    krow_1d = ct.arange(TILE_KH, dtype=ct.int32)
+    k_flat_row = ct.broadcast_to(krow_1d[:, None], (TILE_KH, TILE_HD)).reshape((FLAT_K,))
+    k_flat_col = ct.broadcast_to(col_1d[None, :], (TILE_KH, TILE_HD)).reshape((FLAT_K,))
+    k_token_off = (batch_idx * sl + seq_idx) * (N_KH * HEAD_DIM)
+    k_r_idx = k_token_off + k_flat_row * HEAD_DIM + k_flat_col
+    k_i_idx = k_r_idx + HEAD_DIM_HALF
+    if HD_POW2:
+        k_mask = k_flat_row < N_KH
     else:
-        q_r = ct.load(
-            query, index=(batch_idx, seq_idx, 0, 0, 0), shape=(1, 1, TILE_QH, 1, TILE_HD), padding_mode=PAD_ZERO
-        ).reshape((TILE_QH, TILE_HD))
-        q_i = ct.load(
-            query, index=(batch_idx, seq_idx, 0, 1, 0), shape=(1, 1, TILE_QH, 1, TILE_HD), padding_mode=PAD_ZERO
-        ).reshape((TILE_QH, TILE_HD))
-    new_q_r = q_r * cos_row - q_i * sin_row
-    new_q_i = q_i * cos_row + q_r * sin_row
-    ct.store(
-        query,
-        index=(batch_idx, seq_idx, 0, 0, 0),
-        tile=new_q_r.reshape((1, 1, TILE_QH, 1, TILE_HD)).astype(query.dtype),
-    )
-    ct.store(
-        query,
-        index=(batch_idx, seq_idx, 0, 1, 0),
-        tile=new_q_i.reshape((1, 1, TILE_QH, 1, TILE_HD)).astype(query.dtype),
-    )
+        k_mask = (k_flat_row < N_KH) & (k_flat_col < HEAD_DIM_HALF)
+    k_r = ct.gather(key, k_r_idx, mask=k_mask, check_bounds=False, latency=2)
+    k_i = ct.gather(key, k_i_idx, mask=k_mask, check_bounds=False, latency=2)
 
-    # Process K: load all heads at once
-    if ALIGNED:
-        k_r = ct.load(key, index=(batch_idx, seq_idx, 0, 0, 0), shape=(1, 1, TILE_KH, 1, TILE_HD)).reshape(
-            (TILE_KH, TILE_HD)
-        )
-        k_i = ct.load(key, index=(batch_idx, seq_idx, 0, 1, 0), shape=(1, 1, TILE_KH, 1, TILE_HD)).reshape(
-            (TILE_KH, TILE_HD)
-        )
+    token_cs_off = (batch_idx * sl + seq_idx) * HEAD_DIM
+    slab_stride = BS_SL * HEAD_DIM
+    t_idx = flat_col + token_cs_off
+    h_idx = t_idx + slab_stride
+    w_idx = h_idx + slab_stride
+    t_cos = ct.gather(cos, t_idx, check_bounds=False, latency=2)
+    t_sin = ct.gather(sin, t_idx, check_bounds=False, latency=2)
+    h_cos = ct.gather(cos, h_idx, check_bounds=False, latency=2)
+    h_sin = ct.gather(sin, h_idx, check_bounds=False, latency=2)
+    w_cos = ct.gather(cos, w_idx, check_bounds=False, latency=2)
+    w_sin = ct.gather(sin, w_idx, check_bounds=False, latency=2)
+
+    in_t = flat_col < t_end
+    in_h = flat_col < h_end
+    cos_row = ct.where(in_t, t_cos, ct.where(in_h, h_cos, w_cos))
+    sin_row = ct.where(in_t, t_sin, ct.where(in_h, h_sin, w_sin))
+    if BACKWARD:
+        sin_row = -sin_row
+
+    cos_q = cos_row.astype(query.dtype)
+    sin_q = sin_row.astype(query.dtype)
+    new_q_r = q_r * cos_q - q_i * sin_q
+    new_q_i = q_i * cos_q + q_r * sin_q
+
+    # Reuse Q's cos_row when FLAT_K <= FLAT (common case: TILE_KH <= TILE_QH).
+    if TILE_KH <= TILE_QH:
+        cos_k = ct.extract(cos_row, (0,), shape=(FLAT_K,)).astype(key.dtype)
+        sin_k = ct.extract(sin_row, (0,), shape=(FLAT_K,)).astype(key.dtype)
     else:
-        k_r = ct.load(
-            key, index=(batch_idx, seq_idx, 0, 0, 0), shape=(1, 1, TILE_KH, 1, TILE_HD), padding_mode=PAD_ZERO
-        ).reshape((TILE_KH, TILE_HD))
-        k_i = ct.load(
-            key, index=(batch_idx, seq_idx, 0, 1, 0), shape=(1, 1, TILE_KH, 1, TILE_HD), padding_mode=PAD_ZERO
-        ).reshape((TILE_KH, TILE_HD))
-    new_k_r = k_r * cos_row - k_i * sin_row
-    new_k_i = k_i * cos_row + k_r * sin_row
-    ct.store(
-        key,
-        index=(batch_idx, seq_idx, 0, 0, 0),
-        tile=new_k_r.reshape((1, 1, TILE_KH, 1, TILE_HD)).astype(key.dtype),
-    )
-    ct.store(
-        key,
-        index=(batch_idx, seq_idx, 0, 1, 0),
-        tile=new_k_i.reshape((1, 1, TILE_KH, 1, TILE_HD)).astype(key.dtype),
-    )
+        t_idx_k = k_flat_col + token_cs_off
+        h_idx_k = t_idx_k + slab_stride
+        w_idx_k = h_idx_k + slab_stride
+        t_cos_k = ct.gather(cos, t_idx_k, check_bounds=False, latency=2)
+        t_sin_k = ct.gather(sin, t_idx_k, check_bounds=False, latency=2)
+        h_cos_k = ct.gather(cos, h_idx_k, check_bounds=False, latency=2)
+        h_sin_k = ct.gather(sin, h_idx_k, check_bounds=False, latency=2)
+        w_cos_k = ct.gather(cos, w_idx_k, check_bounds=False, latency=2)
+        w_sin_k = ct.gather(sin, w_idx_k, check_bounds=False, latency=2)
+        in_t_k = k_flat_col < t_end
+        in_h_k = k_flat_col < h_end
+        cos_k_raw = ct.where(in_t_k, t_cos_k, ct.where(in_h_k, h_cos_k, w_cos_k))
+        sin_k_raw = ct.where(in_t_k, t_sin_k, ct.where(in_h_k, h_sin_k, w_sin_k))
+        if BACKWARD:
+            sin_k_raw = -sin_k_raw
+        cos_k = cos_k_raw.astype(key.dtype)
+        sin_k = sin_k_raw.astype(key.dtype)
+    new_k_r = k_r * cos_k - k_i * sin_k
+    new_k_i = k_i * cos_k + k_r * sin_k
+    ct.scatter(query, q_r_idx, new_q_r, mask=q_mask, check_bounds=False, latency=1)
+    ct.scatter(query, q_i_idx, new_q_i, mask=q_mask, check_bounds=False, latency=1)
+    ct.scatter(key, k_r_idx, new_k_r, mask=k_mask, check_bounds=False, latency=1)
+    ct.scatter(key, k_i_idx, new_k_i, mask=k_mask, check_bounds=False, latency=1)
 
 
 def _qwen2vl_mrope_forward(q, k, cos, sin, mrope_section):
-    q = q.transpose(1, 2)
-    k = k.transpose(1, 2)
+    q = q.transpose(1, 2).contiguous()
+    k = k.transpose(1, 2).contiguous()
 
     batch_size, seq_len, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[2]
@@ -159,52 +145,43 @@ def _qwen2vl_mrope_forward(q, k, cos, sin, mrope_section):
     TILE_HD = next_power_of_2(head_dim_half)
     TILE_QH = next_power_of_2(n_q_head)
     TILE_KH = next_power_of_2(n_kv_head)
-    # ALIGNED: both TILE_HD == head_dim_half (power-of-2) AND
-    # TILE_QH == n_q_head AND TILE_KH == n_kv_head — no padding needed anywhere
-    ALIGNED = (TILE_HD == head_dim_half) and (TILE_QH == n_q_head) and (TILE_KH == n_kv_head)
+    bs_sl = batch_size * seq_len
 
-    n_row = batch_size * seq_len
-
-    q = q.contiguous()
-    k = k.contiguous()
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    q_5d = q.reshape(batch_size, seq_len, n_q_head, 2, head_dim_half)
-    k_5d = k.reshape(batch_size, seq_len, n_kv_head, 2, head_dim_half)
-
-    grid = (n_row,)
+    grid = (batch_size, seq_len)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
         _qwen2vl_mrope_kernel,
         (
-            q_5d,
-            k_5d,
-            cos,
-            sin,
+            q.view(-1),
+            k.view(-1),
+            cos.view(-1),
+            sin.view(-1),
             int(seq_len),
+            int(bs_sl),
             int(n_q_head),
             int(n_kv_head),
             int(mrope_section[0]),
             int(mrope_section[1]),
-            float(1.0),
+            False,
+            int(head_dim),
             int(head_dim_half),
             int(TILE_HD),
             int(TILE_QH),
             int(TILE_KH),
-            bool(ALIGNED),
+            bool(TILE_HD == head_dim_half),
         ),
     )
 
-    q_out = q_5d.reshape(batch_size, seq_len, n_q_head, head_dim)
-    k_out = k_5d.reshape(batch_size, seq_len, n_kv_head, head_dim)
-    return q_out.transpose(1, 2), k_out.transpose(1, 2), cos, sin
+    return q.transpose(1, 2), k.transpose(1, 2), cos, sin
 
 
 def _qwen2vl_mrope_backward(dq, dk, cos, sin, mrope_section):
-    dq = dq.transpose(1, 2)
-    dk = dk.transpose(1, 2)
+    dq = dq.transpose(1, 2).contiguous()
+    dk = dk.transpose(1, 2).contiguous()
 
     batch_size, seq_len, n_q_head, head_dim = dq.shape
     n_kv_head = dk.shape[2]
@@ -212,43 +189,35 @@ def _qwen2vl_mrope_backward(dq, dk, cos, sin, mrope_section):
     TILE_HD = next_power_of_2(head_dim_half)
     TILE_QH = next_power_of_2(n_q_head)
     TILE_KH = next_power_of_2(n_kv_head)
-    ALIGNED = (TILE_HD == head_dim_half) and (TILE_QH == n_q_head) and (TILE_KH == n_kv_head)
+    bs_sl = batch_size * seq_len
 
-    n_row = batch_size * seq_len
-
-    dq = dq.contiguous()
-    dk = dk.contiguous()
-
-    dq_5d = dq.reshape(batch_size, seq_len, n_q_head, 2, head_dim_half)
-    dk_5d = dk.reshape(batch_size, seq_len, n_kv_head, 2, head_dim_half)
-
-    grid = (n_row,)
+    grid = (batch_size, seq_len)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
         _qwen2vl_mrope_kernel,
         (
-            dq_5d,
-            dk_5d,
-            cos,
-            sin,
+            dq.view(-1),
+            dk.view(-1),
+            cos.view(-1),
+            sin.view(-1),
             int(seq_len),
+            int(bs_sl),
             int(n_q_head),
             int(n_kv_head),
             int(mrope_section[0]),
             int(mrope_section[1]),
-            float(-1.0),
+            True,
+            int(head_dim),
             int(head_dim_half),
             int(TILE_HD),
             int(TILE_QH),
             int(TILE_KH),
-            bool(ALIGNED),
+            bool(TILE_HD == head_dim_half),
         ),
     )
 
-    dq_out = dq_5d.reshape(batch_size, seq_len, n_q_head, head_dim)
-    dk_out = dk_5d.reshape(batch_size, seq_len, n_kv_head, head_dim)
-    return dq_out.transpose(1, 2), dk_out.transpose(1, 2)
+    return dq.transpose(1, 2), dk.transpose(1, 2)
 
 
 class Qwen2VLMRopeCuTileFunction(torch.autograd.Function):
