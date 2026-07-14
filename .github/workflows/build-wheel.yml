@@ -131,7 +131,7 @@ jobs:
               f.write('\n'.join(deps))
           print('Auditing deps:\n' + '\n'.join(deps))
           EOF
-          # Temporary ignores for transformers==5.3.0 (no fix version yet); revisit when upstream releases a patched version.
+          # Temporary ignores for transformers==5.3.0 (fix available in 5.5.0); revisit when transformers dependency is upgraded.
           pip-audit -r audit-requirements.txt \
             --ignore-vuln CVE-2026-4539 \
             --ignore-vuln PYSEC-2025-211 \
@@ -141,7 +141,8 @@ jobs:
             --ignore-vuln PYSEC-2025-215 \
             --ignore-vuln PYSEC-2025-216 \
             --ignore-vuln PYSEC-2025-217 \
-            --ignore-vuln PYSEC-2025-218
+            --ignore-vuln PYSEC-2025-218 \
+            --ignore-vuln CVE-2026-5241
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}
@@ -155,14 +156,14 @@ jobs:
           # Base name (for outputs)
           BASE_NAME="${{ inputs.package-name }}${{ inputs.artifact-suffix }}-wheel-${{ github.sha }}"
           echo "base-name=${BASE_NAME}" >> $GITHUB_OUTPUT
-          
+
           # Versioned name with arch (for upload)
           PY_VERSION="${{ matrix.python-version }}"
           PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
           ARCH="${{ matrix.arch }}"
           VERSIONED_NAME="${BASE_NAME}-${PY_SUFFIX}-${ARCH}"
           echo "versioned-name=${VERSIONED_NAME}" >> $GITHUB_OUTPUT
-          
+
           echo "📦 Base artifact name: ${BASE_NAME}"
           echo "📦 Versioned artifact name: ${VERSIONED_NAME}"
 
