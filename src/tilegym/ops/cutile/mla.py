@@ -27,6 +27,7 @@ def _mla_sm80_autotune_configs():
     for tm in [64, 128]:
         for tn in [64, 128]:
             yield SimpleNamespace(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=2)
+    yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=3)
 
 
 def _mla_sm90_autotune_configs():
