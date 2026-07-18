@@ -399,6 +399,8 @@ def _torch_dtype(dtype: str, torch: Any) -> Any:
         "float32": torch.float32,
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
+        "float8_e4m3fn": torch.float8_e4m3fn,
+        "float8_e5m2": torch.float8_e5m2,
         "int64": torch.int64,
         "int32": torch.int32,
         "int16": torch.int16,
