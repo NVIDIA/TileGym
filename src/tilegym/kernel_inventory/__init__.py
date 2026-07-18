@@ -41,6 +41,10 @@ class KernelInventoryError(ValueError):
     """Raised when kernel inventory metadata is invalid."""
 
 
+# Backend subdirectories a suite may use below kernel_solutions/.
+_SUITE_BACKENDS = ("triton", "cutile", "cutile_rs")
+
+
 def load_json(path: str | Path) -> dict[str, Any]:
     """Load a JSON object from ``path``."""
     with Path(path).open(encoding="utf-8") as f:
@@ -65,7 +69,7 @@ def iter_kernel_definition_paths(root: str | Path) -> Iterator[Path]:
     paths.update(
         path
         for path in suite_paths
-        if any((path.parent.parent / "kernel_solutions" / backend).is_dir() for backend in ("triton", "cutile"))
+        if any((path.parent.parent / "kernel_solutions" / backend).is_dir() for backend in _SUITE_BACKENDS)
     )
     yield from sorted(paths)
 
@@ -73,10 +77,8 @@ def iter_kernel_definition_paths(root: str | Path) -> Iterator[Path]:
 def iter_kernel_solution_paths(root: str | Path) -> Iterator[Path]:
     """Yield checked-in backend-specific Solution JSON files under ``root``."""
     root_path = Path(root)
-    patterns = (
-        "src/tilegym/transformers/*/kernel_solutions/*.json",
-        "src/tilegym/suites/*/kernel_solutions/triton/*.json",
-        "src/tilegym/suites/*/kernel_solutions/cutile/*.json",
+    patterns = ("src/tilegym/transformers/*/kernel_solutions/*.json",) + tuple(
+        f"src/tilegym/suites/*/kernel_solutions/{backend}/*.json" for backend in _SUITE_BACKENDS
     )
     yield from _iter_paths(root_path, patterns)
 
@@ -104,7 +106,7 @@ def iter_solution_paths_for_definition(definition_path: str | Path) -> Iterator[
     if transformer_solution.is_file():
         yield transformer_solution
 
-    for backend in ("triton", "cutile"):
+    for backend in _SUITE_BACKENDS:
         suite_solution = definition.parent.parent / "kernel_solutions" / backend / definition.name
         if suite_solution.is_file():
             yield suite_solution

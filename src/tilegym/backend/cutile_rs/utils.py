@@ -69,9 +69,9 @@ def _ops_src_root() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "..", "ops", "cutile_rs")
 
 
-def _shared_so_path(crate_dir: str, profile: str = "release") -> str:
-    """The one cdylib for all ops: <crate>/target/<profile>/libcutile_kernels.so."""
-    return os.path.join(crate_dir, "target", profile, "libcutile_kernels.so")
+def _shared_so_path(crate_dir: str, profile: str = "release", so_name: str = "libcutile_kernels.so") -> str:
+    """The one cdylib for all ops: <crate>/target/<profile>/<so_name>."""
+    return os.path.join(crate_dir, "target", profile, so_name)
 
 
 # ── Auto-build on stale source (default ON; opt-out via CUTILE_RS_AUTOBUILD=0) ─
@@ -82,19 +82,27 @@ def _autobuild_enabled() -> bool:
     return os.environ.get("CUTILE_RS_AUTOBUILD", "1").lower() not in ("0", "false", "no")
 
 
-def _so_stale(so_path: str) -> bool:
-    """Stale if the .so is missing or older than any .rs/.toml under
-    ops/cutile_rs/ (the crate src + every <op>_kernel/ source). target/ skipped.
+def _so_stale(so_path: str, src_roots: str | tuple[str, ...] | None = None) -> bool:
+    """Stale if the .so is missing or older than any .rs/.toml under the
+    ``src_roots`` dir(s) (default ops/cutile_rs/ — the crate src + every
+    <op>_kernel/ source). target/ skipped. Suites with their own kernels crate
+    pass their cutile_rs/ source root (plus ops/cutile_rs/ for the shared
+    ffi_util.rs they include).
     """
     if not os.path.isfile(so_path):
         return True
     so_mtime = os.path.getmtime(so_path)
-    for root, _, files in os.walk(_ops_src_root()):
-        if "target" in root.split(os.sep):
-            continue
-        for f in files:
-            if f.endswith((".rs", ".toml")) and os.path.getmtime(os.path.join(root, f)) > so_mtime:
-                return True
+    if src_roots is None:
+        src_roots = (_ops_src_root(),)
+    elif isinstance(src_roots, str):
+        src_roots = (src_roots,)
+    for src_root in src_roots:
+        for root, _, files in os.walk(src_root):
+            if "target" in root.split(os.sep):
+                continue
+            for f in files:
+                if f.endswith((".rs", ".toml")) and os.path.getmtime(os.path.join(root, f)) > so_mtime:
+                    return True
     return False
 
 
@@ -112,22 +120,27 @@ _BUILD_ENV_KEYS_KERNEL = (
     "RUSTFLAGS",
     "CUDA_TOOLKIT_PATH",
     "LIBCLANG_PATH",
+    "BINDGEN_EXTRA_CLANG_ARGS",
 )
 
 
-def _build_kernels(crate_dir: str) -> None:
-    """``cargo build --release`` the single cutile_kernels crate into its own
+def _build_kernels(
+    crate_dir: str,
+    src_roots: str | tuple[str, ...] | None = None,
+    so_name: str = "libcutile_kernels.so",
+) -> None:
+    """``cargo build --release`` a single kernels crate into its own
     target/ (crates.io deps; no cutile-rs checkout). File-locked + re-checks
     staleness inside the lock so concurrent callers don't rebuild redundantly.
     """
     import fcntl
 
-    so_path = _shared_so_path(crate_dir)
+    so_path = _shared_so_path(crate_dir, so_name=so_name)
     os.makedirs(os.path.dirname(so_path), exist_ok=True)
     lock_path = os.path.join(crate_dir, ".build.lock")
     with open(lock_path, "w") as lock_f:
         fcntl.flock(lock_f, fcntl.LOCK_EX)
-        if not _so_stale(so_path):
+        if not _so_stale(so_path, src_roots):
             return
         logger.info(f"cutile-rs: building libcutile_kernels.so (cargo build --release) in {crate_dir} ...")
         t0 = time.time()
@@ -175,22 +188,30 @@ def _build_kernels(crate_dir: str) -> None:
         logger.info(f"cutile-rs: built libcutile_kernels.so in {time.time() - t0:.1f}s")
 
 
-def _ensure_built_and_path() -> str:
+def _ensure_built_and_path(
+    crate_dir: str | None = None,
+    src_roots: str | tuple[str, ...] | None = None,
+    so_name: str = "libcutile_kernels.so",
+) -> str:
     """Resolve the shared .so path, autobuilding if enabled+stale.
+
+    Defaults to the ops crate (ops/cutile_rs/cutile_kernels/); suites with
+    their own kernels crate pass crate_dir/src_roots/so_name explicitly.
 
     The staleness check runs before the first load, so each process builds (when
     needed) and then loads current kernels. The cffi handle cache is dropped on a rebuild, but note this does NOT hot-reload within a live process
     that has already dlopen'd the .so: re-loading the same path reuses the OS
     dlopen mapping, so an in-place rebuild only takes effect in the next process.
     """
-    crate_dir = _kernels_crate_dir()
+    if crate_dir is None:
+        crate_dir = _kernels_crate_dir()
     if crate_dir is None:
         raise RuntimeError(
             "cutile-rs kernels crate not found (expected ops/cutile_rs/cutile_kernels/ with a Cargo.toml)."
         )
-    so_path = _shared_so_path(crate_dir)
-    if _autobuild_enabled() and _so_stale(so_path):
-        _build_kernels(crate_dir)
+    so_path = _shared_so_path(crate_dir, so_name=so_name)
+    if _autobuild_enabled() and _so_stale(so_path, src_roots):
+        _build_kernels(crate_dir, src_roots, so_name)
         _cffi_kernel_libs.clear()
     if not os.path.isfile(so_path):
         raise RuntimeError(
@@ -214,8 +235,8 @@ _cffi_kernel_libs: dict[str, tuple] = {}
 # Generic C-ABI tensor descriptor shared by all cutile-rs ops (the "packer"
 # side). MUST stay in sync with `TensorDesc` in ops/cutile_rs/ffi_util.rs
 # (#[repr(C)], MAX_DIMS=5, strides in ELEMENTS, dtype: 0=f32/1=f16/2=bf16/3=i32/
-# 4=i64/5=f8e5m2). It is prepended to every op's cdef in bind_kernel_function_cffi,
-# so an op signature can just take `const TensorDesc*` args.
+# 4=i64/5=f8e5m2/6=f4e2m1fnx2/7=f8e4m3fn). It is prepended to every op's cdef in
+# bind_kernel_function_cffi, so an op signature can just take `const TensorDesc*` args.
 _TENSORDESC_MAX_DIMS = 5
 _TENSORDESC_CDEF = """
 typedef struct {
@@ -229,7 +250,9 @@ typedef struct {
 
 # torch.dtype -> TensorDesc.dtype code. Keep in sync with ffi_util::dtype_str.
 # int32 (code 3) / int64 (code 4) are integer tensors (index / descriptor-table
-# entries); float8_e5m2 (code 5) is a low-precision element type.
+# entries); float8_e5m2 (code 5) is a low-precision element type. uint8 (code 6)
+# carries packed NVFP4 pairs (cutile f4e2m1fnx2: two E2M1 nibbles per byte, low
+# nibble = even element); float8_e4m3fn (code 7) carries NVFP4 block scales.
 _DTYPE_CODE = {
     "torch.float32": 0,
     "torch.float16": 1,
@@ -237,6 +260,8 @@ _DTYPE_CODE = {
     "torch.int32": 3,
     "torch.int64": 4,
     "torch.float8_e5m2": 5,
+    "torch.uint8": 6,
+    "torch.float8_e4m3fn": 7,
 }
 
 
@@ -265,12 +290,23 @@ def make_tensor_desc(ffi, t):
     return d
 
 
-def bind_kernel_function_cffi(kernel: str, cdef: str):
+def bind_kernel_function_cffi(
+    kernel: str,
+    cdef: str,
+    crate_dir: str | None = None,
+    src_roots: str | tuple[str, ...] | None = None,
+    so_name: str = "libcutile_kernels.so",
+):
     """cffi ABI-mode loader. Returns ``(ffi, lib)``; call ``lib.cutile_<op>(...)``
     (returns a plain int rc — feed to :func:`check_rc`). Loads the shared
     libcutile_kernels.so and cdefs this op's signature. The shared TensorDesc
     typedef is prepended automatically, so ops can take ``const TensorDesc*``
     args and pack tensors via :func:`make_tensor_desc`.
+
+    Suites with their own kernels crate pass ``crate_dir`` / ``src_roots`` /
+    ``so_name`` explicitly; the defaults bind against the ops crate.
+    ``kernel`` keys the cffi handle cache, so it must be unique across all
+    crates.
 
     Usage::
         ffi, lib = bind_kernel_function_cffi("matmul", _FFI_CDEF)
@@ -282,7 +318,7 @@ def bind_kernel_function_cffi(kernel: str, cdef: str):
 
     if kernel in _cffi_kernel_libs:
         return _cffi_kernel_libs[kernel]
-    so_path = _ensure_built_and_path()
+    so_path = _ensure_built_and_path(crate_dir, src_roots, so_name)
     ffi = FFI()
     ffi.cdef(_TENSORDESC_CDEF + cdef)
     lib = ffi.dlopen(so_path)
