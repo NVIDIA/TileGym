@@ -29,7 +29,8 @@ pub struct TensorDesc {
     pub ndim: i32,
     pub shape: [i64; MAX_DIMS],
     pub strides: [i64; MAX_DIMS],
-    /// dtype code: 0 = f32, 1 = f16, 2 = bf16, 3 = i32, 4 = i64, 5 = f8e5m2.
+    /// dtype code: 0 = f32, 1 = f16, 2 = bf16, 3 = i32, 4 = i64, 5 = f8e5m2,
+    /// 6 = f4e2m1fnx2 (packed NVFP4 pair, torch.uint8), 7 = f8e4m3fn.
     pub dtype: i32,
 }
 
@@ -65,7 +66,9 @@ impl TensorDesc {
 
 /// dtype code -> cutile type-name string used in `.generics(...)`. `None` if unknown.
 /// Codes 3 (i32) / 4 (i64) are integer tensors (index / descriptor-table
-/// entries), never element-type generics; included for completeness.
+/// entries), never element-type generics; included for completeness. Codes 6
+/// (f4e2m1fnx2, packed NVFP4 pair crossing as torch.uint8) / 7 (f8e4m3fn block
+/// scales) are fixed-role NVFP4 storage types.
 pub fn dtype_str(code: i32) -> Option<&'static str> {
     match code {
         0 => Some("f32"),
@@ -74,6 +77,8 @@ pub fn dtype_str(code: i32) -> Option<&'static str> {
         3 => Some("i32"),
         4 => Some("i64"),
         5 => Some("f8e5m2"),
+        6 => Some("f4e2m1fnx2"),
+        7 => Some("f8e4m3fn"),
         _ => None,
     }
 }
@@ -84,7 +89,7 @@ pub fn dtype_elem_size(code: i32) -> usize {
         0 | 3 => 4,
         1 | 2 => 2,
         4 => 8,
-        5 => 1,
+        5..=7 => 1,
         _ => 0,
     }
 }
