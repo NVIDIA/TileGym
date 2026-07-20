@@ -22,6 +22,41 @@ _decode_mla_paged_tune_cache: dict = {}
 
 INV_LOG_2 = 1.0 / math.log(2)
 
+# sm120/sm121 (GB20x consumer/workstation Blackwell) do NOT have the wide
+# tcgen05 / large-WGMMA tensor cores of sm100 (GB200 datacenter Blackwell).
+# The TRANS_QK optimisation swaps the Q/K MMA operands so the GEMM M-dim
+# becomes BLOCK_N (forced to 128) instead of BLOCK_H (16/32) -- this only pays
+# off when the wide MMA tile exists (sm100). On sm120/121 it just forces
+# BLOCK_N=128 (blocking small-BLOCK_N autotune configs) and adds transpose
+# overhead, regressing MLADecodePaged / DecodePaged 6~80%. Gate
+# TRANS_QK to datacenter Blackwell only, mirroring the sm120/121 exclusion
+# idiom already used in ops/cutile/{matmul,bmm,attention}.py.
+_SM120_LIKE = [(12, 0), (12, 1)]
+
+
+def _supports_trans_qk() -> bool:
+    """True only on Blackwell parts with the wide MMA that TRANS_QK targets.
+
+    Excludes A100 (sm80, no benefit) and sm120/sm121 (no wide MMA -> regression).
+    """
+    cap = torch.cuda.get_device_capability("cuda")
+    return cap[0] >= 10 and cap not in _SM120_LIKE
+
+
+def _supports_gather_page_load() -> bool:
+    """True only on datacenter Blackwell (sm100/sm103), where the gather-TMA that
+    backs ct.load_advanced_indexing is a large win for multi-page KV loads.
+
+    On sm100 the gathered multi-page load is 10-74% FASTER than per-page TMA loads
+    (measured, DecodePaged). On sm120/sm121 (consumer Blackwell, no efficient
+    gather-TMA) it REGRESSES 29-83% and the penalty scales with NUM_PAGES, so those
+    parts (and A100) fall back to per-page TMA loads. Same datacenter-Blackwell
+    predicate as _supports_trans_qk.
+    """
+    cap = torch.cuda.get_device_capability("cuda")
+    return cap[0] >= 10 and cap not in _SM120_LIKE
+
+
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
@@ -135,14 +170,22 @@ def _load_page(
     LOAD_BLOCK_N,
     BLOCK_D,
     _PAGE_SIZE,
+    USE_GATHER_PAGE_LOAD,
 ):
     """
-    Load data from paged cache via TMA.
+    Load data from paged cache.
 
     For single page, issues one TMA load.
-    For multiple pages, uses ct.load_advanced_indexing (gather TMA) with the 4D
-    cache [total_pages, PAGE_SIZE, N_KV_HEADS, BLOCK_D] directly, issuing
-    NUM_PAGES gather transactions instead of NUM_PAGES*LOAD_BLOCK_N individual ones.
+    For multiple pages, the strategy is arch-gated (USE_GATHER_PAGE_LOAD, set on the
+    host from _supports_gather_page_load()):
+      * datacenter Blackwell (sm100/sm103): ct.load_advanced_indexing (gather TMA)
+        against the 4D cache directly, issuing NUM_PAGES gather transactions instead
+        of NUM_PAGES*LOAD_BLOCK_N individual ones -- 10-74% faster there.
+      * everywhere else (sm120/sm121, A100, ...): one per-page TMA load + ct.cat.
+        Their gather-TMA path is slow, so the gather regresses this memory-bound
+        kernel 29-83% (worse with more pages); per-page TMA restores baseline
+        throughput. NUM_PAGES in {1,2,4} covers every decode autotune config
+        (BLOCK_N<=128, page_size>=32); larger counts use the gather fallback.
 
     Args:
         cache: cache array [total_num_pages, PAGE_SIZE, N_KV_HEADS, BLOCK_D]
@@ -155,6 +198,7 @@ def _load_page(
         LOAD_BLOCK_N: tokens per page load (== PAGE_SIZE)
         BLOCK_D: feature dimension
         _PAGE_SIZE: tokens per page
+        USE_GATHER_PAGE_LOAD: constexpr; True on datacenter Blackwell (use gather)
 
     Returns:
         Loaded tensor of shape [NUM_PAGES * LOAD_BLOCK_N, BLOCK_D]
@@ -173,6 +217,94 @@ def _load_page(
             ),
             (LOAD_BLOCK_N, BLOCK_D),
         )
+    elif USE_GATHER_PAGE_LOAD:
+        p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
+        page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
+        data = ct.reshape(
+            ct.load_advanced_indexing(
+                cache,
+                (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(off_kv_h, 1), ct.Slice(0, BLOCK_D)),
+                padding_mode=PAD_ZERO,
+            ),
+            (NUM_PAGES * LOAD_BLOCK_N, BLOCK_D),
+        )
+    elif NUM_PAGES == 2:
+        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
+        d0 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, 0),
+                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2, 3),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_D),
+        )
+        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
+        d1 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg1, 0, off_kv_h, 0),
+                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2, 3),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_D),
+        )
+        data = ct.cat((d0, d1), 0)
+    elif NUM_PAGES == 4:
+        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
+        d0 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg0, token // LOAD_BLOCK_N, off_kv_h, 0),
+                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2, 3),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_D),
+        )
+        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
+        d1 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg1, 0, off_kv_h, 0),
+                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2, 3),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_D),
+        )
+        pg2 = ct.gather(block_tables, (page_table_offset + page + 2,), padding_value=0).item()
+        d2 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg2, 0, off_kv_h, 0),
+                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2, 3),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_D),
+        )
+        pg3 = ct.gather(block_tables, (page_table_offset + page + 3,), padding_value=0).item()
+        d3 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg3, 0, off_kv_h, 0),
+                shape=(1, LOAD_BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2, 3),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_D),
+        )
+        # ct.cat takes exactly a pair; chain for 4 pages
+        data = ct.cat((ct.cat((d0, d1), 0), ct.cat((d2, d3), 0)), 0)
     else:
         p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
         page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
@@ -197,6 +329,7 @@ def _load_page_wrapper(
     BLOCK_N,
     BLOCK_D,
     LOAD_BLOCK_N,
+    USE_GATHER_PAGE_LOAD,
 ):
     """
     Load cache data (K or V) for current position.
@@ -218,6 +351,7 @@ def _load_page_wrapper(
         LOAD_BLOCK_N,
         BLOCK_D,
         PAGE_SIZE,
+        USE_GATHER_PAGE_LOAD,
     )
     return data
 
@@ -247,6 +381,7 @@ def _decode_attention_kv_paged_kernel(
     TRANS_QK: ConstBool,
     LOAD_BLOCK_N: ConstInt,
     NUM_PAGES_PER_BLOCK: ConstInt,
+    USE_GATHER_PAGE_LOAD: ConstBool,
 ):
     batch_id = ct.bid(0)
     head_block_id = ct.bid(1)
@@ -325,6 +460,7 @@ def _decode_attention_kv_paged_kernel(
                     BLOCK_N,
                     BLOCK_D,
                     LOAD_BLOCK_N,
+                    USE_GATHER_PAGE_LOAD,
                 )
 
             qk = ct.mma(k, ct.transpose(q_tile), acc=qk_zeros)
@@ -367,6 +503,7 @@ def _decode_attention_kv_paged_kernel(
                     BLOCK_N,
                     BLOCK_D,
                     LOAD_BLOCK_N,
+                    USE_GATHER_PAGE_LOAD,
                 )
 
             acc = ct.mma(ct.transpose(v), ct.astype(p, q.dtype), acc=acc)
@@ -415,6 +552,7 @@ def _decode_attention_kv_paged_kernel(
                     BLOCK_N,
                     BLOCK_D,
                     LOAD_BLOCK_N,
+                    USE_GATHER_PAGE_LOAD,
                 )
 
             qk = ct.mma(q_tile, ct.transpose(k), acc=qk_zeros)
@@ -455,6 +593,7 @@ def _decode_attention_kv_paged_kernel(
                     BLOCK_N,
                     BLOCK_D,
                     LOAD_BLOCK_N,
+                    USE_GATHER_PAGE_LOAD,
                 )
 
             acc = acc * ct.reshape(alpha, (BLOCK_H, 1))
@@ -482,13 +621,29 @@ def _decode_attention_kv_paged_kernel(
         ct.scatter(lse_out, lse_indices, lse)
 
 
-def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGES, LOAD_BLOCK_N, BLOCK_DIM, _PAGE_SIZE):
+def _load_page_mla(
+    cache,
+    block_tables,
+    page_table_offset,
+    page,
+    token,
+    NUM_PAGES,
+    LOAD_BLOCK_N,
+    BLOCK_DIM,
+    _PAGE_SIZE,
+    USE_GATHER_PAGE_LOAD,
+):
     """
-    Load data from paged MLA cache (3D: [total_num_pages, PAGE_SIZE, dim]) via TMA.
+    Load data from paged MLA cache (3D: [total_num_pages, PAGE_SIZE, dim]).
 
-    For single page, issues one TMA load.
-    For multiple pages, uses ct.load_advanced_indexing (gather TMA) on the 3D
-    cache directly, issuing NUM_PAGES transactions instead of NUM_PAGES*LOAD_BLOCK_N.
+    For single page, issues one TMA load. For multiple pages the strategy is
+    arch-gated (USE_GATHER_PAGE_LOAD, set on the host from
+    _supports_gather_page_load()), identical rationale to the GQA _load_page:
+      * datacenter Blackwell (sm100/sm103): ct.load_advanced_indexing (gather TMA).
+      * everywhere else (sm120/sm121, A100, ...): one per-page TMA load + ct.cat,
+        because the gather regresses this memory-bound kernel there.
+        NUM_PAGES in {1,2,4} covers every decode autotune config; larger counts
+        use the gather fallback.
 
     Args:
         cache: cache array [total_num_pages, PAGE_SIZE, dim]
@@ -500,6 +655,7 @@ def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGE
         LOAD_BLOCK_N: tokens per page load (== PAGE_SIZE)
         BLOCK_DIM: feature dimension (BLOCK_D or BLOCK_R)
         _PAGE_SIZE: tokens per page
+        USE_GATHER_PAGE_LOAD: constexpr; True on datacenter Blackwell (use gather)
 
     Returns:
         Loaded tensor of shape [NUM_PAGES * LOAD_BLOCK_N, BLOCK_DIM]
@@ -518,6 +674,74 @@ def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGE
             ),
             (LOAD_BLOCK_N, BLOCK_DIM),
         )
+    elif USE_GATHER_PAGE_LOAD:
+        p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
+        page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
+        data = ct.reshape(
+            ct.load_advanced_indexing(
+                cache,
+                (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(0, BLOCK_DIM)),
+                padding_mode=PAD_ZERO,
+            ),
+            (NUM_PAGES * LOAD_BLOCK_N, BLOCK_DIM),
+        )
+    elif NUM_PAGES == 2:
+        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
+        d0 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg0, token // LOAD_BLOCK_N, 0),
+                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
+                order=(0, 1, 2),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_DIM),
+        )
+        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
+        d1 = ct.reshape(
+            ct.load(
+                cache, index=(pg1, 0, 0), shape=(1, LOAD_BLOCK_N, BLOCK_DIM), order=(0, 1, 2), allow_tma=True, latency=2
+            ),
+            (LOAD_BLOCK_N, BLOCK_DIM),
+        )
+        data = ct.cat((d0, d1), 0)
+    elif NUM_PAGES == 4:
+        pg0 = ct.gather(block_tables, (page_table_offset + page,), padding_value=0).item()
+        d0 = ct.reshape(
+            ct.load(
+                cache,
+                index=(pg0, token // LOAD_BLOCK_N, 0),
+                shape=(1, LOAD_BLOCK_N, BLOCK_DIM),
+                order=(0, 1, 2),
+                allow_tma=True,
+                latency=2,
+            ),
+            (LOAD_BLOCK_N, BLOCK_DIM),
+        )
+        pg1 = ct.gather(block_tables, (page_table_offset + page + 1,), padding_value=0).item()
+        d1 = ct.reshape(
+            ct.load(
+                cache, index=(pg1, 0, 0), shape=(1, LOAD_BLOCK_N, BLOCK_DIM), order=(0, 1, 2), allow_tma=True, latency=2
+            ),
+            (LOAD_BLOCK_N, BLOCK_DIM),
+        )
+        pg2 = ct.gather(block_tables, (page_table_offset + page + 2,), padding_value=0).item()
+        d2 = ct.reshape(
+            ct.load(
+                cache, index=(pg2, 0, 0), shape=(1, LOAD_BLOCK_N, BLOCK_DIM), order=(0, 1, 2), allow_tma=True, latency=2
+            ),
+            (LOAD_BLOCK_N, BLOCK_DIM),
+        )
+        pg3 = ct.gather(block_tables, (page_table_offset + page + 3,), padding_value=0).item()
+        d3 = ct.reshape(
+            ct.load(
+                cache, index=(pg3, 0, 0), shape=(1, LOAD_BLOCK_N, BLOCK_DIM), order=(0, 1, 2), allow_tma=True, latency=2
+            ),
+            (LOAD_BLOCK_N, BLOCK_DIM),
+        )
+        # ct.cat takes exactly a pair; chain for 4 pages
+        data = ct.cat((ct.cat((d0, d1), 0), ct.cat((d2, d3), 0)), 0)
     else:
         p_idx = ct.arange(NUM_PAGES, dtype=ct.int32)
         page_ids = ct.gather(block_tables, (page_table_offset + page + p_idx,), padding_value=0)
@@ -532,7 +756,17 @@ def _load_page_mla(cache, block_tables, page_table_offset, page, token, NUM_PAGE
     return data
 
 
-def _load_page_mla_wrapper(curr_n, cache, block_tables, page_table_offset, PAGE_SIZE, BLOCK_N, BLOCK_DIM, LOAD_BLOCK_N):
+def _load_page_mla_wrapper(
+    curr_n,
+    cache,
+    block_tables,
+    page_table_offset,
+    PAGE_SIZE,
+    BLOCK_N,
+    BLOCK_DIM,
+    LOAD_BLOCK_N,
+    USE_GATHER_PAGE_LOAD,
+):
     """
     Load MLA cache data (K, V, or K_rope) for current position.
 
@@ -543,7 +777,16 @@ def _load_page_mla_wrapper(curr_n, cache, block_tables, page_table_offset, PAGE_
     token = curr_n % PAGE_SIZE
 
     data = _load_page_mla(
-        cache, block_tables, page_table_offset, page, token, NUM_PAGES, LOAD_BLOCK_N, BLOCK_DIM, PAGE_SIZE
+        cache,
+        block_tables,
+        page_table_offset,
+        page,
+        token,
+        NUM_PAGES,
+        LOAD_BLOCK_N,
+        BLOCK_DIM,
+        PAGE_SIZE,
+        USE_GATHER_PAGE_LOAD,
     )
     return data
 
@@ -574,6 +817,7 @@ def _decode_mla_kv_paged_kernel(
     LOAD_BLOCK_N: ConstInt,
     NUM_PAGES_PER_BLOCK: ConstInt,
     TRANS_QK: ConstBool,
+    USE_GATHER_PAGE_LOAD: ConstBool,
 ):
     batch_id = ct.bid(0)
     head_block_id = ct.bid(1)
@@ -665,20 +909,24 @@ def _decode_mla_kv_paged_kernel(
                 (BLOCK_N, BLOCK_R),
             )
 
-            # Prefetch V before QK computation so TMA can overlap V load with QK+softmax
-            v_tile = ct.reshape(
-                ct.load(
-                    v_cache,
-                    index=(page_id, token_block_idx, 0),
-                    shape=(1, BLOCK_N, BLOCK_D),
-                    order=(0, 1, 2),
-                    allow_tma=True,
-                    latency=4,
-                ),
-                (BLOCK_N, BLOCK_D),
-            )
-        else:
-            # Multi-page path: compute page_ids once, share across K / K_rope / V loads
+            if USE_GATHER_PAGE_LOAD:
+                # Prefetch V before QK on datacenter Blackwell (overlap TMA with QK+softmax).
+                # On A100/sm120 the extra live V tile (BLOCK_N x BLOCK_D=512) spills / cuts
+                # occupancy, so V is deferred to after the QK GEMM below (baseline scheduling).
+                v_tile = ct.reshape(
+                    ct.load(
+                        v_cache,
+                        index=(page_id, token_block_idx, 0),
+                        shape=(1, BLOCK_N, BLOCK_D),
+                        order=(0, 1, 2),
+                        allow_tma=True,
+                        latency=4,
+                    ),
+                    (BLOCK_N, BLOCK_D),
+                )
+        elif USE_GATHER_PAGE_LOAD:
+            # Multi-page on datacenter Blackwell: gather TMA, page_ids computed once
+            # and shared across K / K_rope / V loads (fast here).
             PAD_ZERO = ct.PaddingMode.ZERO
             page = curr_n // PAGE_SIZE
             token = curr_n % PAGE_SIZE
@@ -710,6 +958,38 @@ def _decode_mla_kv_paged_kernel(
                 ),
                 (BLOCK_N, BLOCK_D),
             )
+        else:
+            # Multi-page on sm120/sm121/A100: per-page TMA loads (gather regresses the
+            # memory-bound decode kernel there). _load_page_mla handles NUM_PAGES in
+            # {2,4} via ct.load(allow_tma)+ct.cat (USE_GATHER_PAGE_LOAD is False here).
+            page = curr_n // PAGE_SIZE
+            token = curr_n % PAGE_SIZE
+            k_tile = _load_page_mla(
+                k_cache,
+                block_tables,
+                page_table_offset,
+                page,
+                token,
+                NUM_PAGES_PER_BLOCK,
+                LOAD_BLOCK_N,
+                BLOCK_D,
+                PAGE_SIZE,
+                USE_GATHER_PAGE_LOAD,
+            )
+            k_rope_tile = _load_page_mla(
+                k_rope,
+                block_tables,
+                page_table_offset,
+                page,
+                token,
+                NUM_PAGES_PER_BLOCK,
+                LOAD_BLOCK_N,
+                BLOCK_R,
+                PAGE_SIZE,
+                USE_GATHER_PAGE_LOAD,
+            )
+            # V deferred to after the QK GEMM (per-page path regresses A100/sm120 under
+            # prefetch pressure); loaded below.
 
         # QK computation — TRANS_QK swaps operands: M=BLOCK_N (large) instead of M=BLOCK_H (small)
         if TRANS_QK:
@@ -731,6 +1011,36 @@ def _decode_mla_kv_paged_kernel(
             else:
                 mask = ct.reshape((offs_n < end_n), (1, BLOCK_N))
                 qk = ct.where(mask, qk, ct.full((BLOCK_H, BLOCK_N), -1.0e6, dtype=ct.float32))
+
+        # Deferred V load on the per-page path (single- and multi-page on A100/sm120): loaded
+        # here, after the QK GEMM, so V is not held live across QK — restores baseline occupancy
+        # on smaller SMs. Datacenter Blackwell already prefetched V above.
+        if not USE_GATHER_PAGE_LOAD:
+            if NUM_PAGES_PER_BLOCK == 1:
+                v_tile = ct.reshape(
+                    ct.load(
+                        v_cache,
+                        index=(page_id, token_block_idx, 0),
+                        shape=(1, BLOCK_N, BLOCK_D),
+                        order=(0, 1, 2),
+                        allow_tma=True,
+                        latency=2,
+                    ),
+                    (BLOCK_N, BLOCK_D),
+                )
+            else:
+                v_tile = _load_page_mla(
+                    v_cache,
+                    block_tables,
+                    page_table_offset,
+                    page,
+                    token,
+                    NUM_PAGES_PER_BLOCK,
+                    LOAD_BLOCK_N,
+                    BLOCK_D,
+                    PAGE_SIZE,
+                    USE_GATHER_PAGE_LOAD,
+                )
 
         if TRANS_QK:
             # reduce over axis 0 (N-dim) → [BLOCK_H]
@@ -832,6 +1142,7 @@ def _gqa_decode_autotune_base(
     HAS_LSE_OUT,
     stride_block_table,
     TRANS_QK,
+    USE_GATHER_PAGE_LOAD,
 ):
     configs = _get_gqa_decode_autotune_configs(QUERY_GROUP_SIZE, page_size)
 
@@ -846,6 +1157,7 @@ def _gqa_decode_autotune_base(
         kv_len_per_split,
         HAS_LSE_OUT,
         TRANS_QK,
+        USE_GATHER_PAGE_LOAD,
         q.dtype,
         str(q.device),
     )
@@ -879,6 +1191,7 @@ def _gqa_decode_autotune_base(
                 TRANS_QK,
                 min(cfg.BLOCK_N, page_size),
                 max(cfg.BLOCK_N // page_size, 1),
+                USE_GATHER_PAGE_LOAD,
             ),
             lambda cfg: {"occupancy": cfg.occupancy},
         )
@@ -916,6 +1229,7 @@ def _gqa_decode_autotune_base(
             TRANS_QK,
             min(best_cfg.BLOCK_N, page_size),
             max(best_cfg.BLOCK_N // page_size, 1),
+            USE_GATHER_PAGE_LOAD,
         ),
     )
     return Att_Out
@@ -945,7 +1259,12 @@ def decode_attention_kv_paged(
     head_dim_vo = v_cache.shape[-1]
 
     QUERY_GROUP_SIZE = num_qo_heads // num_kv_heads
+    # GQA DecodePaged: baseline enabled TRANS_QK on every arch (M=BLOCK_N=128 wide MMA)
+    # and it is the fast path on sm120/B20X too. The _supports_trans_qk() gate is only
+    # correct for the MLA host (whose baseline had TRANS_QK=False); gating it here flips
+    # TRANS_QK True->False on B20X and regresses DecodePaged ~3x.
     TRANS_QK = QUERY_GROUP_SIZE < 64
+    USE_GATHER_PAGE_LOAD = _supports_gather_page_load()
 
     if not (is_power_of_2(head_dim_qk) and is_power_of_2(head_dim_vo)):
         raise NotImplementedError(
@@ -1022,6 +1341,7 @@ def decode_attention_kv_paged(
         HAS_LSE_OUT,
         stride_block_table,
         TRANS_QK,
+        USE_GATHER_PAGE_LOAD,
     )
 
     if should_use_split_kv:
@@ -1063,6 +1383,7 @@ def _mla_decode_autotune_base(
     HAS_LSE_OUT,
     stride_block_table,
     TRANS_QK,
+    USE_GATHER_PAGE_LOAD,
 ):
     mla_cache_key = (
         num_batch,
@@ -1075,6 +1396,7 @@ def _mla_decode_autotune_base(
         kv_len_per_split,
         HAS_LSE_OUT,
         TRANS_QK,
+        USE_GATHER_PAGE_LOAD,
         q.dtype,
         str(q.device),
     )
@@ -1109,6 +1431,7 @@ def _mla_decode_autotune_base(
                 min(cfg.BLOCK_N, page_size),
                 max(cfg.BLOCK_N // page_size, 1),
                 TRANS_QK,
+                USE_GATHER_PAGE_LOAD,
             ),
             lambda cfg: {"occupancy": cfg.occupancy},
         )
@@ -1147,6 +1470,7 @@ def _mla_decode_autotune_base(
             min(best_cfg.BLOCK_N, page_size),
             max(best_cfg.BLOCK_N // page_size, 1),
             TRANS_QK,
+            USE_GATHER_PAGE_LOAD,
         ),
     )
     return Att_Out
@@ -1175,7 +1499,8 @@ def decode_mla_kv_paged(
     page_size = kv_cache.shape[1]
 
     QUERY_GROUP_SIZE = num_qo_heads
-    TRANS_QK = QUERY_GROUP_SIZE < 64
+    TRANS_QK = QUERY_GROUP_SIZE < 64 and _supports_trans_qk()
+    USE_GATHER_PAGE_LOAD = _supports_gather_page_load()
 
     use_autotune = is_autotune_enabled()
     if use_autotune:
@@ -1245,6 +1570,7 @@ def decode_mla_kv_paged(
             HAS_LSE_OUT,
             stride_block_table,
             TRANS_QK,
+            USE_GATHER_PAGE_LOAD,
         )
 
         if should_use_split_kv:
@@ -1374,6 +1700,7 @@ def decode_mla_kv_paged(
             LOAD_BLOCK_N,
             NUM_PAGES_PER_BLOCK,
             TRANS_QK,
+            USE_GATHER_PAGE_LOAD,
         ),
     )
 
