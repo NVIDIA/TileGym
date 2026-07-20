@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
+
 import cuda.tile as ct
 import torch
 import torch.nn.functional as F
@@ -268,24 +269,24 @@ class MultiTokenAttentionCuTileFunction(torch.autograd.Function):
         if stride == (1, 1) and padding == (0, 0) and dilation == (1, 1) and groups == 1:
             grad_probs, grad_weight = _conv1x1_backward(grad_conv, probs, weight)
         else:
-            # cudnn.benchmark=True is critical here: with the default heuristic, cuDNN
-            # picks a pathologically slow algorithm for the weight-gradient on large
-            # spatial dims (>=4096) — we measured 1.3s at L=4096 and 5.5s at L=8192
-            # with the default vs 10ms / 40ms with benchmark enabled (~130x speedup).
-            with torch.backends.cudnn.flags(benchmark=True):
-                grad_probs, grad_weight, _ = torch.ops.aten.convolution_backward(
-                    grad_conv,
-                    probs,
-                    weight,
-                    None,
-                    list(stride),
-                    list(padding),
-                    list(dilation),
-                    False,
-                    [0, 0],
-                    groups,
-                    [True, True, False],
-                )
+            # Default cuDNN heuristic — do NOT force cudnn.benchmark=True here. The
+            # per-call flag context adds fixed overhead that dominates small spatial
+            # dims (L=32: 59µs vs 18µs without) and it is a net loss at every size
+            # except L=256; on the current CUDA stack the default heuristic is also
+            # faster on large dims (L=4096: 12.8ms vs 17.2ms with benchmark on).
+            grad_probs, grad_weight, _ = torch.ops.aten.convolution_backward(
+                grad_conv,
+                probs,
+                weight,
+                None,
+                list(stride),
+                list(padding),
+                list(dilation),
+                False,
+                [0, 0],
+                groups,
+                [True, True, False],
+            )
 
         grad_bias = None
         if bias is not None:

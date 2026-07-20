@@ -575,6 +575,7 @@ def _fused_fwd_autotune_configs():
                 yield SimpleNamespace(BLOCK_M=bm, BLOCK_N=bn, occupancy=occ)
 
 
+# Module-level cache: (batch*heads, seq_len, head_dim, dtype, device_str) -> (cfg, tuned_kernel)
 _fwd_autotune_cache: dict = {}
 
 
@@ -645,7 +646,19 @@ def _fused_fwd_autotune(
             return {"occupancy": cfg.occupancy}
 
         with ct.compiler_timeout(30):
-            result = exhaustive_search(configs, stream, grid_fn, _fna_fused_forward_kernel, args_fn, hints_fn)
+            # single_run_timeout_sec guards against a config whose kernel hangs (warp-
+            # specialization deadlock) — a timed-out run is discarded instead of stalling
+            # the whole search forever.
+            result = exhaustive_search(
+                configs,
+                stream,
+                grid_fn,
+                _fna_fused_forward_kernel,
+                args_fn,
+                hints_fn,
+                quiet=True,
+                single_run_timeout_sec=5.0,
+            )
         best_cfg = result.best.config
         tuned_kernel = _fna_fused_forward_kernel.replace_hints(occupancy=best_cfg.occupancy)
         _fwd_autotune_cache[cache_key] = (best_cfg, tuned_kernel)
