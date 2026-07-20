@@ -48,6 +48,37 @@ def jsd(
 
 
 @dispatch(
+    "liger.poly_norm",
+)
+def poly_norm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    PolyNorm normalization.
+
+    Computes: y = w₀·norm(x³) + w₁·norm(x²) + w₂·norm(x) + b
+    where norm(u) = u / sqrt(mean(u²) + ε)
+
+    Reference:
+    1. https://github.com/BryceZhuo/PolyCom/
+    2. https://arxiv.org/pdf/2411.03884
+
+    Args:
+        input: Input tensor of shape (*, H)
+        weight: Weight tensor of shape (3,) for [w0, w1, w2]
+        bias: Scalar bias tensor of shape (1,)
+        eps: Epsilon for numerical stability. Default: 1e-6
+
+    Returns:
+        Output tensor of same shape as input
+    """
+    raise NotImplementedError(f"poly_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.fused_neighborhood_attention",
 )
 def fused_neighborhood_attention(
@@ -104,6 +135,99 @@ def cross_entropy(
         4-tuple (loss, z_loss, token_accuracy, predicted_tokens) when any RETURN_* flag is True.
     """
     raise NotImplementedError(f"cross_entropy is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "liger.fused_add_rms_norm",
+)
+def fused_add_rms_norm(
+    X: torch.Tensor,
+    R: torch.Tensor,
+    W: torch.Tensor,
+    eps: float = 1e-6,
+    offset: float = 0.0,
+    casting_mode: str = "llama",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused residual addition + RMS normalization.
+
+    Computes the following sequence (common in transformer decoder layers):
+      1. hidden_states = residual + hidden_states
+      2. residual = hidden_states  (updated residual)
+      3. hidden_states = rmsnorm(hidden_states)
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_add_rms_norm.py
+
+    Args:
+        X: Hidden states tensor of shape (*, H).
+        R: Residual tensor of same shape as X.
+        W: RMSNorm weight tensor of shape (H,).
+        eps: Epsilon for numerical stability. Default: 1e-6
+        offset: Constant offset added to W before scaling (e.g. 1.0 for Gemma). Default: 0.0
+        casting_mode: Casting mode for RMSNorm computation:
+            "llama" - only rstd computed in float32 (default)
+            "gemma" - everything cast to float32
+            "none"  - no casting; compute in original dtype
+
+    Returns:
+        Tuple (Y, S):
+            Y: Normalized output of same shape as X.
+            S: Updated residual (X + R) of same shape as X.
+    """
+    raise NotImplementedError(f"fused_add_rms_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "liger.fused_linear_cross_entropy",
+)
+def fused_linear_cross_entropy(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    ce_weight: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    lse_square_scale: float = 0.0,
+    label_smoothing: float = 0.0,
+    reduction: str = "mean",
+    softcap: Optional[float] = None,
+    return_z_loss: bool = False,
+    accum_dtype: Optional[torch.dtype] = None,
+    use_token_scaling: bool = False,
+    return_token_accuracy: bool = False,
+    return_predicted_tokens: bool = False,
+) -> torch.Tensor:
+    """
+    Fused linear + cross-entropy loss (chunked to avoid materializing logits).
+
+    Computes loss = cross_entropy(input @ weight.T + bias, target) without
+    materializing the full (BT, V) logit matrix.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py
+
+    Args:
+        input: Hidden states of shape (BT, H).
+        weight: Vocabulary weight of shape (V, H).
+        target: Target class indices of shape (BT,).
+        bias: Optional bias of shape (V,). Default: None
+        ce_weight: Optional per-class weight of shape (V,) for weighted CE. Default: None
+        ignore_index: Class index to ignore. Default: -100
+        lse_square_scale: Coefficient of the z-loss regularizer (lse^2). Default: 0.0
+        label_smoothing: Label smoothing factor in [0, 1). Default: 0.0
+        reduction: Reduction mode: "mean" | "sum" | "none". Default: "mean"
+        softcap: Optional logit soft-capping value (tanh cap). Default: None
+        return_z_loss: Also return the z-loss term. Default: False
+        accum_dtype: Optional accumulation dtype for grad_weight/grad_bias. Default: None
+        use_token_scaling: Scale each token's loss by its predicted probability. Default: False
+        return_token_accuracy: Also return per-batch token accuracy. Default: False
+        return_predicted_tokens: Also return the argmax predicted token ids. Default: False
+
+    Returns:
+        Scalar loss tensor by default (or per-token losses when reduction="none").
+        When any of return_z_loss / return_token_accuracy / return_predicted_tokens is set,
+        returns a tuple (loss, *extras) with the requested extras appended in that order.
+    """
+    raise NotImplementedError(f"fused_linear_cross_entropy is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -200,6 +324,32 @@ def group_norm(
 
 
 @dispatch(
+    "liger.dyt",
+)
+def dyt(
+    x: torch.Tensor,
+    alpha: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Dynamic Tanh (DyT) activation: y = tanh(alpha * x) * gamma + beta
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/dyt.py
+
+    Args:
+        x: Input tensor of shape (*, N)
+        alpha: Scalar learnable parameter, shape (1,)
+        gamma: Per-channel scale, shape (N,)
+        beta: Optional per-channel bias, shape (N,). If None, bias is omitted.
+
+    Returns:
+        Output tensor of same shape as x
+    """
+    raise NotImplementedError(f"dyt is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.kl_div",
 )
 def kl_div(
@@ -289,6 +439,113 @@ def llama4_rope(
 
 
 @dispatch(
+    "liger.grpo_loss",
+)
+def grpo_loss(
+    logits: torch.Tensor,
+    old_logp: Optional[torch.Tensor],
+    ref_logp: Optional[torch.Tensor],
+    completion_ids: torch.Tensor,
+    advantages: torch.Tensor,
+    completion_mask: Optional[torch.Tensor] = None,
+    temperature: float = 0.9,
+    beta: float = 0.0,
+    eps_low: float = 0.2,
+    eps_high: float = 0.2,
+    inplace: bool = True,
+    loss_type: str = "grpo",
+    max_completion_length: Optional[int] = None,
+    reduce: bool = False,
+    importance_sampling_level: str = "token",
+    sapo_temperature_pos: float = 1.0,
+    sapo_temperature_neg: float = 1.05,
+    vllm_is_ratio: Optional[torch.Tensor] = None,
+    delta: Optional[float] = None,
+    use_bias_correction_kl: bool = False,
+    num_items_in_batch: Optional[torch.Tensor] = None,
+    phi_seq: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    """
+    GRPO / DAPO / BNPO / DR-GRPO / CISPO / SAPO / LUSPO / VESPO policy optimization loss.
+
+    Computes per-token policy gradient loss with optional KL penalty.
+    Logits shape: (B, L+1, N) where L is sequence length and N is vocab size.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/grpo_loss.py
+
+    Args:
+        logits: Logits of shape (B, L+1, N). The extra token is for the prefix position.
+        old_logp: Old log-probs of shape (B, L), or None to use current logits.
+        ref_logp: Reference log-probs of shape (B, L). Required when beta != 0.
+        completion_ids: Token ids of shape (B, L) (int64).
+        advantages: Per-sample advantages of shape (B,).
+        completion_mask: Optional binary mask of shape (B, L). 0 = skip token.
+        temperature: Softmax temperature. Default: 0.9
+        beta: KL penalty coefficient. Default: 0.0
+        eps_low: Lower clip epsilon for PPO. Default: 0.2
+        eps_high: Upper clip epsilon for PPO. Default: 0.2
+        inplace: Write gradient directly into logits buffer. Default: True
+        loss_type: Algorithm variant: "grpo"|"dapo"|"bnpo"|"dr_grpo"|"cispo"|"sapo"|"luspo"|"vespo".
+        max_completion_length: Maximum completion length for dr_grpo/luspo reduction. Default: None
+        reduce: If True, return a reduced scalar loss instead of per-token tensors. Default: False
+        importance_sampling_level: "token" or "sequence" (GSPO) IS correction level. Default: "token"
+            Sequence-level is implemented for the CuTile backend; the Triton backend raises for it.
+        sapo_temperature_pos: SAPO sigmoid temperature for positive advantages. Default: 1.0
+        sapo_temperature_neg: SAPO sigmoid temperature for negative advantages. Default: 1.05
+        vllm_is_ratio: Optional importance sampling ratio tensor.
+        delta: Dual-sided clipping upper bound from INTELLECT-2 (clamps coef_1). Default: None
+        use_bias_correction_kl: Enable DeepSeek-V3.2 IS-corrected KL: kl *= coef_1. Default: False
+        num_items_in_batch: Optional global token count for DAPO/CISPO/VESPO normalization. Default: None
+        phi_seq: Per-sequence gamma weight of shape (B,) or (B, 1); required for loss_type="vespo". Default: None
+
+    Returns:
+        If reduce=False:
+            Tuple (loss, kl, is_clipped):
+                loss: Per-token loss of shape (B, L), float32.
+                kl: Per-token KL divergence of shape (B, L) or None when beta=0.
+                is_clipped: Per-token clip indicator of shape (B, L), float32.
+        If reduce=True:
+            Tuple (loss, kl, clip_ratio):
+                loss: Reduced scalar loss.
+                kl: Mean KL divergence scalar or None when beta=0.
+                clip_ratio: Fraction of clipped tokens, scalar.
+    """
+    raise NotImplementedError(f"grpo_loss is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "liger.rms_norm",
+)
+def rms_norm(
+    X: torch.Tensor,
+    W: Optional[torch.Tensor],
+    eps: float,
+    offset: float = 0.0,
+    casting_mode: str = "llama",
+    in_place: bool = True,
+    row_mode: Optional[bool] = None,
+) -> torch.Tensor:
+    """
+    RMS Normalization: Y = X / RMS(X) * (W + offset).
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/rms_norm.py
+
+    Args:
+        X: Input tensor of shape (*, H).
+        W: Affine scale weight of shape (H,), or None for no affine transform.
+        eps: Epsilon for numerical stability.
+        offset: Constant added to W (e.g., 1.0 for Gemma). Default: 0.0
+        casting_mode: "llama" | "gemma" | "none" controls internal precision. Default: "llama"
+        in_place: Reuse dY buffer for dX in backward to save memory. Default: True
+        row_mode: Force row kernel if True. Default: None (auto)
+
+    Returns:
+        Normalized output tensor of same shape as X.
+    """
+    raise NotImplementedError(f"rms_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.qwen2vl_mrope",
 )
 def qwen2vl_mrope(
@@ -351,6 +608,26 @@ def rope(
 
 
 @dispatch(
+    "liger.softmax",
+)
+def softmax(
+    input: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Softmax applied on the last dimension.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/softmax.py
+
+    Args:
+        input: Input tensor of any shape (*, n_cols).
+
+    Returns:
+        Softmax output of same shape as input.
+    """
+    raise NotImplementedError(f"softmax is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.sparsemax",
 )
 def sparsemax(
@@ -370,6 +647,33 @@ def sparsemax(
         Sparsemax output of same shape as input.
     """
     raise NotImplementedError(f"sparsemax is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "liger.swiglu",
+)
+def swiglu(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    gate_multiplier: float = 1.0,
+    down_multiplier: float = 1.0,
+) -> torch.Tensor:
+    """
+    SwiGLU activation: c = silu(a * gate_multiplier) * b * down_multiplier
+    where silu(x) = x * sigmoid(x).
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/swiglu.py
+
+    Args:
+        a: Gate tensor of shape (*, N).
+        b: Value tensor of shape (*, N).
+        gate_multiplier: Scalar multiplier applied to ``a`` before SiLU. Default 1.0.
+        down_multiplier: Scalar multiplier applied to the output ``silu(a*gm)*b``. Default 1.0.
+
+    Returns:
+        Output tensor of same shape as a and b.
+    """
+    raise NotImplementedError(f"swiglu is not implemented for {get_current_backend()}")
 
 
 @dispatch(
@@ -401,6 +705,34 @@ def tiled_mlp(
         Output tensor of same shape as x.
     """
     raise NotImplementedError(f"tiled_mlp is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "liger.tvd",
+)
+def tvd(
+    p: torch.Tensor,
+    q: torch.Tensor,
+    shift_labels: Optional[torch.Tensor] = None,
+    reduction: str = "batchmean",
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    """
+    Total Variation Distance loss: TVD(P || Q) = 0.5 * |P - Q|.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/tvd.py
+
+    Args:
+        p: First distribution of shape (BT, V). Can be float16/bfloat16/float32.
+        q: Second distribution of shape (BT, V).
+        shift_labels: Optional token labels of shape (BT,) for ignore_index masking. Default: None
+        reduction: Reduction mode: "none" | "sum" | "mean" | "batchmean". Default: "batchmean"
+        ignore_index: Label value to ignore when shift_labels is provided. Default: -100
+
+    Returns:
+        Loss tensor. Shape (BT, V) when reduction="none", scalar otherwise.
+    """
+    raise NotImplementedError(f"tvd is not implemented for {get_current_backend()}")
 
 
 @dispatch(

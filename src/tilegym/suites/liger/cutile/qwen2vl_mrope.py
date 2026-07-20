@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Adapted from https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/qwen2vl_mrope.py
-
 """
 Qwen2VL Multimodal Rotary Position Embedding (M-RoPE) kernel (CuTile backend).
 
@@ -100,15 +98,18 @@ def _qwen2vl_mrope_kernel(
     if BACKWARD:
         sin_row = -sin_row
 
-    cos_q = cos_row.astype(query.dtype)
-    sin_q = sin_row.astype(query.dtype)
-    new_q_r = q_r * cos_q - q_i * sin_q
-    new_q_i = q_i * cos_q + q_r * sin_q
+    # Rotate in fp32 (cos_row/sin_row are fp32) and round only the final result,
+    # Casting cos/sin down to bf16 first would
+    # round the intermediate product/subtraction and fail bf16 tolerance.
+    q_r_f = q_r.astype(ct.float32)
+    q_i_f = q_i.astype(ct.float32)
+    new_q_r = (q_r_f * cos_row - q_i_f * sin_row).astype(query.dtype)
+    new_q_i = (q_i_f * cos_row + q_r_f * sin_row).astype(query.dtype)
 
     # Reuse Q's cos_row when FLAT_K <= FLAT (common case: TILE_KH <= TILE_QH).
     if TILE_KH <= TILE_QH:
-        cos_k = ct.extract(cos_row, (0,), shape=(FLAT_K,)).astype(key.dtype)
-        sin_k = ct.extract(sin_row, (0,), shape=(FLAT_K,)).astype(key.dtype)
+        cos_k = ct.extract(cos_row, (0,), shape=(FLAT_K,))
+        sin_k = ct.extract(sin_row, (0,), shape=(FLAT_K,))
     else:
         t_idx_k = k_flat_col + token_cs_off
         h_idx_k = t_idx_k + slab_stride
@@ -125,10 +126,13 @@ def _qwen2vl_mrope_kernel(
         sin_k_raw = ct.where(in_t_k, t_sin_k, ct.where(in_h_k, h_sin_k, w_sin_k))
         if BACKWARD:
             sin_k_raw = -sin_k_raw
-        cos_k = cos_k_raw.astype(key.dtype)
-        sin_k = sin_k_raw.astype(key.dtype)
-    new_k_r = k_r * cos_k - k_i * sin_k
-    new_k_i = k_i * cos_k + k_r * sin_k
+        cos_k = cos_k_raw
+        sin_k = sin_k_raw
+    # Rotate in fp32 (cos_k/sin_k are fp32), round only the final result.
+    k_r_f = k_r.astype(ct.float32)
+    k_i_f = k_i.astype(ct.float32)
+    new_k_r = (k_r_f * cos_k - k_i_f * sin_k).astype(key.dtype)
+    new_k_i = (k_i_f * cos_k + k_r_f * sin_k).astype(key.dtype)
     ct.scatter(query, q_r_idx, new_q_r, mask=q_mask, check_bounds=False, latency=1)
     ct.scatter(query, q_i_idx, new_q_i, mask=q_mask, check_bounds=False, latency=1)
     ct.scatter(key, k_r_idx, new_k_r, mask=k_mask, check_bounds=False, latency=1)

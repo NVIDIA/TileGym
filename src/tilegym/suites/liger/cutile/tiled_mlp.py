@@ -9,6 +9,7 @@ Pure Python implementation — no GPU kernel.
 Shards input along sequence dimension (dim=-2), applies fn on each shard,
 and concatenates. Backward re-computes forward per shard to save memory.
 
+Implemented as a pure Python chunked wrapper (torch.chunk + cuBLAS + autograd).
 """
 
 import math

@@ -144,6 +144,7 @@ def _llama4_rope_forward_ct(q, k, freqs_cis, BLOCK_SIZE=None, imag_sign=1.0):
         # (seq_len, head_dim_half, 2) → (seq_len, head_dim)
         freqs_cis = freqs_cis.reshape(freqs_cis.shape[0], -1)
 
+    # Align dtype — keep freqs_cis in float32 for precision
     compute_dtype = torch.float32 if q.dtype == torch.float32 else q.dtype
     if k.dtype != q.dtype:
         k = k.to(q.dtype)
