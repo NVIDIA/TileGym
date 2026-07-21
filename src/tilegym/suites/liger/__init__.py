@@ -34,6 +34,7 @@ from .ops import llama4_rope
 from .ops import multi_token_attention
 from .ops import poly_norm
 from .ops import qwen2vl_mrope
+from .ops import relu_squared
 from .ops import rms_norm
 from .ops import rope
 from .ops import softmax
@@ -62,6 +63,7 @@ __all__ = [
     "fused_linear_cross_entropy",
     "grpo_loss",
     "poly_norm",
+    "relu_squared",
     "rms_norm",
     "softmax",
     "swiglu",

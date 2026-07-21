@@ -20,6 +20,7 @@ from . import llama4_rope  # noqa: F401
 from . import multi_token_attention  # noqa: F401
 from . import poly_norm  # noqa: F401
 from . import qwen2vl_mrope  # noqa: F401
+from . import relu_squared  # noqa: F401
 from . import rms_norm  # noqa: F401
 from . import rope  # noqa: F401
 from . import softmax  # noqa: F401
@@ -41,6 +42,7 @@ from .llama4_rope import Llama4RopeCuTileFunction  # noqa: F401
 from .multi_token_attention import MultiTokenAttentionCuTileFunction  # noqa: F401
 from .poly_norm import PolyNormCuTileFunction  # noqa: F401
 from .qwen2vl_mrope import Qwen2VLMRopeCuTileFunction  # noqa: F401
+from .relu_squared import ReLUSquaredCuTileFunction  # noqa: F401
 from .rms_norm import RMSNormCuTileFunction  # noqa: F401
 from .rope import RopeCuTileFunction  # noqa: F401
 from .softmax import SoftmaxCuTileFunction  # noqa: F401
@@ -79,6 +81,7 @@ __all__ = [
     "FusedLinearCrossEntropyCuTileFunction",
     "GrpoLossCuTileFunction",
     "PolyNormCuTileFunction",
+    "ReLUSquaredCuTileFunction",
     "RMSNormCuTileFunction",
     "SwiGLUCuTileFunction",
     "SoftmaxCuTileFunction",
@@ -88,6 +91,7 @@ __all__ = [
     "fused_linear_cross_entropy",
     "grpo_loss",
     "poly_norm",
+    "relu_squared",
     "rms_norm",
     "softmax",
     "swiglu",

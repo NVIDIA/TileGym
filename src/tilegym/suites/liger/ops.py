@@ -770,3 +770,21 @@ def multi_token_attention(
         Output tensor of same shape as scores.
     """
     raise NotImplementedError(f"multi_token_attention is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "liger.relu_squared",
+)
+def relu_squared(input: torch.Tensor) -> torch.Tensor:
+    """
+    ReLU-squared activation: y = relu(x)^2 = max(x, 0)^2.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/relu_squared.py
+
+    Args:
+        input: Input tensor of shape (*, N).
+
+    Returns:
+        Output tensor of same shape as input.
+    """
+    raise NotImplementedError(f"relu_squared is not implemented for {get_current_backend()}")
