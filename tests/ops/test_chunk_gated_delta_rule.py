@@ -241,9 +241,14 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         device = "cuda"
 
         torch.manual_seed(0)
-        q = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        k = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        v = torch.randn(B, T, H, D, device=device, dtype=dtype)
+        # Scale q/k/v by 0.1 (same as test_op) so the long-sequence recurrence
+        # stays bounded. Unscaled randn diverges to inf/NaN for large T (in both
+        # the kernel and the torch reference); benchmarking NaN-producing inputs
+        # is misleading and can perturb timing via NaN/denormal handling. Shapes
+        # and FLOPs are unchanged, so the measured latency is unaffected.
+        q = torch.randn(B, T, H, D, device=device, dtype=dtype) * 0.1
+        k = torch.randn(B, T, H, D, device=device, dtype=dtype) * 0.1
+        v = torch.randn(B, T, H, D, device=device, dtype=dtype) * 0.1
         g = -torch.abs(torch.randn(B, T, H, device=device, dtype=dtype)) * 0.5
         beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype))
 
@@ -264,3 +269,54 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         del q, k, v, g, beta
         torch.cuda.empty_cache()
         gc.collect()
+
+    @pytest.mark.parametrize("T", [512, 2048], ids=["T512", "T2048"])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_long_seq(self, T, backend, arch):
+        """Correctness at perf-representative sequence lengths.
+
+        ``test_op`` only covers T<=128 and ``test_perf`` asserts no correctness,
+        so the many-chunk regime the perf shapes exercise (inter-chunk state scan
+        + the intra Neumann solve over dozens of chunks) is otherwise unverified.
+        Uses the same scaled inputs as ``test_op`` so the recurrence stays bounded
+        (unscaled randn diverges to inf/NaN in *both* the reference and the kernel
+        for long T — see test_perf, which only times).
+        """
+        if not tilegym.is_backend_available(backend):
+            pytest.skip(f"Backend {backend} is not available")
+        tilegym.set_backend(backend)
+        self.setUp()
+        from tilegym.ops import chunk_gated_delta_rule
+
+        device = "cuda"
+        dtype = torch.bfloat16
+        B, H, K, V, CS = 2, 8, 128, 128, 64
+        torch.manual_seed(42)
+        query = torch.randn(B, T, H, K, device=device, dtype=dtype) * 0.1
+        key = torch.randn(B, T, H, K, device=device, dtype=dtype) * 0.1
+        value = torch.randn(B, T, H, V, device=device, dtype=dtype) * 0.1
+        g = -torch.abs(torch.randn(B, T, H, device=device, dtype=dtype)) * 0.5
+        beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype))
+
+        ref_out, _ = self.reference(
+            query.clone(),
+            key.clone(),
+            value.clone(),
+            g.clone(),
+            beta.clone(),
+            chunk_size=CS,
+            use_qk_l2norm_in_kernel=True,
+        )
+        test_out, _ = chunk_gated_delta_rule(
+            query.clone(),
+            key.clone(),
+            value.clone(),
+            g.clone(),
+            beta.clone(),
+            chunk_size=CS,
+            use_qk_l2norm_in_kernel=True,
+        )
+        assert torch.isfinite(test_out).all(), "kernel produced non-finite output on bounded input"
+        assert torch.allclose(ref_out, test_out, atol=2e-3, rtol=5e-3), (
+            f"Output mismatch at T={T}: max_abs_err={(ref_out - test_out).abs().max().item():.2e}"
+        )
