@@ -1400,6 +1400,11 @@ def benchmark_fn_cupti(
             for x in grad_to_none:
                 x.grad = None
 
+        # Flush L2 before enabling CUPTI, then wait for the fill kernel to
+        # finish so it cannot be included in the profiled kernel times.
+        cache.zero_()
+        torch.cuda.synchronize()
+
         try:
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
                 fn()
