@@ -55,6 +55,7 @@ __tile_global__ void matmul_kernel(
     constexpr int num_bid_m = (M + TILE_SIZE_M - 1) / TILE_SIZE_M;
     constexpr int num_bid_n = (N + TILE_SIZE_N - 1) / TILE_SIZE_N;
     constexpr int num_bid_in_group = GROUP_SIZE_M * num_bid_n;
+    constexpr bool output_tiles_are_full = (M % TILE_SIZE_M == 0) && (N % TILE_SIZE_N == 0);
 
     // 2D swizzle for L2 cache reuse
     int bidval = ct::bid().x;
@@ -128,5 +129,10 @@ __tile_global__ void matmul_kernel(
     auto pC = ct::partition_view{ct::tensor_span{C, ct::extents<uint32_t, M, N>{}}, ct::shape<TILE_SIZE_M, TILE_SIZE_N>{}};
 
     // Cast and store result
-    pC.store(ct::element_cast<T>(acc), bidx, bidy);
+    auto result = ct::element_cast<T>(acc);
+    if constexpr (output_tiles_are_full) {
+        pC.store(result, bidx, bidy);
+    } else {
+        pC.store_masked(result, bidx, bidy);
+    }
 }

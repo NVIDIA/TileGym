@@ -43,6 +43,7 @@ __tile_global__ void static_persistent_matmul_kernel(
     constexpr int k_tiles          = (K + TILE_SIZE_K - 1) / TILE_SIZE_K;
     constexpr int num_tiles        = num_bid_m * num_bid_n;
     constexpr int num_bid_in_group = GROUP_SIZE_M * num_bid_n;
+    constexpr bool output_tiles_are_full = (M % TILE_SIZE_M == 0) && (N % TILE_SIZE_N == 0);
 
     constexpr auto zero_pad = ct::view_padding::zero;
 
@@ -66,7 +67,12 @@ __tile_global__ void static_persistent_matmul_kernel(
                 auto b = pB.template load_masked<zero_pad>(k, bid_n);
                 acc = ct::mma(a, b, acc);
             }
-            pC.store(ct::element_cast<T>(acc), bid_m, bid_n);
+            auto result = ct::element_cast<T>(acc);
+            if constexpr (output_tiles_are_full) {
+                pC.store(result, bid_m, bid_n);
+            } else {
+                pC.store_masked(result, bid_m, bid_n);
+            }
         }
     } else if constexpr (TRANSPOSE_A && !TRANSPOSE_B) {
         auto pA = ct::partition_view{ct::tensor_span{A, ct::extents<uint32_t, K, M>{}}, ct::shape<TILE_SIZE_K, TILE_SIZE_M>{}};
@@ -87,7 +93,12 @@ __tile_global__ void static_persistent_matmul_kernel(
                 auto a     = ct::transpose(a_raw);
                 acc = ct::mma(a, b, acc);
             }
-            pC.store(ct::element_cast<T>(acc), bid_m, bid_n);
+            auto result = ct::element_cast<T>(acc);
+            if constexpr (output_tiles_are_full) {
+                pC.store(result, bid_m, bid_n);
+            } else {
+                pC.store_masked(result, bid_m, bid_n);
+            }
         }
     } else if constexpr (!TRANSPOSE_A && TRANSPOSE_B) {
         auto pA = ct::partition_view{ct::tensor_span{A, ct::extents<uint32_t, M, K>{}}, ct::shape<TILE_SIZE_M, TILE_SIZE_K>{}};
@@ -108,7 +119,12 @@ __tile_global__ void static_persistent_matmul_kernel(
                 auto b     = ct::transpose(b_raw);
                 acc = ct::mma(a, b, acc);
             }
-            pC.store(ct::element_cast<T>(acc), bid_m, bid_n);
+            auto result = ct::element_cast<T>(acc);
+            if constexpr (output_tiles_are_full) {
+                pC.store(result, bid_m, bid_n);
+            } else {
+                pC.store_masked(result, bid_m, bid_n);
+            }
         }
     } else {
         auto pA = ct::partition_view{ct::tensor_span{A, ct::extents<uint32_t, K, M>{}}, ct::shape<TILE_SIZE_K, TILE_SIZE_M>{}};
@@ -130,7 +146,12 @@ __tile_global__ void static_persistent_matmul_kernel(
                 auto b     = ct::transpose(b_raw);
                 acc = ct::mma(a, b, acc);
             }
-            pC.store(ct::element_cast<T>(acc), bid_m, bid_n);
+            auto result = ct::element_cast<T>(acc);
+            if constexpr (output_tiles_are_full) {
+                pC.store(result, bid_m, bid_n);
+            } else {
+                pC.store_masked(result, bid_m, bid_n);
+            }
         }
     }
 }
