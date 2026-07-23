@@ -19,6 +19,7 @@ _perf_frameworks = _backends + ["pytorch"]
 
 _SHAPE_CONFIGS = [
     pytest.param(2, 1, 4, 64, 64, False, False, False, id="decode"),
+    pytest.param(1, 1, 16, 128, 128, True, True, True, id="qwen35_cached_decode"),
     pytest.param(2, 16, 4, 64, 64, False, False, False, id="T16"),
     pytest.param(1, 32, 8, 128, 128, False, True, False, id="T32_final_state"),
     pytest.param(2, 8, 4, 64, 64, True, True, False, id="init_final_state"),

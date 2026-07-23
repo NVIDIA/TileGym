@@ -24,9 +24,30 @@ def _ct_mm(a, b):
     return ct.astype(ct.matmul(a, b), ct.float32)
 
 
-def _ct_solve_tril_neumann(A, CS, n_steps):
-    """Return (I - A)^-1 for strictly lower-triangular (nilpotent) A via
-    Neumann-by-squaring.  Plain helper (no @ct.kernel).
+def _ct_solve_tril_serial(A, CS):
+    """Invert a unit lower-triangular system in reference operation order."""
+    offs = ct.arange(CS, dtype=ct.int32)
+    for i in range(1, CS):
+        is_row = offs == i
+        is_row_col = ct.expand_dims(is_row, axis=1)
+        row = ct.sum(ct.where(is_row_col, A, 0.0), axis=0)
+        correction = ct.sum(ct.expand_dims(row, axis=1) * A, axis=0)
+        A = A + ct.where(is_row_col, ct.expand_dims(correction, axis=0), 0.0)
+    eye = ct.where(
+        ct.expand_dims(offs, axis=1) == ct.expand_dims(offs, axis=0),
+        1.0,
+        0.0,
+    )
+    return A + eye
+
+
+def _ct_solve_tril_neumann_guarded(A, CS, n_steps):
+    """Use fast Neumann-by-squaring only when its powers cannot grow.
+
+    Full-fp32 Neumann products still create cancellation terms up to 1e15 on
+    correlated model keys, so changing MMA precision alone is insufficient.
+    The matrix infinity norm is submultiplicative, so ||A||_inf < 1 bounds every
+    squared power instead of discovering instability after the expensive solve.
     """
     offs = ct.arange(CS, dtype=ct.int32)
     eye = ct.where(
@@ -34,12 +55,17 @@ def _ct_solve_tril_neumann(A, CS, n_steps):
         1.0,
         0.0,
     )
-    P = eye + A  # (I + A)  -- first factor kept in fp32 (exact)
-    Apow = A
-    for _ in range(1, n_steps):
-        Apow = _ct_mm(Apow, Apow)  # A^(2^j)
-        P = _ct_mm(P, eye + Apow)  # accumulate (I + A^(2^j))
-    return P
+    norm_inf = ct.max(ct.sum(ct.abs(A), axis=1))
+    result = A
+    if norm_inf < 1.0:
+        result = eye + A
+        A_power = A
+        for _ in range(1, n_steps):
+            A_power = _ct_mm(A_power, A_power)
+            result = _ct_mm(result, eye + A_power)
+    else:
+        result = _ct_solve_tril_serial(A, CS)
+    return result
 
 
 @ct.kernel(occupancy=2)
@@ -62,7 +88,7 @@ def _intra_chunk_prepare_kernel(
     USE_QK_L2NORM: ConstBool,
     CHUNK_SIZE: ConstInt,
     BLOCK_K: ConstInt,
-    SOLVE_STEPS: ConstInt,  # ceil(log2(CHUNK_SIZE)); Neumann-by-squaring factor count
+    SOLVE_STEPS: ConstInt,
     INTER_BF16: ConstBool,  # bf16 intermediates (only when input is bf16/fp16)
 ):
     """Grid: (B*H, num_chunks, 1).  Each program handles one (b, h, chunk)."""
@@ -73,7 +99,7 @@ def _intra_chunk_prepare_kernel(
 
     _ZERO = ct.PaddingMode.ZERO
 
-    # General path (any chunk size): full CHUNK_SIZE x CHUNK_SIZE Neumann solve.
+    # General path (any chunk size): full reference-order triangular solve.
     k_tile = ct.astype(
         ct.load(
             K,
@@ -121,7 +147,12 @@ def _intra_chunk_prepare_kernel(
     kb_tile = k_tile * ct.expand_dims(beta_tile, axis=1)
     base_attn = _ct_mm(kb_tile, ct.transpose(k_tile))
     attn = ct.where(strict_lower, -(base_attn * decay_mask), 0.0)
-    attn = _ct_solve_tril_neumann(attn, CHUNK_SIZE, SOLVE_STEPS)
+    if USE_QK_L2NORM:
+        # Model-normalized keys can be nearly collinear; keep their exact
+        # reference-order solve so small prefill differences cannot alter decode.
+        attn = _ct_solve_tril_serial(attn, CHUNK_SIZE)
+    else:
+        attn = _ct_solve_tril_neumann_guarded(attn, CHUNK_SIZE, SOLVE_STEPS)
 
     num_v_tiles = ct.cdiv(V_dim, BLOCK_K)
     for vt in range(num_v_tiles):
@@ -345,10 +376,6 @@ class _ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
 
         device = query.device
         BLOCK_K = 1 << (K - 1).bit_length()
-        # Neumann-by-squaring factor count for the CHUNK_SIZE x CHUNK_SIZE solve
-        # (s = ceil(log2(chunk_size))); over-provisioning is safe (extra factors
-        # past nilpotency are identity), so this also covers the 64-path's 32x32
-        # sub-blocks. Computed on the host where chunk_size is a real Python int.
         solve_steps = max(1, (chunk_size - 1).bit_length())
 
         # Allocate intermediates (5D). The four (chunk_size, K/V) buffers are the
