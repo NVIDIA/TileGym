@@ -180,7 +180,15 @@ def _gemm_alpha_beta_kernel(
             )
 
 
-def _gemm_alpha_beta_autotune_configs():
+def _effective_occupancy(num_sms, occupancy):
+    """Keep an explicit, realizable SM limit from expanding the launch grid."""
+    actual_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
+    if num_sms is not None and 0 < num_sms < actual_sms:
+        return 1
+    return occupancy
+
+
+def _gemm_alpha_beta_autotune_configs(num_sms=None):
     """
     Iterator of autotune configurations for gemm_alpha_beta kernel.
     Returns configurations optimized for different GPU architectures.
@@ -202,6 +210,8 @@ def _gemm_alpha_beta_autotune_configs():
         ]:
             for BK in [64]:
                 for occupancy in [1, 2, 4, 8]:
+                    if occupancy != _effective_occupancy(num_sms, occupancy):
+                        continue
                     for subtile in subtile_options:
                         yield SimpleNamespace(
                             BLOCK_M=BM,
@@ -222,6 +232,8 @@ def _gemm_alpha_beta_autotune_configs():
         ]:
             for BK in [64]:
                 for occupancy in [1, 2, 4]:
+                    if occupancy != _effective_occupancy(num_sms, occupancy):
+                        continue
                     yield SimpleNamespace(
                         BLOCK_M=BM,
                         BLOCK_N=BN,
@@ -241,6 +253,8 @@ def _gemm_alpha_beta_autotune_configs():
         ]:
             for BK in [64]:
                 for occupancy in [1, 2]:
+                    if occupancy != _effective_occupancy(num_sms, occupancy):
+                        continue
                     yield SimpleNamespace(
                         BLOCK_M=BM,
                         BLOCK_N=BN,
@@ -307,6 +321,7 @@ def _compute_grid_and_programs(M, N, BLOCK_M, BLOCK_N, num_sms, num_ctas, occupa
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     if num_sms is not None:
         NUM_SMS = min(NUM_SMS, num_sms)
+    occupancy = _effective_occupancy(num_sms, occupancy)
 
     num_pid_m = ct.cdiv(M, BLOCK_M)
     num_pid_n = ct.cdiv(N, BLOCK_N)
@@ -424,7 +439,7 @@ def gemm_alpha_beta(
         cache_key = (M, N, K, transpose_a_int, transpose_b_int, a.dtype, num_sms, str(a.device))
         if cache_key not in _gemm_alpha_beta_tune_cache:
             result = exhaustive_search(
-                list(_gemm_alpha_beta_autotune_configs()),
+                list(_gemm_alpha_beta_autotune_configs(num_sms)),
                 stream,
                 grid_fn,
                 _gemm_alpha_beta_kernel,
@@ -451,7 +466,7 @@ def gemm_alpha_beta(
         BLOCK_K = kernel_configs.get("BLOCK_K")
         GROUP_SIZE_M = kernel_configs.get("GROUP_SIZE_M", 8)
         num_ctas = kernel_configs.get("num_ctas", 1)
-        occupancy = kernel_configs.get("occupancy", 1)
+        occupancy = _effective_occupancy(num_sms, kernel_configs.get("occupancy", 1))
         epilogue_subtile = kernel_configs.get("EPILOGUE_SUBTILE", 0)
 
         num_programs = _compute_grid_and_programs(M, N, BLOCK_M, BLOCK_N, num_sms, num_ctas, occupancy)[3]
