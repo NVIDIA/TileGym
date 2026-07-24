@@ -71,7 +71,11 @@ __tile_global__ void attention_decode_kernel_optimized(
     // Load Q and transpose to [HEAD_DIM, QUERY_GROUP_BLOCK_SIZE]
     using Q_4D_Tile = ct::tile<T, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, HEAD_DIM>>;
     using T_DxQG = ct::tile<T, ct::shape<HEAD_DIM, QUERY_GROUP_BLOCK_SIZE>>;
-    Q_4D_Tile q_4d = Q_view.load(batch_id, head_id, 0, 0);
+    // Q_PER_KV may be smaller than QUERY_GROUP_BLOCK_SIZE, so the query-group
+    // tile overhangs the Q tensor. Use a masked load so out-of-bounds group
+    // rows are padded instead of reading past the tensor (do not rely on the
+    // implicit in-bounds assumption of the plain load).
+    Q_4D_Tile q_4d = Q_view.load_masked(batch_id, head_id, 0, 0);
     auto q_2d = ct::reshape(q_4d, ct::shape<QUERY_GROUP_BLOCK_SIZE, HEAD_DIM>{});
     // Keep Q in native type for tensor core K@Q MMA
     auto q_native = ct::transpose(q_2d);  // [HEAD_DIM, QUERY_GROUP_BLOCK_SIZE]
@@ -161,11 +165,14 @@ __tile_global__ void attention_decode_kernel_optimized(
     auto Out_span = ct::tensor_span{Out_ptr, ct::extents{B, H_KV, Q_PER_KV, NUM_KV_SPLITS, HEAD_DIM}};
     auto Out_view = ct::partition_view(Out_span, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM>{});
     auto acc_out_5d = ct::reshape(acc_out_T, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM>{});
-    Out_view.store(acc_out_5d, batch_id, head_id, 0, split_id, 0);
+    // The query-group tile overhangs the Q_PER_KV dimension; a masked store
+    // writes only the valid group rows and masks the out-of-bounds ones so
+    // they do not clobber neighboring (split/head) entries.
+    Out_view.store_masked(acc_out_5d, batch_id, head_id, 0, split_id, 0);
 
     // Store LSE
     auto LSE_span = ct::tensor_span{LSE_ptr, ct::extents{B, H_KV, Q_PER_KV, NUM_KV_SPLITS}};
     auto LSE_view = ct::partition_view(LSE_span, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
     auto lse_4d = ct::reshape(lse, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
-    LSE_view.store(lse_4d, batch_id, head_id, 0, split_id);
+    LSE_view.store_masked(lse_4d, batch_id, head_id, 0, split_id);
 }

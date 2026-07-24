@@ -15,7 +15,7 @@ dependencies = [
   "accelerate==1.13.0",
   "cuda-bindings>=13.2.0",
   "cuda-core>=0.7.0",
-  "cuda-tile[tileiras]>=1.3.0",
+  "cuda-tile[tileiras]>=1.5.0",
   "filelock>=3.20.3",
   "huggingface-hub",
   "matplotlib",
@@ -33,6 +33,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  # cutile-rs kernel-inventory Solutions bind their FFI cdylib through cffi.
+  "cffi",
   "flashinfer-bench==0.1.2",
   "pytest-html",
   "pytest-split",

@@ -1,79 +1,74 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
+
+from types import SimpleNamespace
+
 import cuda.tile as ct
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
 
-# 20 bisections give fp32-scale tau precision (~1e-6 relative interval).
-_BSEARCH_ITER = 20
+# Forward autotune space (occupancy × num_worker_warps): the cumsum scan over the
+# whole row is thread-parallel, so large n_cols favour nww=8 (256 threads) while
+# small n_cols favour nww=4. exhaustive_search picks the per-shape best on first
+# launch and caches it.
+_SPARSEMAX_FWD_TUNE_CONFIGS = [SimpleNamespace(occ=o, nww=n) for o in [2, 4, 8] for n in [4, 8]]
+_SPARSEMAX_FWD_TUNE_CACHE: dict = {}
+
+# Backward autotune space. Same occ×nww sweep, but occ=1 is EXCLUDED: the bwd kernel
+# scatters inside a loop and occupancy=1 there causes intermittent hangs. The best
+# config is shape-dependent (e.g. occ4/nww8 wins at n_cols=8192, occ2/nww8 at 32768),
+# which is exactly why a per-shape autotune is needed rather than a fixed hint.
+_SPARSEMAX_BWD_TUNE_CONFIGS = [SimpleNamespace(occ=o, nww=n) for o in [2, 4, 8] for n in [4, 8]]
+_SPARSEMAX_BWD_TUNE_CACHE: dict = {}
 
 
-def _select_block_size(n_cols: int) -> int:
-    return min(next_power_of_2(n_cols), 4096)
-
-
-@ct.kernel(occupancy=4)
-def _sparsemax_bsearch_kernel(
+# Exact sparsemax threshold (Martins & Astudillo 2016, Alg. 1):
+# on the descending-sorted row z, find support size k = max{ j : z_(j) > (cssv_j - 1)/j },
+# then tau = (sum_{i<=k} z_(i) - 1)/k. The whole row lives in one BLOCK_SIZE tile so ct.cumsum
+# gives the running prefix sum.
+@ct.kernel
+def _sparsemax_fwd_kernel(
     y_output,
     x_input,
+    x_sorted,  # row-wise descending sort of x_input (fp32), produced by torch.sort
     N_COLS: ct.Constant[int],
-    BLOCK_SIZE: ct.Constant[int],
-    BSEARCH_ITER: ct.Constant[int],
+    BLOCK_SIZE: ct.Constant[int],  # = next_pow2(N_COLS): whole row in one tile for the cumsum
 ):
     row_idx = ct.bid(0)
-    n_chunks = (N_COLS + BLOCK_SIZE - 1) // BLOCK_SIZE
+    col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    one_b = ct.full((BLOCK_SIZE,), 1.0, ct.float32)
+    zero_b = ct.full((BLOCK_SIZE,), 0.0, ct.float32)
+    valid_mask = col_idx < N_COLS
+    valid_f = ct.astype(valid_mask, ct.float32)
 
-    x_max = ct.full((1,), -1e38, dtype=ct.float32)
+    z_sorted = ct.astype(
+        ct.gather(x_sorted, (row_idx, col_idx), check_bounds=True, padding_value=0.0),
+        ct.float32,
+    )
+    # Masked entries (col >= N_COLS) contribute 0 to the prefix sum / are excluded from support.
+    z_valid = z_sorted * valid_f
+    cssv = ct.cumsum(z_valid, 0)
+    r = ct.astype(col_idx, ct.float32) + one_b
+    t_vec = (cssv - one_b) / r
+    support = (z_sorted > t_vec) & valid_mask
 
-    for ci in range(n_chunks):
-        col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
-        x_tile = ct.astype(
-            ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=-1e38),
-            ct.float32,
-        )
-        x_max = ct.maximum(x_max, ct.max(x_tile, 0, keepdims=True))
+    # Support size k, clamped to >= 1.
+    k_int = ct.maximum(ct.sum(ct.astype(support, ct.int32), 0, keepdims=True), ct.full((1,), 1, ct.int32))
+    k = ct.astype(k_int, ct.float32)
+    s = ct.sum(ct.where(support, z_sorted, zero_b), 0, keepdims=True)
+    tau = (s - ct.full((1,), 1.0, ct.float32)) / k
 
-    tau_lo = x_max - ct.full((1,), 1.0, ct.float32)
-    tau_hi = x_max
-
-    one = ct.full((1,), 1.0, ct.float32)
-    half = ct.full((1,), 0.5, ct.float32)
-
-    for _ in range(BSEARCH_ITER):
-        tau_mid = half * (tau_lo + tau_hi)
-        f = ct.full((1,), 0.0, ct.float32)
-
-        for ci in range(n_chunks):
-            col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
-            x_tile = ct.astype(
-                ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=-1e38),
-                ct.float32,
-            )
-            valid_mask = ct.astype(col_idx < N_COLS, ct.float32)
-            in_supp = ct.astype(x_tile > tau_mid, ct.float32) * valid_mask
-            f = f + ct.sum(in_supp * (x_tile - tau_mid), 0, keepdims=True)
-
-        tau_lo = ct.where(f >= one, tau_mid, tau_lo)
-        tau_hi = ct.where(f < one, tau_mid, tau_hi)
-
-    tau = half * (tau_lo + tau_hi)
-
-    zero = ct.full((BLOCK_SIZE,), 0.0, ct.float32)
-    for ci in range(n_chunks):
-        col_idx = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
-        x_tile = ct.astype(
-            ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=0.0),
-            ct.float32,
-        )
-        y_tile = ct.maximum(x_tile - tau, zero)
-        ct.scatter(y_output, (row_idx, col_idx), ct.astype(y_tile, y_output.dtype), check_bounds=True)
-
-
-_sparsemax_bsearch_kernel_large = _sparsemax_bsearch_kernel.replace_hints(occupancy=2)
+    x_row = ct.astype(
+        ct.gather(x_input, (row_idx, col_idx), check_bounds=True, padding_value=0.0),
+        ct.float32,
+    )
+    y = ct.maximum(x_row - tau, ct.full((BLOCK_SIZE,), 0.0, ct.float32))
+    ct.scatter(y_output, (row_idx, col_idx), ct.astype(y, y_output.dtype), check_bounds=True)
 
 
 @ct.kernel
@@ -115,25 +110,82 @@ def _sparsemax_bwd_kernel(
         ct.scatter(grad_input, (row_idx, col_idx), ct.astype(gi_tile, grad_input.dtype), check_bounds=True)
 
 
+def _get_tuned_fwd_kernel(n_cols, BLOCK_SIZE, n_rows, stream, out_flat, x_flat, x_sorted):
+    """Autotune occupancy+nww on first call per shape; return cached kernel afterwards."""
+    key = (n_cols, BLOCK_SIZE)
+    if key in _SPARSEMAX_FWD_TUNE_CACHE:
+        return _SPARSEMAX_FWD_TUNE_CACHE[key]
+
+    result = exhaustive_search(
+        _SPARSEMAX_FWD_TUNE_CONFIGS,
+        stream,
+        lambda cfg: (n_rows, 1, 1),
+        _sparsemax_fwd_kernel,
+        lambda cfg: (out_flat, x_flat, x_sorted, int(n_cols), int(BLOCK_SIZE)),
+        lambda cfg: {"occupancy": cfg.occ, "num_worker_warps": cfg.nww},
+        quiet=True,
+    )
+    best = result.best.config
+    _SPARSEMAX_FWD_TUNE_CACHE[key] = _sparsemax_fwd_kernel.replace_hints(occupancy=best.occ, num_worker_warps=best.nww)
+    return _SPARSEMAX_FWD_TUNE_CACHE[key]
+
+
 def _sparsemax_forward_ct(x: torch.Tensor, dim: int):
+    """Exact, sort-based sparsemax forward.
+
+    Sort each row descending (torch.sort), then one kernel computes the exact threshold tau
+    via prefix sums and applies max(x - tau, 0). The whole row must fit in one tile
+    (BLOCK = next_pow2(n_cols)) so ct.cumsum yields the running prefix sum.
+    """
     if dim < 0:
         dim += x.dim()
     x_sw = x.transpose(dim, -1).contiguous()
     n_cols = x_sw.size(-1)
     n_rows = x_sw.numel() // n_cols
     x_flat = x_sw.view(n_rows, n_cols)
+    x_sorted = torch.sort(x_flat.float(), dim=-1, descending=True).values
 
-    BLOCK_SIZE = _select_block_size(n_cols)
+    BLOCK_SIZE = next_power_of_2(n_cols)  # whole row in one tile (required for the cumsum)
     out_flat = torch.empty_like(x_flat)
-    kernel = _sparsemax_bsearch_kernel_large if n_cols > 16384 else _sparsemax_bsearch_kernel
+    stream = torch.cuda.current_stream()
+    kernel = _get_tuned_fwd_kernel(n_cols, BLOCK_SIZE, n_rows, stream, out_flat, x_flat, x_sorted)
     ct.launch(
-        torch.cuda.current_stream(),
+        stream,
         (n_rows, 1, 1),
         kernel,
-        (out_flat, x_flat, int(n_cols), int(BLOCK_SIZE), int(_BSEARCH_ITER)),
+        (out_flat, x_flat, x_sorted, int(n_cols), int(BLOCK_SIZE)),
     )
 
     return out_flat.view_as(x_sw).transpose(dim, -1).contiguous(), out_flat
+
+
+def _get_tuned_bwd_kernel(n_cols, BLOCK_SIZE, n_rows, dtype, device):
+    """Autotune occupancy+nww per shape on first call; cache afterwards.
+
+    Uses a fresh stream + dummy tensors — the autograd backward stream is not safe
+    for exhaustive_search.
+    """
+    key = (n_cols, BLOCK_SIZE)
+    if key in _SPARSEMAX_BWD_TUNE_CACHE:
+        return _SPARSEMAX_BWD_TUNE_CACHE[key]
+
+    tune_stream = torch.cuda.Stream(device=device)
+    dx = torch.empty(n_rows, n_cols, dtype=dtype, device=device)
+    o = torch.empty(n_rows, n_cols, dtype=dtype, device=device)
+    go = torch.empty(n_rows, n_cols, dtype=dtype, device=device)
+
+    result = exhaustive_search(
+        _SPARSEMAX_BWD_TUNE_CONFIGS,
+        tune_stream,
+        lambda cfg: (n_rows, 1, 1),
+        _sparsemax_bwd_kernel,
+        lambda cfg: (dx, o, go, int(n_cols), int(BLOCK_SIZE)),
+        lambda cfg: {"occupancy": cfg.occ, "num_worker_warps": cfg.nww},
+        quiet=True,
+    )
+    best = result.best.config
+    _SPARSEMAX_BWD_TUNE_CACHE[key] = _sparsemax_bwd_kernel.replace_hints(occupancy=best.occ, num_worker_warps=best.nww)
+    return _SPARSEMAX_BWD_TUNE_CACHE[key]
 
 
 def _sparsemax_backward_ct(grad_out: torch.Tensor, out_flat: torch.Tensor, dim: int):
@@ -142,12 +194,13 @@ def _sparsemax_backward_ct(grad_out: torch.Tensor, out_flat: torch.Tensor, dim: 
     n_rows = grad_sw.numel() // n_cols
     go_flat = grad_sw.view(n_rows, n_cols).contiguous()
 
-    BLOCK_SIZE = _select_block_size(n_cols)
+    BLOCK_SIZE = min(next_power_of_2(n_cols), 4096)
     dx_flat = torch.empty_like(go_flat)
+    kernel = _get_tuned_bwd_kernel(n_cols, BLOCK_SIZE, n_rows, go_flat.dtype, go_flat.device)
     ct.launch(
         torch.cuda.current_stream(),
         (n_rows, 1, 1),
-        _sparsemax_bwd_kernel,
+        kernel,
         (dx_flat, out_flat, go_flat, int(n_cols), int(BLOCK_SIZE)),
     )
 

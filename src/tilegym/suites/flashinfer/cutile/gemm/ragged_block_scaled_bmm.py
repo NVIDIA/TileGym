@@ -408,7 +408,6 @@ def _get_default_kernel_configs(total_m, Q, VEC_SIZE):
     """
     gpu_capability = torch.cuda.get_device_capability()
     is_large_m = _is_large_m(total_m, Q)
-    average_m = total_m / Q if Q > 0 else 0
 
     if gpu_capability in [(12, 0), (12, 1)]:
         return {
@@ -421,27 +420,20 @@ def _get_default_kernel_configs(total_m, Q, VEC_SIZE):
             "occupancy": 2,
         }
     elif gpu_capability[0] == 10:
-        # SM100 ragged workloads are sensitive to tail waste at BLOCK_M=256.
-        # Use 256 only for clearly large average segment sizes.
-        if is_large_m and average_m >= 640:
-            return {
-                "BLOCK_M": 256,
-                "BLOCK_N": 128,
-                "BLOCK_K": VEC_SIZE,
-                "GROUP_SIZE_M": 8,
-                "swap_ab": False,
-                "num_ctas": 2,
-                "occupancy": 2,
-            }
-        elif is_large_m:
+        if is_large_m:
+            # The num_ctas=2 / occupancy=2 tuning (and BLOCK_M=256 for large avg-M)
+            # added in 1fb8021e regressed the block-scaled MoE BMM 19-47% on these
+            # ragged fp8 shapes vs the pre-tuning default on datacenter Blackwell
+            # (bit-exact B300/sm103 A/B). Restore the baseline num_ctas=1 /
+            # occupancy=1 / BLOCK_M=128 config, which recovers it.
             return {
                 "BLOCK_M": 128,
                 "BLOCK_N": 128,
                 "BLOCK_K": VEC_SIZE,
                 "GROUP_SIZE_M": 8,
                 "swap_ab": False,
-                "num_ctas": 2,
-                "occupancy": 2,
+                "num_ctas": 1,
+                "occupancy": 1,
             }
         else:
             return {

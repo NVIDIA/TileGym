@@ -32,6 +32,9 @@ _SHAPE_CONFIGS = [
     pytest.param(2, 128, 4, 64, 64, 32, False, False, False, id="chunk32"),
     pytest.param(1, 37, 4, 64, 64, 64, False, False, False, id="T37_prime"),
     pytest.param(2, 65, 4, 128, 128, 64, False, True, False, id="T65_off_by_1"),
+    pytest.param(2, 512, 8, 128, 128, 64, False, False, True, id="T512_long_seq"),
+    pytest.param(2, 2048, 8, 128, 128, 64, False, False, True, id="T2048_long_seq"),
+    pytest.param(1, 10782, 8, 128, 128, 64, False, False, True, id="qwen3_5_T10782"),
 ]
 
 _DTYPES = [
@@ -167,7 +170,7 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
             pytest.skip(f"Backend {backend} is not available")
         try:
             tilegym.set_backend(backend)
-        except Exception as e:
+        except ValueError as e:
             pytest.skip(f"Backend is not supported: {e}")
 
         if dtype == torch.float32:
@@ -216,6 +219,7 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
             use_qk_l2norm_in_kernel=use_l2,
         )
 
+        assert torch.isfinite(test_out).all(), "kernel produced non-finite output on bounded input"
         atol = 1e-3 if dtype == torch.float32 else 2e-3
         rtol = 2e-3 if dtype == torch.float32 else 5e-3
 
@@ -241,9 +245,14 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         device = "cuda"
 
         torch.manual_seed(0)
-        q = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        k = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        v = torch.randn(B, T, H, D, device=device, dtype=dtype)
+        # Scale q/k/v by 0.1 (same as test_op) so the long-sequence recurrence
+        # stays bounded. Unscaled randn diverges to inf/NaN for large T (in both
+        # the kernel and the torch reference); benchmarking NaN-producing inputs
+        # is misleading and can perturb timing via NaN/denormal handling. Shapes
+        # and FLOPs are unchanged, so the measured latency is unaffected.
+        q = torch.randn(B, T, H, D, device=device, dtype=dtype) * 0.1
+        k = torch.randn(B, T, H, D, device=device, dtype=dtype) * 0.1
+        v = torch.randn(B, T, H, D, device=device, dtype=dtype) * 0.1
         g = -torch.abs(torch.randn(B, T, H, device=device, dtype=dtype)) * 0.5
         beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype))
 
@@ -264,3 +273,62 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         del q, k, v, g, beta
         torch.cuda.empty_cache()
         gc.collect()
+
+    @pytest.mark.parametrize("use_l2", [False, True], ids=["prenormalized", "in_kernel_l2"])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_correlated_keys_stable_triangular_solve(self, use_l2, backend, arch, monkeypatch):
+        """Keep the chunk solve stable for strongly correlated model-like keys.
+
+        Random scaled keys leave the unit lower-triangular system well
+        conditioned. Correlated keys exercise the cancellation-sensitive case
+        that reduced-precision Neumann products amplified catastrophically. The
+        pre-normalized case also exercises the non-L2 infinity-norm guard.
+        """
+        monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "1")
+        if not tilegym.is_backend_available(backend):
+            pytest.skip(f"Backend {backend} is not available")
+        try:
+            tilegym.set_backend(backend)
+        except ValueError as e:
+            pytest.skip(f"Backend is not supported: {e}")
+        self.setUp()
+        from tilegym.ops import chunk_gated_delta_rule
+
+        device = "cuda"
+        dtype = torch.bfloat16
+        B, T, H, K, V, CS = 1, 64, 1, 128, 128, 64
+        torch.manual_seed(0)
+        key_base = torch.randn(B, 1, H, K, device=device)
+        key = (key_base + 0.02 * torch.randn(B, T, H, K, device=device)).to(dtype)
+        if not use_l2:
+            key = F.normalize(key.float(), dim=-1).to(dtype)
+        query = torch.randn(B, T, H, K, device=device, dtype=dtype) * 0.1
+        value = torch.randn(B, T, H, V, device=device, dtype=dtype) * 0.1
+        g = -torch.rand(B, T, H, device=device) * 0.02
+        beta = torch.sigmoid(torch.randn(B, T, H, device=device, dtype=dtype) + 2)
+
+        ref_out, ref_state = self.reference(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            chunk_size=CS,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=use_l2,
+        )
+        test_out, test_state = chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            chunk_size=CS,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=use_l2,
+        )
+
+        assert torch.isfinite(test_out).all()
+        assert torch.isfinite(test_state).all()
+        torch.testing.assert_close(test_out, ref_out, atol=2e-3, rtol=5e-3)
+        torch.testing.assert_close(test_state, ref_state, atol=3e-3, rtol=5e-3)

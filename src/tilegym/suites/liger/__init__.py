@@ -19,19 +19,28 @@ if is_backend_available("cutile"):
 
 # Import unified interface
 from .ops import cross_entropy
+from .ops import dyt
+from .ops import fused_add_rms_norm
+from .ops import fused_linear_cross_entropy
 from .ops import fused_linear_jsd
 from .ops import fused_neighborhood_attention
 from .ops import geglu
 from .ops import group_norm
+from .ops import grpo_loss
 from .ops import jsd
 from .ops import kl_div
 from .ops import layer_norm
 from .ops import llama4_rope
 from .ops import multi_token_attention
+from .ops import poly_norm
 from .ops import qwen2vl_mrope
+from .ops import rms_norm
 from .ops import rope
+from .ops import softmax
 from .ops import sparsemax
+from .ops import swiglu
 from .ops import tiled_mlp
+from .ops import tvd
 
 __all__ = [
     "cross_entropy",
@@ -48,4 +57,13 @@ __all__ = [
     "rope",
     "sparsemax",
     "tiled_mlp",
+    "dyt",
+    "fused_add_rms_norm",
+    "fused_linear_cross_entropy",
+    "grpo_loss",
+    "poly_norm",
+    "rms_norm",
+    "softmax",
+    "swiglu",
+    "tvd",
 ]

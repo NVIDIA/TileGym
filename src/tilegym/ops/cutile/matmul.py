@@ -134,6 +134,11 @@ def _static_persistent_matmul_autotune_configs():
         yield SimpleNamespace(
             TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1, LOAD_LATENCY=-1
         )
+        # Small-tile candidate for small/rectangular GEMMs, where the entries above cap
+        # the persistent grid at 16-32 tile-jobs and strand most SMs.
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
 
 
 @ct.kernel
