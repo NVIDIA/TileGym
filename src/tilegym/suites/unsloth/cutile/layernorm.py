@@ -15,7 +15,7 @@ CuTile kernels:
     Uses cuda.tile_experimental.autotune_launch to search occupancy=[1, 2, 4, 8].
     Low occupancy (occ=1, 102 regs) optimal for sparse grids (small n_rows);
     high occupancy (occ=4, 62 regs) optimal for dense grids (large n_rows).
-    Both produce flat load_ptr_tko IR (matching NVT pattern), avoiding tensor_view/
+    Both produce flat load_ptr_tko IR (matching Triton-TileIR pattern), avoiding tensor_view/
     partition_view abstraction that causes predicate explosion.
   - _layernorm_backward_ct_1d: 1D gather/scatter backward with autotune over occupancy.
     Matches forward pattern: scalar loads for inv_var/mean, 1D reductions.
@@ -41,7 +41,7 @@ _layernorm_bwd_tune_cache: dict = {}
 def _layernorm_forward_ct_1d_body(Y, X, W, b, r, mu, n_cols, eps, TILE_N):
     """
     Shared kernel body for 1D LayerNorm forward.
-    Uses ct.gather/ct.scatter producing flat load_ptr_tko IR (matching NVT pattern),
+    Uses ct.gather/ct.scatter producing flat load_ptr_tko IR (matching Triton-TileIR pattern),
     avoiding tensor_view/partition_view abstraction that causes predicate explosion.
 
     When TILE_N == n_cols (no padding), check_bounds=False is used on all
@@ -117,7 +117,7 @@ def _layernorm_backward_ct_1d_body(dX, dY, X, W, r, mu, n_cols, TILE_N):
     """
     1D LayerNorm backward body using ct.gather/ct.scatter.
 
-    Produces flat load_ptr_tko IR (matching NVT pattern), avoiding
+    Produces flat load_ptr_tko IR (matching Triton-TileIR pattern), avoiding
     tensor_view/partition_view abstraction that causes predicate explosion.
     Scalar loads for inv_var and mean via ct.gather().item() — no reshapes.
 

@@ -12,7 +12,7 @@ RMS LayerNorm CuTile kernels (standard + Gemma variant).
 CuTile kernels:
   - _rms_layernorm_forward_ct_1d: 1D gather/scatter forward with autotune over occupancy.
     Uses cuda.tile_experimental.autotune_launch to search occupancy=[1, 2, 4, 8].
-    Both produce flat load_ptr_tko IR (matching NVT pattern), avoiding tensor_view/
+    Both produce flat load_ptr_tko IR (matching Triton-TileIR pattern), avoiding tensor_view/
     partition_view abstraction that causes predicate explosion.
   - _rms_layernorm_backward_ct_1d: 1D gather/scatter backward with autotune over occupancy.
     Matches forward pattern: scalar load for inv_var, 1D reductions.
@@ -46,7 +46,7 @@ ConstFloat = ct.Constant[float]
 def _rms_layernorm_forward_ct_1d_body(Y, X, W, r, n_cols, eps, OFFSET, TILE_N):
     """
     Shared kernel body for 1D RMS LayerNorm forward.
-    Uses ct.gather/ct.scatter producing flat load_ptr_tko IR (matching NVT pattern),
+    Uses ct.gather/ct.scatter producing flat load_ptr_tko IR (matching Triton-TileIR pattern),
     avoiding tensor_view/partition_view abstraction that causes predicate explosion.
 
     When TILE_N == n_cols (no padding), check_bounds=False is used on all
@@ -115,7 +115,7 @@ def _rms_layernorm_backward_ct_1d_body(dX, dY, X, W, r, n_cols, OFFSET, TILE_N):
     """
     1D RMS LayerNorm backward body using ct.gather/ct.scatter.
 
-    Produces flat load_ptr_tko IR (matching NVT pattern), avoiding
+    Produces flat load_ptr_tko IR (matching Triton-TileIR pattern), avoiding
     tensor_view/partition_view abstraction that causes predicate explosion.
     Scalar load for inv_var via ct.gather().item() — no reshapes.
 
