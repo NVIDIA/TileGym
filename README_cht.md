@@ -93,10 +93,10 @@ TileGym 為以下後端提供核心，每個後端的核心位於 `src/tilegym/o
 
 ```bash
 # 安裝到一個獨立的目錄，與預設環境隔離
-pip install --target /opt/nvtriton <nvtriton-wheel-for-your-python>.whl
+pip install --target /opt/triton_tileir <triton-tileir-wheel-for-your-python>.whl
 
 # 在執行時選擇 Triton CUDA Tile IR 後端
-PYTHONPATH=/opt/nvtriton ENABLE_TILE=1 python your_script.py
+PYTHONPATH=/opt/triton_tileir ENABLE_TILE=1 python your_script.py
 ```
 
 ## 快速開始

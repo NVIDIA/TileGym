@@ -153,21 +153,21 @@ class Test_Liger_MultiTokenAttention(common.PyTestCase):
         _reference_multi_token_attention(s_ref, w_ref, groups=groups).sum().backward()
 
         # tilegym implementation
-        s_nvt = s.detach().requires_grad_(True)
-        w_nvt = w.detach().requires_grad_(True)
-        multi_token_attention(s_nvt, w_nvt, groups=groups).sum().backward()
+        s_out = s.detach().requires_grad_(True)
+        w_out = w.detach().requires_grad_(True)
+        multi_token_attention(s_out, w_out, groups=groups).sum().backward()
 
         # fp32 is tight; bf16 runs natively with inherent precision loss vs fp32 ref
         atol = 1e-4 if dtype == torch.float32 else 0.1
         rtol = 1e-3 if dtype == torch.float32 else 0.1
 
-        assert torch.allclose(s_nvt.grad.float(), s_ref.grad, atol=atol, rtol=rtol), (
+        assert torch.allclose(s_out.grad.float(), s_ref.grad, atol=atol, rtol=rtol), (
             f"scores.grad mismatch (dtype={dtype}, groups={groups}, "
-            f"max_err={(s_nvt.grad.float() - s_ref.grad).abs().max().item():.5f})"
+            f"max_err={(s_out.grad.float() - s_ref.grad).abs().max().item():.5f})"
         )
-        assert torch.allclose(w_nvt.grad.float(), w_ref.grad, atol=atol, rtol=rtol), (
+        assert torch.allclose(w_out.grad.float(), w_ref.grad, atol=atol, rtol=rtol), (
             f"weight.grad mismatch (dtype={dtype}, groups={groups}, "
-            f"max_err={(w_nvt.grad.float() - w_ref.grad).abs().max().item():.5f})"
+            f"max_err={(w_out.grad.float() - w_ref.grad).abs().max().item():.5f})"
         )
 
     @pytest.mark.parametrize(
