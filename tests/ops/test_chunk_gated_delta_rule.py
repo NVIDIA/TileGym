@@ -173,8 +173,11 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         if dtype == torch.float32:
             pytest.skip("Skipping fp32 tests due to known failures; under investigation")
 
-        if backend == "tilecpp" and use_l2:
-            pytest.skip("Skipping tilecpp l2norm case due to known failure; under investigation")
+        # [TEST PR] tilecpp+use_l2 skip intentionally removed to re-check whether the
+        # tilecpp l2norm case still fails on current TileGym CI. Do NOT merge.
+        # Original skip (added in Ocean 02c4638d, Jul 1 2026):
+        #     if backend == "tilecpp" and use_l2:
+        #         pytest.skip("Skipping tilecpp l2norm case due to known failure; under investigation")
 
         self.setUp()
 
