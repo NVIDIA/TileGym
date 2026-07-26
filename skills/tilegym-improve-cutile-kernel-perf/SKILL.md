@@ -4,7 +4,7 @@ description: Iteratively optimize cuTile kernel performance through systematic p
 license: CC-BY-4.0 AND Apache-2.0
 metadata:
   author: "TileGym Team <TileGym@nvidia.com>"
-  version: "2026.04.11"
+  version: "2026.4.11"
   environment: "IDE: Claude Code, Cursor (Agent mode); model: Opus 4.6"
   requires: "GPU node Blackwell, Hopper and Ampere for benchmarking"
   tags:
