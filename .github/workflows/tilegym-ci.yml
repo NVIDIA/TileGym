@@ -321,7 +321,7 @@ jobs:
 
           # Fail loudly if ENABLE_TILE=1 + PYTHONPATH=/opt/triton-cuda-tileir did NOT actually
           # activate the CUDA Tile IR backend (e.g. a silent fallback to the
-          # torch-bundled Triton). is_nvt_available() requires triton.backends.tileir,
+          # torch-bundled Triton). is_triton_tileir_available() requires triton.backends.tileir,
           # which only the Triton CUDA Tile IR package provides.
           docker pull ${IMAGE}
           docker run --rm \
@@ -330,7 +330,7 @@ jobs:
             -e PYTHONPATH=/opt/triton-cuda-tileir \
             -w /workspace/tilegym/modeling/transformers \
             ${IMAGE} \
-            uv run --locked --no-sync python -c "import triton; from tilegym.backend.selector import is_nvt_available, get_available_triton_backend; assert is_nvt_available(), 'ENABLE_TILE=1 but the CUDA Tile IR backend is NOT active; triton=' + triton.__file__; print('CUDA Tile IR backend active: triton=' + triton.__file__ + ', get_available_triton_backend=' + get_available_triton_backend())"
+            uv run --locked --no-sync python -c "import triton; from tilegym.backend.selector import is_triton_tileir_available, get_available_triton_backend; assert is_triton_tileir_available(), 'ENABLE_TILE=1 but the CUDA Tile IR backend is NOT active; triton=' + triton.__file__; print('CUDA Tile IR backend active: triton=' + triton.__file__ + ', get_available_triton_backend=' + get_available_triton_backend())"
 
       - name: Pull and run ops tests (shard ${{ matrix.shard }})
         timeout-minutes: 50
