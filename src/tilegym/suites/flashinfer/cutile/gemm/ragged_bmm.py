@@ -627,9 +627,17 @@ def ragged_bmm(
     # Check if autotune is enabled
     enable_autotune = is_autotune_enabled()
 
-    # Decide whether to use swap_ab based on M vs N ratio
-    # swap_ab is beneficial when M is small relative to N
-    use_swap_ab = max_m <= 128 and N >= 256
+    # Decide whether to use swap_ab based on M vs N ratio.
+    # swap_ab (small BLOCK_M) is beneficial when the per-batch M is small relative
+    # to N. Use the per-batch average M (total_m / Q) rather than the host `max_m`
+    # hint: `max_m` is only a grid/cache-key upper bound and callers may pass a
+    # coarse over-estimate (e.g. the fused-MoE path passes total tokens_in_chunk,
+    # not the per-expert max), which would wrongly route small-per-expert MoE
+    # GEMMs to the large-M standard kernel (BLOCK_M=128) instead of swap_ab
+    # (BLOCK_M<=64). The grid bound stays exact via the device-side max_m_device,
+    # so this only affects config selection, never correctness.
+    avg_m = total_m // Q if Q > 0 else max_m
+    use_swap_ab = avg_m <= 128 and N >= 256
 
     if enable_autotune:
         if use_swap_ab:
