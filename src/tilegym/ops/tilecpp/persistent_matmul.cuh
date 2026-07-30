@@ -16,6 +16,8 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cuda_tf32.h>
+#include <type_traits>
 
 template<typename T,
          int M, int N, int K,
@@ -48,6 +50,7 @@ __tile_global__ void static_persistent_matmul_kernel(
     constexpr auto zero_pad = ct::view_padding::zero;
 
     using AccTile = ct::tile<float, ct::shape<TILE_SIZE_M, TILE_SIZE_N>>;
+    using MmaType = std::conditional_t<std::is_same_v<T, float>, __nv_tf32, T>;
 
     if constexpr (!TRANSPOSE_A && !TRANSPOSE_B) {
         auto pA = ct::partition_view{ct::tensor_span{A, ct::extents<uint32_t, M, K>{}}, ct::shape<TILE_SIZE_M, TILE_SIZE_K>{}};
@@ -63,8 +66,8 @@ __tile_global__ void static_persistent_matmul_kernel(
 
             AccTile acc = ct::zeros<AccTile>();
             for (auto k : ct::irange(0, k_tiles)) {
-                auto a = pA.template load_masked<zero_pad>(bid_m, k);
-                auto b = pB.template load_masked<zero_pad>(k, bid_n);
+                auto a = ct::element_cast<MmaType>(pA.template load_masked<zero_pad>(bid_m, k));
+                auto b = ct::element_cast<MmaType>(pB.template load_masked<zero_pad>(k, bid_n));
                 acc = ct::mma(a, b, acc);
             }
             auto result = ct::element_cast<T>(acc);
@@ -89,8 +92,8 @@ __tile_global__ void static_persistent_matmul_kernel(
             AccTile acc = ct::zeros<AccTile>();
             for (auto k : ct::irange(0, k_tiles)) {
                 auto a_raw = pA.template load_masked<zero_pad>(k, bid_m);
-                auto b     = pB.template load_masked<zero_pad>(k, bid_n);
-                auto a     = ct::transpose(a_raw);
+                auto a     = ct::element_cast<MmaType>(ct::transpose(a_raw));
+                auto b     = ct::element_cast<MmaType>(pB.template load_masked<zero_pad>(k, bid_n));
                 acc = ct::mma(a, b, acc);
             }
             auto result = ct::element_cast<T>(acc);
@@ -114,9 +117,9 @@ __tile_global__ void static_persistent_matmul_kernel(
 
             AccTile acc = ct::zeros<AccTile>();
             for (auto k : ct::irange(0, k_tiles)) {
-                auto a     = pA.template load_masked<zero_pad>(bid_m, k);
+                auto a     = ct::element_cast<MmaType>(pA.template load_masked<zero_pad>(bid_m, k));
                 auto b_raw = pB.template load_masked<zero_pad>(bid_n, k);
-                auto b     = ct::transpose(b_raw);
+                auto b     = ct::element_cast<MmaType>(ct::transpose(b_raw));
                 acc = ct::mma(a, b, acc);
             }
             auto result = ct::element_cast<T>(acc);
@@ -142,8 +145,8 @@ __tile_global__ void static_persistent_matmul_kernel(
             for (auto k : ct::irange(0, k_tiles)) {
                 auto a_raw = pA.template load_masked<zero_pad>(k, bid_m);
                 auto b_raw = pB.template load_masked<zero_pad>(bid_n, k);
-                auto a     = ct::transpose(a_raw);
-                auto b     = ct::transpose(b_raw);
+                auto a     = ct::element_cast<MmaType>(ct::transpose(a_raw));
+                auto b     = ct::element_cast<MmaType>(ct::transpose(b_raw));
                 acc = ct::mma(a, b, acc);
             }
             auto result = ct::element_cast<T>(acc);

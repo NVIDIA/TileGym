@@ -82,8 +82,17 @@ def _matmul_autotune_configs():
             Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, num_ctas=1, occupancy=1),
             Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, num_ctas=1, occupancy=2),
         ]
+    elif gpu_capability[0] < 9:
+        # Pre-SM90: num_ctas=1 (CGA unsupported); sweep TILE_K in [32, 64, 128]
+        configs = [
+            Config(TILE_SIZE_M=tile_m, TILE_SIZE_N=tile_n, TILE_SIZE_K=tile_k, num_ctas=1, occupancy=occupancy)
+            for tile_m in [64, 128]
+            for tile_n in [64, 128]
+            for tile_k in [32, 64, 128]
+            for occupancy in [1, 2]
+        ]
     else:
-        # sm100 (Blackwell)
+        # sm100+ (Blackwell)
         configs = [
             Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, num_ctas=1, occupancy=1),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1),
@@ -94,7 +103,6 @@ def _matmul_autotune_configs():
 
 
 def _persistent_matmul_autotune_configs():
-    """Autotune search space for static_persistent_matmul_kernel."""
     gpu_capability = torch.cuda.get_device_capability()
 
     if gpu_capability in [(12, 0), (12, 1)]:
@@ -111,17 +119,22 @@ def _persistent_matmul_autotune_configs():
     elif gpu_capability[0] < 9:
         # sm80 (A100)
         configs = [
+            Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
             Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
         ]
     else:
+        # sm100+ (Blackwell)
         configs = [
             Config(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=128, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
-            Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
-            Config(TILE_SIZE_M=512, TILE_SIZE_N=256, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
+            # Small-tile candidate for small/rectangular GEMMs, where the entries above cap
+            # the persistent grid at 16-32 tile-jobs and strand most SMs.
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
         ]
     return configs
 
