@@ -38,6 +38,25 @@ except (ImportError, RuntimeError):
 if is_backend_available("tilecpp"):
     from . import tilecpp
 
+# Import cutile-rs (Rust FFI) backend if available
+if is_backend_available("cutile-rs"):
+    try:
+        from . import cutile_rs
+    except (ImportError, RuntimeError):
+        import warnings
+
+        warnings.warn(
+            "cutile-rs backend import failed, cutile-rs operations will not be available",
+            stacklevel=2,
+        )
+        cutile_rs = None  # type: ignore
+        # Backend isn't usable if its ops failed to import — keep the selector in sync.
+        from tilegym.backend.selector import _AVAILABLE_BACKENDS
+
+        _AVAILABLE_BACKENDS.discard("cutile-rs")
+else:
+    cutile_rs = None  # type: ignore
+
 # Re-export key interfaces
 from .attn_interface import attention_sink_interface
 from .attn_interface import fmha_interface
