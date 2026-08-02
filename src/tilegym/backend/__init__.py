@@ -9,6 +9,7 @@ Backend management for TileGym project
 from .dispatcher import dispatch
 from .dispatcher import get_available_backends_for_op
 from .dispatcher import get_registry_info
+from .dispatcher import has_backend_impl
 from .dispatcher import print_registry_info
 from .dispatcher import register_impl
 from .selector import assert_backend_available
@@ -56,6 +57,7 @@ __all__ = [
     "dispatch",
     "register_impl",
     "get_available_backends_for_op",
+    "has_backend_impl",
     "get_registry_info",
     "print_registry_info",
     # Cutile utilities
