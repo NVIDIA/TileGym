@@ -131,6 +131,11 @@ def dispatch(name: str, fallback_backend: str = "pytorch"):
 
         _REGISTRY[name]["default"] = default_impl
 
+        # Expose the op name on the dispatched callable so tooling (e.g. test
+        # collection) can map a public op back to its registry entry and query
+        # which backends implement it.
+        wrapper._tilegym_op_name = name
+
         return wrapper
 
     return decorator
@@ -150,6 +155,24 @@ def get_available_backends_for_op(name: str) -> list:
         return ["default"]
 
     return list(_REGISTRY[name].keys())
+
+
+def has_backend_impl(name: str, backend: str) -> bool:
+    """
+    Check whether a specific backend implementation is registered for an op.
+
+    Unlike a plain membership test, this ignores the synthetic ``"default"``
+    entry (the NotImplementedError stub), so it answers "is there a real
+    ``backend`` kernel for this op?".
+
+    Args:
+        name: Operation name (registry key, e.g. ``"softmax"``)
+        backend: Backend name (e.g. ``"cutile"``, ``"triton"``)
+
+    Returns:
+        True if a real implementation for ``backend`` is registered.
+    """
+    return name in _REGISTRY and backend in _REGISTRY[name]
 
 
 def get_registry_info() -> Dict[str, Dict[str, str]]:
