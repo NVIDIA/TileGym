@@ -6,6 +6,7 @@ import math
 
 import cuda.tile as ct
 import torch
+from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
@@ -39,13 +40,13 @@ def _softmax_kernel(
         row_minus_max = row - row_max
 
         # Compute exponential
-        numerator = ct.exp(row_minus_max)
+        numerator = ct.exp(row_minus_max, rounding_mode=RMd.APPROX)
 
         # Compute sum for normalization
         denominator = ct.sum(numerator, 0, keepdims=True)
 
         # Final softmax computation
-        softmax_output = numerator / denominator
+        softmax_output = ct.truediv(numerator, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
         softmax_output = ct.astype(softmax_output, input.dtype)
         ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=True)
 
@@ -69,10 +70,11 @@ def _softmax_kernel_multi_wave_full_row_reg_cached_ldg(
     row = ct.astype(row, ct.float32)
 
     row_max = ct.max(row, 0, keepdims=True)
-    numerator = ct.exp(row - row_max)
+    numerator = ct.exp(row - row_max, rounding_mode=RMd.APPROX)
     denominator = ct.sum(numerator, 0, keepdims=True)
 
-    softmax_output = ct.astype(numerator / denominator, input.dtype)
+    softmax_output = ct.truediv(numerator, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
+    softmax_output = ct.astype(softmax_output, input.dtype)
     ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=check_bound)
 
 
@@ -101,13 +103,13 @@ def _softmax_kernel_tma(
         row_minus_max = row - row_max
 
         # Compute exponential
-        numerator = ct.exp(row_minus_max)
+        numerator = ct.exp(row_minus_max, rounding_mode=RMd.APPROX)
 
         # Compute sum for normalization
         denominator = ct.sum(numerator, 1, keepdims=True)
 
         # Final softmax computation
-        softmax_output = numerator / denominator
+        softmax_output = ct.truediv(numerator, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
 
         # Convert back to original dtype and store
         softmax_output = ct.astype(softmax_output, input.dtype)
@@ -150,9 +152,12 @@ def _softmax_kernel_chunked(
             chunk = ct.gather(input, (row_idx, col_indices), check_bounds=True, padding_value=-math.inf)
             chunk = ct.astype(chunk, ct.float32)
             row_minus_max = chunk - row_max
-            numerator = ct.exp(row_minus_max)
+            numerator = ct.exp(row_minus_max, rounding_mode=RMd.APPROX)
             exponentials_sum = ct.sum(numerator, 0, keepdims=True)
             denominator = denominator + exponentials_sum
+
+        # Reciprocal once per row, multiplied inside the pass-3 chunk loop.
+        inv_denominator = ct.truediv(1.0, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
 
         # Pass 3: Compute final softmax
         for chunk_idx in range(num_chunks):
@@ -162,8 +167,8 @@ def _softmax_kernel_chunked(
             chunk = ct.gather(input, (row_idx, col_indices), check_bounds=True, padding_value=-math.inf)
             chunk = ct.astype(chunk, ct.float32)
             row_minus_max = chunk - row_max
-            numerator = ct.exp(row_minus_max)
-            softmax_output = numerator / denominator
+            numerator = ct.exp(row_minus_max, rounding_mode=RMd.APPROX)
+            softmax_output = numerator * inv_denominator
             softmax_output = ct.astype(softmax_output, input.dtype)
             # Use scatter with bounds checking to avoid writing padded zeros
             ct.scatter(output, (row_idx, col_indices), softmax_output, check_bounds=True)
