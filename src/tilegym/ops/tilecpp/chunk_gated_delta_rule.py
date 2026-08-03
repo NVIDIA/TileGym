@@ -19,6 +19,7 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
+from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 _intra_kernel = TileCppKernel(
@@ -64,7 +65,11 @@ def _launch_intra(
 
     occupancy = 1
     bool_to_str = lambda b: "true" if b else "false"
+    beta_cpp_type = get_cpp_type(Beta.dtype)
+    g_cpp_type = get_cpp_type(G.dtype)
     template_params = [
+        beta_cpp_type,
+        g_cpp_type,
         chunk_size,
         block_k,
         bool_to_str(use_qk_l2norm),
@@ -74,7 +79,7 @@ def _launch_intra(
         dtype=dtype,
         template_params=template_params,
         signature=(
-            "const {T}*, const {T}*, const {T}*, const {T}*, const {T}*, "
+            f"const {{T}}*, const {{T}}*, const {{T}}*, const {beta_cpp_type}*, const {g_cpp_type}*, "
             "float*, float*, float*, float*, float*, "
             "float, int, int, int, int, int, int"
         ),
