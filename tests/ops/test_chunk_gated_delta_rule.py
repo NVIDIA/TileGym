@@ -176,9 +176,6 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         if dtype == torch.float32:
             pytest.skip("Skipping fp32 tests due to known failures; under investigation")
 
-        if backend == "tilecpp" and use_l2:
-            pytest.skip("Skipping tilecpp l2norm case due to known failure; under investigation")
-
         self.setUp()
 
         from tilegym.ops import chunk_gated_delta_rule
@@ -284,8 +281,6 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         that reduced-precision Neumann products amplified catastrophically. The
         pre-normalized case also exercises the non-L2 infinity-norm guard.
         """
-        if backend == "tilecpp":
-            pytest.skip("Skipping tilecpp case due to known failure; under investigation")
         monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "1")
         if not tilegym.is_backend_available(backend):
             pytest.skip(f"Backend {backend} is not available")
