@@ -74,6 +74,8 @@ __tile__ inline TileType cgdr_solve_tril(TileType A) {
 // Grid: (B * NUM_HEADS, num_chunks, 1).
 // ============================================================================
 template<typename T,
+         typename BetaT,
+         typename GT,
          int CHUNK_SIZE,
          int BLOCK_K,
          bool USE_QK_L2NORM,
@@ -83,8 +85,8 @@ __tile_global__ void chunk_gated_delta_rule_intra_kernel(
     const T* __restrict__ Q,           // (B, T, H, K)
     const T* __restrict__ K,           // (B, T, H, K)
     const T* __restrict__ V,           // (B, T, H, V)
-    const T* __restrict__ Beta,        // (B, T, H)
-    const T* __restrict__ G,           // (B, T, H)
+    const BetaT* __restrict__ Beta,    // (B, T, H)
+    const GT* __restrict__ G,          // (B, T, H)
     float* __restrict__ Q_out,         // (B, H, num_chunks, CHUNK_SIZE, K)
     float* __restrict__ K_out,         // (B, H, num_chunks, CHUNK_SIZE, K)
     float* __restrict__ V_corr,        // (B, H, num_chunks, CHUNK_SIZE, V)
@@ -249,12 +251,12 @@ __tile_global__ void chunk_gated_delta_rule_intra_kernel(
     // --- v_corrected = attn @ (v * beta[:, None]) : iterate V tiles ---
     int num_v_tiles = (V_dim + BLOCK_K - 1) / BLOCK_K;
     for (auto vt : ct::irange(0, num_v_tiles)) {
-        auto v_4d = pV.load(b, pid_chunk, h, vt);
+        auto v_4d = pV.load_masked(b, pid_chunk, h, vt);
         auto v    = ct::element_cast<float>(ct::reshape<ct::shape<CHUNK_SIZE, BLOCK_K>>(v_4d));
         auto vb   = v * beta_col;
         auto vc   = ct::matmul(attn, vb);
-        pVcorr.store(ct::reshape<ct::shape<1, 1, 1, CHUNK_SIZE, BLOCK_K>>(vc),
-                     b, h, pid_chunk, 0, vt);
+        pVcorr.store_masked(ct::reshape<ct::shape<1, 1, 1, CHUNK_SIZE, BLOCK_K>>(vc),
+                            b, h, pid_chunk, 0, vt);
     }
 }
 
