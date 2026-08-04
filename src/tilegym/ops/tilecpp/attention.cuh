@@ -251,7 +251,11 @@ __tile_global__ void prefill_fmha_fwd_kernel(
     // Convert back to input type and store output
     auto acc_T = ct::element_cast<T>(acc);
     auto acc_4d = ct::reshape(acc_T, ct::shape<1, 1, BLOCK_M, BLOCK_D>{});
-    Out_view.store(acc_4d, batch_idx, head_idx, pid_x, 0);
+    if constexpr (EVEN_Q) {
+        Out_view.store(acc_4d, batch_idx, head_idx, pid_x, 0);
+    } else {
+        Out_view.store_masked(acc_4d, batch_idx, head_idx, pid_x, 0);
+    }
 
     if constexpr (HAS_BACKWARD) {
         auto L_span = ct::tensor_span{L_ptr, ct::extents<uint32_t, B, H, S_QO>{}};
@@ -260,7 +264,11 @@ __tile_global__ void prefill_fmha_fwd_kernel(
         auto lse_2d = m_i + ct::log2(l_i);                                 // (TILE_M, 1)
         auto lse_1d = ct::reshape(lse_2d, ct::shape<BLOCK_M>{});
         auto lse_3d = ct::reshape(lse_1d, ct::shape<1, 1, BLOCK_M>{});
-        L_view.store(lse_3d, batch_idx, head_idx, pid_x);
+        if constexpr (EVEN_Q) {
+            L_view.store(lse_3d, batch_idx, head_idx, pid_x);
+        } else {
+            L_view.store_masked(lse_3d, batch_idx, head_idx, pid_x);
+        }
     }
 }
 
