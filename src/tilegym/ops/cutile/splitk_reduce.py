@@ -45,6 +45,7 @@ def _splitk_reduce_kernel(
         order=(0, 1, 2, 3),
         allow_tma=True,
         latency=2,
+        padding_mode=ct.PaddingMode.ZERO,
     )
     out_splitk = ct.reshape(out_splitk, (NUM_KV_SPLITS_POW2, TILE_D))
 
