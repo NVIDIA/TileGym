@@ -13,9 +13,9 @@ from tilegym.backend import register_impl
 from tilegym.kernel_utils import get_kernel_configs
 from tilegym.ops.cutile.utils import cached_replace_hints
 
-# Module-level tune caches for standard and swap_ab ragged BMM
-_ragged_bmm_standard_tune_cache: dict = {}
-_ragged_bmm_swap_ab_tune_cache: dict = {}
+# Module-level tune cache for ragged BMM: shape key -> (config, tuned kernel).
+# The tuned kernel is whichever of the standard / swap_ab variants measured faster.
+_ragged_bmm_tune_cache: dict = {}
 
 
 @ct.kernel
@@ -425,11 +425,17 @@ def _get_default_kernel_configs():
         }
 
 
-def _ragged_bmm_autotune_standard(
-    stream, a, b, c, m_indptr, Q, max_m, max_m_device, N, total_m, transpose_a, transpose_b
-):
+def _ragged_bmm_autotune(stream, a, b, c, m_indptr, Q, max_m, max_m_device, N, total_m, transpose_a, transpose_b):
     """
-    Autotuned launch for standard ragged BMM kernel.
+    Autotuned launch for ragged BMM.
+
+    Tunes the standard and the swap_ab kernel over their respective config spaces
+    and launches whichever measured faster. The two variants only differ in the
+    accumulator layout, so they are interchangeable for any shape; which one wins
+    is not predictable from the shape alone (it depends on the per-arch config
+    space and is non-monotonic in the per-batch M), so it is measured rather than
+    guessed. Both variants read their grid bound from max_m_device, so the choice
+    never affects correctness.
     """
     NUM_SMS = torch.cuda.get_device_properties(a.device).multi_processor_count
 
@@ -473,87 +479,28 @@ def _ragged_bmm_autotune_standard(
         return {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy}
 
     cache_key = (Q, max_m, N, total_m, transpose_a_int, transpose_b_int, a.dtype, str(a.device))
-    if cache_key not in _ragged_bmm_standard_tune_cache:
-        result = exhaustive_search(
-            list(_ragged_bmm_autotune_configs_standard()),
-            stream,
-            grid_fn,
-            _ragged_bmm_kernel,
-            args_fn,
-            hints_fn,
-        )
-        best_cfg = result.best.config
-        _ragged_bmm_standard_tune_cache[cache_key] = (
+    if cache_key not in _ragged_bmm_tune_cache:
+        best = None
+        for kernel, configs in (
+            (_ragged_bmm_kernel, list(_ragged_bmm_autotune_configs_standard())),
+            (_ragged_bmm_swap_ab_kernel, list(_ragged_bmm_autotune_configs_swap_ab())),
+        ):
+            try:
+                result = exhaustive_search(configs, stream, grid_fn, kernel, args_fn, hints_fn)
+            except Exception:
+                # A whole config space can fail to build on a given arch (e.g. smem
+                # limits); fall back to whichever variant did tune successfully.
+                continue
+            if best is None or result.best.mean_us < best[0]:
+                best = (result.best.mean_us, kernel, result.best.config)
+        if best is None:
+            raise RuntimeError("ragged_bmm autotune found no working configuration")
+        _, best_kernel, best_cfg = best
+        _ragged_bmm_tune_cache[cache_key] = (
             best_cfg,
-            _ragged_bmm_kernel.replace_hints(**hints_fn(best_cfg)),
+            best_kernel.replace_hints(**hints_fn(best_cfg)),
         )
-    best_cfg, tuned_kernel = _ragged_bmm_standard_tune_cache[cache_key]
-    ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
-
-
-def _ragged_bmm_autotune_swap_ab(
-    stream, a, b, c, m_indptr, Q, max_m, max_m_device, N, total_m, transpose_a, transpose_b
-):
-    """
-    Autotuned launch for swap_ab ragged BMM kernel.
-    """
-    NUM_SMS = torch.cuda.get_device_properties(a.device).multi_processor_count
-
-    transpose_a_int = 1 if transpose_a else 0
-    transpose_b_int = 1 if transpose_b else 0
-
-    def args_fn(cfg):
-        BM = cfg.BLOCK_M
-        BN = cfg.BLOCK_N
-        BK = cfg.BLOCK_K
-        GSM = cfg.GROUP_SIZE_M
-
-        return (
-            a,
-            b,
-            c,
-            m_indptr,
-            Q,
-            max_m,
-            max_m_device,
-            N,
-            transpose_a_int,
-            transpose_b_int,
-            BM,
-            BN,
-            BK,
-            GSM,
-        )
-
-    def grid_fn(cfg):
-        BM = cfg.BLOCK_M
-        BN = cfg.BLOCK_N
-        num_pid_m = ct.cdiv(max_m, BM)
-        num_pid_n = ct.cdiv(N, BN)
-        tiles_per_batch = num_pid_m * num_pid_n
-        total_tiles = tiles_per_batch * Q
-        num_programs = min(NUM_SMS // cfg.num_ctas, total_tiles) * cfg.occupancy
-        return (num_programs, 1, 1)
-
-    def hints_fn(cfg):
-        return {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy}
-
-    swap_cache_key = (Q, max_m, N, total_m, transpose_a_int, transpose_b_int, a.dtype, str(a.device))
-    if swap_cache_key not in _ragged_bmm_swap_ab_tune_cache:
-        result = exhaustive_search(
-            list(_ragged_bmm_autotune_configs_swap_ab()),
-            stream,
-            grid_fn,
-            _ragged_bmm_swap_ab_kernel,
-            args_fn,
-            hints_fn,
-        )
-        best_cfg = result.best.config
-        _ragged_bmm_swap_ab_tune_cache[swap_cache_key] = (
-            best_cfg,
-            _ragged_bmm_swap_ab_kernel.replace_hints(**hints_fn(best_cfg)),
-        )
-    best_cfg, tuned_kernel = _ragged_bmm_swap_ab_tune_cache[swap_cache_key]
+    best_cfg, tuned_kernel = _ragged_bmm_tune_cache[cache_key]
     ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
 
 
@@ -627,49 +574,25 @@ def ragged_bmm(
     # Check if autotune is enabled
     enable_autotune = is_autotune_enabled()
 
-    # Decide whether to use swap_ab based on M vs N ratio.
-    # swap_ab (small BLOCK_M) is beneficial when the per-batch M is small relative
-    # to N. Use the per-batch average M (total_m / Q) rather than the host `max_m`
-    # hint: `max_m` is only a grid/cache-key upper bound and callers may pass a
-    # coarse over-estimate (e.g. the fused-MoE path passes total tokens_in_chunk,
-    # not the per-expert max), which would wrongly route small-per-expert MoE
-    # GEMMs to the large-M standard kernel (BLOCK_M=128) instead of swap_ab
-    # (BLOCK_M<=64). The grid bound stays exact via the device-side max_m_device,
-    # so this only affects config selection, never correctness.
-    avg_m = total_m // Q if Q > 0 else max_m
-    use_swap_ab = avg_m <= 128 and N >= 256
-
     if enable_autotune:
-        if use_swap_ab:
-            _ragged_bmm_autotune_swap_ab(
-                torch.cuda.current_stream(),
-                a,
-                b,
-                c,
-                m_indptr,
-                Q,
-                max_m,
-                max_m_device,
-                N,
-                total_m,
-                transpose_a,
-                transpose_b,
-            )
-        else:
-            _ragged_bmm_autotune_standard(
-                torch.cuda.current_stream(),
-                a,
-                b,
-                c,
-                m_indptr,
-                Q,
-                max_m,
-                max_m_device,
-                N,
-                total_m,
-                transpose_a,
-                transpose_b,
-            )
+        # The standard and swap_ab kernels are both tuned and the faster one wins.
+        # There is no host-side shape heuristic here on purpose: a threshold on the
+        # per-batch M mis-routes MoE GEMMs, because which variant is faster is not
+        # monotonic in M and differs per arch (measured on sm90 / sm103 / sm120).
+        _ragged_bmm_autotune(
+            torch.cuda.current_stream(),
+            a,
+            b,
+            c,
+            m_indptr,
+            Q,
+            max_m,
+            max_m_device,
+            N,
+            total_m,
+            transpose_a,
+            transpose_b,
+        )
     else:
         # Use fixed default configs
         default_configs = _get_default_kernel_configs()
