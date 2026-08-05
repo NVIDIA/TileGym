@@ -25,6 +25,8 @@
 #include <cuda_bf16.h>
 
 template<typename T,
+         typename WT,
+         typename BT,
          int BLOCK_N,
          int BLOCK_D,
          bool IS_SWISH,
@@ -38,8 +40,8 @@ template<typename T,
 __tile_global__ void persistent_layer_norm_fwd_kernel(
     const T* __restrict__ X,       // (N, D)
     T* __restrict__ Y,             // (N, D)
-    const T* __restrict__ W,       // (D,)
-    const T* __restrict__ B,       // (D,)
+    const WT* __restrict__ W,      // (D,)
+    const BT* __restrict__ B,      // (D,)
     float* __restrict__ Mean,      // (N,)
     float* __restrict__ Rstd       // (N,)
 ) {

@@ -16,6 +16,7 @@ import torch.nn as nn
 
 from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
+from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._cuda_utils import get_dtype_info
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
@@ -88,14 +89,15 @@ def _launch_rms_norm_kernel(
 ):
     dump_kernel_types("rms_norm_kernel", x, weight, y, rstd)
     dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
 
     eps_tp = f"{eps}f"
 
-    # Signature: const T*, const T*, T*, float*, int
+    # Signature: const T*, const WT*, T*, float*, int
     kernel, _, _ = _rms_norm_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size, N, eps_tp],
-        signature="const {T}*, const {T}*, {T}*, float*, int",
+        template_params=[w_cpp_type, block_size, N, eps_tp],
+        signature=f"const {{T}}*, const {w_cpp_type}*, {{T}}*, float*, int",
     )
 
     grid = M
@@ -129,12 +131,13 @@ def _launch_rms_norm_kernel_pv(
     """
     dump_kernel_types("rms_norm_kernel_pv", x, weight, y, rstd)
     dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
 
     # Template params: M, N, BLOCK_SIZE
     kernel, _, _ = _rms_norm_kernel_pv.get_kernel(
         dtype=dtype,
-        template_params=[M, N, block_size],
-        signature="const {T}*, const {T}*, {T}*, float*, float",
+        template_params=[w_cpp_type, M, N, block_size],
+        signature=f"const {{T}}*, const {w_cpp_type}*, {{T}}*, float*, float",
     )
 
     # One block per row
@@ -173,6 +176,7 @@ def _launch_rms_norm_static_persistent_kernel(
     """
     dump_kernel_types("rms_norm_static_persistent_kernel", x, y, weight, rstd)
     dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
 
     NUM_SMS = _get_num_sm()
     grid_size = min(NUM_SMS, _ceildiv(M, tile_size_m) * _ceildiv(N, tile_size_n))
@@ -184,8 +188,8 @@ def _launch_rms_norm_static_persistent_kernel(
 
     kernel, _, _ = _rms_norm_static_persistent_kernel.get_kernel(
         dtype=dtype,
-        template_params=[tile_size_m, tile_size_n, occupancy, M, N, NUM_SMS, eps_tp, offset_tp],
-        signature="const {T}*, {T}*, const {T}*, float*",
+        template_params=[w_cpp_type, tile_size_m, tile_size_n, occupancy, M, N, NUM_SMS, eps_tp, offset_tp],
+        signature=f"const {{T}}*, {{T}}*, const {w_cpp_type}*, float*",
     )
 
     _rms_norm_static_persistent_kernel.launch(
@@ -215,12 +219,13 @@ def _launch_rms_norm_backward_dx_kernel(
     """Launch the rms_norm_backward_dx_kernel CUDA kernel."""
     dump_kernel_types("rms_norm_backward_dx_kernel", dx, dy, x, weight)
     dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
 
-    # Signature: T*, const T*, const T*, const T*, const float*, float*, int, int
+    # Signature: T*, const T*, const T*, const WT*, const float*, float*, int, int
     kernel, _, _ = _rms_norm_backward_dx_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size],
-        signature="{T}*, const {T}*, const {T}*, const {T}*, const float*, float*, int, int",
+        template_params=[w_cpp_type, block_size],
+        signature=f"{{T}}*, const {{T}}*, const {{T}}*, const {w_cpp_type}*, const float*, float*, int, int",
     )
 
     # One block per row
@@ -338,7 +343,7 @@ class RMSNorm(torch.autograd.Function):
         if bias is not None:
             raise NotImplementedError("Bias is not supported in TileCpp RMSNorm")
 
-        # Ensure inputs are contiguous
+        # Ensure inputs are contiguous.
         x = x.contiguous()
         weight = weight.contiguous()
 

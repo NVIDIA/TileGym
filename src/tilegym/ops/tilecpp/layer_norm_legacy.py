@@ -14,6 +14,7 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
+from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 
@@ -44,11 +45,13 @@ def _launch_layer_norm_fwd(
     """Launch the layer_norm_fwd_fused_kernel CUDA kernel."""
     dump_kernel_types("layer_norm_fwd_fused_kernel", x, y, weight, bias)
     dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
+    b_cpp_type = get_cpp_type(bias.dtype)
 
     kernel, _, _ = _layer_norm_fwd_kernel.get_kernel(
         dtype=dtype,
-        template_params=[N, BLOCK_SIZE],
-        signature="{T}*, {T}*, {T}*, {T}*, float*, float*, float, float",
+        template_params=[w_cpp_type, b_cpp_type, N, BLOCK_SIZE],
+        signature=f"{{T}}*, {{T}}*, const {w_cpp_type}*, const {b_cpp_type}*, float*, float*, float, float",
     )
 
     _layer_norm_fwd_kernel.launch(
@@ -72,6 +75,8 @@ class LayerNorm(torch.autograd.Function):
     def forward(ctx, x, normalized_shape, weight, bias, eps, weight_shift=0.0):
         # allocate output
         y = torch.empty_like(x)
+        weight = weight.contiguous()
+        bias = bias.contiguous()
         # reshape input data into 2D tensor
         x_arg = x.reshape(-1, x.shape[-1])
         M, N = x_arg.shape

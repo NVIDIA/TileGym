@@ -10,7 +10,7 @@
  * Tensor layouts:
  *   Q, K:         (B, T, H, K_HEAD_DIM)   - input dtype T
  *   V, Output:    (B, T, H, V_HEAD_DIM)   - input dtype T
- *   G, Beta:      (B, T, H)               - input dtype T (loaded as scalar)
+ *   G, Beta:      (B, T, H)               - float32 (loaded as scalar)
  *   InitState:    (B, H, K_HEAD_DIM, V_HEAD_DIM)  - float32
  *   FinalState:   (B, H, K_HEAD_DIM, V_HEAD_DIM)  - float32
  */
@@ -26,7 +26,7 @@
  * Forward kernel.
  *
  * Template params:
- *   T:                   element type for Q/K/V/G/Beta/Output
+ *   T:                   element type for Q/K/V/Output
  *   BLOCK_K, BLOCK_V:    power-of-2 tile sizes (>= K_HEAD_DIM, BLOCK_V <= V_HEAD_DIM)
  *   HAS_INITIAL_STATE:   seed the recurrent state from InitState if true
  *   OUTPUT_FINAL_STATE:  write state back to FinalState if true
@@ -36,6 +36,8 @@
  * same cubin can serve every shape (avoids recompile per shape).
  */
 template<typename T,
+         typename GT,
+         typename BetaT,
          int BLOCK_K,
          int BLOCK_V,
          bool HAS_INITIAL_STATE,
@@ -45,8 +47,8 @@ __tile_global__ void recurrent_gated_delta_rule_fwd_kernel(
     const T* __restrict__ Q,               // (B, T, H, K_HEAD_DIM)
     const T* __restrict__ K,               // (B, T, H, K_HEAD_DIM)
     const T* __restrict__ V,               // (B, T, H, V_HEAD_DIM)
-    const T* __restrict__ G,               // (B, T, H)
-    const T* __restrict__ Beta,            // (B, T, H)
+    const GT* __restrict__ G,              // (B, T, H)
+    const BetaT* __restrict__ Beta,        // (B, T, H)
     T* __restrict__ Output,                // (B, T, H, V_HEAD_DIM)
     const float* __restrict__ InitState,   // (B, H, K_HEAD_DIM, V_HEAD_DIM) or nullptr
     float* __restrict__ FinalState,        // (B, H, K_HEAD_DIM, V_HEAD_DIM) or nullptr
