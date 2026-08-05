@@ -15,6 +15,7 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
+from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 
@@ -102,9 +103,13 @@ def rope_forward(q, k, cos, sin, rope_dim=None):
     dtype = q.dtype
     dump_kernel_types("rope_kernel", q, k, cos, sin)
 
-    # Template params: T, BATCH, Q_HEADS, K_HEADS, BLOCK_QH, BLOCK_KH, BLOCK_HD,
+    # Template params: T, CT, BATCH, Q_HEADS, K_HEADS, BLOCK_QH, BLOCK_KH, BLOCK_HD,
     #                  HALF_ROPE_DIM, HEAD_DIM, COS_BS, SEQ_LEN
+    cos_cpp_type = get_cpp_type(cos.dtype)
+    sin_cpp_type = get_cpp_type(sin.dtype)
     template_params = [
+        cos_cpp_type,
+        sin_cpp_type,
         batch_size,
         n_q_head,
         n_kv_head,
@@ -120,7 +125,7 @@ def rope_forward(q, k, cos, sin, rope_dim=None):
     kernel, _, _ = _rope_forward_kernel.get_kernel(
         dtype=dtype,
         template_params=template_params,
-        signature="{T}*, {T}*, {T}*, {T}*",
+        signature=f"{{T}}*, {{T}}*, const {cos_cpp_type}*, const {sin_cpp_type}*",
     )
 
     _rope_forward_kernel.launch(
@@ -186,7 +191,11 @@ def rope_backward(dq, dk, cos, sin, rope_dim=None):
     dtype = dq.dtype
     dump_kernel_types("rope_backward_kernel", dq, dk, cos, sin)
 
+    cos_cpp_type = get_cpp_type(cos.dtype)
+    sin_cpp_type = get_cpp_type(sin.dtype)
     template_params = [
+        cos_cpp_type,
+        sin_cpp_type,
         batch_size,
         n_q_head,
         n_kv_head,
@@ -202,7 +211,7 @@ def rope_backward(dq, dk, cos, sin, rope_dim=None):
     kernel, _, _ = _rope_backward_kernel.get_kernel(
         dtype=dtype,
         template_params=template_params,
-        signature="{T}*, {T}*, {T}*, {T}*",
+        signature=f"{{T}}*, {{T}}*, const {cos_cpp_type}*, const {sin_cpp_type}*",
     )
 
     _rope_backward_kernel.launch(

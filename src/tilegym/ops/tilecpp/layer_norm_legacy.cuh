@@ -22,12 +22,12 @@
  *
  * Each program handles one row. Uses loop over blocks if N > BLOCK_SIZE.
  */
-template<typename T, int N, int BLOCK_SIZE>
+template<typename T, typename WT, typename BT, int N, int BLOCK_SIZE>
 __tile_global__ void layer_norm_fwd_fused_kernel(
     T* __restrict__ X,
     T* __restrict__ Y,
-    T* __restrict__ W,
-    T* __restrict__ B,
+    const WT* __restrict__ W,
+    const BT* __restrict__ B,
     float* __restrict__ Mean,
     float* __restrict__ Rstd,
     float eps,
@@ -88,8 +88,8 @@ __tile_global__ void layer_norm_fwd_fused_kernel(
         auto cols = ct::full<i32xN>(off) + ct::iota<i32xN>();
         auto mask = cols < ct::full<i32xN>(N);
 
-        auto w_t = ct::load_masked(W + cols, mask, T(0));
-        auto b_t = ct::load_masked(B + cols, mask, T(0));
+        auto w_t = ct::load_masked(W + cols, mask, WT(0));
+        auto b_t = ct::load_masked(B + cols, mask, BT(0));
         auto w = ct::element_cast<float>(w_t) + weight_shift;
         auto b = ct::element_cast<float>(b_t);
 
