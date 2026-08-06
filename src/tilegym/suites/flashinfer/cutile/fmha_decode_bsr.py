@@ -32,29 +32,34 @@ INV_LOG_2 = 1.0 / math.log(2)
 # TRANS_QK to datacenter Blackwell only, mirroring the sm120/121 exclusion
 # idiom already used in ops/cutile/{matmul,bmm,attention}.py.
 _SM120_LIKE = [(12, 0), (12, 1)]
+# H100 opts into both optimisations below explicitly, rather than through the
+# >= sm100 test.
+_SM90 = (9, 0)
 
 
 def _supports_trans_qk() -> bool:
-    """True only on Blackwell parts with the wide MMA that TRANS_QK targets.
+    """True on H100 and on Blackwell parts with the wide MMA that TRANS_QK targets.
 
     Excludes A100 (sm80, no benefit) and sm120/sm121 (no wide MMA -> regression).
     """
     cap = torch.cuda.get_device_capability("cuda")
-    return cap[0] >= 10 and cap not in _SM120_LIKE
+    return cap == _SM90 or (cap[0] >= 10 and cap not in _SM120_LIKE)
 
 
 def _supports_gather_page_load() -> bool:
-    """True only on datacenter Blackwell (sm100/sm103), where the gather-TMA that
-    backs ct.load_advanced_indexing is a large win for multi-page KV loads.
+    """True on H100 and datacenter Blackwell (sm100/sm103), where the gather-TMA
+    that backs ct.load_advanced_indexing is a large win for multi-page KV loads.
 
     On sm100 the gathered multi-page load is 10-74% FASTER than per-page TMA loads
     (measured, DecodePaged). On sm120/sm121 (consumer Blackwell, no efficient
     gather-TMA) it REGRESSES 29-83% and the penalty scales with NUM_PAGES, so those
-    parts (and A100) fall back to per-page TMA loads. Same datacenter-Blackwell
-    predicate as _supports_trans_qk.
+    parts (and A100) fall back to per-page TMA loads.
+
+    On sm90 the gather only pays off together with TRANS_QK, which is enabled
+    there as well.
     """
     cap = torch.cuda.get_device_capability("cuda")
-    return cap[0] >= 10 and cap not in _SM120_LIKE
+    return cap == _SM90 or (cap[0] >= 10 and cap not in _SM120_LIKE)
 
 
 ConstInt = ct.Constant[int]
