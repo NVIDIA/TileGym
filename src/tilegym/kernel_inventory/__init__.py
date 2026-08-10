@@ -25,8 +25,17 @@ from pathlib import Path
 from typing import Any
 from typing import Iterator
 
+from tilegym.kernel_inventory.composition import DefinitionCompositionError
+from tilegym.kernel_inventory.composition import validate_definition_composition
+from tilegym.kernel_inventory.layout import iter_inventory_json_paths
+from tilegym.kernel_inventory.layout import solution_paths_for_definition
 from tilegym.kernel_inventory.return_contract import ReturnContractError
 from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+from tilegym.kernel_inventory.review import ReviewManifestError
+from tilegym.kernel_inventory.review import file_sha256
+from tilegym.kernel_inventory.review import load_review_manifest
+from tilegym.kernel_inventory.review import make_leaf_review_record
+from tilegym.kernel_inventory.review import validate_leaf_review_manifest
 from tilegym.kernel_inventory.source_contract import SourceContractError
 from tilegym.kernel_inventory.source_contract import resolve_repo_relative_path
 from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
@@ -39,10 +48,6 @@ SOLUTION_SCHEMA_URL = "https://github.com/flashinfer-ai/flashinfer-bench/blob/ma
 
 class KernelInventoryError(ValueError):
     """Raised when kernel inventory metadata is invalid."""
-
-
-# Backend subdirectories a suite may use below kernel_solutions/.
-_SUITE_BACKENDS = ("triton", "cutile", "cutile_rs")
 
 
 def load_json(path: str | Path) -> dict[str, Any]:
@@ -62,25 +67,12 @@ def iter_kernel_definition_paths(root: str | Path) -> Iterator[Path]:
     ``kernel_definitions`` and backend-specific Solutions in the sibling
     ``kernel_solutions`` directory.
     """
-    root_path = Path(root)
-    transformer_paths = root_path.glob("src/tilegym/transformers/*/kernel_definitions/*.json")
-    suite_paths = root_path.glob("src/tilegym/suites/*/kernel_definitions/*.json")
-    paths = set(transformer_paths)
-    paths.update(
-        path
-        for path in suite_paths
-        if any((path.parent.parent / "kernel_solutions" / backend).is_dir() for backend in _SUITE_BACKENDS)
-    )
-    yield from sorted(paths)
+    yield from iter_inventory_json_paths(root, "kernel_definitions")
 
 
 def iter_kernel_solution_paths(root: str | Path) -> Iterator[Path]:
     """Yield checked-in backend-specific Solution JSON files under ``root``."""
-    root_path = Path(root)
-    patterns = ("src/tilegym/transformers/*/kernel_solutions/*.json",) + tuple(
-        f"src/tilegym/suites/*/kernel_solutions/{backend}/*.json" for backend in _SUITE_BACKENDS
-    )
-    yield from _iter_paths(root_path, patterns)
+    yield from iter_inventory_json_paths(root, "kernel_solutions")
 
 
 def iter_kernel_python_paths(root: str | Path) -> Iterator[Path]:
@@ -98,21 +90,13 @@ def iter_solution_paths_for_definition(definition_path: str | Path) -> Iterator[
     The function supports both current inventory layouts without requiring
     callers to infer a Solution path from a transformer-only convention.
     """
-    definition = Path(definition_path)
-    if definition.parent.name != "kernel_definitions":
-        raise KernelInventoryError(f"Definition must live in kernel_definitions: {definition}")
-
-    transformer_solution = definition.parent.parent / "kernel_solutions" / definition.name
-    if transformer_solution.is_file():
-        yield transformer_solution
-
-    for backend in _SUITE_BACKENDS:
-        suite_solution = definition.parent.parent / "kernel_solutions" / backend / definition.name
-        if suite_solution.is_file():
-            yield suite_solution
+    try:
+        yield from solution_paths_for_definition(definition_path)
+    except ValueError as exc:
+        raise KernelInventoryError(str(exc)) from exc
 
 
-def validate_definition(definition: dict[str, Any]) -> None:
+def validate_definition(definition: dict[str, Any], definition_path: str | Path | None = None) -> None:
     """Validate a kernel Definition with FIB and TileGym checks."""
     _require_mapping(definition, "Definition")
     try:
@@ -137,9 +121,18 @@ def validate_definition(definition: dict[str, Any]) -> None:
         )
     except ReturnContractError as exc:
         raise KernelInventoryError(str(exc)) from exc
+    if definition_path is not None:
+        try:
+            validate_definition_composition(definition, definition_path)
+        except DefinitionCompositionError as exc:
+            raise KernelInventoryError(str(exc)) from exc
 
 
-def validate_solution(solution: dict[str, Any], repo_root: str | Path | None = None) -> None:
+def validate_solution(
+    solution: dict[str, Any],
+    repo_root: str | Path | None = None,
+    definition: dict[str, Any] | None = None,
+) -> None:
     """Validate a kernel Solution with FIB and TileGym checks."""
     _require_mapping(solution, "Solution")
     source_paths = normalize_solution_source_paths(solution)
@@ -166,6 +159,13 @@ def validate_solution(solution: dict[str, Any], repo_root: str | Path | None = N
         ) from exc
     except Exception as exc:
         raise KernelInventoryError(f"Solution schema invalid: {exc}") from exc
+    if solution.get("launch") is not None and repo_root is not None and definition is not None:
+        try:
+            from tilegym.kernel_inventory.launch import validate_launch_contract
+
+            validate_launch_contract(solution["launch"], definition, solution["spec"]["entry_point"], repo_root)
+        except Exception as exc:
+            raise KernelInventoryError(f"Solution launch contract invalid: {exc}") from exc
 
 
 def validate_solution_entry_point(solution: dict[str, Any], repo_root: str | Path) -> None:

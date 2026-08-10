@@ -12,9 +12,11 @@ schema; TileGym owns execution of the checked-in metadata.
 from __future__ import annotations
 
 import json
+import keyword
 import re
 from pathlib import Path
 from typing import Any
+from typing import Literal
 from typing import Sequence
 
 from flashinfer_bench.data import AxisConst
@@ -25,8 +27,13 @@ from flashinfer_bench.data import SupportedLanguages
 from flashinfer_bench.data import TensorSpec
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import field_validator
 from pydantic import model_validator
 
+from tilegym.kernel_inventory.composition import _RESERVED_INCLUDE_NAMES
+from tilegym.kernel_inventory.launch import RawKernelLaunch
+from tilegym.kernel_inventory.source_contract import SourceRepository as SourceRepository
+from tilegym.kernel_inventory.source_contract import make_pinned_source_permalink as make_pinned_source_permalink
 from tilegym.kernel_inventory.source_contract import resolve_repo_relative_path as _resolve_repo_relative_path
 from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
 
@@ -50,6 +57,34 @@ class TileGymSourceFile(BaseModel):
         return self
 
 
+class TileGymDefinition(Definition):
+    """FIB Definition extended with local leaf-Definition includes."""
+
+    include: list[str] = Field(default_factory=list)
+
+    @field_validator("include")
+    @classmethod
+    def _validate_include_names(cls, include: list[str]) -> list[str]:
+        for name in include:
+            if not name or not name.isidentifier() or keyword.iskeyword(name):
+                raise ValueError(f"Definition.include entries must be local Python module names: {name!r}")
+        if len(set(include)) != len(include):
+            raise ValueError("Definition.include entries must be unique")
+        reserved = sorted(set(include) & _RESERVED_INCLUDE_NAMES)
+        if reserved:
+            raise ValueError(f"Definition.include entries use reserved module names: {reserved}")
+        return include
+
+    @model_validator(mode="after")
+    def _validate_fib_definition(self) -> "TileGymDefinition":
+        self.to_fib_definition()
+        return self
+
+    def to_fib_definition(self) -> Definition:
+        """Validate and return the base FIB Definition without TileGym extensions."""
+        return Definition.model_validate(self.model_dump(mode="python", exclude={"include"}))
+
+
 class TileGymBuildSpec(BaseModel):
     """Build spec compatible with TileGym's cuTile language label."""
 
@@ -59,6 +94,7 @@ class TileGymBuildSpec(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     destination_passing_style: bool = True
     binding: str | None = None
+    target_triton_backends: list[Literal["nvt", "oait"]] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _validate_spec(self) -> "TileGymBuildSpec":
@@ -75,6 +111,11 @@ class TileGymBuildSpec(BaseModel):
             raise ValueError(
                 f"Solution.spec.target_hardware entries must use the SM<major><minor> format: {invalid_targets}"
             )
+        if self.target_triton_backends is not None:
+            if self.language != SupportedLanguages.TRITON.value:
+                raise ValueError("Solution.spec.target_triton_backends is valid only for language='triton'")
+            if len(set(self.target_triton_backends)) != len(self.target_triton_backends):
+                raise ValueError("Solution.spec.target_triton_backends entries must be unique")
         return self
 
     def fib_language(self) -> str:
@@ -91,6 +132,7 @@ class TileGymSolution(BaseModel):
     spec: TileGymBuildSpec
     sources: list[TileGymSourceFile] = Field(min_length=1)
     description: str | None = None
+    launch: RawKernelLaunch | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -122,6 +164,14 @@ class TileGymSolution(BaseModel):
         entry_file = self.spec.entry_point.split("::", 1)[0]
         if entry_file not in seen_paths:
             raise ValueError(f"Entry source file '{entry_file}' not found in sources")
+        if self.launch is not None and self.spec.language != SupportedLanguages.TRITON.value:
+            scoped_parameters = sorted(
+                binding.parameter for binding in self.launch.arguments if binding.target_triton_backends is not None
+            )
+            if scoped_parameters:
+                raise ValueError(
+                    f"Launch binding target_triton_backends is valid only for language='triton': {scoped_parameters}"
+                )
         return self
 
     def to_fib_solution(
@@ -147,14 +197,15 @@ class TileGymSolution(BaseModel):
                     ).read_text(encoding="utf-8")
             sources.append({"path": source.path, "content": content})
 
-        fib_data = self.model_dump(mode="json", exclude_none=True)
+        fib_data = self.model_dump(mode="json", exclude_none=True, exclude={"launch"})
         fib_data["spec"]["language"] = self.spec.fib_language()
+        fib_data["spec"].pop("target_triton_backends", None)
         fib_data["sources"] = sources
         return Solution.model_validate(fib_data)
 
     def to_tilegym_dict(self, *, path_only_sources: bool = True) -> dict[str, Any]:
         """Return stable TileGym JSON data."""
-        data = self.model_dump(mode="json", exclude_none=True)
+        data = self.model_dump(mode="json")
         if path_only_sources:
             data["sources"] = {"path": [source.path for source in self.sources]}
         return _drop_none_except_shape(data)
@@ -186,10 +237,11 @@ def make_definition(
     tags: Sequence[str] | None = None,
     description: str | None = None,
     constraints: Sequence[str] | None = None,
-) -> Definition:
+    include: Sequence[str] | None = None,
+) -> TileGymDefinition:
     """Create a Definition after enforcing TileGym's source permalink contract."""
     validate_reference_source_contract(reference)
-    return Definition(
+    return TileGymDefinition(
         name=name,
         op_type=op_type,
         axes=axes,
@@ -199,6 +251,7 @@ def make_definition(
         tags=list(tags or []),
         description=description,
         constraints=list(constraints or []),
+        include=list(include or []),
     )
 
 
@@ -211,6 +264,7 @@ def make_solution(
     sources: dict[str, Any] | Sequence[str | dict[str, Any] | TileGymSourceFile],
     repo_root: str | Path | None = None,
     description: str | None = None,
+    launch: RawKernelLaunch | dict[str, Any] | None = None,
 ) -> TileGymSolution:
     """Create a TileGym Solution and validate it through FIB Solution."""
     normalized_sources: Any
@@ -229,6 +283,7 @@ def make_solution(
             "spec": spec.model_dump(mode="json") if isinstance(spec, TileGymBuildSpec) else spec,
             "sources": normalized_sources,
             "description": description,
+            "launch": launch,
         }
     )
     solution.to_fib_solution(repo_root, allow_placeholder_content=repo_root is None)
@@ -240,9 +295,9 @@ def source_path(path: str) -> TileGymSourceFile:
     return TileGymSourceFile(path=path)
 
 
-def validate_tilegym_definition_model(definition: dict[str, Any]) -> Definition:
+def validate_tilegym_definition_model(definition: dict[str, Any]) -> TileGymDefinition:
     """Validate a TileGym Definition with FIB Definition."""
-    model = Definition.model_validate(definition)
+    model = TileGymDefinition.model_validate(definition)
     validate_reference_source_contract(model.reference)
     return model
 
@@ -261,7 +316,10 @@ def materialize_solution_for_fib(solution: dict[str, Any], repo_root: str | Path
 
 def definition_to_tilegym_json(definition: Definition) -> dict[str, Any]:
     """Return stable TileGym JSON data for a Definition."""
-    return _drop_none_except_shape(definition.model_dump(mode="json"))
+    data = definition.model_dump(mode="json")
+    if not data.get("include"):
+        data.pop("include", None)
+    return _drop_none_except_shape(data)
 
 
 def solution_to_tilegym_json(solution: TileGymSolution, *, path_only_sources: bool = True) -> dict[str, Any]:
@@ -270,8 +328,22 @@ def solution_to_tilegym_json(solution: TileGymSolution, *, path_only_sources: bo
 
 
 def write_definition_json(definition: Definition, path: str | Path) -> None:
-    """Write a Definition JSON file using TileGym's stable formatting."""
-    _write_stable_json(definition_to_tilegym_json(definition), path)
+    """Validate path-dependent composition and write stable Definition JSON."""
+    data = definition_to_tilegym_json(definition)
+    validate_definition_for_path(data, path)
+    _write_stable_json(data, path)
+
+
+def validate_definition_for_path(definition: Definition | dict[str, Any], path: str | Path) -> None:
+    """Validate hierarchy, include resolution, flatness, and leaf calls for ``path``.
+
+    Include targets cannot be resolved by ``make_definition`` alone because
+    their meaning depends on the destination inventory hierarchy.
+    """
+    from tilegym.kernel_inventory.composition import validate_definition_composition
+
+    data = definition_to_tilegym_json(definition) if isinstance(definition, Definition) else definition
+    validate_definition_composition(data, path)
 
 
 def write_solution_json(solution: TileGymSolution, path: str | Path, *, path_only_sources: bool = True) -> None:
@@ -282,9 +354,11 @@ def write_solution_json(solution: TileGymSolution, path: str | Path, *, path_onl
 def _drop_none_except_shape(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, dict):
         cleaned = {}
+        literal_binding = value.get("kind") == "literal"
         for child_key, child_value in value.items():
             cleaned_value = _drop_none_except_shape(child_value, key=child_key)
-            if cleaned_value is None and child_key != "shape":
+            preserve_null = child_key == "shape" or (literal_binding and child_key == "value")
+            if cleaned_value is None and not preserve_null:
                 continue
             cleaned[child_key] = cleaned_value
         return cleaned
