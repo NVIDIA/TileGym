@@ -436,14 +436,19 @@ def _get_default_kernel_configs(total_m, Q, VEC_SIZE):
                 "occupancy": 1,
             }
         else:
+            # Small avg-M (avg_m < 256) sm10x (gpu_capability[0] == 10) path.
+            # Restore the baseline num_ctas=1 / occupancy=1 / BLOCK_M=128 /
+            # swap_ab=False config; the swapped BLOCK_M=64 / occupancy=2 tuning
+            # regressed the small-M ragged fp8 shapes on datacenter Blackwell
+            # vs this pre-tuning default.
             return {
-                "BLOCK_M": 64,
+                "BLOCK_M": 128,
                 "BLOCK_N": 128,
                 "BLOCK_K": VEC_SIZE,
                 "GROUP_SIZE_M": 8,
-                "swap_ab": True,
+                "swap_ab": False,
                 "num_ctas": 1,
-                "occupancy": 2,
+                "occupancy": 1,
             }
     elif gpu_capability == (9, 0):
         if is_large_m:
