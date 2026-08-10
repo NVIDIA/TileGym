@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+version: 1
+
+# Runtime data is test-only. Tensor shapes and dtypes remain owned by the
+# corresponding Definition so this catalog can later migrate to FIB Workload.
+patterns: {}
+
+cases:
+  src/tilegym/transformers/olmo3::definition::olmo3_dual_rms_norm:
+    mutates: [q, k]
+  src/tilegym/transformers/olmoe::definition::olmoe_dual_rms_norm:
+    mutates: [q, k]
+  src/tilegym/transformers/qwen3_5::definition::qwen3_5_causal_conv1d_update_silu:
+    mutates: [conv_state]

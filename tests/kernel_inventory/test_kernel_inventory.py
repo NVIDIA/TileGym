@@ -25,6 +25,7 @@ try:
     from tilegym.kernel_inventory import iter_kernel_definition_paths
     from tilegym.kernel_inventory import iter_kernel_python_paths
     from tilegym.kernel_inventory import iter_kernel_solution_paths
+    from tilegym.kernel_inventory import iter_solution_paths_for_definition
     from tilegym.kernel_inventory import load_json
     from tilegym.kernel_inventory import materialize_solution_sources
     from tilegym.kernel_inventory import normalize_solution_source_paths
@@ -33,6 +34,7 @@ try:
     from tilegym.kernel_inventory import validate_solution_entry_point
     from tilegym.kernel_inventory.generation import make_solution
     from tilegym.kernel_inventory.generation import materialize_solution_for_fib
+    from tilegym.kernel_inventory.layout import inventory_coordinate
     from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
     from tilegym.kernel_inventory.return_contract import ReturnContractError
     from tilegym.kernel_inventory.return_contract import instrument_reference_returns
@@ -137,6 +139,11 @@ def _duplicate_names(entries: list[tuple[str, Path]]) -> list[str]:
             duplicates.add(name)
         seen.add(name)
     return sorted(duplicates)
+
+
+def _canonical_catalog_entries(paths: list[Path]) -> list[tuple[str, Path]]:
+    """Key catalog entries by hierarchy-derived identity, not schema-local names."""
+    return [(inventory_coordinate(path).canonical_id, path) for path in paths]
 
 
 def test_validate_definition_accepts_flashinfer_shape():
@@ -341,6 +348,58 @@ def test_solution_requires_compute_capability_target_hardware():
         validate_solution(solution)
 
 
+def test_solution_accepts_triton_compiler_targets_and_strips_them_from_fib(tmp_path):
+    source_path = tmp_path / "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def run(input, weight, eps):\n    return input\n", encoding="utf-8")
+    solution = _solution()
+    solution["spec"]["language"] = "triton"
+    solution["spec"]["target_triton_backends"] = ["nvt", "oait"]
+
+    validate_solution(solution, repo_root=tmp_path)
+    fib_solution = materialize_solution_for_fib(solution, repo_root=tmp_path)
+
+    assert solution["spec"]["target_triton_backends"] == ["nvt", "oait"]
+    assert not hasattr(fib_solution.spec, "target_triton_backends")
+
+
+def test_make_solution_preserves_triton_compiler_targets_in_tilegym_json(tmp_path):
+    source = "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"
+    source_path = tmp_path / source
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def run(input, weight, eps):\n    return input\n", encoding="utf-8")
+    spec = dict(_solution()["spec"])
+    spec["language"] = "triton"
+    spec["target_triton_backends"] = ["nvt"]
+
+    solution = make_solution(
+        name="rmsnorm_d128_triton",
+        definition="rmsnorm_d128",
+        author="tilegym-agent",
+        spec=spec,
+        sources=source,
+        repo_root=tmp_path,
+    )
+
+    assert solution.to_tilegym_dict()["spec"]["target_triton_backends"] == ["nvt"]
+
+
+@pytest.mark.parametrize("target_triton_backends", [[], ["cuda"], ["nvt", "nvt"]])
+def test_solution_rejects_invalid_triton_compiler_targets(target_triton_backends):
+    solution = _solution()
+    solution["spec"]["language"] = "triton"
+    solution["spec"]["target_triton_backends"] = target_triton_backends
+    with pytest.raises(KernelInventoryError, match="target_triton_backends"):
+        validate_solution(solution)
+
+
+def test_solution_rejects_triton_compiler_targets_for_non_triton_language():
+    solution = _solution()
+    solution["spec"]["target_triton_backends"] = ["nvt"]
+    with pytest.raises(KernelInventoryError, match="valid only for language='triton'"):
+        validate_solution(solution)
+
+
 def test_solution_rejects_source_path_outside_repo(tmp_path):
     source_path = tmp_path / "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"
     source_path.parent.mkdir(parents=True)
@@ -404,7 +463,7 @@ def test_all_current_kernel_definitions_validate():
     for path in iter_kernel_definition_paths(REPO_ROOT):
         definition = load_json(path)
         assert path.stem == definition["name"], f"{path}: Definition filename must match Definition.name"
-        validate_definition(definition)
+        validate_definition(definition, path)
         _assert_definition_reference_contract(path, definition)
 
 
@@ -420,23 +479,38 @@ def test_all_current_kernel_solutions_validate():
 
 
 def test_kernel_definition_solution_catalog_is_complete():
-    definition_entries = [(load_json(path)["name"], path) for path in iter_kernel_definition_paths(REPO_ROOT)]
-    solution_entries = [(load_json(path)["name"], path) for path in iter_kernel_solution_paths(REPO_ROOT)]
+    definition_paths = list(iter_kernel_definition_paths(REPO_ROOT))
+    definition_entries = _canonical_catalog_entries(definition_paths)
+    solution_entries = _canonical_catalog_entries(list(iter_kernel_solution_paths(REPO_ROOT)))
 
     duplicate_definitions = _duplicate_names(definition_entries)
     duplicate_solutions = _duplicate_names(solution_entries)
-    assert not duplicate_definitions, f"Duplicate Definition names: {duplicate_definitions}"
-    assert not duplicate_solutions, f"Duplicate Solution names: {duplicate_solutions}"
+    assert not duplicate_definitions, f"Duplicate Definition identities: {duplicate_definitions}"
+    assert not duplicate_solutions, f"Duplicate Solution identities: {duplicate_solutions}"
 
-    definitions = dict(definition_entries)
-    solutions = {name: load_json(path) for name, path in solution_entries}
-    definition_names = set(definitions)
-    solution_definitions = {solution["definition"] for solution in solutions.values()}
-
-    missing_definitions = sorted(solution_definitions - definition_names)
-    missing_solutions = sorted(definition_names - solution_definitions)
-    assert not missing_definitions, f"Solutions reference missing Definitions: {missing_definitions}"
+    paired_solutions = set()
+    missing_solutions = []
+    for definition_path in definition_paths:
+        solutions = list(iter_solution_paths_for_definition(definition_path))
+        if not solutions:
+            missing_solutions.append(inventory_coordinate(definition_path).canonical_id)
+        paired_solutions.update(solutions)
+    all_solutions = {path for _name, path in solution_entries}
+    unpaired_solutions = sorted(all_solutions - paired_solutions)
     assert not missing_solutions, f"Definitions without a matching Solution: {missing_solutions}"
+    assert not unpaired_solutions, f"Solutions without a matching Definition path: {unpaired_solutions}"
+
+
+def test_solution_catalog_identity_allows_local_names_to_repeat_across_hierarchy_scopes(tmp_path):
+    solution_root = tmp_path / "src/tilegym/suites/example/kernel_solutions"
+    paths = [
+        solution_root / "first_op/cutile/shared_leaf.json",
+        solution_root / "second_op/triton/shared_leaf.json",
+    ]
+    entries = _canonical_catalog_entries(paths)
+
+    assert entries[0][0] != entries[1][0]
+    assert _duplicate_names(entries) == []
 
 
 def test_transformer_solution_sources_stay_in_dedicated_kernel_modules():
