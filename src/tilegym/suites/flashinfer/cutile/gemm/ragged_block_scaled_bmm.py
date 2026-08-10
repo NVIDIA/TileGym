@@ -49,45 +49,47 @@ def _ragged_block_scaled_bmm_kernel(
     Uses persistent scheduling with static grid and GROUP_SIZE_M tile swizzling.
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
 
-    Defense-in-depth: the per-tile loop bound is computed from the device-side
-    `max_m_device` rather than the host-side `max_m`. This prevents silent output corruption when the caller passes
-    too small a host-side max_m hint.
+    Per-expert (grouped-GEMM) tile scheduling: the flat tile space is built from
+    each expert's own valid_m via a running prefix sum over `m_indptr`
+    (last_problem_end), so every expert contributes only its real tiles
+    (cdiv(valid_m, BLOCK_M) * num_pid_n). This avoids the phantom out-of-range
+    tiles a uniform per-expert bound would emit for less-loaded experts.
+    `max_m` / `max_m_device` are unused here, retained in the signature only for
+    API / autotune-cache-key compatibility.
     """
     pid = ct.bid(0)
 
     num_k_tiles = ct.num_tiles(a, axis=1, shape=(BLOCK_M, BLOCK_K))
-    # Override host max_m with device truth (see docstring).
-    max_m_runtime = ct.load(max_m_device, index=(0,), shape=(1,)).item()
-    num_pid_m = ct.cdiv(max_m_runtime, BLOCK_M)
     num_pid_n = ct.cdiv(n, BLOCK_N)
-    tiles_per_batch = num_pid_m * num_pid_n
-    total_tiles = tiles_per_batch * q
     num_programs = ct.num_blocks(0)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
-    # Persistent scheduling loop
-    for current_pid in range(pid, total_tiles, num_programs):
-        # Calculate pid_q, pid_m, pid_n with GROUP_SIZE_M swizzling
-        # pid_q = batch index
-        pid_q = current_pid // tiles_per_batch
-        pid_in_batch = current_pid % tiles_per_batch
-
-        group_id = pid_in_batch // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m_actual = ct.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
-
-        pid_m = first_pid_m + (pid_in_batch % group_size_m_actual)
-        pid_n = (pid_in_batch % num_pid_in_group) // group_size_m_actual
-
-        # Load segment boundaries using ct.load with dynamic index
-        m_start_tile = ct.load(m_indptr, index=(pid_q,), shape=(1,))
-        m_start = m_start_tile.item()
-        m_end_tile = ct.load(m_indptr, index=(pid_q + 1,), shape=(1,))
-        m_end = m_end_tile.item()
+    # Per-expert tile scheduling: each expert contributes only its own real tiles
+    # (cdiv(valid_m, BLOCK_M) * num_pid_n) via a running prefix sum. A uniform
+    # per-expert bound would add phantom tiles for less-loaded experts and cause
+    # persistent-loop wave quantization.
+    tile_idx = pid
+    last_problem_end = 0
+    # Chain segment boundaries: expert q's end is expert q+1's start, so we do
+    # Q+1 scalar loads total instead of 2*Q.
+    m_start = ct.load(m_indptr, index=(0,), shape=(1,)).item()
+    for pid_q in range(q):
+        m_end = ct.load(m_indptr, index=(pid_q + 1,), shape=(1,)).item()
         valid_m = m_end - m_start
+        num_pid_m = ct.cdiv(valid_m, BLOCK_M)
+        tiles_this_expert = num_pid_m * num_pid_n
 
-        # Only process if this tile is within valid M range
-        if pid_m * BLOCK_M < valid_m:
+        # Process every flat tile this CTA owns within the current expert's range.
+        while tile_idx >= last_problem_end and tile_idx < last_problem_end + tiles_this_expert:
+            pid_in_batch = tile_idx - last_problem_end
+
+            group_id = pid_in_batch // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m_actual = ct.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
+
+            pid_m = first_pid_m + (pid_in_batch % group_size_m_actual)
+            pid_n = (pid_in_batch % num_pid_in_group) // group_size_m_actual
+
             # Create sliced views for A and C using Array.slice
             Ai = a.slice(axis=0, start=m_start, stop=m_end)
             Ci = c.slice(axis=0, start=m_start, stop=m_end)
@@ -176,6 +178,13 @@ def _ragged_block_scaled_bmm_kernel(
             # Store to output C using TMA
             ct.store(Ci, index=(pid_m, pid_n), tile=c_block)
 
+            # Advance to this CTA's next flat tile (persistent stride).
+            tile_idx = tile_idx + num_programs
+
+        # Running prefix sum over experts; chain start = previous end.
+        last_problem_end = last_problem_end + tiles_this_expert
+        m_start = m_end
+
 
 @ct.kernel
 def _ragged_block_scaled_bmm_swap_ab_kernel(
@@ -199,8 +208,10 @@ def _ragged_block_scaled_bmm_swap_ab_kernel(
     cuTile kernel for ragged block-scaled BMM with swap_ab optimization.
     Uses Array.slice + TMA (ct.load/ct.store) for A and C access.
 
-    Defense-in-depth: same as `_ragged_block_scaled_bmm_kernel` — the per-tile
-    loop bound is computed from `max_m_device` (device truth), not the host hint.
+    Defense-in-depth: this swap_ab path keeps uniform tiles-per-batch scheduling
+    and computes the persistent-loop bound from the device-side `max_m_device`,
+    not the host-side `max_m` hint, preventing silent output corruption when the
+    host hint underestimates the actual per-batch max.
     """
     pid = ct.bid(0)
 
