@@ -176,6 +176,9 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         if dtype == torch.float32:
             pytest.skip("Skipping fp32 tests due to known failures; under investigation")
 
+        if arch in ["sm120", "sm121"] and backend == "tilecpp" and use_l2:
+            pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+
         self.setUp()
 
         from tilegym.ops import chunk_gated_delta_rule
@@ -288,6 +291,10 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
             tilegym.set_backend(backend)
         except ValueError as e:
             pytest.skip(f"Backend is not supported: {e}")
+
+        if arch in ["sm120", "sm121"] and backend == "tilecpp" and use_l2:
+            pytest.skip("Skip on sm120, sm121: limited shared memory size.")
+
         self.setUp()
         from tilegym.ops import chunk_gated_delta_rule
 
