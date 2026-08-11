@@ -156,15 +156,33 @@ def _gemma_attn_fwd_inner(
     return acc, l_i, m_i
 
 
-def _gemma_fmha_autotune_configs():
-    """Iterator of autotune configurations for gemma FMHA kernel."""
+def _gemma_fmha_configs(BLOCK_D):
+    """Return the full tile-config tuning space as an ordered list.
+
+    The first entry is the fixed default used when autotuning is disabled.
+    Per-CTA live state scales with the padded head dim: the loop-carried FP32
+    accumulator is BLOCK_M x BLOCK_D and the FP32 softmax tile is
+    BLOCK_M x BLOCK_N. Past BLOCK_D=128 the 128x128 tile no longer fits the
+    register file (spills to a local frame), so wider heads default to a
+    smaller tile, keeping BLOCK_M >= 64 so the MMA path is preserved.
+    """
     gpu_capability = torch.cuda.get_device_capability()
-    if gpu_capability[0] < 9:
-        yield SimpleNamespace(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2)
-        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=64, num_ctas=1, occupancy=2)
-    else:
-        yield SimpleNamespace(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1)
-        yield SimpleNamespace(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2)
+    if gpu_capability[0] < 9:  # pre-SM90: no TMA/WGMMA, smaller tiles throughout
+        return [
+            SimpleNamespace(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2),
+            SimpleNamespace(BLOCK_M=128, BLOCK_N=64, num_ctas=1, occupancy=2),
+        ]
+    small_tiles = [
+        SimpleNamespace(BLOCK_M=64, BLOCK_N=32, num_ctas=1, occupancy=2),
+        SimpleNamespace(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2),
+    ]
+    large_tiles = [
+        SimpleNamespace(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2),
+        SimpleNamespace(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1),
+    ]
+    if BLOCK_D > 128:  # SM90+ wide-head path: 128x128 tiles would spill registers
+        return small_tiles + large_tiles
+    return large_tiles + small_tiles
 
 
 @ct.kernel(occupancy=2)
@@ -318,7 +336,7 @@ def _cutile_autotune_gemma_fmha(
     if cache_key not in _gemma_fmha_tune_cache:
         with ct.compiler_timeout(5):
             result = exhaustive_search(
-                list(_gemma_fmha_autotune_configs()),
+                _gemma_fmha_configs(BLOCK_D),
                 stream,
                 lambda cfg: (math.ceil(S_qo / cfg.BLOCK_M), B * H, 1),
                 _gemma_fmha_kernel,
@@ -435,9 +453,8 @@ class _GemmaAttentionFunction(torch.autograd.Function):
                 has_soft_cap,
             )
 
-        _gemma_cap = torch.cuda.get_device_capability()
-        BLOCK_M = 64 if _gemma_cap[0] < 9 else 128
-        BLOCK_N = 64 if _gemma_cap[0] < 9 else 128
+        default_cfg = _gemma_fmha_configs(BLOCK_D)[0]
+        BLOCK_M, BLOCK_N = default_cfg.BLOCK_M, default_cfg.BLOCK_N
         EVEN_K = (S_kv % BLOCK_N) == 0
         grid = ((S_qo + BLOCK_M - 1) // BLOCK_M, B * H, 1)
 
