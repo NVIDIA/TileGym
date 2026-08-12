@@ -4,6 +4,7 @@
 
 """TileGym ops module - contains all operation interfaces and backend implementations"""
 
+import warnings
 from tilegym.backend import is_backend_available
 
 # Backend implementations
@@ -16,7 +17,6 @@ if is_backend_available("cutile"):
     try:
         from . import cutile
     except (ImportError, RuntimeError):
-        import warnings
 
         warnings.warn("Cutile backend import failed, cutile operations will not be available")
         cutile = None  # type: ignore
@@ -29,7 +29,6 @@ from . import moe_interface
 try:
     from . import triton
 except (ImportError, RuntimeError):
-    import warnings
 
     warnings.warn("Triton backend import failed, triton operations will not be available")
     triton = None  # type: ignore
