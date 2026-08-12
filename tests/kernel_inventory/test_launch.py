@@ -255,10 +255,10 @@ def test_launch_contract_requires_parameters_missing_from_a_reachable_autotune_c
     source.write_text(
         "import triton\n"
         "import triton.language as tl\n\n"
-        "def is_nvt_backend():\n"
+        "def is_triton_tileir_backend():\n"
         "    return False\n\n"
         "def configs():\n"
-        "    if is_nvt_backend():\n"
+        "    if is_triton_tileir_backend():\n"
         "        return [triton.Config({'BK': 64, 'BV': 64}, num_warps=4)]\n"
         "    return [triton.Config({}, num_warps=4)]\n\n"
         "@triton.autotune(configs=configs(), key=['n', 'BK', 'BV'])\n"
@@ -300,10 +300,10 @@ def test_launch_contract_accepts_compiler_scoped_binding_for_conditional_autotun
     source.write_text(
         "import triton\n"
         "import triton.language as tl\n\n"
-        "def is_nvt_backend():\n"
+        "def is_triton_tileir_backend():\n"
         "    return False\n\n"
         "def configs():\n"
-        "    if is_nvt_backend():\n"
+        "    if is_triton_tileir_backend():\n"
         "        return [triton.Config({'BK': 64}, num_warps=4)]\n"
         "    return [triton.Config({}, num_warps=4)]\n\n"
         "@triton.autotune(configs=configs(), key=['n'])\n"
@@ -379,10 +379,10 @@ def test_launch_contract_requires_parameters_missing_from_a_conditional_config_m
     source.write_text(
         "import triton\n"
         "import triton.language as tl\n\n"
-        "def is_nvt_backend():\n"
+        "def is_triton_tileir_backend():\n"
         "    return False\n\n"
         "def configs():\n"
-        "    return [triton.Config({'BK': 64} if is_nvt_backend() else {}, num_warps=4)]\n\n"
+        "    return [triton.Config({'BK': 64} if is_triton_tileir_backend() else {}, num_warps=4)]\n\n"
         "@triton.autotune(configs=configs(), key=['n', 'BK'])\n"
         "@triton.jit\n"
         "def kernel(x, output, n, BK: tl.constexpr):\n"
@@ -495,7 +495,7 @@ def test_launch_contract_treats_unknown_local_mapping_alternatives_as_unowned(tm
     [
         "[triton.Config({'BK': 64}), *EXTERNAL_CONFIGS]",
         "[triton.Config({'BK': 64})] + EXTERNAL_CONFIGS",
-        "[triton.Config({'BK': 64})] if use_nvt() else EXTERNAL_CONFIGS",
+        "[triton.Config({'BK': 64})] if use_triton_tileir() else EXTERNAL_CONFIGS",
     ],
 )
 def test_launch_contract_treats_unknown_config_sequence_alternatives_as_unowned(tmp_path, configs_expression):
@@ -504,7 +504,7 @@ def test_launch_contract_treats_unknown_config_sequence_alternatives_as_unowned(
         "import triton\n"
         "import triton.language as tl\n\n"
         "EXTERNAL_CONFIGS = get_external_configs()\n\n"
-        "def use_nvt():\n"
+        "def use_triton_tileir():\n"
         "    return False\n\n"
         f"@triton.autotune(configs={configs_expression}, key=['n', 'BK'])\n"
         "@triton.jit\n"

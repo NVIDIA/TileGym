@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 
 
-def is_nvt_available() -> bool:
+def is_triton_tileir_available() -> bool:
     """Match TileGym selector semantics without importing the backend package."""
     try:
         import triton.backends.tileir
@@ -22,4 +22,4 @@ def is_nvt_available() -> bool:
 
 def get_available_triton_backend() -> str:
     """Return TileGym's canonical active Triton compiler label."""
-    return "nvt" if is_nvt_available() else "oait"
+    return "nvt" if is_triton_tileir_available() else "oait"
