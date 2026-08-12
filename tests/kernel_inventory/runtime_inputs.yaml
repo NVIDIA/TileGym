@@ -6,7 +6,6 @@ version: 1
 
 # Runtime data is test-only. Tensor shapes and dtypes remain owned by the
 # corresponding Definition so this catalog can later migrate to FIB Workload.
-patterns: {}
 
 cases:
   src/tilegym/transformers/olmo3::definition::olmo3_dual_rms_norm:

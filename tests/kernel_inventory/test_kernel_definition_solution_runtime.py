@@ -164,16 +164,16 @@ def test_kernel_inventory_triton_backend_detection_is_backend_isolated(monkeypat
 
     monkeypatch.setattr(builtins, "__import__", isolated_import)
     monkeypatch.setenv("ENABLE_TILE", "1")
-    assert detector.is_nvt_available() is True
+    assert detector.is_triton_tileir_available() is True
     assert detector.get_available_triton_backend() == "nvt"
 
     monkeypatch.setenv("ENABLE_TILE", "0")
-    assert detector.is_nvt_available() is False
+    assert detector.is_triton_tileir_available() is False
     assert detector.get_available_triton_backend() == "oait"
 
     tileir_available = False
     monkeypatch.setenv("ENABLE_TILE", "1")
-    assert detector.is_nvt_available() is False
+    assert detector.is_triton_tileir_available() is False
     assert detector.get_available_triton_backend() == "oait"
     backend_modules_after = {
         name for name in sys.modules if name == "tilegym.backend" or name.startswith("tilegym.backend.")
