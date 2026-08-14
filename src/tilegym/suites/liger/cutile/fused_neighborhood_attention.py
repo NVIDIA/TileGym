@@ -14,6 +14,7 @@ import torch
 from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
 ConstInt = ct.Constant[int]
@@ -604,7 +605,7 @@ def _fused_fwd_autotune(
 
     if cache_key not in _fwd_autotune_cache:
         configs = list(_fused_fwd_autotune_configs())
-        if os.environ.get("DISABLE_AUTOTUNE", "0") == "1":
+        if is_autotune_disabled():
             configs = configs[:1]
 
         def grid_fn(cfg):
