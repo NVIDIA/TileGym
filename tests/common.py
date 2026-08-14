@@ -88,6 +88,38 @@ def get_tensor_alignment(tensor):
     return alignment
 
 
+# Consumer-Blackwell arches (sm120/sm121) have less device memory than the
+# data-center GPUs the liger ``test_perf`` shapes were sized for.
+_MEMORY_CONSTRAINED_ARCHS = ("sm120", "sm121")
+
+
+def skip_perf_shape_on_oom(test_fn):
+    r"""Convert a genuine OOM on memory-constrained arches into a skip.
+
+    Wraps a liger ``test_perf`` method. If executing the perf shape raises a
+    ``torch.cuda.OutOfMemoryError`` and ``--arch`` is a memory-constrained
+    consumer-Blackwell arch (sm120/sm121), reclaim memory and ``pytest.skip``.
+    On every other arch (b200/sm100, h100/sm90, a100/sm80) the error is
+    re-raised so the perf-tracking platforms still fail loudly. Only
+    ``torch.cuda.OutOfMemoryError`` is intercepted -- correctness assertions and
+    all other exceptions propagate unchanged.
+    """
+
+    @wraps(test_fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return test_fn(self, *args, **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            gc.collect()
+            torch.cuda.empty_cache()
+            arch = self.request.config.getoption("--arch")
+            if arch in _MEMORY_CONSTRAINED_ARCHS:
+                pytest.skip(f"perf shape exceeds device memory on {arch}")
+            raise
+
+    return wrapper
+
+
 class PyTestCase:
     r"""
     Base class for TileGym unit tests.
