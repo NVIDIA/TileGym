@@ -37,7 +37,6 @@ class Test_Liger_GroupNorm(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_forward(self, batch_size, num_channels, hidden_size, num_groups, dtype, backend, monkeypatch):
         """Test forward output matches PyTorch F.group_norm reference."""
-        monkeypatch.setenv("DISABLE_AUTOTUNE", "1")
         self.setUp()
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
@@ -72,7 +71,6 @@ class Test_Liger_GroupNorm(common.PyTestCase):
     @pytest.mark.parametrize("backend", _backends)
     def test_op_backward(self, batch_size, num_channels, hidden_size, num_groups, dtype, backend, monkeypatch):
         """Test backward gradients (dX, dW, dB) match PyTorch reference."""
-        monkeypatch.setenv("DISABLE_AUTOTUNE", "1")
         self.setUp()
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)

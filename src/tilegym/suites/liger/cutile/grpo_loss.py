@@ -32,6 +32,7 @@ from cuda.tile.tune import exhaustive_search
 
 LOG2E = 1.4426950408889634
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
 _LOSS_TYPE_GRPO = 0
@@ -361,7 +362,7 @@ _fwd_autotune_cache: dict = {}
 
 
 def _tuned_fwd_kernel(stream, cache_key, grid, fwd_args):
-    if os.environ.get("DISABLE_AUTOTUNE") == "1":
+    if is_autotune_disabled():
         return _grpo_loss_fwd_ct.replace_hints(occupancy=ByTarget(sm_100=_FWD_FALLBACK_OCC, default=_FWD_FALLBACK_OCC))
     if cache_key not in _fwd_autotune_cache:
         result = exhaustive_search(
