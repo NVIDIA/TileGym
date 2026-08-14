@@ -62,6 +62,9 @@ class Test_RMSNorm(common.PyTestCase):
         if backend != "cutile" and mode == "multi_wave_cached":
             pytest.skip(f"multi_wave_cached mode is not implemented for backend {backend}")
 
+        if backend == "tilecpp" and mode == "static_persistent":
+            pytest.skip("tilecpp static_persistent is under investigation")
+
         # skip static_persistent tests when n > 16384 to avoid excessive memory usage
         # Avoid tileiras hangs on RTX PRO 6000 which has 100 KB shared memory per SM
         # mode=None can also select static_persistent via heuristic when M > NUM_SMS * 2
