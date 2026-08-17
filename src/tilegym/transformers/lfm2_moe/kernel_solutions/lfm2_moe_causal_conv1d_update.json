@@ -1,0 +1,25 @@
+{
+  "author": "tilegym-agent",
+  "definition": "lfm2_moe_causal_conv1d_update",
+  "description": "cuTile decode-path depthwise causal conv1d update (kernel_size=3, no activation) for LFM2-MoE. Updates conv_state in place.",
+  "name": "lfm2_moe_causal_conv1d_update_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/lfm2_moe/kernels/causal_conv1d_update.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/lfm2_moe/kernels/causal_conv1d_update.py::lfm2_causal_conv1d_update_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "SM100",
+      "SM103",
+      "SM120"
+    ]
+  }
+}

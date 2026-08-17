@@ -53,6 +53,7 @@ MUTATED_INPUTS_BY_DEFINITION = {
     "olmo3_dual_rms_norm": ("q", "k"),
     "olmoe_dual_rms_norm": ("q", "k"),
     "qwen3_5_causal_conv1d_update_silu": ("conv_state",),
+    "lfm2_moe_causal_conv1d_update": ("conv_state",),
 }
 
 
