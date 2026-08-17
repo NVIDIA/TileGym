@@ -1,0 +1,67 @@
+{
+  "axes": {
+    "B": {
+      "description": "Supported batch size.",
+      "type": "const",
+      "value": 1
+    },
+    "D": {
+      "description": "Channel dimension.",
+      "type": "var"
+    },
+    "K": {
+      "description": "Convolution kernel size / cached window length (conv_L_cache).",
+      "type": "const",
+      "value": 3
+    },
+    "T": {
+      "description": "Sequence length (single-token decode path).",
+      "type": "const",
+      "value": 1
+    }
+  },
+  "description": "LFM2-MoE decode-path depthwise causal conv1d update (kernel_size=3, no activation). The conv_state input holds the full K-wide window and is rolled/updated in place.",
+  "inputs": {
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    },
+    "conv_state": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "K"
+      ]
+    },
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D",
+        "K"
+      ]
+    }
+  },
+  "name": "lfm2_moe_causal_conv1d_update",
+  "op_type": "causal_conv1d_update",
+  "outputs": {
+    "output": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2_moe/modeling_lfm2_moe.py (Lfm2MoeShortConv, causal_conv1d_update path)\nimport torch\n\ndef run(x, conv_state, weight, bias=None, activation=None):\n    rolled = torch.cat([conv_state[..., 1:], x], dim=-1)\n    out = (rolled * weight.unsqueeze(0)).sum(-1, keepdim=True)\n    conv_state[..., 0] = conv_state[..., 1]\n    conv_state[..., 1] = conv_state[..., 2]\n    conv_state[..., 2] = x[..., 0]\n    return out", 
+  "tags": [
+    "model:lfm2_moe",
+    "stage:decode",
+    "status:unverified"
+  ]
+}

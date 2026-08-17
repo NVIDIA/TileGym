@@ -1,0 +1,58 @@
+{
+  "axes": {
+    "B": {
+      "description": "Supported batch size.",
+      "type": "const",
+      "value": 1
+    },
+    "D": {
+      "description": "Channel dimension.",
+      "type": "var"
+    },
+    "K": {
+      "description": "Convolution kernel size (conv_L_cache).",
+      "type": "const",
+      "value": 3
+    },
+    "T": {
+      "description": "Sequence length.",
+      "type": "var"
+    }
+  },
+  "description": "LFM2-MoE prefill-path depthwise causal conv1d (kernel_size=3, no activation). Input is unpadded; the entry point left-pads by K-1 internally.",
+  "inputs": {
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    },
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D",
+        "K"
+      ]
+    }
+  },
+  "name": "lfm2_moe_causal_conv1d_prefill",
+  "op_type": "causal_conv1d_prefill",
+  "outputs": {
+    "output": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2_moe/modeling_lfm2_moe.py (Lfm2MoeShortConv, causal_conv1d_fn path)\nimport torch\nimport torch.nn.functional as F\n\ndef run(x, weight):\n    B, D, L = x.shape\n    K = weight.shape[1]\n    xp = F.pad(x, (K - 1, 0))\n    w = weight.view(D, 1, K)\n    return F.conv1d(xp, w, groups=D)",
+  "tags": [
+    "model:lfm2_moe",
+    "stage:prefill",
+    "status:unverified"
+  ]
+}
