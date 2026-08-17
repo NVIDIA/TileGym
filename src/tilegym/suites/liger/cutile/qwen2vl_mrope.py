@@ -8,7 +8,22 @@ Qwen2VL Multimodal Rotary Position Embedding (M-RoPE) kernel (CuTile backend).
 Half-split layout: left half of head_dim = real part, right half = imaginary part.
 Three RoPE sections: temporal [0, t_end), height [t_end, h_end), width [h_end, hd//2).
 cos/sin shape: (3, bsz, seq_len, head_dim).
-Grid: (bsz, seq_len) — one program per token (2D grid avoids divmod on pid).
+
+Two kernel variants selected at runtime via the ALIGNED flag (mirrors rope.py):
+
+  ALIGNED case (power-of-2 head_dim AND all head counts match tile sizes AND
+  contiguous Q/K):
+    _qwen2vl_mrope_4d_ct -- operates on Q/K in original
+    (bsz, n_heads, seq_len, head_dim) layout using ct.load block loads (block index
+    0/1 in the last dim selects the real/imag half). No host-side transpose or
+    contiguous copy is needed, and Q/K traffic is a coalesced TMA load instead of a
+    per-element gather. Grid: (bsz * seq_len,).
+
+  Non-ALIGNED case (e.g. non-power-of-2 head_dim):
+    _qwen2vl_mrope_kernel -- gather/scatter kernel operating on a host-side
+    transposed+contiguous (bsz, seq_len, n_heads, head_dim) copy with column masking
+    to head_dim//2 so non-power-of-2 head_dim stays out-of-bounds safe.
+    Grid: (bsz, seq_len).
 """
 
 import cuda.tile as ct
@@ -19,6 +34,66 @@ from tilegym.backend import register_impl
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
+
+
+@ct.kernel
+def _qwen2vl_mrope_4d_ct(
+    Q,  # (bsz, n_q_heads, seq_len, head_dim) -- original layout, head_dim = 2*TILE_HD
+    K,  # (bsz, n_k_heads, seq_len, head_dim)
+    COS,  # (3, bsz, seq_len, head_dim) -- first TILE_HD elements per section are the cos values
+    SIN,  # (3, bsz, seq_len, head_dim)
+    seq_len: ConstInt,
+    MROPE_SECTION_T: ConstInt,
+    MROPE_SECTION_H: ConstInt,
+    sin_sign: ct.Constant[float],
+    TILE_QH: ConstInt,
+    TILE_KH: ConstInt,
+    TILE_HD: ConstInt,
+):
+    """ALIGNED fast path: no host-side transpose/contiguous, coalesced TMA loads."""
+    pid = ct.bid(0)
+    batch_idx = pid // seq_len
+    seq_idx = pid % seq_len
+
+    t_end = MROPE_SECTION_T
+    h_end = t_end + MROPE_SECTION_H
+
+    # Select the M-RoPE section per column along head_dim//2: temporal [0, t_end),
+    # height [t_end, h_end), width [h_end, hd//2). COS/SIN are (3, bsz, seq, hd);
+    # block index (section, batch, seq, 0) grabs [0, TILE_HD) = the rotation values.
+    col = ct.arange(TILE_HD, dtype=ct.int32)[None, :]  # (1, TILE_HD)
+    in_t = col < t_end
+    in_h = col < h_end
+    t_cos = ct.load(COS, index=(0, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    h_cos = ct.load(COS, index=(1, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    w_cos = ct.load(COS, index=(2, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    t_sin = ct.load(SIN, index=(0, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    h_sin = ct.load(SIN, index=(1, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    w_sin = ct.load(SIN, index=(2, batch_idx, seq_idx, 0), shape=(1, 1, 1, TILE_HD)).reshape((1, TILE_HD))
+    cos_row = ct.where(in_t, t_cos, ct.where(in_h, h_cos, w_cos))
+    sin_row = ct.where(in_t, t_sin, ct.where(in_h, h_sin, w_sin)) * sin_sign
+
+    # Q in (bsz, n_q_heads, seq_len, head_dim): index (b, 0, s, 0) = real half,
+    # index (b, 0, s, 1) = imag half (block 1 starts at element TILE_HD = head_dim//2).
+    q_r = ct.load(Q, index=(batch_idx, 0, seq_idx, 0), shape=(1, TILE_QH, 1, TILE_HD)).reshape((TILE_QH, TILE_HD))
+    q_i = ct.load(Q, index=(batch_idx, 0, seq_idx, 1), shape=(1, TILE_QH, 1, TILE_HD)).reshape((TILE_QH, TILE_HD))
+    # Rotate in fp32 (cos_row/sin_row are fp32), round only the final result.
+    q_r_f = q_r.astype(ct.float32)
+    q_i_f = q_i.astype(ct.float32)
+    new_q_r = (q_r_f * cos_row - q_i_f * sin_row).astype(Q.dtype)
+    new_q_i = (q_i_f * cos_row + q_r_f * sin_row).astype(Q.dtype)
+    ct.store(Q, index=(batch_idx, 0, seq_idx, 0), tile=new_q_r.reshape((1, TILE_QH, 1, TILE_HD)))
+    ct.store(Q, index=(batch_idx, 0, seq_idx, 1), tile=new_q_i.reshape((1, TILE_QH, 1, TILE_HD)))
+
+    # K in (bsz, n_k_heads, seq_len, head_dim)
+    k_r = ct.load(K, index=(batch_idx, 0, seq_idx, 0), shape=(1, TILE_KH, 1, TILE_HD)).reshape((TILE_KH, TILE_HD))
+    k_i = ct.load(K, index=(batch_idx, 0, seq_idx, 1), shape=(1, TILE_KH, 1, TILE_HD)).reshape((TILE_KH, TILE_HD))
+    k_r_f = k_r.astype(ct.float32)
+    k_i_f = k_i.astype(ct.float32)
+    new_k_r = (k_r_f * cos_row - k_i_f * sin_row).astype(K.dtype)
+    new_k_i = (k_i_f * cos_row + k_r_f * sin_row).astype(K.dtype)
+    ct.store(K, index=(batch_idx, 0, seq_idx, 0), tile=new_k_r.reshape((1, TILE_KH, 1, TILE_HD)))
+    ct.store(K, index=(batch_idx, 0, seq_idx, 1), tile=new_k_i.reshape((1, TILE_KH, 1, TILE_HD)))
 
 
 @ct.kernel
@@ -139,7 +214,51 @@ def _qwen2vl_mrope_kernel(
     ct.scatter(key, k_i_idx, new_k_i, mask=k_mask, check_bounds=False, latency=1)
 
 
+def _is_aligned(q, k, n_q_head, n_kv_head, head_dim_half, TILE_HD, TILE_QH, TILE_KH):
+    """ALIGNED fast path: power-of-2 head_dim / head counts and contiguous Q/K, so the
+    4D block-load kernel can run in-place on the original (bsz, n_heads, seq, hd) layout
+    without any host transpose+contiguous copy."""
+    return (
+        (TILE_HD == head_dim_half)
+        and (TILE_QH == n_q_head)
+        and (TILE_KH == n_kv_head)
+        and q.is_contiguous()
+        and k.is_contiguous()
+    )
+
+
 def _qwen2vl_mrope_forward(q, k, cos, sin, mrope_section):
+    # q/k in: (bsz, n_heads, seq_len, head_dim)
+    batch_size, n_q_head, seq_len, head_dim = q.shape
+    n_kv_head = k.shape[1]
+    head_dim_half = head_dim // 2
+    TILE_HD = next_power_of_2(head_dim_half)
+    TILE_QH = next_power_of_2(n_q_head)
+    TILE_KH = next_power_of_2(n_kv_head)
+
+    if _is_aligned(q, k, n_q_head, n_kv_head, head_dim_half, TILE_HD, TILE_QH, TILE_KH):
+        cos_c = cos.contiguous()
+        sin_c = sin.contiguous()
+        ct.launch(
+            torch.cuda.current_stream(),
+            (batch_size * seq_len,),
+            _qwen2vl_mrope_4d_ct,
+            (
+                q,
+                k,
+                cos_c,
+                sin_c,
+                int(seq_len),
+                int(mrope_section[0]),
+                int(mrope_section[1]),
+                1.0,
+                int(TILE_QH),
+                int(TILE_KH),
+                int(TILE_HD),
+            ),
+        )
+        return q, k, cos, sin
+
     q = q.transpose(1, 2).contiguous()
     k = k.transpose(1, 2).contiguous()
 
@@ -184,6 +303,37 @@ def _qwen2vl_mrope_forward(q, k, cos, sin, mrope_section):
 
 
 def _qwen2vl_mrope_backward(dq, dk, cos, sin, mrope_section):
+    # dq/dk in: (bsz, n_heads, seq_len, head_dim)
+    batch_size, n_q_head, seq_len, head_dim = dq.shape
+    n_kv_head = dk.shape[1]
+    head_dim_half = head_dim // 2
+    TILE_HD = next_power_of_2(head_dim_half)
+    TILE_QH = next_power_of_2(n_q_head)
+    TILE_KH = next_power_of_2(n_kv_head)
+
+    if _is_aligned(dq, dk, n_q_head, n_kv_head, head_dim_half, TILE_HD, TILE_QH, TILE_KH):
+        cos_c = cos.contiguous()
+        sin_c = sin.contiguous()
+        ct.launch(
+            torch.cuda.current_stream(),
+            (batch_size * seq_len,),
+            _qwen2vl_mrope_4d_ct,
+            (
+                dq,
+                dk,
+                cos_c,
+                sin_c,
+                int(seq_len),
+                int(mrope_section[0]),
+                int(mrope_section[1]),
+                -1.0,  # backward negates sin
+                int(TILE_QH),
+                int(TILE_KH),
+                int(TILE_HD),
+            ),
+        )
+        return dq, dk
+
     dq = dq.transpose(1, 2).contiguous()
     dk = dk.transpose(1, 2).contiguous()
 
