@@ -25,10 +25,15 @@ def _persistent_layer_norm_autotune_configs():
 
     Generates configurations:
     - BLOCK_N: [1, 2, 4, 8, 16, 32] - number of rows per block
+    - num_worker_warps: [4, 8] - CUDA-core warp-group width (Triton ``num_warps``
+      equivalent). Normalization-style kernels with large tiles are the
+      canonical case for tuning this hint, and nww=8 (256 threads) is a large
+      win on the bandwidth-bound small-D shapes.
     - num_ctas: [1] - single CTA for this kernel
     """
     for block_n in [1, 2, 4, 8, 16, 32]:
-        yield SimpleNamespace(BLOCK_N=block_n, num_ctas=1)
+        for num_worker_warps in [4, 8]:
+            yield SimpleNamespace(BLOCK_N=block_n, num_ctas=1, num_worker_warps=num_worker_warps)
 
 
 def _get_default_persistent_layer_norm_configs(BLOCK_D=None):
@@ -44,8 +49,8 @@ def _get_default_persistent_layer_norm_configs(BLOCK_D=None):
             block_n = min(8, p)
         else:
             block_n = 8
-        return {"BLOCK_N": block_n, "num_ctas": 1}
-    return {"BLOCK_N": 8, "num_ctas": 1}
+        return {"BLOCK_N": block_n, "num_ctas": 1, "num_worker_warps": 8}
+    return {"BLOCK_N": 8, "num_ctas": 1, "num_worker_warps": 8}
 
 
 def _persistent_layer_norm_early_config_prune(configs, N, D, BLOCK_D):
@@ -321,12 +326,14 @@ def _persistent_layer_norm_autotune_base(
                 grid_fn,
                 _persistent_layer_norm_fwd_kernel,
                 args_fn,
-                lambda cfg: {"num_ctas": cfg.num_ctas},
+                lambda cfg: {"num_ctas": cfg.num_ctas, "num_worker_warps": cfg.num_worker_warps},
             )
         best_cfg = result.best.config
         _layer_norm_legacy_tune_cache[cache_key] = (
             best_cfg,
-            _persistent_layer_norm_fwd_kernel.replace_hints(num_ctas=best_cfg.num_ctas),
+            _persistent_layer_norm_fwd_kernel.replace_hints(
+                num_ctas=best_cfg.num_ctas, num_worker_warps=best_cfg.num_worker_warps
+            ),
         )
     best_cfg, tuned_kernel = _layer_norm_legacy_tune_cache[cache_key]
     ct.launch(stream, grid_fn(best_cfg), tuned_kernel, args_fn(best_cfg))
@@ -404,10 +411,13 @@ def _cutile_persistent_layer_norm_fwd(
         grid_size = min(NUM_SMS, num_row_blocks)
         grid = (grid_size, 1, 1)
 
+        default_kernel = _persistent_layer_norm_fwd_kernel.replace_hints(
+            num_ctas=configs["num_ctas"], num_worker_warps=configs["num_worker_warps"]
+        )
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            _persistent_layer_norm_fwd_kernel,
+            default_kernel,
             (
                 x,
                 y,
