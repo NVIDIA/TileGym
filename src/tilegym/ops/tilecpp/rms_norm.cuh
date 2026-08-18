@@ -17,7 +17,7 @@
 /**
  * RMSNorm kernel - optimized version.
  *
- * Computes: y = x * rsqrt(mean(x^2) + eps) * weight
+ * Computes: y = x * rsqrt(mean(x^2) + eps) * (offset + weight)
  *
  * Optimizations:
  * - __restrict__ pointers for alias optimization
@@ -36,7 +36,7 @@
  *   N: Number of columns (hidden size)
  *   eps: Small epsilon for numerical stability
  */
-template<typename T, typename WT, int BLOCK_SIZE, int N, float EPS>
+template<typename T, typename WT, int BLOCK_SIZE, int N, float EPS, float OFFSET>
 __tile_global__ void rms_norm_kernel(
     const T* __restrict__ X,
     const WT* __restrict__ W,
@@ -110,7 +110,7 @@ __tile_global__ void rms_norm_kernel(
         }
         auto wj = ct::element_cast<float>(wj_raw);
         auto xj = ct::element_cast<float>(xj_raw);
-        auto yj_f32 = xj * rms * wj;
+        auto yj_f32 = xj * rms * (OFFSET + wj);
         auto yj = ct::element_cast<T>(yj_f32);
         if constexpr (EVEN_N) {
             [[ using cutile : hint(1000, latency=1) ]]
@@ -121,6 +121,77 @@ __tile_global__ void rms_norm_kernel(
             ct::store_masked(Y_row + cols, yj, mask);
         }
     }
+}
+
+
+/**
+ * RMSNorm multi-wave cached kernel.
+ *
+ * Computes: y = x * rsqrt(mean(x^2) + eps) * (offset + weight)
+ *
+ * One block per row and TILE_SIZE >= N, so the whole row is a single tile: it
+ * is loaded once and held in registers across the reduction and the normalize
+ * step, instead of being reloaded the way `rms_norm_kernel` does.
+ *
+ * Grid: (M, 1, 1)
+ *
+ * Template Parameters:
+ *   T: Element type (float, __half, __nv_bfloat16)
+ *   WT: Weight element type
+ *   TILE_SIZE: Row tile size; power of two >= N, so one tile spans the row
+ *   N: Number of columns (hidden size)
+ *   EPS: Small epsilon for numerical stability
+ *
+ * Parameters:
+ *   X: Pointer to input tensor (M, N)
+ *   W: Pointer to weight tensor (N,)
+ *   Y: Pointer to output tensor (M, N)
+ *   rstd_ptr: Pointer to store 1/std per row (M,)
+ *   stride: Row stride (typically N)
+ */
+template<typename T, typename WT, int TILE_SIZE, int N, float EPS, float OFFSET>
+__tile_global__ void rms_norm_multi_wave_cached_kernel(
+    const T* __restrict__ X,
+    const WT* __restrict__ W,
+    T* __restrict__ Y,
+    float* __restrict__ rstd_ptr,
+    int stride
+) {
+    namespace ct = cuda::tiles;
+
+    using TxTS = ct::tile<T, ct::shape<TILE_SIZE>>;
+    using WxTS = ct::tile<WT, ct::shape<TILE_SIZE>>;
+    using i32xTS = ct::tile<int, ct::shape<TILE_SIZE>>;
+
+    // Each program handles one row
+    int row = ct::bid().x;
+
+    auto X_row = X + row * stride;
+    auto Y_row = Y + row * stride;
+    auto W_aligned = ct::assume_aligned<16>(W);
+    auto rstd_aligned = ct::assume_aligned<16>(rstd_ptr);
+
+    auto cols = ct::iota<i32xTS>();
+    auto mask = cols < N;
+
+    // Cache the row in registers: loaded once, reused after the reduction.
+    [[ using cutile : hint(1000, latency=1) ]]
+    auto xj_raw = ct::load_masked(X_row + cols, mask, ct::zeros<TxTS>());
+    auto xj = ct::element_cast<float>(xj_raw);
+
+    float sum_sq = static_cast<float>(ct::sum<0>(xj * xj));
+    float rms = ct::rsqrt(sum_sq / static_cast<float>(N) + EPS);
+
+    rstd_aligned[row] = rms;
+
+    [[ using cutile : hint(1000, latency=1) ]]
+    auto wj_raw = ct::load_masked(W_aligned + cols, mask, ct::zeros<WxTS>());
+    auto wj = ct::element_cast<float>(wj_raw);
+
+    auto yj = ct::element_cast<T>(xj * rms * (OFFSET + wj));
+
+    [[ using cutile : hint(1000, latency=1) ]]
+    ct::store_masked(Y_row + cols, yj, mask);
 }
 
 
@@ -232,7 +303,11 @@ __tile_global__ void rms_norm_static_persistent_kernel(
     using TileMxN = ct::tile<T,     ct::shape<TILE_SIZE_M, TILE_SIZE_N>>;
     using f32_Mx1 = ct::tile<float, ct::shape<TILE_SIZE_M, 1>>;
     using f32_M   = ct::tile<float, ct::shape<TILE_SIZE_M>>;
+    using WxN     = ct::tile<WT,    ct::shape<TILE_SIZE_N>>;
 
+    // TILE_SIZE_N is next_power_of_2(N), so the tile overhangs the row whenever
+    // N is not a power of two. Masked accesses pad with zero, so the overhanging
+    // lanes add nothing to sum(x^2) and are not written past the end of the row.
     X = ct::assume_aligned<16>(X);
     Y = ct::assume_aligned<16>(Y);
     W = ct::assume_aligned<16>(W);
@@ -255,16 +330,16 @@ __tile_global__ void rms_norm_static_persistent_kernel(
                                     ct::shape<TILE_SIZE_M>{});
 
     // Load W once, apply offset in fp32 (y = x_hat * (offset + w)).
-    auto w       = ct::element_cast<float>(pW.load(0));            // (TILE_N,)
+    auto w_raw   = pW.load_masked(0);
+    auto w       = ct::element_cast<float>(w_raw);                 // (TILE_N,)
     auto w_with  = w + ct::full<ct::tile<float, ct::shape<TILE_SIZE_N>>>(OFFSET);
     auto w_bcast = ct::reshape<ct::shape<1, TILE_SIZE_N>>(w_with);
 
     constexpr float inv_N = 1.0f / static_cast<float>(N);
 
     for (auto current_bid : ct::irange(pid, upper_bound, NUM_SMS)) {
-        TileMxN x_tile;
         [[ using cutile : hint(1000, latency=10) ]]
-        x_tile = pX.load(current_bid, 0);
+        auto x_tile = pX.load_masked(current_bid, 0);
         auto x = ct::element_cast<float>(x_tile);
 
         // Row-wise sum(x^2) -> (TILE_M, 1) -> divide by N -> +eps -> rsqrt
@@ -281,7 +356,7 @@ __tile_global__ void rms_norm_static_persistent_kernel(
         auto y_T    = ct::element_cast<T>(y_f32);
 
         [[ using cutile : hint(1000, allow_tma=false, latency=3) ]]
-        pY.store(y_T, current_bid, 0);
+        pY.store_masked(y_T, current_bid, 0);
     }
 }
 

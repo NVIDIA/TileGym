@@ -186,9 +186,7 @@ __tile_global__ void swiglu_forward_kernel_gather(
     c_ptr = ct::assume_aligned<16>(c_ptr);
 
     n_cols     = ct::assume_bounded_below(n_cols,     ct::integral_constant<0>{});
-    n_cols     = ct::assume_divisible(n_cols,         ct::integral_constant<8>{});
     row_stride = ct::assume_bounded_below(row_stride, ct::integral_constant<0>{});
-    row_stride = ct::assume_divisible(row_stride,     ct::integral_constant<16>{});
 
     int row = ct::bid().x;
 

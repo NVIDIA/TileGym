@@ -65,6 +65,10 @@ __tile_global__ void recurrent_gated_delta_rule_fwd_kernel(
     using f32_K   = ct::tile<float, ct::shape<BLOCK_K>>;
     using f32_V   = ct::tile<float, ct::shape<BLOCK_V>>;
 
+    // BLOCK_K/BLOCK_V are rounded up to powers of two, so the trailing tile of
+    // a ragged head dim is partial: pad reads with zero and clip writes.
+    constexpr auto zero_pad = ct::view_padding::zero;
+
     Q          = ct::assume_aligned<16>(Q);
     K          = ct::assume_aligned<16>(K);
     V          = ct::assume_aligned<16>(V);
@@ -105,16 +109,16 @@ __tile_global__ void recurrent_gated_delta_rule_fwd_kernel(
         auto pInit = ct::partition_view(
             ct::tensor_span{InitState, ct::extents{B, NUM_HEADS, K_HEAD_DIM, V_HEAD_DIM}},
             ct::shape<1, 1, BLOCK_K, BLOCK_V>{});
-        auto init_loaded = pInit.load(b, h, 0, pid_v);
+        auto init_loaded = pInit.template load_masked<zero_pad>(b, h, 0, pid_v);
         state = ct::reshape<ct::shape<BLOCK_K, BLOCK_V>>(init_loaded);
     }
 
     for (auto t : ct::irange(0, SEQ_LEN)) {
         // Load q_t, k_t as BLOCK_K tiles.
-        auto q_t_loaded = pQ.load(b, t, h, 0);
+        auto q_t_loaded = pQ.template load_masked<zero_pad>(b, t, h, 0);
         auto q_t = ct::element_cast<float>(ct::reshape<ct::shape<BLOCK_K>>(q_t_loaded));
 
-        auto k_t_loaded = pK.load(b, t, h, 0);
+        auto k_t_loaded = pK.template load_masked<zero_pad>(b, t, h, 0);
         auto k_t = ct::element_cast<float>(ct::reshape<ct::shape<BLOCK_K>>(k_t_loaded));
 
         if constexpr (USE_QK_L2NORM) {
@@ -131,7 +135,7 @@ __tile_global__ void recurrent_gated_delta_rule_fwd_kernel(
         q_t = q_t * scale;
 
         // Load v_t as BLOCK_V tile.
-        auto v_t_loaded = pV.load(b, t, h, pid_v);
+        auto v_t_loaded = pV.template load_masked<zero_pad>(b, t, h, pid_v);
         auto v_t = ct::element_cast<float>(ct::reshape<ct::shape<BLOCK_V>>(v_t_loaded));
 
         auto g_t_tile    = ct::element_cast<float>(pG.load(b, t, h));
@@ -164,7 +168,7 @@ __tile_global__ void recurrent_gated_delta_rule_fwd_kernel(
         // Store output (cast back to T).
         auto out_tile = ct::reshape<ct::shape<1, 1, 1, BLOCK_V>>(
             ct::element_cast<T>(out_t));
-        pO.store(out_tile, b, t, h, pid_v);
+        pO.store_masked(out_tile, b, t, h, pid_v);
     }
 
     // ---- Final state ----
@@ -173,6 +177,6 @@ __tile_global__ void recurrent_gated_delta_rule_fwd_kernel(
             ct::tensor_span{FinalState, ct::extents{B, NUM_HEADS, K_HEAD_DIM, V_HEAD_DIM}},
             ct::shape<1, 1, BLOCK_K, BLOCK_V>{});
         auto state_tile = ct::reshape<ct::shape<1, 1, BLOCK_K, BLOCK_V>>(state);
-        pFinal.store(state_tile, b, h, 0, pid_v);
+        pFinal.store_masked(state_tile, b, h, 0, pid_v);
     }
 }

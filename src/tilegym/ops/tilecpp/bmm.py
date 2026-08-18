@@ -21,7 +21,6 @@ from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.autotuner import Config
 from tilegym.ops.tilecpp.autotuner import TileCppAutotuner
 from tilegym.ops.tilecpp.autotuner import autotune
-from tilegym.ops.tilecpp.autotuner import is_autotuning_enabled
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
 from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._cuda_utils import make_kernel_args
@@ -482,23 +481,14 @@ def bmm_static_persistent(a, b, transpose_a=False, transpose_b=False, **kwargs):
     """
     Static persistent batch matrix multiplication.
 
-    Uses static persistent scheduling with GPU-specific default configurations:
-    - B200 (sm_120/121): TILE_M=128, TILE_N=128, TILE_K=64, occupancy=2, num_ctas=1
-    - H100 (sm_90): TILE_M=128, TILE_N=128, TILE_K=64, occupancy=1, num_ctas=1
-    - GB100 (sm_100): TILE_M=256, TILE_N=256, TILE_K=64, occupancy=1, num_ctas=2
+    The tile configuration is always chosen by the autotuner, whose search space
+    is GPU-dependent.
 
     Args:
         a: Input tensor A with shape (Q, M, K) or (Q, K, M) if transposed
         b: Input tensor B with shape (Q, K, N) or (Q, N, K) if transposed
         transpose_a: Whether to transpose A
         transpose_b: Whether to transpose B
-        **kwargs: Optional kernel configuration parameters:
-            - TILE_M: M-dimension tile size (default: GPU-dependent)
-            - TILE_N: N-dimension tile size (default: GPU-dependent)
-            - TILE_K: K-dimension tile size (default: 64)
-            - GROUP_SIZE_M: Number of M-tiles to group (default: 8)
-            - occupancy: Occupancy multiplier (default: GPU-dependent)
-            - num_ctas: Number of CTAs per kernel (default: GPU-dependent)
 
     Returns:
         Output tensor C with shape (Q, M, N)
@@ -523,63 +513,7 @@ def bmm_static_persistent(a, b, transpose_a=False, transpose_b=False, **kwargs):
 
     c = torch.empty((Q, M, N), device=a.device, dtype=a.dtype)
 
-    if is_autotuning_enabled():
-        return _autotune_bmm_static_persistent(a, b, c, Q, M, N, K, transpose_a, transpose_b)
-
-    capability = torch.cuda.get_device_capability()
-    if capability in [(12, 0), (12, 1)]:
-        # B200: Smaller tiles, num_ctas=1, higher occupancy
-        default_config = {
-            "TILE_M": 128,
-            "TILE_N": 128,
-            "TILE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_ctas": 1,
-            "occupancy": 2,
-        }
-    elif capability == (9, 0):
-        # H100: Medium tiles
-        default_config = {
-            "TILE_M": 128,
-            "TILE_N": 128,
-            "TILE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_ctas": 1,
-            "occupancy": 1,
-        }
-    else:
-        # Other GPUs (e.g., GB100): Larger tiles, num_ctas=2
-        default_config = {
-            "TILE_M": 256,
-            "TILE_N": 256,
-            "TILE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_ctas": 2,
-            "occupancy": 1,
-        }
-
-    # Override defaults with any user-provided configs
-    config = {**default_config, **kwargs}
-
-    _launch_bmm_static_persistent_kernel(
-        a,
-        b,
-        c,
-        Q,
-        M,
-        N,
-        K,
-        transpose_a,
-        transpose_b,
-        block_m=config["TILE_M"],
-        block_n=config["TILE_N"],
-        block_k=config["TILE_K"],
-        group_m=config["GROUP_SIZE_M"],
-        occupancy=config["occupancy"],
-        num_ctas=config["num_ctas"],
-    )
-
-    return c
+    return _autotune_bmm_static_persistent(a, b, c, Q, M, N, K, transpose_a, transpose_b)
 
 
 # Register the implementation

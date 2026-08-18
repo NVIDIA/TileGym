@@ -28,6 +28,11 @@ _rms_norm_kernel = TileCppKernel(
     kernel_name="rms_norm_kernel",
 )
 
+_rms_norm_multi_wave_cached_kernel = TileCppKernel(
+    source_path=Path(__file__).parent / "rms_norm.cuh",
+    kernel_name="rms_norm_multi_wave_cached_kernel",
+)
+
 _rms_norm_kernel_pv = TileCppKernel(
     source_path=Path(__file__).parent / "rms_norm.cuh",
     kernel_name="rms_norm_kernel_pv",
@@ -84,6 +89,7 @@ def _launch_rms_norm_kernel(
     stride: int,
     N: int,
     eps: float,
+    offset: float,
     M: int,
     block_size: int,
 ):
@@ -92,11 +98,12 @@ def _launch_rms_norm_kernel(
     w_cpp_type = get_cpp_type(weight.dtype)
 
     eps_tp = f"{eps}f"
+    offset_tp = f"{offset}f"
 
     # Signature: const T*, const WT*, T*, float*, int
     kernel, _, _ = _rms_norm_kernel.get_kernel(
         dtype=dtype,
-        template_params=[w_cpp_type, block_size, N, eps_tp],
+        template_params=[w_cpp_type, block_size, N, eps_tp, offset_tp],
         signature=f"const {{T}}*, const {w_cpp_type}*, {{T}}*, float*, int",
     )
 
@@ -104,6 +111,49 @@ def _launch_rms_norm_kernel(
 
     _rms_norm_kernel.launch(
         grid=grid,
+        kernel=kernel,
+        args=[
+            np.uint64(x.data_ptr()),
+            np.uint64(weight.data_ptr()),
+            np.uint64(y.data_ptr()),
+            np.uint64(rstd.data_ptr()),
+            np.int32(stride),
+        ],
+    )
+
+
+def _launch_rms_norm_multi_wave_cached_kernel(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    y: torch.Tensor,
+    rstd: torch.Tensor,
+    stride: int,
+    N: int,
+    eps: float,
+    offset: float,
+    M: int,
+    tile_size: int,
+):
+    """
+    Template params: T, WT, TILE_SIZE, N, EPS, OFFSET.
+    Runtime args  : X, W, Y, Rstd, stride.
+    Grid          : M (one block per row; the row is a single cached tile).
+    """
+    dump_kernel_types("rms_norm_multi_wave_cached_kernel", x, weight, y, rstd)
+    dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
+
+    eps_tp = f"{eps}f"
+    offset_tp = f"{offset}f"
+
+    kernel, _, _ = _rms_norm_multi_wave_cached_kernel.get_kernel(
+        dtype=dtype,
+        template_params=[w_cpp_type, tile_size, N, eps_tp, offset_tp],
+        signature=f"const {{T}}*, const {w_cpp_type}*, {{T}}*, float*, int",
+    )
+
+    _rms_norm_multi_wave_cached_kernel.launch(
+        grid=M,
         kernel=kernel,
         args=[
             np.uint64(x.data_ptr()),
@@ -323,6 +373,7 @@ class RMSNorm(torch.autograd.Function):
         eps,
         bias=None,
         mode=None,
+        offset=0.0,
     ):
         """
         CUDA Tile C++ RMSNorm forward pass.
@@ -333,9 +384,9 @@ class RMSNorm(torch.autograd.Function):
             weight: Weight tensor of shape [N]
             eps: Epsilon value for numerical stability
             bias: Bias tensor of shape [N], default is None (not supported)
-            mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload").
-                  ``multi_wave_cached`` is not implemented in the tilecpp backend
-                  and raises NotImplementedError.
+            mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload",
+                  "multi_wave_cached")
+            offset: Offset to add to weight (default 0.0 for Llama, 1.0 for Gemma3)
 
         Returns:
             Normalized and transformed tensor of same shape as input
@@ -380,7 +431,7 @@ class RMSNorm(torch.autograd.Function):
                 M,
                 N,
                 eps,
-                0.0,  # offset: 0.0 for standard RMSNorm
+                offset,
                 TILE_SIZE_M,
                 TILE_SIZE_N,
             )
@@ -402,6 +453,7 @@ class RMSNorm(torch.autograd.Function):
                 x_arg.stride(0),
                 N,
                 eps,
+                offset,
                 M,
                 block_size,
             )
@@ -410,12 +462,34 @@ class RMSNorm(torch.autograd.Function):
             ctx.eps = eps
             ctx.block_size = block_size
         elif mode == "multi_wave_cached":
-            raise NotImplementedError("multi_wave_cached mode is not implemented for the tilecpp backend")
+            # TILE_SIZE >= N, so the row is one tile the kernel keeps in registers.
+            TILE_SIZE = _next_power_of_2(N)
+
+            rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+
+            _launch_rms_norm_multi_wave_cached_kernel(
+                x_arg,
+                weight,
+                y.reshape(-1, y.shape[-1]),
+                rstd,
+                x_arg.stride(0),
+                N,
+                eps,
+                offset,
+                M,
+                TILE_SIZE,
+            )
+
+            ctx.save_for_backward(x, weight, rstd)
+            ctx.eps = eps
+            ctx.block_size = TILE_SIZE
         else:
             raise ValueError(
                 f"Unknown mode '{mode}'. Supported modes: None, 'static_persistent', "
                 f"'multi_wave_reload', 'multi_wave_cached'"
             )
+
+        ctx.offset = offset
 
         return y
 
@@ -425,17 +499,22 @@ class RMSNorm(torch.autograd.Function):
         Backward pass for CUDA Tile C++ RMSNorm.
         Retrieves saved tensors and delegates to rms_norm_backward().
         """
+        if ctx.offset != 0.0:
+            raise NotImplementedError(
+                f"Backward pass not implemented for TileCpp RMSNorm with non-zero offset ({ctx.offset})"
+            )
+
         x, weight, rstd = ctx.saved_tensors
 
         # Call the standalone backward function
         dx, dw = rms_norm_backward(x, dy, weight, rstd)
 
-        # Return gradients: (x, normalized_shape, weight, eps, bias, mode)
-        return dx, None, dw, None, None, None
+        # Return gradients: (x, normalized_shape, weight, eps, bias, mode, offset)
+        return dx, None, dw, None, None, None, None
 
 
 @register_impl("rms_norm", backend="tilecpp")
-def rms_norm(input, normalized_shape, weight, eps, bias=None, mode=None, **kwargs):
+def rms_norm(input, normalized_shape, weight, eps, bias=None, mode=None, offset=0.0, **kwargs):
     """
     Root mean square normalization implemented using CUDA Tile C++
 
@@ -445,15 +524,15 @@ def rms_norm(input, normalized_shape, weight, eps, bias=None, mode=None, **kwarg
         weight: Tensor of shape (N,)
         eps: Small constant added to variance calculation prior to division
         bias: Bias tensor of shape (N,), default is None (not supported)
-        mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload").
-              ``multi_wave_cached`` is not implemented in the tilecpp backend
-              and raises NotImplementedError.
+        mode: Kernel selection mode (None, "static_persistent", "multi_wave_reload",
+              "multi_wave_cached")
+        offset: Offset to add to weight (default 0.0 for Llama, 1.0 for Gemma3)
         **kwargs: Additional arguments for backend-specific configurations
 
     Returns:
         Normalized tensor with same shape as input
     """
-    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, mode)
+    return RMSNorm.apply(input, normalized_shape, weight, eps, bias, mode, offset)
 
 
 class TileCppRMSNorm(nn.Module):
