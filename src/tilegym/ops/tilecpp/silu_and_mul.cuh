@@ -78,11 +78,78 @@ __tile_global__ void silu_and_mul_kernel(
 
 
 /**
+ * Backward pass for the fused SiLU and multiplication kernel.
+ *
+ *   db = dc * silu(a)
+ *   da = dc * b * (sigmoid(a) + silu(a) * (1 - sigmoid(a)))
+ *
+ * Template Parameters:
+ *   T: Element type (float, __half, __nv_bfloat16)
+ *   BLOCK_SIZE: Tile size (power of 2, >= hidden_size)
+ *
+ * Parameters:
+ *   grad_output: Upstream gradient (M, hidden_size)
+ *   input:       Original forward input (M, 2 * hidden_size)
+ *   grad_input:  OUT gradient w.r.t. input (M, 2 * hidden_size)
+ *   stride:      Input row stride (2 * hidden_size for row-major)
+ *   hidden_size: Size of each half
+ */
+template<typename T, int BLOCK_SIZE>
+__tile_global__ void silu_and_mul_backward_kernel(
+    const T* __restrict__ grad_output,
+    const T* __restrict__ input,
+    T* __restrict__ grad_input,
+    int stride,
+    int hidden_size
+) {
+    namespace ct = cuda::tiles;
+
+    using TxN = ct::tile<T, ct::shape<BLOCK_SIZE>>;
+    using i64xN = ct::tile<int64_t, ct::shape<BLOCK_SIZE>>;
+
+    int64_t pid = ct::bid().x;
+
+    auto grad_output_aligned = ct::assume_aligned<16>(grad_output);
+    auto input_aligned = ct::assume_aligned<16>(input);
+    auto grad_input_aligned = ct::assume_aligned<16>(grad_input);
+
+    auto input_row = input_aligned + pid * stride;
+    auto grad_input_row = grad_input_aligned + pid * stride;
+    auto grad_output_row = grad_output_aligned + pid * (stride / 2);
+
+    auto col_offsets = ct::iota<i64xN>();
+    auto mask = col_offsets < static_cast<int64_t>(hidden_size);
+    auto zero_pad = ct::full<TxN>(static_cast<T>(0));
+
+    auto dc_T = ct::load_masked(grad_output_row + col_offsets, mask, zero_pad);
+    auto dc = ct::element_cast<float>(dc_T);
+
+    auto a_T = ct::load_masked(input_row + col_offsets, mask, zero_pad);
+    auto a = ct::element_cast<float>(a_T);
+
+    auto b_T = ct::load_masked(input_row + hidden_size + col_offsets, mask, zero_pad);
+    auto b = ct::element_cast<float>(b_T);
+
+    auto denom = ct::add(1.0f, ct::exp(-a), ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
+    auto sigmoid_a = ct::div(1.0f, denom, ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+    auto silu_a = a * sigmoid_a;
+
+    auto db = dc * silu_a;
+    auto silu_grad = sigmoid_a + silu_a * ct::sub(1.0f, sigmoid_a,
+                                                  ct::round_ties_to_even_t{},
+                                                  ct::round_subnormals_to_zero_t{});
+    auto da = dc * b * silu_grad;
+
+    ct::store_masked(grad_input_row + col_offsets, ct::element_cast<T>(da), mask);
+    ct::store_masked(grad_input_row + hidden_size + col_offsets, ct::element_cast<T>(db), mask);
+}
+
+
+/**
  * Row-wise SiLU and multiplication kernel using tensor_span.
  *
  * Template Parameters:
  *   T: Element type (float, __half, __nv_bfloat16)
- *   M: Number of rows (batch_size)
  *   N: Number of columns (2 * hidden_size)
  *   HIDDEN_SIZE: Hidden size (N / 2) - compile-time constant
  *   TILE_SIZE: Tile size (power of 2, >= HIDDEN_SIZE)
@@ -91,7 +158,7 @@ __tile_global__ void silu_and_mul_kernel(
  *   input: Pointer to input data (M, N) where N = 2 * HIDDEN_SIZE
  *   output: Pointer to output data (M, HIDDEN_SIZE)
  */
-template<typename T, int M, int N, int HIDDEN_SIZE, int TILE_SIZE, int INPUT_STRIDE, int OUTPUT_STRIDE>
+template<typename T, int N, int HIDDEN_SIZE, int TILE_SIZE, int INPUT_STRIDE, int OUTPUT_STRIDE>
 __tile_global__ void silu_and_mul_kernel_row_wise(
     T* __restrict__ input,
     T* __restrict__ output

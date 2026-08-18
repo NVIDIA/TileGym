@@ -60,16 +60,6 @@ def _launch_fwd(
 
     BLOCK_K = _next_power_of_2(K_HEAD_DIM)
     BLOCK_V = min(64, _next_power_of_2(V_HEAD_DIM))
-    if BLOCK_K != K_HEAD_DIM:
-        raise NotImplementedError(
-            f"tilecpp recurrent_gated_delta_rule requires K head dim to be a power of two "
-            f"(got K={K_HEAD_DIM}); the kernel does unmasked tile loads of size BLOCK_K=next_pow2(K)."
-        )
-    if V_HEAD_DIM % BLOCK_V != 0:
-        raise NotImplementedError(
-            f"tilecpp recurrent_gated_delta_rule requires V head dim ({V_HEAD_DIM}) to be a multiple "
-            f"of BLOCK_V={BLOCK_V}; the kernel does unmasked tile loads of BLOCK_V-wide V tiles."
-        )
 
     # Template params: BLOCK_K, BLOCK_V, HAS_INITIAL_STATE, OUTPUT_FINAL_STATE, USE_QK_L2NORM
     bool_to_str = lambda b: "true" if b else "false"

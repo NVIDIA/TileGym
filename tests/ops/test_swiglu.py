@@ -86,12 +86,6 @@ class Test_SwiGLU(common.PyTestCase):
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
 
-        if backend == "tilecpp" and (hidden_size % 8 != 0 or hidden_size % 16 != 0):
-            pytest.skip(
-                "tilecpp swiglu_forward gather kernel requires hidden_size divisible by 8 "
-                "(and contiguous-row stride divisible by 16) for vectorised loads/stores."
-            )
-
         a = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
         b = torch.randn(batch_size, seq_len, hidden_size, device="cuda")
 
@@ -180,12 +174,6 @@ class Test_SwiGLU(common.PyTestCase):
             set_backend(backend)
         except Exception as e:
             pytest.skip(f"Backend is not supported: {e}")
-
-        if backend == "tilecpp" and (hidden_size % 8 != 0 or hidden_size % 16 != 0):
-            pytest.skip(
-                "tilecpp swiglu_forward gather kernel requires hidden_size divisible by 8 "
-                "(and contiguous-row stride divisible by 16) for vectorised loads/stores."
-            )
 
         device = torch.device("cuda")
         dtype = torch.float32

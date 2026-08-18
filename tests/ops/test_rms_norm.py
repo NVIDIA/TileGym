@@ -58,8 +58,8 @@ class Test_RMSNorm(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
-        # multi_wave_cached is only implemented in the cutile backend
-        if backend != "cutile" and mode == "multi_wave_cached":
+        # multi_wave_cached is only implemented in the cutile and tilecpp backends
+        if backend not in ("cutile", "tilecpp") and mode == "multi_wave_cached":
             pytest.skip(f"multi_wave_cached mode is not implemented for backend {backend}")
 
         if backend == "tilecpp" and mode == "static_persistent":
