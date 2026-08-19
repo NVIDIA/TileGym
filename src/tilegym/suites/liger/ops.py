@@ -514,6 +514,40 @@ def grpo_loss(
 
 
 @dispatch(
+    "liger.modulated_rms_norm",
+)
+def modulated_rms_norm(
+    X: torch.Tensor,
+    W: Optional[torch.Tensor],
+    scale: torch.Tensor,
+    shift: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+    offset: float = 0.0,
+    casting_mode: str = "llama",
+    in_place: bool = True,
+) -> torch.Tensor:
+    """
+    Modulated RMS Normalization: Y = (X / RMS(X) * (W + offset)) * (1 + scale) + shift.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/modulated_rms_norm.py
+
+    Args:
+        X: Input tensor of shape (*, H).
+        W: Affine scale weight of shape (H,), or None for no affine transform.
+        scale: Modulation scale, broadcast over rows. Shape (H,), (B, H), or (N, H).
+        shift: Optional modulation shift, same broadcast shape as scale.
+        eps: Epsilon for numerical stability.
+        offset: Constant added to W (e.g., 1.0 for Gemma). Default: 0.0
+        casting_mode: "llama" | "gemma" | "none" controls internal precision. Default: "llama"
+        in_place: Reuse dY buffer for dX in backward to save memory. Default: True
+
+    Returns:
+        Normalized output tensor of same shape as X.
+    """
+    raise NotImplementedError(f"modulated_rms_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.rms_norm",
 )
 def rms_norm(
