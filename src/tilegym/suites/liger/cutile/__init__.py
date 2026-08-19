@@ -17,6 +17,7 @@ from . import jsd  # noqa: F401
 from . import kl_div  # noqa: F401
 from . import layer_norm  # noqa: F401
 from . import llama4_rope  # noqa: F401
+from . import modulated_rms_norm  # noqa: F401
 from . import multi_token_attention  # noqa: F401
 from . import poly_norm  # noqa: F401
 from . import qwen2vl_mrope  # noqa: F401
@@ -39,6 +40,7 @@ from .jsd import JSDCuTileFunction  # noqa: F401
 from .kl_div import KLDivCuTileFunction  # noqa: F401
 from .layer_norm import LayerNormCuTileFunction  # noqa: F401
 from .llama4_rope import Llama4RopeCuTileFunction  # noqa: F401
+from .modulated_rms_norm import ModulatedRMSNormCuTileFunction  # noqa: F401
 from .multi_token_attention import MultiTokenAttentionCuTileFunction  # noqa: F401
 from .poly_norm import PolyNormCuTileFunction  # noqa: F401
 from .qwen2vl_mrope import Qwen2VLMRopeCuTileFunction  # noqa: F401
@@ -59,6 +61,7 @@ __all__ = [
     "KLDivCuTileFunction",
     "LayerNormCuTileFunction",
     "Llama4RopeCuTileFunction",
+    "ModulatedRMSNormCuTileFunction",
     "MultiTokenAttentionCuTileFunction",
     "SparsemaxCuTileFunction",
     "cross_entropy",
@@ -70,6 +73,7 @@ __all__ = [
     "kl_div",
     "layer_norm",
     "llama4_rope",
+    "modulated_rms_norm",
     "multi_token_attention",
     "Qwen2VLMRopeCuTileFunction",
     "RopeCuTileFunction",
