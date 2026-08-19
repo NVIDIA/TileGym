@@ -1095,6 +1095,29 @@ def benchmark(
     return res
 
 
+# Buffer fills and memcpy/memset are excluded from kernel_name ranking only:
+# their time still counts toward the total, but they are never the op under test.
+_HELPER_KERNEL_RE = re.compile(r"at::native::FillFunctor|^Memcpy|^Memset")
+
+
+def _pick_dominant_kernel(kernel_times, kernel_re_list=None):
+    """
+    Pick the kernel name to report from a self-time-desc sorted kernel_times
+    list: restrict to kernel_filter matches when given, prefer non-helper
+    kernels, then take the highest self-time. Falls back to the overall top
+    kernel if the preferred subsets are empty.
+    """
+    candidates = kernel_times
+    if kernel_re_list is not None:
+        matched = [k for k in candidates if any(r.search(k["name"]) for r in kernel_re_list)]
+        if matched:
+            candidates = matched
+    non_helper = [k for k in candidates if not _HELPER_KERNEL_RE.search(k["name"])]
+    if non_helper:
+        candidates = non_helper
+    return candidates[0]["name"] if candidates else None
+
+
 def _extract_kernel_times_from_profile(fn):
     """
     Run fn() once under torch.profiler (CUDA only). Return the dominant kernel
@@ -1125,8 +1148,7 @@ def _extract_kernel_times_from_profile(fn):
             )
         # sort by self time descending so dominant kernel is first
         kernel_times.sort(key=lambda x: x["self_time_us"], reverse=True)
-        best_key = kernel_times[0]["name"] if kernel_times else None
-        return best_key, kernel_times
+        return _pick_dominant_kernel(kernel_times), kernel_times
     except Exception:
         return None, []
 
@@ -1516,7 +1538,8 @@ def benchmark_fn_cupti(
     # can call key_averages() without launching an extra profiled run.
     # All kernels with self_device_time_total > 0 are captured regardless of
     # kernel_filter, giving a complete picture of every GPU kernel that ran.
-    # kernel_name is set to the single most time-consuming kernel overall.
+    # kernel_name however must describe what was timed: it is picked from the
+    # kernel_filter matches (when set), skipping helper kernels.
     cupti_kernel_times = []
     for _item in prof.key_averages():
         if _item.self_device_time_total > 0:
@@ -1529,7 +1552,7 @@ def benchmark_fn_cupti(
                 }
             )
     cupti_kernel_times.sort(key=lambda x: x["self_time_us"], reverse=True)
-    kernel_name = cupti_kernel_times[0]["name"] if cupti_kernel_times else None
+    kernel_name = _pick_dominant_kernel(cupti_kernel_times, kernel_re_list)
 
     res = {
         "mean": times.mean().item(),
