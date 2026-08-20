@@ -87,36 +87,44 @@ def _early_config_prune(named_args: dict, cfg: Config) -> bool:
 def _get_configs(is_backward=False):
     capability = torch.cuda.get_device_capability()
 
-    if capability in [(12, 0), (12, 1)]:
-        configs = [
-            Config(BLOCK_M=64, BLOCK_N=64, occupancy=2),
-        ]
-    elif capability == (9, 0):
-        configs = [
-            Config(BLOCK_M=BM, BLOCK_N=BN, occupancy=2, num_stages=s)
-            for BM in [64, 128]
-            for BN in [64, 128]
-            for s in [2, 3]
-        ]
-    elif capability == (8, 0):
-        configs = [
-            Config(BLOCK_M=BM, BLOCK_N=BN, occupancy=2, num_stages=s)
-            for BM in [64, 128]
-            for BN in [32, 64]
-            for s in [3, 4]
-        ]
-    else:
-        if is_backward:
+    if is_backward:
+        if capability in [(12, 0), (12, 1)]:
             configs = [
-                Config(BLOCK_M=128, BLOCK_N=128, num_stages=7),
+                Config(BLOCK_M=64, BLOCK_N=64, occupancy=2),
+            ]
+        elif capability == (9, 0):
+            configs = [
+                Config(BLOCK_M=BM, BLOCK_N=BN, occupancy=2, num_stages=s)
+                for BM in [64, 128]
+                for BN in [64, 128]
+                for s in [2, 3]
+            ]
+        elif capability == (8, 0):
+            configs = [
+                Config(BLOCK_M=BM, BLOCK_N=BN, occupancy=2, num_stages=s)
+                for BM in [64, 128]
+                for BN in [32, 64]
+                for s in [3, 4]
             ]
         else:
             configs = [
-                Config(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1),
-                Config(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2),
-                Config(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=2),
-                Config(BLOCK_M=256, BLOCK_N=128, num_ctas=2, occupancy=2),
+                Config(BLOCK_M=128, BLOCK_N=128, num_stages=7),
             ]
+    elif capability in [(12, 0), (12, 1)]:
+        configs = [
+            Config(BLOCK_M=64, BLOCK_N=64, num_ctas=1, occupancy=2),
+        ]
+    elif capability[0] == 9:
+        configs = [Config(BLOCK_M=BM, BLOCK_N=BN, num_ctas=1, occupancy=2) for BM in [64, 128] for BN in [64, 128]]
+    elif capability[0] < 9:
+        configs = [Config(BLOCK_M=BM, BLOCK_N=64, num_ctas=1, occupancy=2) for BM in [64, 128]]
+    else:
+        configs = [
+            Config(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=1),
+            Config(BLOCK_M=128, BLOCK_N=128, num_ctas=1, occupancy=2),
+            Config(BLOCK_M=256, BLOCK_N=128, num_ctas=1, occupancy=2),
+            Config(BLOCK_M=256, BLOCK_N=128, num_ctas=2, occupancy=2),
+        ]
 
     return SearchSpace(configs, predicate_fn=_early_config_prune)
 

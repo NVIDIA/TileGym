@@ -31,6 +31,7 @@ from .ops import jsd
 from .ops import kl_div
 from .ops import layer_norm
 from .ops import llama4_rope
+from .ops import modulated_rms_norm
 from .ops import multi_token_attention
 from .ops import poly_norm
 from .ops import qwen2vl_mrope
@@ -53,6 +54,7 @@ __all__ = [
     "kl_div",
     "layer_norm",
     "llama4_rope",
+    "modulated_rms_norm",
     "multi_token_attention",
     "qwen2vl_mrope",
     "rope",
