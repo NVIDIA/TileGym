@@ -35,8 +35,17 @@ except (ImportError, RuntimeError):
     triton = None  # type: ignore
 
 # Import CUDA Tile C++ backend if available
+tilecpp = None  # type: ignore
 if is_backend_available("tilecpp"):
-    from . import tilecpp
+    try:
+        from . import tilecpp
+    except (ImportError, RuntimeError):
+        import warnings
+
+        warnings.warn(
+            "tilecpp backend import failed, tilecpp operations will not be available"
+        )
+        tilecpp = None  # type: ignore
 
 # Import cutile-rs (Rust FFI) backend if available
 if is_backend_available("cutile-rs"):
@@ -73,7 +82,6 @@ from .ops import *
 __all__ = [
     # Export all operations from ops module
     # Backend implementations
-    "tilecpp",
     # Interface modules
     "attn_interface",
     "moe_interface",
@@ -89,6 +97,8 @@ __all__ = [
     "fused_moe",
 ]
 
-# Add cutile to exports only if successfully imported
+# Add backend submodules to exports only if successfully imported
 if cutile is not None:
     __all__.append("cutile")
+if tilecpp is not None:
+    __all__.append("tilecpp")
