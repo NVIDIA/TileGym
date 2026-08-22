@@ -194,11 +194,6 @@ def _persistent_layer_norm_fwd(x, weight, bias, eps, mean=None, rstd=None):
         rstd = torch.empty((N,), dtype=torch.float32, device=x.device)
 
     BLOCK_D = _next_power_of_2(D)
-    if BLOCK_D != D:
-        raise ValueError(
-            f"persistent_layer_norm requires the last dimension D to be a power of two "
-            f"(got D={D}); the kernel does unmasked tile loads of size BLOCK_D=next_pow2(D)."
-        )
 
     gpu_capability = torch.cuda.get_device_capability(x.device)
     enable_autotune = is_autotuning_enabled() and gpu_capability[0] >= 9
