@@ -930,6 +930,34 @@ class Test_FMHA_variant(common.PyTestCase):
                 seed=seed,
                 window_size=window_size,
             )
+        elif backend == "tilecpp":
+            if not is_backend_available("tilecpp"):
+                pytest.skip("TileCpp backend not available")
+            if dtype == torch.float8_e5m2:
+                pytest.skip("Skip float8_e5m2 due to tilecpp not support float8")
+            if dropout > 0:
+                pytest.skip("TileCpp does not support dropout with deterministic random generation")
+            if seq_len >= 2**13 and (bias_type == "matrix" or use_random_mask):
+                # 8192-seqlen matrix bias and random-mask shapes are outside the
+                # shape set this backend is validated on.
+                pytest.skip("TileCpp: 8192-seqlen matrix bias / random mask is not covered")
+            set_backend("tilecpp")
+            backend_fn = lambda: fmha_variant(
+                q=q,
+                k=k,
+                v=v,
+                q_lens=q_lens,
+                kv_lens=kv_lens,
+                scaling=sm_scale,
+                dropout=dropout,
+                layout=layout,
+                random_mask=triton_mask,
+                is_causal=is_causal,
+                bias=triton_bias,
+                bias_type=bias_type,
+                seed=seed,
+                window_size=window_size,
+            )
         else:
             pytest.skip(f"Backend {backend} not supported")
 
