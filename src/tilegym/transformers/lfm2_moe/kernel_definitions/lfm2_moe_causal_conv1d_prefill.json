@@ -21,19 +21,19 @@
   },
   "description": "LFM2-MoE prefill-path depthwise causal conv1d (kernel_size=3, no activation). Input is unpadded; the entry point left-pads by K-1 internally.",
   "inputs": {
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D",
+        "K"
+      ]
+    },
     "x": {
       "dtype": "bfloat16",
       "shape": [
         "B",
         "D",
         "T"
-      ]
-    },
-    "weight": {
-      "dtype": "bfloat16",
-      "shape": [
-        "D",
-        "K"
       ]
     }
   },
@@ -49,7 +49,7 @@
       ]
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2_moe/modeling_lfm2_moe.py (Lfm2MoeShortConv, causal_conv1d_fn path)\nimport torch\nimport torch.nn.functional as F\n\ndef run(x, weight):\n    B, D, L = x.shape\n    K = weight.shape[1]\n    xp = F.pad(x, (K - 1, 0))\n    w = weight.view(D, 1, K)\n    return F.conv1d(xp, w, groups=D)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/5eddc12edfaf8cafde8c9bae4ccb12f8a139b4f9/src/transformers/models/lfm2_moe/modeling_lfm2_moe.py#L385-L405\nimport torch\nimport torch.nn.functional as F\n\ndef run(x, weight, bias=None, activation=None, seq_idx=None):\n    # LFM2 short-conv fuses no activation and does not use packed sequences,\n    # so `activation` and `seq_idx` are always None at the call site.\n    _, hidden_size, seq_len = x.shape\n    padding = weight.shape[-1] - 1\n    out = F.conv1d(\n        x.to(weight.dtype),\n        weight=weight.unsqueeze(1),\n        bias=bias,\n        padding=padding,\n        groups=hidden_size,\n    )[:, :, :seq_len]\n    return out.to(x.dtype)",
   "tags": [
     "model:lfm2_moe",
     "stage:prefill",

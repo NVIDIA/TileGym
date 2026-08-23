@@ -96,10 +96,19 @@ class Lfm2MoeSparseMoeBlockTileGym(nn.Module):
         # Import here so the module import is cheap and doesn't run HF init
         # at TileGym import time.
         from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeExperts
-        from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeTopKRouter
 
         self.experts = Lfm2MoeExperts(config)
-        self.gate = Lfm2MoeTopKRouter(config)
+        try:
+            # transformers >= 5.13-style: dedicated router module.
+            from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeTopKRouter
+
+            self.gate = Lfm2MoeTopKRouter(config)
+        except ImportError:
+            # Older releases (e.g. 5.10.x) inline the router as a plain
+            # `nn.Linear(hidden_size, num_experts)` named `gate`. Both layouts
+            # expose the same state_dict key `gate.weight` of shape (E, H),
+            # and `_route` only needs `.weight`, so they are interchangeable.
+            self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
         self.use_expert_bias = config.use_expert_bias
         if self.use_expert_bias:
             # Match the stock buffer exactly (name / dtype / shape) so strict

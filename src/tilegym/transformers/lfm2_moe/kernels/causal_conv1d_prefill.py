@@ -26,7 +26,6 @@ def _causal_conv1d_prefill_kernel(
     x,  # (D, T_padded)  left-padded by K-1
     weight,  # (D, K=3)
     output,  # (D, T)
-    T: ConstInt,
     BLOCK_T: ConstInt,
 ):
     bid_d = ct.bid(0)
@@ -83,13 +82,18 @@ def lfm2_causal_conv1d_fn_cutile(
     w = weight.contiguous()
     output = torch.empty(D, L, dtype=x.dtype, device=x.device)
 
+    # NOTE: the sequence length is deliberately *not* passed as a ct.Constant --
+    # it would become part of the JIT specialization key and force a fresh cuTile
+    # compile for every distinct prompt length (a long-prompt stall). Bounds are
+    # handled by `check_bounds` on the gathers/scatter, so one compiled kernel
+    # serves all lengths.
     BLOCK_T = 256
     grid = (D, (L + BLOCK_T - 1) // BLOCK_T)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
         _causal_conv1d_prefill_kernel,
-        (x_padded, w, output, L, BLOCK_T),
+        (x_padded, w, output, BLOCK_T),
     )
 
     out = output.unsqueeze(0)  # (1, D, L)
