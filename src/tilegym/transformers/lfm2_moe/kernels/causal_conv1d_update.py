@@ -67,27 +67,39 @@ def lfm2_causal_conv1d_update_cutile(
 ) -> torch.Tensor:
     """Depthwise causal conv1d decode-update (drop-in for ``causal_conv1d_update``).
 
-    Matches the call contract of ``Lfm2MoeShortConv.forward``'s single-token
-    cached-decode branch, which passes the *3D* ``hidden_states`` tensor and
-    multiplies the result with the 3D gate ``C`` (``y = C * hidden_states``).
+    The call contract differs across transformers releases:
+
+    - transformers >= 5.13-style ``Lfm2MoeShortConv.forward`` passes the *3D*
+      ``hidden_states`` ``(B, D, 1)`` and multiplies the result with the 3D
+      gate ``C`` (``y = C * hidden_states``) -- the output must stay 3D.
+    - Older releases (e.g. 5.10.x, ``cuda_kernels_forward``) pass
+      ``Bx.squeeze(-1)`` -- a *2D* ``(B, D)`` input -- and unsqueeze the
+      result themselves.
+
+    Both conventions are accepted; the returned tensor keeps the input's rank.
 
     Args:
-        x: ``(B=1, D, L=1)`` current-timestep input (``B * x`` after the
-            in-proj chunk, still 3D at the call site).
+        x: ``(B=1, D, L=1)`` or ``(B=1, D)`` current-timestep input (``B * x``
+            after the in-proj chunk).
         conv_state: ``(B=1, D, K=3)`` rolling window cache, updated **in place**.
         weight: ``(D, K=3)`` depthwise conv weights.
         bias: optional ``(D,)`` bias (LFM2-8B-A1B uses ``conv_bias=False`` -> None).
         activation: accepted for signature compatibility; must be ``None``.
 
     Returns:
-        ``(B=1, D, 1)`` conv output for the current timestep (same rank as the
-        input, like the HF reference implementation).
+        Conv output for the current timestep, same rank as ``x``
+        (``(B=1, D, 1)`` or ``(B=1, D)``).
     """
     assert activation is None, "LFM2 short-conv fuses no activation; activation must be None"
 
-    B, D, L = x.shape
+    keep_3d = x.dim() == 3
+    if keep_3d:
+        B, D, L = x.shape
+        assert L == 1, f"lfm2_causal_conv1d_update_cutile is the single-token decode path, got L={L}"
+    else:
+        assert x.dim() == 2, f"expected x of rank 2 or 3, got shape {tuple(x.shape)}"
+        B, D = x.shape
     assert B == 1, "lfm2_causal_conv1d_update_cutile only supports B=1"
-    assert L == 1, f"lfm2_causal_conv1d_update_cutile is the single-token decode path, got L={L}"
     K = weight.shape[1]
     assert K == 3, f"expected kernel_size 3, got {K}"
 
@@ -105,7 +117,9 @@ def lfm2_causal_conv1d_update_cutile(
         (x_1d, cs, w, output, BLOCK_D),
     )
 
-    out = output.view(1, D, 1)  # (1, D, 1), matching the HF fallback's output rank
+    # Match the input rank (5.13+ passes 3D and gates directly; <= 5.10 passes
+    # 2D and unsqueezes at the call site).
+    out = output.view(1, D, 1) if keep_3d else output.unsqueeze(0)
     if bias is not None:
-        out = out + bias.view(1, -1, 1)
+        out = out + (bias.view(1, -1, 1) if keep_3d else bias.view(1, -1))
     return out

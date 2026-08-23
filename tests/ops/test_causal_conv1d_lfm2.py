@@ -31,9 +31,14 @@ def _ref_update(x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor)
 
     Mirrors HF's fallback ``causal_conv1d_update`` on the single-token decode
     path: ``x`` is 3D ``(B, D, 1)`` and the output keeps that rank.
+
+    The multiply-accumulate is done in float32 to match the kernel under test
+    (which upcasts to f32 internally, like the CUDA causal-conv1d package) --
+    a pure-bf16 reference rounds each product to bf16 before summing and is
+    *less* accurate than the kernel, showing up as spurious 1-2 ulp diffs.
     """
     rolled = torch.cat([conv_state[..., 1:], x], dim=-1)
-    out = (rolled * weight.unsqueeze(0)).sum(-1, keepdim=True)
+    out = (rolled.float() * weight.float().unsqueeze(0)).sum(-1, keepdim=True).to(x.dtype)
     return out, rolled
 
 
@@ -80,6 +85,31 @@ def test_update(D, dtype):
     # output matches reference
     torch.testing.assert_close(out.float(), ref_out.float(), atol=atol, rtol=1e-3)
     # conv_state was rolled in place to [s1, s2, x]
+    torch.testing.assert_close(cs.float(), ref_state.float(), atol=atol, rtol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_update_2d_legacy_call(dtype):
+    """Older transformers (<= 5.10.x, `cuda_kernels_forward`) call the update
+    with a 2D ``(B, D)`` input (``Bx.squeeze(-1)``) and unsqueeze the result
+    at the call site. The wrapper must accept that convention too."""
+    from tilegym.transformers.lfm2_moe.kernels.causal_conv1d_update import lfm2_causal_conv1d_update_cutile
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    D = 512
+    x = torch.randn(1, D, 1, dtype=dtype, device=device)
+    conv_state = torch.randn(1, D, 3, dtype=dtype, device=device)
+    weight = torch.randn(D, 3, dtype=dtype, device=device)
+
+    ref_out, ref_state = _ref_update(x, conv_state, weight)
+
+    cs = conv_state.clone()
+    out = lfm2_causal_conv1d_update_cutile(x.squeeze(-1), cs, weight)  # 2D legacy call
+
+    assert out.shape == (1, D)  # rank follows the input
+    atol = 1e-4 if dtype == torch.float32 else 2e-2
+    torch.testing.assert_close(out.float(), ref_out.squeeze(-1).float(), atol=atol, rtol=1e-3)
     torch.testing.assert_close(cs.float(), ref_state.float(), atol=atol, rtol=1e-3)
 
 
