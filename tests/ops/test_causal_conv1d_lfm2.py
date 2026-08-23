@@ -44,7 +44,7 @@ def _ref_update(x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor)
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("D, L", [(2048, 16), (2048, 128), (256, 7), (300, 33)])
-def test_prefill(D, L, dtype):
+def test_op_prefill(D, L, dtype):
     from tilegym.transformers.lfm2_moe.kernels.causal_conv1d_prefill import lfm2_causal_conv1d_fn_cutile
 
     torch.manual_seed(0)
@@ -62,7 +62,7 @@ def test_prefill(D, L, dtype):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("D", [2048, 256, 300])
-def test_update(D, dtype):
+def test_op_update(D, dtype):
     """Exercise the kernel with the exact 3D call contract of
     ``Lfm2MoeShortConv.forward``'s cached-decode branch: x is ``(B, D, 1)``
     and the output must be ``(B, D, 1)`` (it is multiplied with the 3D gate
@@ -89,7 +89,7 @@ def test_update(D, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_update_2d_legacy_call(dtype):
+def test_op_update_2d_legacy_call(dtype):
     """Older transformers (<= 5.10.x, `cuda_kernels_forward`) call the update
     with a 2D ``(B, D)`` input (``Bx.squeeze(-1)``) and unsqueeze the result
     at the call site. The wrapper must accept that convention too."""
@@ -113,7 +113,7 @@ def test_update_2d_legacy_call(dtype):
     torch.testing.assert_close(cs.float(), ref_state.float(), atol=atol, rtol=1e-3)
 
 
-def test_prefill_matches_update_stepwise():
+def test_op_prefill_matches_update_stepwise():
     """A full-sequence prefill should equal stepping the update kernel token by
     token from a zero-initialized K-wide state (end-to-end conv consistency)."""
     from tilegym.transformers.lfm2_moe.kernels.causal_conv1d_prefill import lfm2_causal_conv1d_fn_cutile
