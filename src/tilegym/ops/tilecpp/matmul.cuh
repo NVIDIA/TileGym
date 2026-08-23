@@ -17,6 +17,8 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cuda_tf32.h>
+#include <type_traits>
 
 /**
  * Matrix Multiplication Kernel with transpose support
@@ -53,6 +55,7 @@ __tile_global__ void matmul_kernel(
     constexpr int num_bid_m = (M + TILE_SIZE_M - 1) / TILE_SIZE_M;
     constexpr int num_bid_n = (N + TILE_SIZE_N - 1) / TILE_SIZE_N;
     constexpr int num_bid_in_group = GROUP_SIZE_M * num_bid_n;
+    constexpr bool output_tiles_are_full = (M % TILE_SIZE_M == 0) && (N % TILE_SIZE_N == 0);
 
     // 2D swizzle for L2 cache reuse
     int bidval = ct::bid().x;
@@ -68,6 +71,7 @@ __tile_global__ void matmul_kernel(
     using BTile = ct::tile<T, ct::shape<TILE_SIZE_K, TILE_SIZE_N>>;
     using AccTile = ct::tile<float, ct::shape<TILE_SIZE_M, TILE_SIZE_N>>;
     using CTile = ct::tile<T, ct::shape<TILE_SIZE_M, TILE_SIZE_N>>;
+    using MmaType = std::conditional_t<std::is_same_v<T, float>, __nv_tf32, T>;
 
     // Initialize accumulator
     AccTile acc = ct::zeros<AccTile>();
@@ -81,8 +85,8 @@ __tile_global__ void matmul_kernel(
         auto pB = ct::partition_view{ct::tensor_span{B, ct::extents<uint32_t, K, N>{}}, ct::shape<TILE_SIZE_K, TILE_SIZE_N>{}};
 
         for (auto k : ct::irange(0, num_tiles_k)) {
-            auto a = pA.template load_masked<zero_pad>(bidx, k);
-            auto b = pB.template load_masked<zero_pad>(k, bidy);
+            auto a = ct::element_cast<MmaType>(pA.template load_masked<zero_pad>(bidx, k));
+            auto b = ct::element_cast<MmaType>(pB.template load_masked<zero_pad>(k, bidy));
             acc = ct::mma(a, b, acc);
         }
     } else if constexpr (TRANSPOSE_A && !TRANSPOSE_B) {
@@ -92,8 +96,8 @@ __tile_global__ void matmul_kernel(
 
         for (auto k : ct::irange(0, num_tiles_k)) {
             auto a_raw = pA.template load_masked<zero_pad>(k, bidx);
-            auto b = pB.template load_masked<zero_pad>(k, bidy);
-            auto a = ct::transpose(a_raw);  // [TILE_K, TILE_M] -> [TILE_M, TILE_K]
+            auto a = ct::element_cast<MmaType>(ct::transpose(a_raw));  // [TILE_K, TILE_M] -> [TILE_M, TILE_K]
+            auto b = ct::element_cast<MmaType>(pB.template load_masked<zero_pad>(k, bidy));
             acc = ct::mma(a, b, acc);
         }
     } else if constexpr (!TRANSPOSE_A && TRANSPOSE_B) {
@@ -102,9 +106,9 @@ __tile_global__ void matmul_kernel(
         auto pB = ct::partition_view{ct::tensor_span{B, ct::extents<uint32_t, N, K>{}}, ct::shape<TILE_SIZE_N, TILE_SIZE_K>{}};
 
         for (auto k : ct::irange(0, num_tiles_k)) {
-            auto a = pA.template load_masked<zero_pad>(bidx, k);
+            auto a = ct::element_cast<MmaType>(pA.template load_masked<zero_pad>(bidx, k));
             auto b_raw = pB.template load_masked<zero_pad>(bidy, k);
-            auto b = ct::transpose(b_raw);  // [TILE_N, TILE_K] -> [TILE_K, TILE_N]
+            auto b = ct::element_cast<MmaType>(ct::transpose(b_raw));  // [TILE_N, TILE_K] -> [TILE_K, TILE_N]
             acc = ct::mma(a, b, acc);
         }
     } else {
@@ -115,8 +119,8 @@ __tile_global__ void matmul_kernel(
         for (auto k : ct::irange(0, num_tiles_k)) {
             auto a_raw = pA.template load_masked<zero_pad>(k, bidx);
             auto b_raw = pB.template load_masked<zero_pad>(bidy, k);
-            auto a = ct::transpose(a_raw);  // [TILE_K, TILE_M] -> [TILE_M, TILE_K]
-            auto b = ct::transpose(b_raw);  // [TILE_N, TILE_K] -> [TILE_K, TILE_N]
+            auto a = ct::element_cast<MmaType>(ct::transpose(a_raw));  // [TILE_K, TILE_M] -> [TILE_M, TILE_K]
+            auto b = ct::element_cast<MmaType>(ct::transpose(b_raw));  // [TILE_N, TILE_K] -> [TILE_K, TILE_N]
             acc = ct::mma(a, b, acc);
         }
     }
@@ -125,5 +129,10 @@ __tile_global__ void matmul_kernel(
     auto pC = ct::partition_view{ct::tensor_span{C, ct::extents<uint32_t, M, N>{}}, ct::shape<TILE_SIZE_M, TILE_SIZE_N>{}};
 
     // Cast and store result
-    pC.store(ct::element_cast<T>(acc), bidx, bidy);
+    auto result = ct::element_cast<T>(acc);
+    if constexpr (output_tiles_are_full) {
+        pC.store(result, bidx, bidy);
+    } else {
+        pC.store_masked(result, bidx, bidy);
+    }
 }

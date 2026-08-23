@@ -38,6 +38,11 @@ _silu_and_mul_kernel_row_wise = TileCppKernel(
     kernel_name="silu_and_mul_kernel_row_wise",
 )
 
+_silu_and_mul_backward_kernel = TileCppKernel(
+    source_path=Path(__file__).parent / "silu_and_mul.cuh",
+    kernel_name="silu_and_mul_backward_kernel",
+)
+
 
 def ensure_contiguous(fn):
     @functools.wraps(fn)
@@ -123,15 +128,14 @@ def _launch_silu_and_mul_kernel_row_wise(
     dump_kernel_types("silu_and_mul_kernel_row_wise", input_tensor, output_tensor)
     dtype = input_tensor.dtype
 
-    # Template params: M, N, HIDDEN_SIZE, TILE_SIZE, INPUT_STRIDE, OUTPUT_STRIDE
-    M = n_rows
+    # Template params: N, HIDDEN_SIZE, TILE_SIZE, INPUT_STRIDE, OUTPUT_STRIDE
     N = input_tensor.shape[1]  # 2 * hidden_size
     INPUT_STRIDE = input_tensor.stride(0)
     OUTPUT_STRIDE = output_tensor.stride(0)
 
     kernel, _, _ = _silu_and_mul_kernel_row_wise.get_kernel(
         dtype=dtype,
-        template_params=[M, N, hidden_size, tile_size, INPUT_STRIDE, OUTPUT_STRIDE],
+        template_params=[N, hidden_size, tile_size, INPUT_STRIDE, OUTPUT_STRIDE],
         signature="{T}*, {T}*",
     )
 
@@ -149,6 +153,62 @@ def _launch_silu_and_mul_kernel_row_wise(
     )
 
 
+def _launch_silu_and_mul_backward_kernel(
+    grad_output: torch.Tensor,
+    input_tensor: torch.Tensor,
+    grad_input: torch.Tensor,
+    stride: int,
+    hidden_size: int,
+    n_rows: int,
+    block_size: int,
+):
+    """Launch the SiLU and Mul backward kernel."""
+    dump_kernel_types("silu_and_mul_backward_kernel", grad_output, input_tensor, grad_input)
+    dtype = input_tensor.dtype
+
+    kernel, _, _ = _silu_and_mul_backward_kernel.get_kernel(
+        dtype=dtype,
+        template_params=[block_size],
+        signature="const {T}*, const {T}*, {T}*, int, int",
+    )
+
+    _silu_and_mul_backward_kernel.launch(
+        grid=(n_rows,),
+        kernel=kernel,
+        args=[
+            np.uint64(grad_output.data_ptr()),
+            np.uint64(input_tensor.data_ptr()),
+            np.uint64(grad_input.data_ptr()),
+            np.int32(stride),
+            np.int32(hidden_size),
+        ],
+    )
+
+
+def _silu_and_mul_backward(grad_output: torch.Tensor, input: torch.Tensor) -> torch.Tensor:
+    """Gradient w.r.t. the concatenated input, shape (..., 2 * hidden_size)."""
+    original_shape = input.shape
+    hidden_size = original_shape[-1] // 2
+
+    input_flat = input.contiguous().view(-1, original_shape[-1])
+    grad_output_flat = grad_output.contiguous().view(-1, hidden_size)
+    n_rows = input_flat.shape[0]
+
+    grad_input = torch.empty_like(input_flat)
+
+    _launch_silu_and_mul_backward_kernel(
+        grad_output_flat,
+        input_flat,
+        grad_input,
+        stride=input_flat.stride(0),
+        hidden_size=hidden_size,
+        n_rows=n_rows,
+        block_size=calculate_settings(hidden_size),
+    )
+
+    return grad_input.view(*original_shape)
+
+
 # =============================================================================
 # Public Interface
 # =============================================================================
@@ -156,12 +216,14 @@ def _launch_silu_and_mul_kernel_row_wise(
 
 class _SiluAndMul(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, out=None, kernel_type="row_wise", **kwargs):
-        return _silu_and_mul_impl(input, out=out, kernel_type=kernel_type, **kwargs)
+    def forward(ctx, input, out=None, kernel_type="row_wise"):
+        ctx.save_for_backward(input)
+        return _silu_and_mul_impl(input, out=out, kernel_type=kernel_type)
 
     @staticmethod
-    def backward(ctx, *grad_outputs):
-        raise NotImplementedError("Backward pass for tilecpp silu_and_mul is not implemented.")
+    def backward(ctx, grad_output):
+        (input,) = ctx.saved_tensors
+        return _silu_and_mul_backward(grad_output, input), None, None
 
 
 @register_impl("silu_and_mul", backend="tilecpp")
@@ -182,12 +244,11 @@ def silu_and_mul(
 
     Returns:
         torch.Tensor: Output tensor of shape (..., hidden_size)
-
-    Note:
-        Backward pass is not implemented and will raise NotImplementedError on autograd.
     """
     if input.requires_grad:
-        return _SiluAndMul.apply(input, out, kernel_type, **kwargs)
+        if out is not None:
+            raise ValueError("out parameter not supported when requires_grad=True")
+        return _SiluAndMul.apply(input, out, kernel_type)
     return _silu_and_mul_impl(input, out=out, kernel_type=kernel_type, **kwargs)
 
 

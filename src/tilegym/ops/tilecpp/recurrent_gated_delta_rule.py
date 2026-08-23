@@ -15,6 +15,7 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
+from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 _fwd_kernel = TileCppKernel(
@@ -50,6 +51,8 @@ def _launch_fwd(
     use_qk_l2norm,
 ):
     dtype = query.dtype
+    g_cpp_type = get_cpp_type(g.dtype)
+    beta_cpp_type = get_cpp_type(beta.dtype)
     dump_kernel_types("recurrent_gated_delta_rule_fwd_kernel", query, key, value)
 
     B, T, H, K_HEAD_DIM = query.shape
@@ -57,16 +60,6 @@ def _launch_fwd(
 
     BLOCK_K = _next_power_of_2(K_HEAD_DIM)
     BLOCK_V = min(64, _next_power_of_2(V_HEAD_DIM))
-    if BLOCK_K != K_HEAD_DIM:
-        raise NotImplementedError(
-            f"tilecpp recurrent_gated_delta_rule requires K head dim to be a power of two "
-            f"(got K={K_HEAD_DIM}); the kernel does unmasked tile loads of size BLOCK_K=next_pow2(K)."
-        )
-    if V_HEAD_DIM % BLOCK_V != 0:
-        raise NotImplementedError(
-            f"tilecpp recurrent_gated_delta_rule requires V head dim ({V_HEAD_DIM}) to be a multiple "
-            f"of BLOCK_V={BLOCK_V}; the kernel does unmasked tile loads of BLOCK_V-wide V tiles."
-        )
 
     # Template params: BLOCK_K, BLOCK_V, HAS_INITIAL_STATE, OUTPUT_FINAL_STATE, USE_QK_L2NORM
     bool_to_str = lambda b: "true" if b else "false"
@@ -80,8 +73,8 @@ def _launch_fwd(
 
     kernel, _, _ = _fwd_kernel.get_kernel(
         dtype=dtype,
-        template_params=template_params,
-        signature="const {T}*, const {T}*, const {T}*, const {T}*, const {T}*, {T}*, const float*, float*, float, int, int, int, int, int",
+        template_params=[g_cpp_type, beta_cpp_type] + list(template_params),
+        signature=f"const {{T}}*, const {{T}}*, const {{T}}*, const {g_cpp_type}*, const {beta_cpp_type}*, {{T}}*, const float*, float*, float, int, int, int, int, int",
     )
 
     grid = (B * H, (V_HEAD_DIM + BLOCK_V - 1) // BLOCK_V, 1)

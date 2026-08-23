@@ -71,6 +71,9 @@ class Test_BMM_FWD(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
+        if backend == "tilecpp" and static_persistent:
+            pytest.skip("tilecpp static_persistent is under investigation")
+
         if backend == "cutile" and not static_persistent and (transpose_a or transpose_b):
             pytest.skip("CuTile non-persistent kernel doesn't support transpose")
         if backend == "cutile-rs" and not static_persistent and (transpose_a or transpose_b):

@@ -45,7 +45,11 @@ class Test_FlashInfer_Matmul_Alpha_Beta(common.PyTestCase):
     @pytest.mark.parametrize("m, n, k", [(4096, 4096, 4096), (8192, 8192, 8192)])
     @pytest.mark.parametrize(
         "dtype, out_dtype",
-        [(torch.float16, torch.float16), (torch.bfloat16, torch.bfloat16), (torch.float8_e4m3fn, torch.bfloat16)],
+        [
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+            (torch.float8_e4m3fn, torch.bfloat16),
+        ],
     )
     @pytest.mark.parametrize("trans_a, trans_b", [(False, True)])
     @pytest.mark.parametrize("alpha, beta", [(1.0, 0.0), (1.5, 2.0)])

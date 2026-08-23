@@ -18,6 +18,9 @@ import numpy as np
 import torch
 
 from tilegym.backend import register_impl
+from tilegym.ops.tilecpp.autotuner import Config
+from tilegym.ops.tilecpp.autotuner import TileCppAutotuner
+from tilegym.ops.tilecpp.autotuner import autotune
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
 from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._cuda_utils import make_kernel_args
@@ -44,6 +47,67 @@ BLOCK_SIZE_M = 128
 BLOCK_SIZE_N = 128
 BLOCK_SIZE_K = 32
 GROUP_SIZE_M = 8
+
+
+def _bmm_autotune_configs():
+    gpu_capability = torch.cuda.get_device_capability()
+
+    if gpu_capability in [(12, 0), (12, 1)]:
+        return [
+            Config(
+                TILE_M=tile_m,
+                TILE_N=tile_n,
+                TILE_K=tile_k,
+                GROUP_SIZE_M=8,
+                occupancy=occupancy,
+                num_ctas=1,
+            )
+            for tile_m in [64, 128]
+            for tile_n in [64, 128]
+            for tile_k in [32, 64]
+            for occupancy in [1, 2, 4]
+        ]
+    if gpu_capability[0] < 9:
+        return [
+            Config(
+                TILE_M=tile_m,
+                TILE_N=tile_n,
+                TILE_K=tile_k,
+                GROUP_SIZE_M=8,
+                occupancy=occupancy,
+                num_ctas=1,
+            )
+            for tile_m in [64, 128]
+            for tile_n in [64, 128]
+            for tile_k in [32, 64, 128]
+            for occupancy in [1, 2]
+        ]
+    if gpu_capability == (9, 0):
+        return [
+            Config(
+                TILE_M=tile_m,
+                TILE_N=tile_n,
+                TILE_K=64,
+                GROUP_SIZE_M=8,
+                occupancy=occupancy,
+                num_ctas=2,
+            )
+            for tile_m in [64, 128, 256]
+            for tile_n in [64, 128, 256]
+            for occupancy in [1, 2]
+        ]
+    return [
+        Config(
+            TILE_M=tile_m,
+            TILE_N=256,
+            TILE_K=64,
+            GROUP_SIZE_M=8,
+            occupancy=1,
+            num_ctas=2,
+        )
+        for tile_m in [128, 256]
+    ]
+
 
 # =============================================================================
 # Kernel Launch Function
@@ -224,6 +288,70 @@ def _launch_bmm_static_persistent_kernel(
     )
 
 
+@autotune(search_space=_bmm_autotune_configs())
+def _autotune_bmm_static_persistent(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    Q: int,
+    M: int,
+    N: int,
+    K: int,
+    transpose_a: bool,
+    transpose_b: bool,
+    autotuner: TileCppAutotuner | None = None,
+):
+    key = (
+        "tilecpp_bmm_static_persistent",
+        Q,
+        M,
+        N,
+        K,
+        transpose_a,
+        transpose_b,
+        a.dtype,
+        str(a.device),
+    )
+    named_args = {"Q": Q, "M": M, "N": N}
+
+    def launch_fn(cfg: Config):
+        _launch_bmm_static_persistent_kernel(
+            a,
+            b,
+            c,
+            Q,
+            M,
+            N,
+            K,
+            transpose_a,
+            transpose_b,
+            block_m=cfg.TILE_M,
+            block_n=cfg.TILE_N,
+            block_k=cfg.TILE_K,
+            group_m=cfg.GROUP_SIZE_M,
+            occupancy=cfg.occupancy,
+            num_ctas=cfg.num_ctas,
+        )
+
+    def grid_fn(args: dict, cfg: Config) -> tuple[int, ...]:
+        num_sms = torch.cuda.get_device_properties(a.device).multi_processor_count
+        num_tiles_m = (args["M"] + cfg.TILE_M - 1) // cfg.TILE_M
+        num_tiles_n = (args["N"] + cfg.TILE_N - 1) // cfg.TILE_N
+        total_tiles = num_tiles_m * num_tiles_n * args["Q"]
+        grid_size = min(num_sms // cfg.num_ctas, total_tiles) * cfg.occupancy
+        return (grid_size,)
+
+    autotuner(
+        torch.cuda.current_stream(),
+        key=key,
+        launch_fn=launch_fn,
+        grid_fn=grid_fn,
+        named_args=named_args,
+    )
+
+    return c
+
+
 # =============================================================================
 # Public Interface
 # =============================================================================
@@ -353,23 +481,14 @@ def bmm_static_persistent(a, b, transpose_a=False, transpose_b=False, **kwargs):
     """
     Static persistent batch matrix multiplication.
 
-    Uses static persistent scheduling with GPU-specific default configurations:
-    - B200 (sm_120/121): TILE_M=128, TILE_N=128, TILE_K=64, occupancy=2, num_ctas=1
-    - H100 (sm_90): TILE_M=128, TILE_N=128, TILE_K=64, occupancy=1, num_ctas=1
-    - GB100 (sm_100): TILE_M=256, TILE_N=256, TILE_K=64, occupancy=1, num_ctas=2
+    The tile configuration is always chosen by the autotuner, whose search space
+    is GPU-dependent.
 
     Args:
         a: Input tensor A with shape (Q, M, K) or (Q, K, M) if transposed
         b: Input tensor B with shape (Q, K, N) or (Q, N, K) if transposed
         transpose_a: Whether to transpose A
         transpose_b: Whether to transpose B
-        **kwargs: Optional kernel configuration parameters:
-            - TILE_M: M-dimension tile size (default: GPU-dependent)
-            - TILE_N: N-dimension tile size (default: GPU-dependent)
-            - TILE_K: K-dimension tile size (default: 64)
-            - GROUP_SIZE_M: Number of M-tiles to group (default: 8)
-            - occupancy: Occupancy multiplier (default: GPU-dependent)
-            - num_ctas: Number of CTAs per kernel (default: GPU-dependent)
 
     Returns:
         Output tensor C with shape (Q, M, N)
@@ -392,62 +511,9 @@ def bmm_static_persistent(a, b, transpose_a=False, transpose_b=False, **kwargs):
     assert a.is_contiguous(), "matrix A must be contiguous"
     assert b.is_contiguous(), "matrix B must be contiguous"
 
-    capability = torch.cuda.get_device_capability()
-    if capability in [(12, 0), (12, 1)]:
-        # B200: Smaller tiles, num_ctas=1, higher occupancy
-        default_config = {
-            "TILE_M": 128,
-            "TILE_N": 128,
-            "TILE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_ctas": 1,
-            "occupancy": 2,
-        }
-    elif capability == (9, 0):
-        # H100: Medium tiles
-        default_config = {
-            "TILE_M": 128,
-            "TILE_N": 128,
-            "TILE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_ctas": 1,
-            "occupancy": 1,
-        }
-    else:
-        # Other GPUs (e.g., GB100): Larger tiles, num_ctas=2
-        default_config = {
-            "TILE_M": 256,
-            "TILE_N": 256,
-            "TILE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_ctas": 2,
-            "occupancy": 1,
-        }
-
-    # Override defaults with any user-provided configs
-    config = {**default_config, **kwargs}
-
     c = torch.empty((Q, M, N), device=a.device, dtype=a.dtype)
 
-    _launch_bmm_static_persistent_kernel(
-        a,
-        b,
-        c,
-        Q,
-        M,
-        N,
-        K,
-        transpose_a,
-        transpose_b,
-        block_m=config["TILE_M"],
-        block_n=config["TILE_N"],
-        block_k=config["TILE_K"],
-        group_m=config["GROUP_SIZE_M"],
-        occupancy=config["occupancy"],
-        num_ctas=config["num_ctas"],
-    )
-
-    return c
+    return _autotune_bmm_static_persistent(a, b, c, Q, M, N, K, transpose_a, transpose_b)
 
 
 # Register the implementation

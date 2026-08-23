@@ -5,10 +5,12 @@
 """CuTile fused cross-entropy with optional in-place gradient writes."""
 
 import math
+from types import SimpleNamespace
 from typing import Optional
 
 import cuda.tile as ct
 import torch
+from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
@@ -22,6 +24,76 @@ MAX_FUSED_SIZE = 65536 // 2
 # ct.exp2(x * LOG2E) avoids a slower exp path in the streaming reductions.
 LOG2E = 1.4426950408889634
 
+# Autotune space for the streaming row-reduction over the vocab. num_worker_warps=8
+# (256 threads) is the max cuTile allows and is the sweet spot for the per-row
+# reduction (nww=4 halves parallelism); occupancy trades off with BLOCK_SIZE — a
+# large whole-vocab tile favours occ=2, a small chunked tile favours occ=4. The
+# best pair is shape-dependent, so exhaustive_search picks it per (n_cols, BLOCK).
+_CE_TUNE_CONFIGS = [SimpleNamespace(occ=o, nww=n) for o in [2, 4] for n in [4, 8]]
+_CE_TUNE_CACHE: dict = {}
+
+
+def _get_tuned_ce_kernel(n_cols, block_size, dtype, device):
+    """Autotune occupancy+nww per (n_cols, BLOCK_SIZE, dtype); cache the tuned kernel.
+
+    Tuned on a fresh stream over throwaway tensors (the kernel writes gradients in
+    place, and the autograd backward stream is not safe for exhaustive_search). The
+    reduction cost is driven by n_cols/BLOCK_SIZE, so the tuned hints apply across
+    all output-flag combos launched with the same (n_cols, BLOCK_SIZE, dtype).
+    """
+    key = (int(n_cols), int(block_size), dtype)
+    if key in _CE_TUNE_CACHE:
+        return _CE_TUNE_CACHE[key]
+
+    tune_rows = 2048  # enough CTAs to fill the GPU while keeping the tune tensor small
+    tune_stream = torch.cuda.Stream(device=device)
+    inp = torch.zeros(tune_rows, int(n_cols), dtype=dtype, device=device)
+    tgt = torch.zeros(tune_rows, dtype=torch.int64, device=device)
+    loss = torch.zeros(tune_rows, dtype=dtype, device=device)
+    d_f32 = torch.zeros(1, dtype=torch.float32, device=device)
+    d_i64 = torch.zeros(1, dtype=torch.int64, device=device)
+    d_w = torch.zeros(1, dtype=torch.float32, device=device)
+
+    def args_fn(_cfg):
+        return (
+            inp,
+            tgt,
+            d_w,
+            loss,
+            d_f32,
+            d_f32,
+            d_i64,
+            int(n_cols),
+            1.0,
+            float(tune_rows),
+            0.0,
+            -100,
+            0.0,
+            0.0,
+            0.0,
+            int(block_size),
+            1,  # HAS_GRADIENTS=1 (the expensive path)
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,  # RETURN_PREDICTED_TOKENS=0
+        )
+
+    result = exhaustive_search(
+        _CE_TUNE_CONFIGS,
+        tune_stream,
+        lambda cfg: (tune_rows, 1, 1),
+        _liger_cross_entropy_kernel,
+        args_fn,
+        lambda cfg: {"occupancy": cfg.occ, "num_worker_warps": cfg.nww},
+        quiet=True,
+    )
+    best = result.best.config
+    _CE_TUNE_CACHE[key] = _liger_cross_entropy_kernel.replace_hints(occupancy=best.occ, num_worker_warps=best.nww)
+    return _CE_TUNE_CACHE[key]
+
 
 def _select_block_size(vocab_size: int, device=None) -> int:
     cap = torch.cuda.get_device_capability(device)
@@ -29,7 +101,7 @@ def _select_block_size(vocab_size: int, device=None) -> int:
     return min(max_block, min(MAX_FUSED_SIZE, next_power_of_2(vocab_size)))
 
 
-@ct.kernel(occupancy=4)
+@ct.kernel
 def _liger_cross_entropy_kernel(
     input,
     target,
@@ -374,10 +446,11 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
         dummy_weight = torch.zeros(1, dtype=torch.float32, device=_input.device)
 
         grid = (num_rows, 1, 1)
+        _ce_kernel = _get_tuned_ce_kernel(vocab_size, BLOCK_SIZE, _input.dtype, _input.device)
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            _liger_cross_entropy_kernel,
+            _ce_kernel,
             (
                 _input,
                 target,

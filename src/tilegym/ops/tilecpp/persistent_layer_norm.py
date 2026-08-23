@@ -19,6 +19,7 @@ from tilegym.ops.tilecpp.autotuner import TileCppAutotuner
 from tilegym.ops.tilecpp.autotuner import autotune
 from tilegym.ops.tilecpp.autotuner import is_autotuning_enabled
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
+from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 _fwd_kernel = TileCppKernel(
@@ -64,6 +65,8 @@ def _get_default_persistent_layer_norm_configs():
 
 def _launch_fwd(x, y, weight, bias, mean, rstd, eps, compute_mean_and_rstd, block_n, block_d):
     dtype = x.dtype
+    w_cpp_type = get_cpp_type(weight.dtype)
+    b_cpp_type = get_cpp_type(bias.dtype)
     dump_kernel_types("persistent_layer_norm_fwd_kernel", x, weight, bias)
 
     N, D = x.shape
@@ -92,8 +95,8 @@ def _launch_fwd(x, y, weight, bias, mean, rstd, eps, compute_mean_and_rstd, bloc
 
     kernel, _, _ = _fwd_kernel.get_kernel(
         dtype=dtype,
-        template_params=template_params,
-        signature=("const {T}*, {T}*, const {T}*, const {T}*, float*, float*"),
+        template_params=[w_cpp_type, b_cpp_type] + list(template_params),
+        signature=f"const {{T}}*, {{T}}*, const {w_cpp_type}*, const {b_cpp_type}*, float*, float*",
     )
 
     _fwd_kernel.launch(
@@ -176,6 +179,8 @@ def _persistent_layer_norm_fwd(x, weight, bias, eps, mean=None, rstd=None):
     N, D = x.shape
     assert weight.dim() == 1 and bias.dim() == 1
     assert weight.numel() == D and bias.numel() == D
+    weight = weight.contiguous()
+    bias = bias.contiguous()
 
     y = torch.empty_like(x)
     if (mean is None) != (rstd is None):

@@ -17,7 +17,7 @@ from tilegym.logger import get_logger
 logger = get_logger(__name__)
 
 
-def is_nvt_available():
+def is_triton_tileir_available():
     try:
         import triton.backends.tileir
 
@@ -220,7 +220,7 @@ def get_available_backends() -> Set[str]:
 
 
 def get_available_triton_backend() -> str:
-    if is_nvt_available():
+    if is_triton_tileir_available():
         return "nvt"
     return "oait"
 

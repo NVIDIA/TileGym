@@ -88,6 +88,38 @@ def get_tensor_alignment(tensor):
     return alignment
 
 
+# Consumer-Blackwell arches (sm120/sm121) have less device memory than the
+# data-center GPUs the liger ``test_perf`` shapes were sized for.
+_MEMORY_CONSTRAINED_ARCHS = ("sm120", "sm121")
+
+
+def skip_perf_shape_on_oom(test_fn):
+    r"""Convert a genuine OOM on memory-constrained arches into a skip.
+
+    Wraps a liger ``test_perf`` method. If executing the perf shape raises a
+    ``torch.cuda.OutOfMemoryError`` and ``--arch`` is a memory-constrained
+    consumer-Blackwell arch (sm120/sm121), reclaim memory and ``pytest.skip``.
+    On every other arch (b200/sm100, h100/sm90, a100/sm80) the error is
+    re-raised so the perf-tracking platforms still fail loudly. Only
+    ``torch.cuda.OutOfMemoryError`` is intercepted -- correctness assertions and
+    all other exceptions propagate unchanged.
+    """
+
+    @wraps(test_fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return test_fn(self, *args, **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            gc.collect()
+            torch.cuda.empty_cache()
+            arch = self.request.config.getoption("--arch")
+            if arch in _MEMORY_CONSTRAINED_ARCHS:
+                pytest.skip(f"perf shape exceeds device memory on {arch}")
+            raise
+
+    return wrapper
+
+
 class PyTestCase:
     r"""
     Base class for TileGym unit tests.
@@ -136,6 +168,7 @@ class PyTestCase:
         test_index=None,
         ref_index=None,
         output_processor=None,
+        comparison_chunk_size=None,
     ):
         r"""
         Check that a specified test function matches the reference.
@@ -169,6 +202,9 @@ class PyTestCase:
                 at this index incase of multiple outputs. Default is None
             ref_index: Compare a specific tensor from the reference output tuple
                 at this index incase of multiple outputs. Default is None
+            comparison_chunk_size: If set, compare tensors in slices of this
+                many elements along the first dimension to bound temporary
+                memory used by the correctness checker.
         """
         passed = True
         all_msgs = []
@@ -252,7 +288,15 @@ class PyTestCase:
             if output_processor is not None:
                 to = output_processor(ind, to, fn_kwargs, extra_test_kwargs, extra_ref_kwargs)
                 ro = output_processor(ind, ro, fn_kwargs, extra_test_kwargs, extra_ref_kwargs)
-            out_close, msg = compare_tensors(to, ro, rtol, atol, equal_nan, check_stride)
+            out_close, msg = compare_tensors(
+                to,
+                ro,
+                rtol,
+                atol,
+                equal_nan,
+                check_stride,
+                chunk_size=comparison_chunk_size,
+            )
             if not out_close:
                 passed = False
                 prefix = f"*** OUTPUT {ind} DID NOT MATCH THE REFERENCE (rtol={rtol}, atol={atol}) ***"
@@ -301,6 +345,7 @@ class PyTestCase:
                     grad_atol,
                     equal_nan,
                     check_stride,
+                    chunk_size=comparison_chunk_size,
                 )
 
                 if not grad_close:
@@ -679,6 +724,7 @@ def compare_tensors(
     equal_nan=False,
     check_stride=True,
     msg_prefix="\t",
+    chunk_size=None,
 ):
     # Auto-detect tolerances based on data type if not provided
     if rtol is None or atol is None:
@@ -707,6 +753,20 @@ def compare_tensors(
     if test.dtype != reference.dtype:
         msgs = f"dtype mismatch, test: {test.dtype}, reference: {reference.dtype}"
         raise RuntimeError(msgs)
+
+    if chunk_size is not None:
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if test.ndim > 0 and test.shape[0] > chunk_size:
+            return _compare_tensors_chunked(
+                test,
+                reference,
+                rtol,
+                atol,
+                equal_nan,
+                msg_prefix,
+                chunk_size,
+            )
 
     dtype = test.dtype
     input = test.to(torch.float32)
@@ -757,6 +817,136 @@ def compare_tensors(
         f"max arith mean change:   {max_arith_mean_change:11.4e}",
         f"shape: {input.shape} stride: {input.stride()} dtype: {dtype}",
         f"mismatched indices:{not_close_mask.nonzero().cpu()}",
+    ]
+    if msg_prefix is not None:
+        msgs = [f"{msg_prefix}{msg}" for msg in msgs]
+
+    return allclose, msgs
+
+
+def _compare_tensors_chunked(
+    test,
+    reference,
+    rtol,
+    atol,
+    equal_nan,
+    msg_prefix,
+    chunk_size,
+):
+    """Compare tensor slices while preserving compare_tensors diagnostics."""
+
+    allclose = True
+    close_count = 0
+    mismatched_indices = []
+
+    ref_min = None
+    ref_max = None
+    test_min = None
+    test_max = None
+    abs_ref_min = None
+    abs_ref_max = None
+    abs_test_min = None
+    abs_test_max = None
+    max_abs_diff = None
+    max_rel_change = None
+    max_max_mean_change = None
+    max_arith_mean_change = None
+
+    with torch.no_grad():
+        for start in range(0, test.shape[0], chunk_size):
+            end = min(start + chunk_size, test.shape[0])
+            input = test[start:end].to(torch.float32)
+            ref = reference[start:end].to(torch.float32)
+            input = torch.where(torch.isnan(ref), float("nan"), input)
+
+            allclose = bool(torch.allclose(input, ref, rtol, atol, equal_nan)) and allclose
+
+            abs_diff = (input - ref).abs()
+            abs_ref = ref.abs()
+            abs_input = input.abs()
+
+            is_close = abs_diff <= (atol + rtol * abs_ref)
+            not_close_mask = is_close.logical_not()
+            close_count += is_close.sum().item()
+
+            chunk_mismatched_indices = not_close_mask.nonzero().cpu()
+            if chunk_mismatched_indices.numel() != 0:
+                chunk_mismatched_indices[:, 0] += start
+                mismatched_indices.append(chunk_mismatched_indices)
+
+            rel_change = abs_diff / abs_ref
+            rel_change[abs_ref == 0] = 0
+
+            max_mean_change_denom = torch.max(abs_input, abs_ref)
+            max_mean_change = abs_diff / max_mean_change_denom
+            max_mean_change[max_mean_change_denom == 0] = 0
+
+            arith_mean_change_denom = 0.5 * (input + ref).abs()
+            arith_mean_change = abs_diff / arith_mean_change_denom
+            arith_mean_change[arith_mean_change_denom == 0] = 0
+
+            chunk_ref_min = ref.min()
+            chunk_ref_max = ref.max()
+            chunk_test_min = input.min()
+            chunk_test_max = input.max()
+            chunk_abs_ref_min = abs_ref.min()
+            chunk_abs_ref_max = abs_ref.max()
+            chunk_abs_test_min = abs_input.min()
+            chunk_abs_test_max = abs_input.max()
+            chunk_max_abs_diff = abs_diff.max()
+            chunk_max_rel_change = rel_change.max()
+            chunk_max_max_mean_change = max_mean_change.max()
+            chunk_max_arith_mean_change = arith_mean_change.max()
+
+            ref_min = chunk_ref_min if ref_min is None else torch.minimum(ref_min, chunk_ref_min)
+            ref_max = chunk_ref_max if ref_max is None else torch.maximum(ref_max, chunk_ref_max)
+            test_min = chunk_test_min if test_min is None else torch.minimum(test_min, chunk_test_min)
+            test_max = chunk_test_max if test_max is None else torch.maximum(test_max, chunk_test_max)
+            abs_ref_min = chunk_abs_ref_min if abs_ref_min is None else torch.minimum(abs_ref_min, chunk_abs_ref_min)
+            abs_ref_max = chunk_abs_ref_max if abs_ref_max is None else torch.maximum(abs_ref_max, chunk_abs_ref_max)
+            abs_test_min = (
+                chunk_abs_test_min if abs_test_min is None else torch.minimum(abs_test_min, chunk_abs_test_min)
+            )
+            abs_test_max = (
+                chunk_abs_test_max if abs_test_max is None else torch.maximum(abs_test_max, chunk_abs_test_max)
+            )
+            max_abs_diff = (
+                chunk_max_abs_diff if max_abs_diff is None else torch.maximum(max_abs_diff, chunk_max_abs_diff)
+            )
+            max_rel_change = (
+                chunk_max_rel_change if max_rel_change is None else torch.maximum(max_rel_change, chunk_max_rel_change)
+            )
+            max_max_mean_change = (
+                chunk_max_max_mean_change
+                if max_max_mean_change is None
+                else torch.maximum(max_max_mean_change, chunk_max_max_mean_change)
+            )
+            max_arith_mean_change = (
+                chunk_max_arith_mean_change
+                if max_arith_mean_change is None
+                else torch.maximum(max_arith_mean_change, chunk_max_arith_mean_change)
+            )
+
+    if mismatched_indices:
+        mismatched_indices = torch.cat(mismatched_indices)
+    else:
+        mismatched_indices = torch.empty((0, test.ndim), dtype=torch.int64)
+
+    total_count = test.numel()
+    close_percent = close_count / total_count * 100
+    msgs = [
+        f"allclose: {allclose}",
+        f"matched: {close_count} / {total_count} [{close_percent:.2f}%]",
+        f"ref range:    {ref_min:11.4e} : {ref_max:11.4e}",
+        f"test range:   {test_min:11.4e} : {test_max:11.4e}",
+        f"|ref| range:  {abs_ref_min:11.4e} : {abs_ref_max:11.4e}",
+        f"|test| range: {abs_test_min:11.4e} : {abs_test_max:11.4e}",
+        f"max absolute difference: {max_abs_diff:11.4e}",
+        f"max relative change:     {max_rel_change:11.4e}",
+        f"max max mean change:     {max_max_mean_change:11.4e}",
+        f"max arith mean change:   {max_arith_mean_change:11.4e}",
+        f"shape: {test.shape} stride: {test.stride()} dtype: {test.dtype}",
+        f"mismatched indices:{mismatched_indices}",
     ]
     if msg_prefix is not None:
         msgs = [f"{msg_prefix}{msg}" for msg in msgs]
@@ -1241,6 +1431,11 @@ def benchmark_fn_cupti(
         if grad_to_none is not None:
             for x in grad_to_none:
                 x.grad = None
+
+        # Flush L2 before enabling CUPTI, then wait for the fill kernel to
+        # finish so it cannot be included in the profiled kernel times.
+        cache.zero_()
+        torch.cuda.synchronize()
 
         try:
             with profile(activities=[ProfilerActivity.CUDA]) as prof:

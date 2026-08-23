@@ -56,11 +56,6 @@ class Test_SiLUAndMul(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
-        if backend == "tilecpp":
-            pytest.skip(
-                "tilecpp silu_and_mul does not implement backward; the gradient check would raise NotImplementedError"
-            )
-
         self.setUp()
         device = torch.device("cuda")
 
@@ -108,11 +103,6 @@ class Test_SiLUAndMul(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
-
-        if backend == "tilecpp":
-            pytest.skip(
-                "tilecpp silu_and_mul does not implement backward; the gradient check would raise NotImplementedError"
-            )
 
         self.setUp()
         device = torch.device("cuda")

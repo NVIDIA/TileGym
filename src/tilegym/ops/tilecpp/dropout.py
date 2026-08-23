@@ -49,19 +49,12 @@ def _launch_dropout_kernel(
     dump_kernel_types("seeded_dropout_kernel", x, output)
     dtype = x.dtype
 
-    if n_elements % block_size != 0:
-        raise ValueError(
-            f"dropout requires n_elements ({n_elements}) to be a multiple of block_size ({block_size}); "
-            f"the kernel does unmasked tile loads/stores of BLOCK_SIZE elements per block."
-        )
-
     num_blocks = (n_elements + block_size - 1) // block_size
 
-    # Template params: BLOCK_SIZE, NUM_BLOCKS
     kernel, _, _ = _seeded_dropout_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size, num_blocks],
-        signature="const {T}*, {T}*, float, uint64_t",
+        template_params=[block_size],
+        signature="const {T}*, {T}*, float, uint64_t, int",
     )
 
     _seeded_dropout_kernel.launch(
@@ -72,6 +65,7 @@ def _launch_dropout_kernel(
             np.uint64(output.data_ptr()),
             np.float32(p),
             np.uint64(_mix_seed(seed)),
+            np.int32(n_elements),
         ],
     )
 

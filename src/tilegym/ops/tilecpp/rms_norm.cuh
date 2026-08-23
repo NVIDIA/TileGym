@@ -17,7 +17,7 @@
 /**
  * RMSNorm kernel - optimized version.
  *
- * Computes: y = x * rsqrt(mean(x^2) + eps) * weight
+ * Computes: y = x * rsqrt(mean(x^2) + eps) * (offset + weight)
  *
  * Optimizations:
  * - __restrict__ pointers for alias optimization
@@ -36,10 +36,10 @@
  *   N: Number of columns (hidden size)
  *   eps: Small epsilon for numerical stability
  */
-template<typename T, int BLOCK_SIZE, int N, float EPS>
+template<typename T, typename WT, int BLOCK_SIZE, int N, float EPS, float OFFSET>
 __tile_global__ void rms_norm_kernel(
     const T* __restrict__ X,
-    const T* __restrict__ W,
+    const WT* __restrict__ W,
     T* __restrict__ Y,
     float* __restrict__ rstd_ptr,
     int stride
@@ -48,6 +48,7 @@ __tile_global__ void rms_norm_kernel(
 
     using TxBS = ct::tile<T, ct::shape<BLOCK_SIZE>>;
     using f32xBS = ct::tile<float, ct::shape<BLOCK_SIZE>>;
+    using WxBS   = ct::tile<WT,    ct::shape<BLOCK_SIZE>>;
     using i32xBS = ct::tile<int, ct::shape<BLOCK_SIZE>>;
 
     // Each program handles one row
@@ -60,6 +61,7 @@ __tile_global__ void rms_norm_kernel(
     auto rstd_aligned = ct::assume_aligned<16>(rstd_ptr);
 
     auto zero_pad = ct::zeros<TxBS>();
+    auto zero_pad_w = ct::zeros<WxBS>();
 
     constexpr bool EVEN_N = (N % BLOCK_SIZE) == 0;
     constexpr int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -92,7 +94,7 @@ __tile_global__ void rms_norm_kernel(
     for (auto j_idx : ct::irange(0, num_blocks)) {
         int j = j_idx * BLOCK_SIZE;
         auto cols = ct::iota<i32xBS>() + j;
-        TxBS wj_raw;
+        WxBS wj_raw;
         TxBS xj_raw;
         if constexpr (EVEN_N) {
             [[ using cutile : hint(1000, latency=1) ]]
@@ -102,13 +104,13 @@ __tile_global__ void rms_norm_kernel(
         } else {
             auto mask = cols < N;
             [[ using cutile : hint(1000, latency=1) ]]
-            wj_raw = ct::load_masked(W_aligned + cols, mask, zero_pad);
+            wj_raw = ct::load_masked(W_aligned + cols, mask, zero_pad_w);
             [[ using cutile : hint(1000, latency=1) ]]
             xj_raw = ct::load_masked(X_row + cols, mask, zero_pad);
         }
         auto wj = ct::element_cast<float>(wj_raw);
         auto xj = ct::element_cast<float>(xj_raw);
-        auto yj_f32 = xj * rms * wj;
+        auto yj_f32 = xj * rms * (OFFSET + wj);
         auto yj = ct::element_cast<T>(yj_f32);
         if constexpr (EVEN_N) {
             [[ using cutile : hint(1000, latency=1) ]]
@@ -123,15 +125,86 @@ __tile_global__ void rms_norm_kernel(
 
 
 /**
+ * RMSNorm multi-wave cached kernel.
+ *
+ * Computes: y = x * rsqrt(mean(x^2) + eps) * (offset + weight)
+ *
+ * One block per row and TILE_SIZE >= N, so the whole row is a single tile: it
+ * is loaded once and held in registers across the reduction and the normalize
+ * step, instead of being reloaded the way `rms_norm_kernel` does.
+ *
+ * Grid: (M, 1, 1)
+ *
+ * Template Parameters:
+ *   T: Element type (float, __half, __nv_bfloat16)
+ *   WT: Weight element type
+ *   TILE_SIZE: Row tile size; power of two >= N, so one tile spans the row
+ *   N: Number of columns (hidden size)
+ *   EPS: Small epsilon for numerical stability
+ *
+ * Parameters:
+ *   X: Pointer to input tensor (M, N)
+ *   W: Pointer to weight tensor (N,)
+ *   Y: Pointer to output tensor (M, N)
+ *   rstd_ptr: Pointer to store 1/std per row (M,)
+ *   stride: Row stride (typically N)
+ */
+template<typename T, typename WT, int TILE_SIZE, int N, float EPS, float OFFSET>
+__tile_global__ void rms_norm_multi_wave_cached_kernel(
+    const T* __restrict__ X,
+    const WT* __restrict__ W,
+    T* __restrict__ Y,
+    float* __restrict__ rstd_ptr,
+    int stride
+) {
+    namespace ct = cuda::tiles;
+
+    using TxTS = ct::tile<T, ct::shape<TILE_SIZE>>;
+    using WxTS = ct::tile<WT, ct::shape<TILE_SIZE>>;
+    using i32xTS = ct::tile<int, ct::shape<TILE_SIZE>>;
+
+    // Each program handles one row
+    int row = ct::bid().x;
+
+    auto X_row = X + row * stride;
+    auto Y_row = Y + row * stride;
+    auto W_aligned = ct::assume_aligned<16>(W);
+    auto rstd_aligned = ct::assume_aligned<16>(rstd_ptr);
+
+    auto cols = ct::iota<i32xTS>();
+    auto mask = cols < N;
+
+    // Cache the row in registers: loaded once, reused after the reduction.
+    [[ using cutile : hint(1000, latency=1) ]]
+    auto xj_raw = ct::load_masked(X_row + cols, mask, ct::zeros<TxTS>());
+    auto xj = ct::element_cast<float>(xj_raw);
+
+    float sum_sq = static_cast<float>(ct::sum<0>(xj * xj));
+    float rms = ct::rsqrt(sum_sq / static_cast<float>(N) + EPS);
+
+    rstd_aligned[row] = rms;
+
+    [[ using cutile : hint(1000, latency=1) ]]
+    auto wj_raw = ct::load_masked(W_aligned + cols, mask, ct::zeros<WxTS>());
+    auto wj = ct::element_cast<float>(wj_raw);
+
+    auto yj = ct::element_cast<T>(xj * rms * (OFFSET + wj));
+
+    [[ using cutile : hint(1000, latency=1) ]]
+    ct::store_masked(Y_row + cols, yj, mask);
+}
+
+
+/**
  * RMSNorm kernel — one CTA per row, unmasked partition_view loads/stores.
  * Template Parameters:
  *   T, M, N, BLOCK_SIZE (= N).
  */
-template<typename T, int M, int N, int BLOCK_SIZE>
+template<typename T, typename WT, int M, int N, int BLOCK_SIZE>
 [[ using cutile : hint(1000, num_cta_in_cga=1) ]]
 __tile_global__ void rms_norm_kernel_pv(
     const T* __restrict__ X,
-    const T* __restrict__ W,
+    const WT* __restrict__ W,
     T* __restrict__ Y,
     float* __restrict__ rstd_ptr,
     float eps
@@ -158,7 +231,7 @@ __tile_global__ void rms_norm_kernel_pv(
         ct::tensor_span{W, ct::extents<uint32_t, N>{}},
         ct::shape<BLOCK_SIZE>{});
 
-    TxBS_1d w_loaded;
+    ct::tile<WT, ct::shape<BLOCK_SIZE>> w_loaded;
     [[ using cutile : hint(1000, latency=1) ]]
     w_loaded = W_view.load(0);
     auto w = ct::element_cast<float>(w_loaded);
@@ -209,6 +282,7 @@ __tile_global__ void rms_norm_kernel_pv(
  *   NUM_SMS: persistent grid size (== grid x-dim)
  */
 template<typename T,
+         typename WT,
          int TILE_SIZE_M, int TILE_SIZE_N,
          int occupancy,
          int M,
@@ -220,7 +294,7 @@ template<typename T,
 __tile_global__ void rms_norm_static_persistent_kernel(
     const T* __restrict__ X,
     T* __restrict__ Y,
-    const T* __restrict__ W,
+    const WT* __restrict__ W,
     float* __restrict__ Rstd
 ) {
     namespace ct = cuda::tiles;
@@ -229,7 +303,11 @@ __tile_global__ void rms_norm_static_persistent_kernel(
     using TileMxN = ct::tile<T,     ct::shape<TILE_SIZE_M, TILE_SIZE_N>>;
     using f32_Mx1 = ct::tile<float, ct::shape<TILE_SIZE_M, 1>>;
     using f32_M   = ct::tile<float, ct::shape<TILE_SIZE_M>>;
+    using WxN     = ct::tile<WT,    ct::shape<TILE_SIZE_N>>;
 
+    // TILE_SIZE_N is next_power_of_2(N), so the tile overhangs the row whenever
+    // N is not a power of two. Masked accesses pad with zero, so the overhanging
+    // lanes add nothing to sum(x^2) and are not written past the end of the row.
     X = ct::assume_aligned<16>(X);
     Y = ct::assume_aligned<16>(Y);
     W = ct::assume_aligned<16>(W);
@@ -252,16 +330,16 @@ __tile_global__ void rms_norm_static_persistent_kernel(
                                     ct::shape<TILE_SIZE_M>{});
 
     // Load W once, apply offset in fp32 (y = x_hat * (offset + w)).
-    auto w       = ct::element_cast<float>(pW.load(0));            // (TILE_N,)
+    auto w_raw   = pW.load_masked(0);
+    auto w       = ct::element_cast<float>(w_raw);                 // (TILE_N,)
     auto w_with  = w + ct::full<ct::tile<float, ct::shape<TILE_SIZE_N>>>(OFFSET);
     auto w_bcast = ct::reshape<ct::shape<1, TILE_SIZE_N>>(w_with);
 
     constexpr float inv_N = 1.0f / static_cast<float>(N);
 
     for (auto current_bid : ct::irange(pid, upper_bound, NUM_SMS)) {
-        TileMxN x_tile;
         [[ using cutile : hint(1000, latency=10) ]]
-        x_tile = pX.load(current_bid, 0);
+        auto x_tile = pX.load_masked(current_bid, 0);
         auto x = ct::element_cast<float>(x_tile);
 
         // Row-wise sum(x^2) -> (TILE_M, 1) -> divide by N -> +eps -> rsqrt
@@ -278,7 +356,7 @@ __tile_global__ void rms_norm_static_persistent_kernel(
         auto y_T    = ct::element_cast<T>(y_f32);
 
         [[ using cutile : hint(1000, allow_tma=false, latency=3) ]]
-        pY.store(y_T, current_bid, 0);
+        pY.store_masked(y_T, current_bid, 0);
     }
 }
 
@@ -308,12 +386,12 @@ __tile_global__ void rms_norm_static_persistent_kernel(
  *   stride: Row stride of X (typically N)
  *   N: Number of columns
  */
-template<typename T, int BLOCK_SIZE>
+template<typename T, typename WT, int BLOCK_SIZE>
 __tile_global__ void rms_norm_backward_dx_kernel(
     T* __restrict__ DX,
     const T* __restrict__ DY,
     const T* __restrict__ X,
-    const T* __restrict__ W,
+    const WT* __restrict__ W,
     const float* __restrict__ Rstd,
     float* __restrict__ temp_buffer,
     int stride,
@@ -323,6 +401,7 @@ __tile_global__ void rms_norm_backward_dx_kernel(
 
     using TxBS = ct::tile<T, ct::shape<BLOCK_SIZE>>;
     using f32xBS = ct::tile<float, ct::shape<BLOCK_SIZE>>;
+    using WxBS   = ct::tile<WT,    ct::shape<BLOCK_SIZE>>;
     using i32xBS = ct::tile<int, ct::shape<BLOCK_SIZE>>;
 
     int row = ct::bid().x;
@@ -335,6 +414,7 @@ __tile_global__ void rms_norm_backward_dx_kernel(
     auto Rstd_aligned = ct::assume_aligned<16>(Rstd);
 
     auto zero_pad = ct::zeros<TxBS>();
+    auto zero_pad_w = ct::zeros<WxBS>();
 
     // Load rstd for this row (scalar)
     float inv_std = Rstd_aligned[row];
@@ -350,7 +430,7 @@ __tile_global__ void rms_norm_backward_dx_kernel(
 
         auto x_raw = ct::load_masked(X_row + cols, mask, zero_pad);
         auto dy_raw = ct::load_masked(DY_row + cols, mask, zero_pad);
-        auto w_raw = ct::load_masked(W_aligned + cols, mask, zero_pad);
+        auto w_raw = ct::load_masked(W_aligned + cols, mask, zero_pad_w);
 
         // Upcast to float32 before any multiply so dy*x is computed in fp32.
         // Doing the multiply in native fp16/bf16 would lose precision.
@@ -377,7 +457,7 @@ __tile_global__ void rms_norm_backward_dx_kernel(
 
         auto x_raw = ct::load_masked(X_row + cols, mask, zero_pad);
         auto dy_raw = ct::load_masked(DY_row + cols, mask, zero_pad);
-        auto w_raw = ct::load_masked(W_aligned + cols, mask, zero_pad);
+        auto w_raw = ct::load_masked(W_aligned + cols, mask, zero_pad_w);
 
         auto x = ct::element_cast<float>(x_raw);
         auto dy = ct::element_cast<float>(dy_raw);

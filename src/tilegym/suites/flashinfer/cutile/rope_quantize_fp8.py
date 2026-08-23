@@ -13,9 +13,19 @@ from cuda.tile.tune import exhaustive_search
 from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.ops.cutile.utils import cached_replace_hints
+from tilegym.ops.cutile.utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
 PAD_ZERO = ct.PaddingMode.ZERO
+
+# Width of the no_rope copy-quantize sub-tile; empirical sweet spot on b200
+_NOPE_BLOCK_CAP = 128
+
+
+def _nope_block(no_rope_dim: int) -> int:
+    # >= 1 so the kernel's ceil-div never divides by zero when there is no nope span.
+    return max(1, min(next_power_of_2(no_rope_dim), _NOPE_BLOCK_CAP))
+
 
 # Module-level tune cache: (num_tokens, num_qo_heads, num_kv_heads, rope_dim, no_rope_dim, q_dtype, out_dtype, device) -> (best_cfg, tuned_kernel)
 _rope_quantize_fp8_tune_cache: dict = {}
@@ -64,6 +74,7 @@ def _cutile_autotune_rope_quantize_fp8(
     rope_dim,
     no_rope_dim,
     total_blocks_y,
+    nope_block,
 ):
     cache_key = (
         num_tokens,
@@ -100,6 +111,7 @@ def _cutile_autotune_rope_quantize_fp8(
                 rope_dim,
                 no_rope_dim,
                 cfg.TOKENS_PER_BLOCK,
+                nope_block,
             ),
             lambda cfg: {"occupancy": cfg.occupancy},
         )
@@ -132,6 +144,7 @@ def _cutile_autotune_rope_quantize_fp8(
             rope_dim,
             no_rope_dim,
             best_cfg.TOKENS_PER_BLOCK,
+            nope_block,
         ),
     )
 
@@ -192,12 +205,13 @@ def _rope_quantize_fp8_kernel(
     ROPE_DIM: ConstInt,
     NO_ROPE_DIM: ConstInt,
     TOKENS_PER_BLOCK: ConstInt,
+    NOPE_BLOCK: ConstInt,
 ):
     pid_x = ct.bid(0)
     pid_y = ct.bid(1)
 
     HALF_DIM: ConstInt = ROPE_DIM // 2
-    no_rope_chunks: ConstInt = (NO_ROPE_DIM + ROPE_DIM - 1) // ROPE_DIM
+    no_rope_chunks: ConstInt = (NO_ROPE_DIM + NOPE_BLOCK - 1) // NOPE_BLOCK
 
     q_rope_end = NUM_QO_HEADS
     k_rope_end = q_rope_end + NUM_KV_HEADS
@@ -245,7 +259,7 @@ def _rope_quantize_fp8_kernel(
         k_tile = ct.load(
             k_nope,
             index=(pid_x, chunk_idx),
-            shape=(TOKENS_PER_BLOCK, ROPE_DIM),
+            shape=(TOKENS_PER_BLOCK, NOPE_BLOCK),
             padding_mode=PAD_ZERO,
         )
         ct.store(
@@ -258,7 +272,7 @@ def _rope_quantize_fp8_kernel(
         q_tile = ct.load(
             q_nope,
             index=(pid_x, head_idx, chunk_idx),
-            shape=(TOKENS_PER_BLOCK, 1, ROPE_DIM),
+            shape=(TOKENS_PER_BLOCK, 1, NOPE_BLOCK),
             padding_mode=PAD_ZERO,
         )
         ct.store(
@@ -319,7 +333,8 @@ def rope_quantize_fp8(
     num_kv_heads = 1 if k_rope.ndim == 2 else k_rope.shape[1]
     no_rope_dim = q_nope.shape[2] if q_nope is not None else 0
 
-    no_rope_chunks = (no_rope_dim + rope_dim - 1) // rope_dim
+    nope_block = _nope_block(no_rope_dim)
+    no_rope_chunks = (no_rope_dim + nope_block - 1) // nope_block
     total_blocks_y = num_qo_heads + num_kv_heads + num_kv_heads * no_rope_chunks + num_qo_heads * no_rope_chunks
 
     assert not is_neox, "is_neox should be False for rope_quantize_fp8"
@@ -349,6 +364,7 @@ def rope_quantize_fp8(
             rope_dim,
             no_rope_dim,
             cfg.TOKENS_PER_BLOCK,
+            nope_block,
         )
         ct.launch(stream, grid, kernel, args)
     else:
@@ -372,5 +388,6 @@ def rope_quantize_fp8(
             rope_dim,
             no_rope_dim,
             total_blocks_y,
+            nope_block,
         )
     return q_rope_out, k_rope_out, q_nope_out, k_nope_out

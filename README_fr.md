@@ -93,10 +93,10 @@ Pour utiliser le backend Triton CUDA Tile IR, installez son wheel dans un réper
 
 ```bash
 # Installez dans un répertoire séparé, à l'écart de l'environnement par défaut
-pip install --target /opt/nvtriton <nvtriton-wheel-for-your-python>.whl
+pip install --target /opt/triton_tileir <triton-tileir-wheel-for-your-python>.whl
 
 # Sélectionnez le backend Triton CUDA Tile IR à l'exécution
-PYTHONPATH=/opt/nvtriton ENABLE_TILE=1 python your_script.py
+PYTHONPATH=/opt/triton_tileir ENABLE_TILE=1 python your_script.py
 ```
 
 ## Démarrage rapide

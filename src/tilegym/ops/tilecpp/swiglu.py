@@ -208,12 +208,6 @@ def swiglu_forward(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     c = torch.empty_like(a)
     n_rows = a.shape[0]
 
-    if n_cols % 8 != 0:
-        raise NotImplementedError(f"tilecpp swiglu_forward requires n_cols ({n_cols}) to be a multiple of 8.")
-    row_stride = a.stride(0)
-    if row_stride % 16 != 0:
-        raise NotImplementedError(f"tilecpp swiglu_forward requires row stride ({row_stride}) to be a multiple of 16.")
-
     BLOCK_SIZE = next_power_of_2(n_cols)
     _launch_swiglu_forward_gather_kernel(a, b, c, n_rows, n_cols, BLOCK_SIZE)
     return c.view(*ori_shape)

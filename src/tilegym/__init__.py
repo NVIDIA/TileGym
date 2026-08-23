@@ -39,7 +39,6 @@ from .backend import is_backend_available
 from .backend import print_registry_info
 from .backend import set_backend
 
-# Setup cutile integration
 if is_backend_available("cutile"):
     # Apply experimental kernel tracking patch
     from .experimental import _apply_patch as _apply_experimental_patch
@@ -72,7 +71,7 @@ __all__ = [
 ]
 
 # Version info
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import contextlib
 from enum import Enum

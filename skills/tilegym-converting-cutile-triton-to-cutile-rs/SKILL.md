@@ -1,13 +1,13 @@
 ---
 name: tilegym-converting-cutile-triton-to-cutile-rs
 description: |
-  Use this skill to convert, port, or translate Triton-TileIR (nvtriton) or cuTile-Python GPU kernels to cutile-rs (Rust). The orchestrator runs scripts/preflight.sh, then drives a bounded Agent A -> B -> D -> E pipeline (Agent C is diagnostic, Agent F optional), delegating all kernel/host/correctness/perf work to sub-agents and routing by each stage's single-line VERDICT.
+  Use this skill to convert, port, or translate Triton-TileIR or cuTile-Python GPU kernels to cutile-rs (Rust). The orchestrator runs scripts/preflight.sh, then drives a bounded Agent A -> B -> D -> E pipeline (Agent C is diagnostic, Agent F optional), delegating all kernel/host/correctness/perf work to sub-agents and routing by each stage's single-line VERDICT.
 license: CC-BY-4.0 AND Apache-2.0
 metadata:
   author: "TileGym Team <TileGym@nvidia.com>"
 ---
 
-# Converting Triton-TileIR (nvtriton) / cuTile-Python to cutile-rs
+# Converting Triton-TileIR / cuTile-Python to cutile-rs
 
 ## Instructions
 

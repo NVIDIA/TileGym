@@ -17,6 +17,10 @@ from typing import Any
 
 import pytest
 
+from tests.kernel_inventory.runtime_inputs import RuntimeInputCatalog
+from tests.kernel_inventory.runtime_inputs import make_runtime_override
+from tests.kernel_inventory.runtime_inputs import resolve_torch_dtype
+
 # Correctness coverage should select a stable config before importing cuda.tile.
 os.environ.setdefault("DISABLE_TUNE", "1")
 os.environ.setdefault("TILEGYM_DISABLE_AUTOTUNE", "1")
@@ -37,8 +41,17 @@ try:
     from tilegym.kernel_inventory import validate_definition
     from tilegym.kernel_inventory import validate_solution
     from tilegym.kernel_inventory import validate_solution_entry_point
+    from tilegym.kernel_inventory.composition import installed_reference_modules
+    from tilegym.kernel_inventory.launch import RawKernelLaunch
+    from tilegym.kernel_inventory.launch import allocate_definition_outputs
+    from tilegym.kernel_inventory.launch import inspect_raw_entry_signature
+    from tilegym.kernel_inventory.launch import make_launch_context
+    from tilegym.kernel_inventory.launch import materialize_launch_arguments
+    from tilegym.kernel_inventory.launch import resolve_grid
+    from tilegym.kernel_inventory.layout import inventory_coordinate
     from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
     from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+    from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
 finally:
     if _original_tilegym is None:
         sys.modules.pop("tilegym", None)
@@ -49,12 +62,7 @@ DEFAULT_AXIS_VALUES = {
     "H": 64,
     "T": 5,
 }
-MUTATED_INPUTS_BY_DEFINITION = {
-    "olmo3_dual_rms_norm": ("q", "k"),
-    "olmoe_dual_rms_norm": ("q", "k"),
-    "qwen3_5_causal_conv1d_update_silu": ("conv_state",),
-    "lfm2_moe_causal_conv1d_update": ("conv_state",),
-}
+RUNTIME_INPUT_CATALOG = RuntimeInputCatalog.from_path()
 
 
 class _CapturedReferenceReturn:
@@ -77,7 +85,7 @@ def definition_solution_cases_for_submodule(submodule: str | Path | None) -> lis
     definition_paths = (
         iter_kernel_definition_paths(REPO_ROOT)
         if search_root == REPO_ROOT
-        else sorted(search_root.glob("kernel_definitions/*.json"))
+        else sorted((search_root / "kernel_definitions").rglob("*.json"))
     )
     for definition_path in definition_paths:
         solution_paths = list(iter_solution_paths_for_definition(definition_path))
@@ -85,10 +93,22 @@ def definition_solution_cases_for_submodule(submodule: str | Path | None) -> lis
             raise ValueError(f"Definition has no checked-in Solutions: {definition_path}")
         for solution_path in solution_paths:
             solution = load_json(solution_path)
-            cases.append(pytest.param(definition_path, solution_path, id=solution["name"]))
+            cases.append(
+                pytest.param(definition_path, solution_path, id=_runtime_case_id(definition_path, solution_path))
+            )
     if search_root != REPO_ROOT and not cases:
         raise ValueError(f"Kernel submodule has no Definition/Solution pairs: {search_root}")
     return cases
+
+
+def _runtime_case_id(definition_path: str | Path, solution_path: str | Path) -> str:
+    """Return an unambiguous Definition-coordinate plus Solution-backend ID."""
+    definition_coordinate = inventory_coordinate(definition_path)
+    solution_coordinate = inventory_coordinate(solution_path)
+    backend = solution_coordinate.backend
+    if backend is None:
+        backend = load_json(solution_path)["spec"]["language"]
+    return f"{definition_coordinate.canonical_id}::{backend}"
 
 
 def _kernel_submodule_root(submodule: str | Path | None) -> Path:
@@ -169,44 +189,74 @@ def run_definition_solution_runtime(definition_path: Path, solution_path: Path) 
 
 def _run_definition_solution_runtime(definition_path: Path, solution_path: Path) -> None:
     """Run one Definition/Solution check with package imports isolated."""
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("flashinfer_bench")
-    pytest.importorskip("cuda.tile")
-
     definition = load_json(definition_path)
     solution = load_json(solution_path)
-    validate_definition(definition)
-    validate_solution(solution, repo_root=REPO_ROOT)
+    validate_definition(definition, definition_path)
+    validate_solution(solution, repo_root=REPO_ROOT, definition=definition)
     validate_solution_entry_point(solution, repo_root=REPO_ROOT)
-    reference_fn = _load_reference(definition, definition_path)
-    solution_fn = _load_solution_entry(solution)
-    _assert_matching_entry_signatures(definition, reference_fn, solution, solution_fn)
+    if solution.get("launch") is None:
+        _assert_matching_entry_signatures_static(definition, solution, definition_path)
 
+    torch = pytest.importorskip("torch")
+    _require_solution_runtime_dependencies(solution)
+    _skip_if_solution_does_not_target_current_triton_backend(solution)
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for kernel inventory runtime checks")
     _skip_if_solution_does_not_target_current_compute_capability(solution, torch)
 
-    device = torch.device("cuda")
-    torch.manual_seed(2026)
-    axes = _axis_values(definition)
-    base_inputs = _make_inputs(definition, torch, device, axes)
-    for boolean_assignment in _boolean_branch_assignments(definition, axes, base_inputs):
-        inputs = dict(base_inputs)
-        inputs.update(boolean_assignment)
-        _run_runtime_branch(definition, reference_fn, solution_fn, inputs, axes, torch)
+    with installed_reference_modules(definition, definition_path):
+        reference_fn = _load_reference(definition, definition_path)
+        solution_fn = _load_solution_entry(solution)
+        if solution.get("launch") is None:
+            _assert_matching_entry_signatures(definition, reference_fn, solution, solution_fn)
+
+        device = torch.device("cuda")
+        torch.manual_seed(2026)
+        axes = _axis_values(definition, definition_path)
+        base_inputs = _make_inputs(definition, torch, device, axes, definition_path)
+        mutated_inputs = RUNTIME_INPUT_CATALOG.case_for_definition(definition_path).mutated_inputs
+        unknown_mutations = sorted(set(mutated_inputs) - set(definition["inputs"]))
+        if unknown_mutations:
+            raise ValueError(f"{definition_path}: runtime input catalog mutates unknown inputs: {unknown_mutations}")
+        for boolean_assignment in _boolean_branch_assignments(definition, axes, base_inputs):
+            inputs = dict(base_inputs)
+            inputs.update(boolean_assignment)
+            _run_runtime_branch(
+                definition,
+                reference_fn,
+                solution,
+                solution_fn,
+                inputs,
+                axes,
+                torch,
+                mutated_inputs,
+            )
+
+
+def _require_solution_runtime_dependencies(solution: dict[str, Any]) -> None:
+    """Gate only dependencies required by the already-validated Solution language."""
+    language = solution["spec"]["language"]
+    if language == "cuda-tile":
+        pytest.importorskip("cuda.tile")
+    elif language == "triton":
+        pytest.importorskip("triton")
 
 
 def _run_runtime_branch(
     definition: dict[str, Any],
     reference_fn: Any,
+    solution: dict[str, Any],
     solution_fn: Any,
     inputs: dict[str, Any],
     axes: dict[str, int],
     torch: Any,
+    mutated_inputs: tuple[str, ...],
 ) -> None:
     """Compare reference and Solution for one concrete Boolean branch."""
     reference_inputs = {name: _clone_value(value) for name, value in inputs.items()}
     solution_inputs = {name: _clone_value(value) for name, value in inputs.items()}
+    reference_before = {name: _clone_value(value) for name, value in reference_inputs.items()}
+    solution_before = {name: _clone_value(value) for name, value in solution_inputs.items()}
     branch = _boolean_branch_label(inputs)
 
     if "runtime:unsupported" in definition.get("tags", []):
@@ -220,8 +270,12 @@ def _run_runtime_branch(
         return
 
     reference_result = _call_entry_strictly(reference_fn, reference_inputs, "Definition.reference")
-    solution_result = _call_entry_strictly(solution_fn, solution_inputs, "Solution entry point")
-    torch.cuda.synchronize()
+    if solution.get("launch") is None:
+        solution_result = _call_entry_strictly(solution_fn, solution_inputs, "Solution entry point")
+    else:
+        solution_result = _launch_raw_solution(definition, solution, solution_fn, solution_inputs, axes, torch)
+    if any(getattr(value, "is_cuda", False) for value in solution_inputs.values()):
+        torch.cuda.synchronize()
 
     assert isinstance(reference_result, _CapturedReferenceReturn), (
         f"{definition['name']} {branch}: Definition.reference return was not instrumented"
@@ -236,7 +290,7 @@ def _run_runtime_branch(
         f"{definition['name']} {branch}",
     )
 
-    for name in MUTATED_INPUTS_BY_DEFINITION.get(definition["name"], ()):
+    for name in mutated_inputs:
         torch.testing.assert_close(
             solution_inputs[name],
             reference_inputs[name],
@@ -244,6 +298,148 @@ def _run_runtime_branch(
             atol=2e-2,
             msg=lambda msg: f"{definition['name']} {branch} mutated input {name} mismatch\n{msg}",
         )
+    for name in sorted(set(definition["inputs"]) - set(mutated_inputs)):
+        if not hasattr(inputs[name], "shape"):
+            continue
+        torch.testing.assert_close(
+            reference_inputs[name],
+            reference_before[name],
+            rtol=0,
+            atol=0,
+            msg=lambda msg: f"{definition['name']} {branch} reference unexpectedly mutated input {name}\n{msg}",
+        )
+        torch.testing.assert_close(
+            solution_inputs[name],
+            solution_before[name],
+            rtol=0,
+            atol=0,
+            msg=lambda msg: f"{definition['name']} {branch} Solution unexpectedly mutated input {name}\n{msg}",
+        )
+
+
+def _launch_raw_solution(
+    definition: dict[str, Any],
+    solution: dict[str, Any],
+    solution_fn: Any,
+    inputs: dict[str, Any],
+    axes: dict[str, int],
+    torch: Any,
+) -> Any:
+    """Allocate Definition outputs and invoke one raw Triton or cuTile kernel."""
+    launch = RawKernelLaunch.model_validate(solution["launch"])
+    output_bindings = {binding.name: binding for binding in launch.arguments if binding.kind == "output"}
+    device = next(value.device for value in inputs.values() if hasattr(value, "device"))
+
+    def allocator(*, name, shape, dtype, spec):
+        del spec
+        binding = output_bindings[name]
+        if binding.initialize_from is not None:
+            seed = inputs[binding.initialize_from]
+            if tuple(seed.shape) != shape or seed.dtype != resolve_torch_dtype(dtype, torch):
+                raise ValueError(
+                    f"{definition['name']}: output '{name}' seed '{binding.initialize_from}' "
+                    "does not match the declared output shape and dtype"
+                )
+            return seed.clone()
+        factory = getattr(torch, binding.initialize or "empty")
+        return factory(shape, dtype=resolve_torch_dtype(dtype, torch), device=device)
+
+    outputs = allocate_definition_outputs(definition, axes, allocator)
+    context = make_launch_context(definition, inputs, outputs=outputs, axes=axes)
+    language = solution["spec"]["language"]
+    if language == "triton":
+        conditional_parameters = {
+            binding.parameter for binding in launch.arguments if binding.target_triton_backends is not None
+        }
+        triton_backend = _current_triton_backend() if conditional_parameters else None
+        arguments = materialize_launch_arguments(launch, context, triton_backend=triton_backend)
+        signature = inspect_raw_entry_signature(solution["spec"]["entry_point"], REPO_ROOT)
+        explicit_heuristics = {
+            parameter.name
+            for parameter in signature.parameters
+            if parameter.provided_by_heuristic and parameter.name in arguments
+        }
+        if explicit_heuristics:
+            solution_fn = _unwrap_triton_heuristics(solution_fn, explicit_heuristics)
+        if conditional_parameters:
+            _assert_triton_autotune_argument_ownership(
+                solution_fn,
+                arguments,
+                conditional_parameters,
+            )
+        grid = launch.grid
+        if isinstance(grid, str):
+            grid = lambda meta: resolve_grid(launch.grid, context, REPO_ROOT, meta=meta)
+        solution_fn[grid](**arguments)
+    elif language == "cuda-tile":
+        arguments = materialize_launch_arguments(launch, context)
+        ct = pytest.importorskip("cuda.tile")
+        grid = resolve_grid(launch.grid, context, REPO_ROOT)
+        signature = inspect_raw_entry_signature(solution["spec"]["entry_point"], REPO_ROOT)
+        ordered = []
+        missing_optional = False
+        for parameter in signature.parameters:
+            if parameter.name not in arguments:
+                missing_optional = True
+                continue
+            if missing_optional:
+                raise TypeError(
+                    f"cuTile launch cannot bind '{parameter.name}' after omitting an earlier optional parameter"
+                )
+            ordered.append(arguments[parameter.name])
+        ct.launch(torch.cuda.current_stream(), grid, solution_fn, tuple(ordered))
+    else:
+        raise ValueError(f"Raw launch is unsupported for Solution language {language!r}")
+
+    result = tuple(outputs[name] for name in definition["outputs"])
+    return result[0] if len(result) == 1 else result
+
+
+def _unwrap_triton_heuristics(solution_fn: Any, explicit_parameters: set[str]) -> Any:
+    """Bypass only heuristic layers whose values are explicitly launch-bound."""
+    from triton.runtime.autotuner import Heuristics
+
+    while isinstance(solution_fn, Heuristics):
+        owned = set(solution_fn.values)
+        if not owned <= explicit_parameters:
+            pytest.fail(
+                "Raw Triton launch cannot partially override a Heuristics layer; "
+                f"missing {sorted(owned - explicit_parameters)}"
+            )
+        solution_fn = solution_fn.fn
+    return solution_fn
+
+
+def _assert_triton_autotune_argument_ownership(
+    solution_fn: Any,
+    arguments: dict[str, Any],
+    conditional_parameters: set[str],
+) -> None:
+    """Require compiler-scoped bindings to agree with the active Autotuner configs."""
+    from triton.runtime.autotuner import Autotuner
+
+    autotuner = solution_fn
+    seen: set[int] = set()
+    while not isinstance(autotuner, Autotuner) and hasattr(autotuner, "fn") and id(autotuner) not in seen:
+        seen.add(id(autotuner))
+        autotuner = autotuner.fn
+    if not isinstance(autotuner, Autotuner):
+        pytest.fail("Compiler-scoped raw Triton launch bindings require an active triton.autotune decorator")
+    config_key_sets = [set(config.kwargs) for config in autotuner.configs]
+    if not config_key_sets:
+        pytest.fail("Compiler-scoped raw Triton launch bindings require at least one active autotune config")
+    for parameter in sorted(conditional_parameters):
+        owned = [parameter in keys for keys in config_key_sets]
+        if parameter in arguments and any(owned):
+            pytest.fail(
+                f"Compiler-scoped raw Triton launch binding '{parameter}' is explicit, "
+                "but an active autotune config also supplies it"
+            )
+        if parameter not in arguments and not all(owned):
+            pytest.fail(
+                f"Compiler-scoped raw Triton launch binding '{parameter}' is omitted, "
+                "but not every active autotune config supplies it"
+            )
 
 
 def _assert_unsupported_solution_matches_reference(
@@ -277,7 +473,7 @@ def _capture_runtime_error(call: Any, label: str) -> Exception:
     pytest.fail(f"{label} must raise because the Definition is tagged runtime:unsupported")
 
 
-def _axis_values(definition: dict[str, Any]) -> dict[str, int]:
+def _axis_values(definition: dict[str, Any], definition_path: Path | None = None) -> dict[str, int]:
     """Build deterministic concrete axis values for a Definition runtime case."""
     values = {name: axis["value"] for name, axis in definition["axes"].items() if axis.get("type") == "const"}
     for name, axis in definition["axes"].items():
@@ -286,14 +482,34 @@ def _axis_values(definition: dict[str, Any]) -> dict[str, int]:
             values[name] = defaults.get(name, 4)
     if "T_padded" in values and "T" in values and "K" in values:
         values["T_padded"] = values["T"] + values["K"] - 1
+    if definition_path is not None:
+        overrides = RUNTIME_INPUT_CATALOG.case_for_definition(definition_path).axes
+        unknown = sorted(set(overrides) - set(definition["axes"]))
+        if unknown:
+            raise ValueError(f"{definition_path}: runtime input catalog overrides unknown axes: {unknown}")
+        values.update(overrides)
     return values
 
 
-def _make_inputs(definition: dict[str, Any], torch: Any, device: Any, axes: dict[str, int]) -> dict[str, Any]:
+def _make_inputs(
+    definition: dict[str, Any],
+    torch: Any,
+    device: Any,
+    axes: dict[str, int],
+    definition_path: Path | None = None,
+) -> dict[str, Any]:
     """Create seeded representative inputs that conform to a Definition."""
     inputs = {}
+    overrides = RUNTIME_INPUT_CATALOG.case_for_definition(definition_path).inputs if definition_path else {}
+    unknown = sorted(set(overrides) - set(definition["inputs"]))
+    if unknown:
+        raise ValueError(f"{definition_path}: runtime input catalog overrides unknown inputs: {unknown}")
     for name, spec in definition["inputs"].items():
-        inputs[name] = _make_input(name, spec, axes, torch, device)
+        config = overrides.get(name)
+        if config is None or config["kind"] == "default":
+            inputs[name] = _make_input(name, spec, axes, torch, device)
+        else:
+            inputs[name] = make_runtime_override(config, spec, axes, torch, device)
     _satisfy_boolean_constraints(definition, inputs, axes)
     return inputs
 
@@ -304,15 +520,16 @@ def _boolean_branch_assignments(
     inputs: dict[str, Any] | None = None,
 ) -> list[dict[str, bool]]:
     """Enumerate scalar Boolean assignments satisfying applicable constraints."""
-    boolean_inputs = [
+    all_boolean_inputs = [
         name for name, spec in definition["inputs"].items() if spec["shape"] is None and spec["dtype"] == "bool"
     ]
-    if not boolean_inputs:
-        return [{}]
+    boolean_inputs = list(all_boolean_inputs)
+    if inputs is not None:
+        boolean_inputs = [name for name in boolean_inputs if name not in inputs or inputs[name] is not None]
     constraints = [
         constraint
         for constraint in definition.get("constraints", ())
-        if set(boolean_inputs) & _constraint_names(constraint)
+        if set(all_boolean_inputs) & _constraint_names(constraint)
     ]
     assignments = []
     for values in itertools.product((False, True), repeat=len(boolean_inputs)):
@@ -349,7 +566,9 @@ def _constraint_names(constraint: str) -> set[str]:
 def _constraints_hold(constraints: Any, inputs: dict[str, Any], axes: dict[str, int]) -> bool:
     """Evaluate constraints that depend only on axes and Python scalar inputs."""
     context = dict(axes)
-    context.update({name: value for name, value in inputs.items() if isinstance(value, bool | float | int)})
+    context.update(
+        {name: value for name, value in inputs.items() if value is None or isinstance(value, bool | float | int)}
+    )
     for constraint in constraints:
         try:
             result = eval(compile(constraint, "<Definition.constraints>", "eval"), {"__builtins__": {}}, context)
@@ -375,14 +594,16 @@ def _make_input(name: str, spec: dict[str, Any], axes: dict[str, int], torch: An
             return 1.0
         if name == "seq_len":
             return axes["T"]
-        if dtype.startswith("int"):
+        if dtype.startswith(("int", "uint")):
             return 1
         return 1.0
 
     shape = tuple(axes[axis] for axis in shape_spec)
-    torch_dtype = _torch_dtype(dtype, torch)
+    torch_dtype = resolve_torch_dtype(dtype, torch)
     if dtype == "bool":
         return torch.randint(0, 2, shape, device=device, dtype=torch.bool)
+    if dtype.startswith("uint"):
+        return torch.randint(0, 4, shape, device=device, dtype=torch.int64).to(torch_dtype)
     if dtype.startswith("int"):
         return torch.randint(-3, 4, shape, device=device, dtype=torch_dtype)
 
@@ -394,27 +615,13 @@ def _make_input(name: str, spec: dict[str, Any], axes: dict[str, int], torch: An
     return base.to(torch_dtype).contiguous()
 
 
-def _torch_dtype(dtype: str, torch: Any) -> Any:
-    """Resolve an inventory dtype string to its torch dtype."""
-    return {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "int64": torch.int64,
-        "int32": torch.int32,
-        "int16": torch.int16,
-        "int8": torch.int8,
-        "bool": torch.bool,
-    }[dtype]
-
-
 def _assert_output_matches_spec(value: Any, spec: dict[str, Any], axes: dict[str, int], torch: Any, label: str) -> None:
     """Check one concrete tensor output against its Definition TensorSpec."""
     expected_shape = () if spec["shape"] is None else tuple(axes[axis] for axis in spec["shape"])
     assert tuple(value.shape) == expected_shape, (
         f"{label} has shape {tuple(value.shape)}; Definition declares {expected_shape}"
     )
-    expected_dtype = _torch_dtype(spec["dtype"], torch)
+    expected_dtype = resolve_torch_dtype(spec["dtype"], torch)
     assert value.dtype == expected_dtype, f"{label} has dtype {value.dtype}; Definition declares {expected_dtype}"
 
 
@@ -477,6 +684,24 @@ def _skip_if_solution_does_not_target_current_compute_capability(solution: dict[
             f"Solution targets {target_hardware}; current compute capability is {current_hardware} "
             f"({torch.cuda.get_device_name(0)})"
         )
+
+
+def _skip_if_solution_does_not_target_current_triton_backend(solution: dict[str, Any]) -> None:
+    """Skip only a Triton Solution that explicitly excludes the active compiler."""
+    target_backends = solution["spec"].get("target_triton_backends")
+    if not target_backends:
+        return
+    current_backend = _current_triton_backend()
+    if current_backend not in target_backends:
+        pytest.skip(
+            f"Solution targets Triton compiler backends {target_backends}; "
+            f"current Triton compiler backend is {current_backend}"
+        )
+
+
+def _current_triton_backend() -> str:
+    """Return the active compiler using TileGym's canonical selector."""
+    return get_available_triton_backend()
 
 
 def _current_compute_capability_label(torch: Any) -> str:
@@ -557,6 +782,56 @@ def _assert_matching_entry_signatures(
     )
 
 
+def _assert_matching_entry_signatures_static(
+    definition: dict[str, Any],
+    solution: dict[str, Any],
+    definition_path: Path,
+    repo_root: Path = REPO_ROOT,
+) -> None:
+    """Compare wrapper/public signatures from AST before backend dependency gating."""
+    reference_tree = ast.parse(definition["reference"], filename=str(definition_path))
+    reference_run = next(
+        node
+        for node in reference_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run"
+    )
+    source, symbol = solution["spec"]["entry_point"].split("::", 1)
+    solution_path = repo_root / source
+    solution_tree = ast.parse(solution_path.read_text(encoding="utf-8"), filename=str(solution_path))
+    solution_run = next(
+        node
+        for node in solution_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol
+    )
+    reference_signature = _ast_call_signature(reference_run.args)
+    solution_signature = _ast_call_signature(solution_run.args)
+    assert reference_signature == solution_signature, (
+        f"{definition['name']}: Definition.reference run signature {reference_signature} does not match "
+        f"Solution entry point {solution['spec']['entry_point']} signature {solution_signature}"
+    )
+
+
+def _ast_call_signature(arguments: ast.arguments) -> tuple[tuple[str, str, str | None], ...]:
+    """Represent a Python AST signature while ignoring annotations."""
+    positional = [*arguments.posonlyargs, *arguments.args]
+    positional_defaults = [None] * (len(positional) - len(arguments.defaults)) + [
+        ast.dump(default, include_attributes=False) for default in arguments.defaults
+    ]
+    signature = []
+    for index, (parameter, default) in enumerate(zip(positional, positional_defaults, strict=True)):
+        kind = "positional_only" if index < len(arguments.posonlyargs) else "positional_or_keyword"
+        signature.append((parameter.arg, kind, default))
+    if arguments.vararg is not None:
+        signature.append((arguments.vararg.arg, "var_positional", None))
+    for parameter, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True):
+        signature.append(
+            (parameter.arg, "keyword_only", None if default is None else ast.dump(default, include_attributes=False))
+        )
+    if arguments.kwarg is not None:
+        signature.append((arguments.kwarg.arg, "var_keyword", None))
+    return tuple(signature)
+
+
 def _call_signature(callable_: Any) -> inspect.Signature:
     """Return a callable's public invocation signature without type-only annotations."""
     signature = inspect.signature(callable_)
@@ -575,6 +850,7 @@ def _call_entry_strictly(entry_fn: Any, inputs: dict[str, Any], label: str) -> A
     keyword_args = {}
     accepted_names = set()
     accepts_arbitrary_keywords = False
+    omitted_positional_only = None
 
     for name, parameter in signature.parameters.items():
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
@@ -587,11 +863,16 @@ def _call_entry_strictly(entry_fn: Any, inputs: dict[str, Any], label: str) -> A
         if name not in inputs:
             if parameter.default is inspect.Parameter.empty:
                 raise TypeError(f"{label} requires Definition input '{name}'")
+            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+                omitted_positional_only = name
             continue
 
         if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            if parameter.default is not inspect.Parameter.empty:
-                raise TypeError(f"{label} has an optional positional-only parameter '{name}', which is unsupported")
+            if omitted_positional_only is not None:
+                raise TypeError(
+                    f"{label} cannot bind positional-only parameter '{name}' after omitted "
+                    f"optional positional-only parameter '{omitted_positional_only}'"
+                )
             positional_args.append(inputs[name])
         elif parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
             if parameter.default is inspect.Parameter.empty:

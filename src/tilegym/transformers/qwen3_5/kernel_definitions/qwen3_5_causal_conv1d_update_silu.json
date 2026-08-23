@@ -1,76 +1,76 @@
 {
+  "name": "qwen3_5_causal_conv1d_update_silu",
+  "op_type": "causal_conv1d_update_silu",
   "axes": {
     "B": {
-      "description": "Supported batch size.",
       "type": "const",
-      "value": 1
+      "value": 1,
+      "description": "Supported batch size."
     },
     "D": {
-      "description": "Channel dimension.",
-      "type": "var"
+      "type": "var",
+      "description": "Channel dimension."
     },
     "K": {
-      "description": "Convolution kernel size.",
       "type": "const",
-      "value": 4
+      "value": 4,
+      "description": "Convolution kernel size."
     },
     "K_state": {
-      "description": "Cached state length.",
       "type": "const",
-      "value": 3
+      "value": 4,
+      "description": "Cached state length."
     },
     "S": {
-      "description": "Decode sequence length.",
       "type": "const",
-      "value": 1
+      "value": 1,
+      "description": "Decode sequence length."
     }
   },
-  "constraints": [
-    "K_state == K - 1"
-  ],
-  "description": "Qwen3.5 decode-path depthwise causal conv1d update fused with SiLU. The conv_state input is updated in-place.",
   "inputs": {
     "conv_state": {
-      "dtype": "bfloat16",
       "shape": [
         "B",
         "D",
         "K_state"
-      ]
+      ],
+      "dtype": "bfloat16"
     },
     "hidden_states": {
-      "dtype": "bfloat16",
       "shape": [
         "B",
         "D",
         "S"
-      ]
+      ],
+      "dtype": "bfloat16"
     },
     "weight": {
-      "dtype": "bfloat16",
       "shape": [
         "D",
         "K"
-      ]
+      ],
+      "dtype": "bfloat16"
     }
   },
-  "name": "qwen3_5_causal_conv1d_update_silu",
-  "op_type": "causal_conv1d_update_silu",
   "outputs": {
     "output": {
-      "dtype": "bfloat16",
       "shape": [
         "B",
         "D",
         "S"
-      ]
+      ],
+      "dtype": "bfloat16"
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L545-L554\nimport torch\n\ndef run(hidden_states, conv_state, weight, bias=None, activation=None):\n    x = hidden_states[:, :, 0]\n    full = torch.cat([conv_state, x.unsqueeze(-1)], dim=-1)\n    dot = (full * weight.unsqueeze(0)).sum(-1)\n    output = dot * torch.sigmoid(dot)\n    conv_state[:, :, 0] = conv_state[:, :, 1]\n    conv_state[:, :, 1] = conv_state[:, :, 2]\n    conv_state[:, :, 2] = x\n    return output.unsqueeze(-1)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L545-L554\nimport torch\nimport torch.nn.functional as F\n\ndef run(hidden_states, conv_state, weight, bias=None, activation=None):\n    _, hidden_size, seq_len = hidden_states.shape\n    state_len = conv_state.shape[-1]\n    hidden_states_new = torch.cat([conv_state, hidden_states], dim=-1).to(weight.dtype)\n    conv_state.copy_(hidden_states_new[:, :, -state_len:])\n    output = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)\n    output = F.silu(output[:, :, -seq_len:])\n    return output.to(hidden_states.dtype)",
   "tags": [
     "model:qwen3.5",
     "stage:decode",
     "status:verified",
     "fused"
+  ],
+  "description": "Qwen3.5 decode-path depthwise causal conv1d update fused with SiLU. The conv_state input is updated in-place.",
+  "constraints": [
+    "K_state == K"
   ]
 }
