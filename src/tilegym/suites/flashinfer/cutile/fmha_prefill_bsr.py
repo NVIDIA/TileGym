@@ -24,6 +24,8 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
 
+_RAGGED_TWO_LOOP_MIN_SEQ = 4096
+
 
 def _get_prefill_autotune_configs(page_size=None):
     configs = [
@@ -495,6 +497,7 @@ def _prefill_attention_ragged_body(
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
     IS_CAUSAL: ConstBool,
+    USE_TWO_LOOP: ConstBool,
 ):
     # Load sequence info
     seq_start_idx_tile = ct.gather(batch_offsets, (batch_id,), padding_value=0)
@@ -560,85 +563,23 @@ def _prefill_attention_ragged_body(
     offs_n_base = ct.arange(BLOCK_N, dtype=ct.int32)
     offs_m = start_m + ct.arange(BLOCK_M, dtype=ct.int32)
 
-    # Two-stage causal split: keep the masking machinery (offs_n / causal_mask /
-    # ct.where) out of the bulk off-band iterations. Only the single diagonal
-    # block needs masking, so the off-band loop body stays small — better
-    # software pipelining and lower register pressure than a merged loop that
-    # drags the mask through every iteration.
-    if IS_CAUSAL:
-        # Off-band: everything before the diagonal block (fully unmasked)
-        off_band_hi = ct.minimum(seq_len_kv, start_m)
-        # On-band: the diagonal block itself
-        on_band_lo = start_m
-        on_band_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
-    else:
-        # Non-causal: process everything in off-band loop
-        off_band_hi = seq_len_kv
-        on_band_lo = 0
-        on_band_hi = 0
+    if USE_TWO_LOOP:
+        if IS_CAUSAL:
+            off_band_hi = ct.minimum(seq_len_kv, start_m)
+            on_band_lo = start_m
+            on_band_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
+        else:
+            off_band_hi = seq_len_kv
+            on_band_lo = 0
+            on_band_hi = 0
 
-    off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
-    for iter_idx in range(off_band_iters):
-        curr_n = iter_idx * BLOCK_N
-
-        k_tile = ct.load(
-            k_seq,
-            index=(iter_idx, off_kv_h, 0),
-            shape=(BLOCK_N, 1, BLOCK_D),
-            order=(0, 1, 2),
-            allow_tma=True,
-            latency=2,
-            padding_mode=PAD_ZERO,
-        )
-        k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
-
-        qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
-
-        if BLOCK_R > 0:
-            k_pe_tile = ct.load(
-                k_seq,
-                index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
-                shape=(BLOCK_N, 1, BLOCK_R),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-                padding_mode=PAD_ZERO,
-            )
-            k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
-            qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
-
-        qk_max = ct.max(qk, axis=1, keepdims=False)
-        m_ij = ct.maximum(m_i, (qk_max * qk_scale))
-        p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
-
-        alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
-        l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
-        acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
-
-        v_tile = ct.load(
-            v_seq,
-            index=(iter_idx, off_kv_h, 0),
-            shape=(BLOCK_N, 1, BLOCK_D),
-            order=(0, 1, 2),
-            allow_tma=True,
-            latency=2,
-            padding_mode=PAD_ZERO,
-        )
-        v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
-
-        acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
-        m_i = m_ij
-
-    if IS_CAUSAL:
-        on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
-        on_band_block_start = on_band_lo // BLOCK_N
-        for iter_idx in range(on_band_iters):
-            curr_n = on_band_lo + iter_idx * BLOCK_N
-            block_idx = on_band_block_start + iter_idx
+        off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
+        for iter_idx in range(off_band_iters):
+            curr_n = iter_idx * BLOCK_N
 
             k_tile = ct.load(
                 k_seq,
-                index=(block_idx, off_kv_h, 0),
+                index=(iter_idx, off_kv_h, 0),
                 shape=(BLOCK_N, 1, BLOCK_D),
                 order=(0, 1, 2),
                 allow_tma=True,
@@ -652,7 +593,7 @@ def _prefill_attention_ragged_body(
             if BLOCK_R > 0:
                 k_pe_tile = ct.load(
                     k_seq,
-                    index=(block_idx, off_kv_h, BLOCK_D // BLOCK_R),
+                    index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
                     shape=(BLOCK_N, 1, BLOCK_R),
                     order=(0, 1, 2),
                     allow_tma=True,
@@ -661,10 +602,6 @@ def _prefill_attention_ragged_body(
                 )
                 k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
                 qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
-
-            offs_n = curr_n + offs_n_base
-            causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
-            qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
 
             qk_max = ct.max(qk, axis=1, keepdims=False)
             m_ij = ct.maximum(m_i, (qk_max * qk_scale))
@@ -676,7 +613,129 @@ def _prefill_attention_ragged_body(
 
             v_tile = ct.load(
                 v_seq,
-                index=(block_idx, off_kv_h, 0),
+                index=(iter_idx, off_kv_h, 0),
+                shape=(BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2),
+                allow_tma=True,
+                latency=2,
+                padding_mode=PAD_ZERO,
+            )
+            v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
+
+            acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
+            m_i = m_ij
+
+        if IS_CAUSAL:
+            on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
+            on_band_block_start = on_band_lo // BLOCK_N
+            for iter_idx in range(on_band_iters):
+                curr_n = on_band_lo + iter_idx * BLOCK_N
+                block_idx = on_band_block_start + iter_idx
+
+                k_tile = ct.load(
+                    k_seq,
+                    index=(block_idx, off_kv_h, 0),
+                    shape=(BLOCK_N, 1, BLOCK_D),
+                    order=(0, 1, 2),
+                    allow_tma=True,
+                    latency=2,
+                    padding_mode=PAD_ZERO,
+                )
+                k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
+
+                qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
+
+                if BLOCK_R > 0:
+                    k_pe_tile = ct.load(
+                        k_seq,
+                        index=(block_idx, off_kv_h, BLOCK_D // BLOCK_R),
+                        shape=(BLOCK_N, 1, BLOCK_R),
+                        order=(0, 1, 2),
+                        allow_tma=True,
+                        latency=2,
+                        padding_mode=PAD_ZERO,
+                    )
+                    k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
+                    qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
+
+                offs_n = curr_n + offs_n_base
+                causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
+                qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
+
+                qk_max = ct.max(qk, axis=1, keepdims=False)
+                m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+                p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
+
+                alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+                l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+                acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
+
+                v_tile = ct.load(
+                    v_seq,
+                    index=(block_idx, off_kv_h, 0),
+                    shape=(BLOCK_N, 1, BLOCK_D),
+                    order=(0, 1, 2),
+                    allow_tma=True,
+                    latency=2,
+                    padding_mode=PAD_ZERO,
+                )
+                v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
+
+                acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
+                m_i = m_ij
+    else:
+        if IS_CAUSAL:
+            loop_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
+        else:
+            loop_hi = seq_len_kv
+
+        total_iters = (loop_hi + BLOCK_N - 1) // BLOCK_N
+        for iter_idx in range(total_iters):
+            curr_n = iter_idx * BLOCK_N
+
+            k_tile = ct.load(
+                k_seq,
+                index=(iter_idx, off_kv_h, 0),
+                shape=(BLOCK_N, 1, BLOCK_D),
+                order=(0, 1, 2),
+                allow_tma=True,
+                latency=2,
+                padding_mode=PAD_ZERO,
+            )
+            k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
+
+            qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
+
+            if BLOCK_R > 0:
+                k_pe_tile = ct.load(
+                    k_seq,
+                    index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
+                    shape=(BLOCK_N, 1, BLOCK_R),
+                    order=(0, 1, 2),
+                    allow_tma=True,
+                    latency=2,
+                    padding_mode=PAD_ZERO,
+                )
+                k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
+                qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
+
+            if IS_CAUSAL:
+                if curr_n >= start_m:
+                    offs_n = curr_n + offs_n_base
+                    causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
+                    qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
+
+            qk_max = ct.max(qk, axis=1, keepdims=False)
+            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
+
+            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
+
+            v_tile = ct.load(
+                v_seq,
+                index=(iter_idx, off_kv_h, 0),
                 shape=(BLOCK_N, 1, BLOCK_D),
                 order=(0, 1, 2),
                 allow_tma=True,
@@ -732,12 +791,13 @@ def _prefill_attention_ragged_kernel(
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
     IS_CAUSAL: ConstBool,
+    USE_TWO_LOOP: ConstBool,
 ):
     """
     Prefill attention kernel with ragged (contiguous) KV cache.
-    Uses a unified single loop over all KV positions; causal mask is applied
-    conditionally only in the diagonal region (curr_n >= start_m), eliminating
-    duplicated loop body and reducing register pressure.
+    The KV loop structure is architecture-gated by USE_TWO_LOOP: a two-loop
+    causal split (unmasked off-band + masked diagonal) on consumer Blackwell, or
+    a unified single loop with an in-loop diagonal mask elsewhere.
     """
     seq_block_id = ct.bid(0)
     batch_id = ct.bid(1)
@@ -764,6 +824,7 @@ def _prefill_attention_ragged_kernel(
         BLOCK_R,
         QUERY_GROUP_SIZE,
         IS_CAUSAL,
+        USE_TWO_LOOP,
     )
 
 
@@ -786,6 +847,7 @@ def _prefill_attention_ragged_lpt_kernel(
     BLOCK_R: ConstInt,
     QUERY_GROUP_SIZE: ConstInt,
     IS_CAUSAL: ConstBool,
+    USE_TWO_LOOP: ConstBool,
     NUM_HEADS: ConstInt,
     NUM_BATCH: ConstInt,
     MAX_SEQ_LEN: ConstInt,
@@ -833,6 +895,7 @@ def _prefill_attention_ragged_lpt_kernel(
         BLOCK_R,
         QUERY_GROUP_SIZE,
         IS_CAUSAL,
+        USE_TWO_LOOP,
     )
 
 
@@ -1110,6 +1173,15 @@ def prefill_attention_kv_ragged(
     BLOCK_R = head_dim_qk - head_dim_vo
     QUERY_GROUP_SIZE = num_qo_heads // num_kv_heads
 
+    # Two-loop causal split is the default (wins on consumer Blackwell, fp8, and
+    # long seq). Only datacenter Blackwell (sm10x) bf16/fp16 at short seq prefers
+    # the single fused loop — carve out exactly that niche.
+    _fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
+    is_fp8 = q.dtype in _fp8_dtypes or k_cache.dtype in _fp8_dtypes
+    use_two_loop = True
+    if torch.cuda.get_device_capability()[0] == 10 and not is_fp8 and max_seq_len < _RAGGED_TWO_LOOP_MIN_SEQ:
+        use_two_loop = False
+
     outputs = (
         torch.empty(
             [q.shape[0], num_qo_heads, head_dim_vo],
@@ -1153,7 +1225,7 @@ def prefill_attention_kv_ragged(
         num_hb_remainder = (num_qo_heads * num_batch) % swizzle
 
         ragged_lpt_stream = torch.cuda.current_stream()
-        ragged_lpt_cache_key = (autotune_key, swizzle, str(q.device))
+        ragged_lpt_cache_key = (autotune_key, swizzle, str(q.device), use_two_loop)
         if ragged_lpt_cache_key not in _prefill_ragged_lpt_tune_cache:
             result = exhaustive_search(
                 list(_get_prefill_autotune_configs(None)),
@@ -1178,6 +1250,7 @@ def prefill_attention_kv_ragged(
                     BLOCK_R,
                     QUERY_GROUP_SIZE,
                     is_causal,
+                    use_two_loop,
                     num_qo_heads,
                     num_batch,
                     max_seq_len,
@@ -1215,6 +1288,7 @@ def prefill_attention_kv_ragged(
                 BLOCK_R,
                 QUERY_GROUP_SIZE,
                 is_causal,
+                use_two_loop,
                 num_qo_heads,
                 num_batch,
                 max_seq_len,
@@ -1225,7 +1299,7 @@ def prefill_attention_kv_ragged(
         )
     else:
         ragged_stream = torch.cuda.current_stream()
-        ragged_cache_key = (autotune_key, str(q.device))
+        ragged_cache_key = (autotune_key, str(q.device), use_two_loop)
         if ragged_cache_key not in _prefill_ragged_tune_cache:
             result = exhaustive_search(
                 list(_get_prefill_autotune_configs(None)),
@@ -1250,6 +1324,7 @@ def prefill_attention_kv_ragged(
                     BLOCK_R,
                     QUERY_GROUP_SIZE,
                     is_causal,
+                    use_two_loop,
                 ),
                 lambda cfg: {"occupancy": cfg.occupancy},
             )
@@ -1281,6 +1356,7 @@ def prefill_attention_kv_ragged(
                 BLOCK_R,
                 QUERY_GROUP_SIZE,
                 is_causal,
+                use_two_loop,
             ),
         )
 
