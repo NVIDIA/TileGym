@@ -78,9 +78,7 @@ def _gemma_attn_decode_inner_grouped(
             sm_scale_orig = qk_scale * LOG_2
             qk = qk * sm_scale_orig
             qk = ct.truediv(qk, SOFT_CAP, flush_to_zero=True, rounding_mode=RMd.APPROX)
-            # TODO: Performance will be ready once tanh approx is supported
-            # Currently using exact tanh which may impact performance
-            qk = ct.tanh(qk)
+            qk = ct.tanh(qk, rounding_mode=RMd.APPROX)
             qk = qk * SOFT_CAP
 
             mask = curr_n + offs_n < S_kv
