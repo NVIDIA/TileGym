@@ -50,10 +50,13 @@ python tests/benchmark/bench_swiglu.py
 ### Autotuning
 
 
-| Variable                   | Default | Description                                                                                             |
-| -------------------------- | ------- | ------------------------------------------------------------------------------------------------------- |
-| `TILECPP_AUTOTUNE`         | `0`     | Set to `1` to enable autotuning for kernel configurations. When disabled, uses default configurations.  |
-| `TILECPP_VERBOSE_AUTOTUNE` | `0`     | Set to `1` to enable verbose output during autotuning, showing configuration trials and timing results. |
+Autotuning follows `TILEGYM_DISABLE_AUTOTUNE`, the switch shared by every
+backend, and so is on unless that variable disables it.
+
+| Variable                   | Default                      | Description                                                                                             |
+| -------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `TILECPP_AUTOTUNE`         | unset                        | Overrides the shared switch for this backend alone: `0` pins the default configurations, anything else searches. |
+| `TILECPP_VERBOSE_AUTOTUNE` | `0`                          | Set to `1` to enable verbose output during autotuning, showing configuration trials and timing results. |
 
 
 ## Adding a New CUDA Tile C++ Kernel to TileGym

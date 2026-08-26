@@ -7,9 +7,9 @@ CUDA Tile C++ Autotuner
 
 Provides autotuning infrastructure for CUDA Tile C++ kernels.
 
-The autotuner is controlled by the TILECPP_AUTOTUNE environment variable:
-- TILECPP_AUTOTUNE=0 (default): Use default configurations
-- TILECPP_AUTOTUNE=1: Enable autotuning to find optimal configurations
+Autotuning follows TILEGYM_DISABLE_AUTOTUNE, the project-wide switch, and so is
+on unless that variable disables it. TILECPP_AUTOTUNE overrides the decision for
+this backend alone: 0 pins the default configurations, anything else searches.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Callable
 from typing import Sequence
 
 import torch
+
+from tilegym.autotune import is_autotune_disabled
 
 logger = logging.getLogger(__name__)
 
@@ -371,5 +373,14 @@ def autotune(search_space):
 
 
 def is_autotuning_enabled() -> bool:
-    """Check if autotuning is enabled via TILECPP_AUTOTUNE environment variable."""
-    return os.environ.get("TILECPP_AUTOTUNE", "0") != "0"
+    """Report whether the search should run for this call.
+
+    TILECPP_AUTOTUNE, when set, decides on its own so that this backend can be
+    pinned to its default configurations while the others keep searching.
+    Otherwise the project-wide TILEGYM_DISABLE_AUTOTUNE switch decides, which
+    leaves autotuning on by default.
+    """
+    override = os.environ.get("TILECPP_AUTOTUNE")
+    if override is not None:
+        return override != "0"
+    return not is_autotune_disabled()
