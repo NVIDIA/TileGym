@@ -3,17 +3,28 @@
 # SPDX-License-Identifier: MIT
 
 import math
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
 from cuda.tile import RoundingMode as RMd
+from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
 
+from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
+
+_DEFAULT_TMA_OCCUPANCY = 2
+# Occupancy is tuned at first use per (device, dtype, shape) because the optimum
+# depends on the installed compiler and GPU. Each candidate costs one kernel
+# compile, so the grid is kept small.
+_TMA_OCCUPANCY_CANDIDATES = (2, 4, 6, 8)
+_softmax_tma_tune_cache: dict = {}
 
 
 @ct.kernel(occupancy=4)
@@ -79,7 +90,7 @@ def _softmax_kernel_multi_wave_full_row_reg_cached_ldg(
 
 
 # TMA version with static persistent scheduling
-@ct.kernel(occupancy=2)
+@ct.kernel(occupancy=_DEFAULT_TMA_OCCUPANCY)
 def _softmax_kernel_tma(
     output,
     input,
@@ -175,6 +186,35 @@ def _softmax_kernel_chunked(
 
 
 # Launch patterns for the kernels:
+def _softmax_tma_occupancy(input, output, n_rows, n_cols, tile_size, num_sms):
+    """Return the occupancy for the regular-TMA kernel, tuning once per shape."""
+    if is_autotune_disabled():
+        return _DEFAULT_TMA_OCCUPANCY
+
+    cache_key = (str(input.device), input.dtype, n_rows, n_cols)
+    if cache_key not in _softmax_tma_tune_cache:
+
+        def args_fn(cfg):
+            return (output, input, n_rows, n_cols, tile_size)
+
+        def grid_fn(cfg):
+            return (min(num_sms * cfg.occupancy, n_rows), 1, 1)
+
+        def hints_fn(cfg):
+            return {"occupancy": cfg.occupancy}
+
+        result = exhaustive_search(
+            [SimpleNamespace(occupancy=occupancy) for occupancy in _TMA_OCCUPANCY_CANDIDATES],
+            torch.cuda.current_stream(),
+            grid_fn,
+            _softmax_kernel_tma,
+            args_fn,
+            hints_fn,
+        )
+        _softmax_tma_tune_cache[cache_key] = result.best.config.occupancy
+    return _softmax_tma_tune_cache[cache_key]
+
+
 def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     """
     Launch the basic cuTile softmax kernel with static persistent scheduling
@@ -255,9 +295,10 @@ def _launch_softmax_kernel_tma(
     output = output.contiguous()
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
-    num_programs = min(NUM_SM * 2, n_rows)
+    occupancy = _softmax_tma_occupancy(input, output, n_rows, original_n_cols, TILE_SIZE, NUM_SM)
+    softmax_kernel_forward = cached_replace_hints(_softmax_kernel_tma, occupancy=occupancy)
+    num_programs = min(NUM_SM * occupancy, n_rows)
     grid = (num_programs, 1, 1)
-    softmax_kernel_forward = _softmax_kernel_tma
 
     ct.launch(
         torch.cuda.current_stream(),
