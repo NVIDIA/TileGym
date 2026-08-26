@@ -41,7 +41,12 @@ class Test_FlashInfer_Matmul_Alpha_Beta(common.PyTestCase):
 
         return a, b
 
-    @pytest.mark.parametrize("framework", ["cutile"])  # cutile only; other backends OOM on all configs on this GPU
+    @pytest.mark.parametrize(
+        "framework",
+        [
+            "cutile",  # cutile only; other backends OOM on all configs on this GPU
+        ],
+    )
     @pytest.mark.parametrize("m, n, k", [(4096, 4096, 4096), (8192, 8192, 8192)])
     @pytest.mark.parametrize(
         "dtype, out_dtype",
