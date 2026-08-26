@@ -47,12 +47,13 @@ the narrow end; in between, fp32 `exp` throughput and the reduction dependency c
   statistic pass adds a full row read. Choosing the pass structure by row width is the
   single largest lever, worth more than any tuning knob once rows exceed register residency.
 - **Occupancy tiering by row width.** Wider rows mean bigger tiles, more registers/SMEM per CTA,
-  fewer resident CTAs. The cuTile kernels pin occupancy per variant — `occupancy=4` on the narrow
-  gather-persistent kernel, `occupancy=2` on the full-row TMA kernel — and hosts size
-  persistent grids to match (`min(NUM_SM * 4, n_rows)` for the narrow kernel, `NUM_SM * 2` for the
-  TMA path; all in `cutile/softmax.py`). The
-  invariant: the right occupancy falls as row width grows; one fixed setting either starves narrow
-  rows of parallelism or spills wide rows.
+  fewer resident CTAs. The cuTile kernels pin occupancy per variant. The narrow gather-persistent
+  kernel uses occupancy 4; the full-row TMA path searches a small set on first use and caches the
+  winner per device, dtype, and shape. The host uses the selected value for both the compiler hint
+  and persistent-grid multiplier (`min(NUM_SM * occupancy, n_rows)`; all in `cutile/softmax.py`).
+  Register and shared-memory pressure generally favor lower occupancy as row width grows, but the
+  winner can be non-monotonic because grid-wave and compiler effects also matter. Autotuning adapts
+  those effects to the installed compiler instead of encoding version-specific shape tiers.
 - **Routing between kernel variants.** The repo keeps several forward kernels alive simultaneously —
   gather-persistent, one-CTA-per-row register-cached, full-row TMA persistent, chunked
   three-pass — because each wins in a row-width band, and the host routes among them
@@ -73,9 +74,9 @@ the narrow end; in between, fp32 `exp` throughput and the reduction dependency c
 
 ## Applicable techniques
 - **Persistent grid-stride scheduling** (`tech-persistent-grid`) — decouples grid size from `n_rows`;
-  pair the grid multiple with the kernel's pinned occupancy.
-- **Occupancy pinning / tiering** (`tech-occupancy`) — set occupancy per row-width band instead of
-  accepting the compiler default; wide-row tiles at high occupancy spill.
+  pair the grid multiple with the kernel's selected occupancy.
+- **Occupancy autotuning** (`tech-occupancy`) — search a bounded set and cache the winner instead of
+  accepting the compiler default or encoding compiler-version-specific shape tiers.
 - **TMA vs gather loads** (`tech-tma-load`) — full-row `ct.load` with padding mode vs `ct.gather` with
   index tiles; both paths exist per variant and the winner is width-dependent.
 - **Compile-time bounds-check elision** — route exact power-of-two widths to a check-free
