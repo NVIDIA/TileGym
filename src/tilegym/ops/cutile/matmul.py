@@ -128,6 +128,14 @@ def _static_persistent_matmul_autotune_configs():
         yield SimpleNamespace(
             TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1, LOAD_LATENCY=-1
         )
+        # Wide-N and load-cost-tuned tiles for extreme-skinny shapes (large M, small
+        # N/K), where the square tiles above leave the persistent grid underutilized.
+        yield SimpleNamespace(
+            TILE_SIZE_M=256, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1, LOAD_LATENCY=4
+        )
         yield SimpleNamespace(
             TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
         )
