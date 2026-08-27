@@ -3,17 +3,25 @@
 # SPDX-License-Identifier: MIT
 
 import functools
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
 from cuda.tile import RoundingMode as RMd
+from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.experimental import experimental_kernel
 
+from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
+
+# Preserve the unhinted compiler default because explicit occupancy can regress some shapes.
+_SILU_OCCUPANCY_CONFIGS = tuple(SimpleNamespace(occupancy=occ) for occ in (None, 1, 2, 4, 8, 12, 16))
+_SILU_TUNE_CACHE: dict = {}
 
 
 # To be launched with grid = number of rows (batch_size)
@@ -119,6 +127,37 @@ def _ensure_contiguous(fn):
     return wrapper
 
 
+def _launch_silu_kernel(kernel, args, grid, cache_key):
+    stream = torch.cuda.current_stream()
+    if is_autotune_disabled():
+        tuned_kernel = kernel
+    else:
+        if cache_key not in _SILU_TUNE_CACHE:
+            result = exhaustive_search(
+                _SILU_OCCUPANCY_CONFIGS,
+                stream,
+                lambda _: grid,
+                kernel,
+                lambda _: args,
+                lambda cfg: {} if cfg.occupancy is None else {"occupancy": cfg.occupancy},
+            )
+            best_cfg = result.best.config
+            tuned_kernel = (
+                kernel if best_cfg.occupancy is None else cached_replace_hints(kernel, occupancy=best_cfg.occupancy)
+            )
+            _SILU_TUNE_CACHE[cache_key] = (best_cfg, tuned_kernel)
+        _, tuned_kernel = _SILU_TUNE_CACHE[cache_key]
+
+    ct.launch(stream, grid, tuned_kernel, args)
+
+
+def _silu_and_mul_forward(input_flat, output, hidden_size):
+    tile_size = next_power_of_2(hidden_size)
+    args = (input_flat, output, tile_size, hidden_size)
+    cache_key = ("fwd", hidden_size, input_flat.dtype, str(input_flat.device))
+    _launch_silu_kernel(_silu_and_mul_kernel_row_wise, args, (input_flat.shape[0],), cache_key)
+
+
 def _silu_and_mul_backward(
     grad_output: torch.Tensor,
     input: torch.Tensor,
@@ -143,14 +182,11 @@ def _silu_and_mul_backward(
     grad_a = torch.empty_like(grad_output_flat)
     grad_b = torch.empty_like(grad_output_flat)
 
-    TILE_SIZE = next_power_of_2(hidden_size)
+    tile_size = next_power_of_2(hidden_size)
     grid = (batch_size,)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        _silu_and_mul_backward_kernel_row_wise,
-        (grad_output_flat, input_flat, grad_a, grad_b, TILE_SIZE, hidden_size),
-    )
+    args = (grad_output_flat, input_flat, grad_a, grad_b, tile_size, hidden_size)
+    cache_key = ("bwd", hidden_size, grad_output_flat.dtype, str(grad_output_flat.device))
+    _launch_silu_kernel(_silu_and_mul_backward_kernel_row_wise, args, grid, cache_key)
 
     return grad_a.view(*original_output_shape), grad_b.view(*original_output_shape)
 
@@ -176,16 +212,7 @@ class _SiLUAndMulFunction(torch.autograd.Function):
             device=input.device,
         )
 
-        from .utils import next_power_of_2
-
-        TILE_SIZE = next_power_of_2(hidden_size)
-        grid = (batch_size,)
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            _silu_and_mul_kernel_row_wise,
-            (input_flat, output, TILE_SIZE, hidden_size),
-        )
+        _silu_and_mul_forward(input_flat, output, hidden_size)
 
         # Reshape output
         output_shape = list(original_shape)
@@ -249,14 +276,5 @@ def silu_and_mul(
             device=input.device,
         )
 
-    from .utils import next_power_of_2
-
-    TILE_SIZE = next_power_of_2(hidden_size)
-    grid = (batch_size,)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        _silu_and_mul_kernel_row_wise,
-        (input_flat, output, TILE_SIZE, hidden_size),
-    )
+    _silu_and_mul_forward(input_flat, output, hidden_size)
     return output.reshape(*output_shape)
