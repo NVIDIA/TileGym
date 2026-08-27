@@ -49,13 +49,20 @@ def _bmm_autotune_configs():
                             TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=occupancy, num_ctas=2
                         )
     else:
-        # Other GPUs (e.g., GB100): Larger tiles with num_ctas=2
         for TILE_M in [128, 256]:
             for TILE_N in [256]:
-                for TILE_K in [64]:
-                    yield SimpleNamespace(
-                        TILE_M=TILE_M, TILE_N=TILE_N, TILE_K=TILE_K, GROUP_SIZE_M=8, occupancy=1, num_ctas=2
-                    )
+                for TILE_K in [32, 64]:
+                    for occupancy in [1, 2]:
+                        for LATENCY in [3, 4, 5]:
+                            yield SimpleNamespace(
+                                TILE_M=TILE_M,
+                                TILE_N=TILE_N,
+                                TILE_K=TILE_K,
+                                GROUP_SIZE_M=8,
+                                occupancy=occupancy,
+                                num_ctas=2,
+                                LATENCY=LATENCY,
+                            )
 
 
 # CuTile implementation of BMM kernel
@@ -108,6 +115,7 @@ def _static_persistent_bmm_kernel(
     TILE_N: ct.Constant[int],
     TILE_K: ct.Constant[int],
     GROUP_SIZE_M: ct.Constant[int],
+    LATENCY: ct.Constant[int],
     TRANSPOSE_A: ct.Constant[bool],
     TRANSPOSE_B: ct.Constant[bool],
 ):
@@ -159,7 +167,7 @@ def _static_persistent_bmm_kernel(
                     shape=(1, TILE_K, TILE_M),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
-                    latency=3,
+                    latency=LATENCY,
                 )
                 # Transpose to get (1, TILE_M, TILE_K)
                 a_tile_3d = ct.permute(a_tile_3d, (0, 2, 1))
@@ -171,7 +179,7 @@ def _static_persistent_bmm_kernel(
                     shape=(1, TILE_M, TILE_K),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
-                    latency=3,
+                    latency=LATENCY,
                 )
             # Reshape to 2D for MMA
             a_tile = ct.reshape(a_tile_3d, (TILE_M, TILE_K))
@@ -185,7 +193,7 @@ def _static_persistent_bmm_kernel(
                     shape=(1, TILE_N, TILE_K),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
-                    latency=3,
+                    latency=LATENCY,
                 )
                 # Transpose to get (1, TILE_K, TILE_N)
                 b_tile_3d = ct.permute(b_tile_3d, (0, 2, 1))
@@ -197,7 +205,7 @@ def _static_persistent_bmm_kernel(
                     shape=(1, TILE_K, TILE_N),
                     order=(0, 1, 2),
                     padding_mode=zero_pad,
-                    latency=3,
+                    latency=LATENCY,
                 )
             # Reshape to 2D for MMA
             b_tile = ct.reshape(b_tile_3d, (TILE_K, TILE_N))
@@ -209,7 +217,7 @@ def _static_persistent_bmm_kernel(
         result = ct.astype(accumulator, C.dtype)
         # Reshape to 3D for store
         result_3d = ct.reshape(result, (1, TILE_M, TILE_N))
-        ct.store(C, index=(bid_q, bid_m, bid_n), tile=result_3d, order=(0, 1, 2), latency=3)
+        ct.store(C, index=(bid_q, bid_m, bid_n), tile=result_3d, order=(0, 1, 2), latency=LATENCY)
 
 
 def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, transpose_a, transpose_b):
@@ -246,6 +254,7 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
             cfg.TILE_N,
             cfg.TILE_K,
             cfg.GROUP_SIZE_M,
+            getattr(cfg, "LATENCY", 3),
             transpose_a,
             transpose_b,
         )
