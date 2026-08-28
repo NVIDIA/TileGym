@@ -361,9 +361,12 @@ jobs:
           fi
 
           docker pull ${IMAGE}
+          # No autotune-disable flag: ops tests exercise the autotuned paths. The
+          # switch is TILEGYM_DISABLE_AUTOTUNE (src/tilegym/autotune.py); the
+          # DISABLE_AUTOTUNE name that used to be passed here has not been read by
+          # any operator since 2c6b3b3, so it was doing nothing.
           docker run --rm \
             --gpus all \
-            -e DISABLE_AUTOTUNE=1 \
             -e ENABLE_TILE=1 \
             -e PYTHONPATH=/opt/triton-cuda-tileir \
             -e PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8 \
