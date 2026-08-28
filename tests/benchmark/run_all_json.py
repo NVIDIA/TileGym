@@ -30,6 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Wall-clock budget for a single benchmark file. The GPU runners are ephemeral
+# pods whose hosts differ by up to ~1.35x in speed, so this needs enough slack
+# that the slowest pod still finishes the longest benchmark. bench_bmm.py is
+# currently the longest at ~16 min on a fast pod, which leaves no margin under
+# the previous 20 min budget and made test-benchmark fail roughly half the time.
+BENCHMARK_TIMEOUT_S = int(os.environ.get("BENCH_TIMEOUT_S", "1800"))
+
 
 def get_gpu_info() -> Dict[str, Any]:
     """Capture GPU information using nvidia-smi."""
@@ -220,7 +227,7 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
             [sys.executable, str(benchmark_file)],
             capture_output=True,
             text=True,
-            timeout=1200,  # 20 minute timeout per benchmark
+            timeout=BENCHMARK_TIMEOUT_S,
             cwd=benchmark_file.parent,
         )
 
@@ -253,8 +260,8 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
             "benchmark_file": benchmark_file.name,
             "status": "TIMEOUT",
             "error_type": "TimeoutError",
-            "error_message": "Benchmark exceeded 20 minute timeout",
-            "error": "Benchmark exceeded 20 minute timeout",
+            "error_message": f"Benchmark exceeded {BENCHMARK_TIMEOUT_S}s timeout",
+            "error": f"Benchmark exceeded {BENCHMARK_TIMEOUT_S}s timeout",
             "benchmarks": [],
         }
     except Exception as e:
