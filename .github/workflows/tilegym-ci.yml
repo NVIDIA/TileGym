@@ -300,8 +300,11 @@ jobs:
       - name: Checkout code (sparse - need ops tests and shared utilities)
         uses: actions/checkout@v4
         with:
+          # .test_durations is needed on the host so the nightly can seed the
+          # shard's durations file before pytest-split reads it.
           sparse-checkout: |
             tests
+            .github/.test_durations
           sparse-checkout-cone-mode: false
 
       - name: Create test results directory
@@ -339,11 +342,20 @@ jobs:
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
 
           # PR builds read the committed durations map to balance shards. Nightly
-          # builds (main/schedule) instead record fresh per-test timings to an
+          # builds (main/schedule) additionally record fresh per-test timings to an
           # uploaded file, which the update-test-durations job merges and commits
           # back so the committed map stays current as tests are added.
+          #
+          # pytest-split uses one path for both reading and writing, so the nightly
+          # seeds the shard's output file with the committed map: without it
+          # pytest-split finds no durations and falls back to splitting by test
+          # count, which leaves the shards badly unbalanced. --clean-durations then
+          # makes it write back only the tests this shard actually ran, so the
+          # per-shard files stay disjoint and the merge below keeps working.
           if [ "${{ needs.config.outputs.is_pr }}" == "false" ]; then
-            DURATIONS_ARGS="--durations-path /test-results/durations-${{ matrix.shard }}.json --store-durations"
+            cp ${{ github.workspace }}/.github/.test_durations \
+               ${{ github.workspace }}/test-results/durations-${{ matrix.shard }}.json
+            DURATIONS_ARGS="--durations-path /test-results/durations-${{ matrix.shard }}.json --store-durations --clean-durations"
           else
             DURATIONS_ARGS="--durations-path /workspace/tilegym/.github/.test_durations"
           fi
