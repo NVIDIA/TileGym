@@ -42,7 +42,9 @@
  */
 template<typename T, typename CT, typename ST, int BATCH, int Q_HEADS, int K_HEADS,
          int BLOCK_QH, int BLOCK_KH, int BLOCK_HD,
-         int HALF_ROPE_DIM, int HEAD_DIM, int COS_BS, int SEQ_LEN>
+         int HALF_ROPE_DIM, int HEAD_DIM, int COS_BS, int SEQ_LEN,
+         int Q_STRIDE_B, int Q_STRIDE_H, int Q_STRIDE_S,
+         int K_STRIDE_B, int K_STRIDE_H, int K_STRIDE_S>
 __tile_global__ void rope_kernel(
     T* __restrict__ q,    // [batch, n_q_heads, seq_len, head_dim]
     T* __restrict__ k,    // [batch, n_kv_heads, seq_len, head_dim]
@@ -78,8 +80,11 @@ __tile_global__ void rope_kernel(
     // Process Q tensor - 4D view over head_dim. Tile indices 0 and 1 along the
     // head_dim axis cover [0:2*BLOCK_HD) == [0:rope_dim); any elements at
     // [rope_dim:HEAD_DIM) are not accessed and pass through unchanged (in-place).
-    auto pQ = ct::partition_view(ct::tensor_span{q, ct::extents{BATCH, Q_HEADS, SEQ_LEN, HEAD_DIM}},
-                                 ct::shape<1, BLOCK_QH, 1, BLOCK_HD>{});
+    auto pQ = ct::partition_view(
+        ct::tensor_span{q, ct::layout_strided_mapping{
+            ct::extents<uint32_t, BATCH, Q_HEADS, SEQ_LEN, HEAD_DIM>{},
+            ct::extents<uint32_t, Q_STRIDE_B, Q_STRIDE_H, Q_STRIDE_S, 1>{}}},
+        ct::shape<1, BLOCK_QH, 1, BLOCK_HD>{});
     auto q_tile_1_loaded = pQ.load(batch_idx, 0, row_idx, 0);
     auto q_tile_1 = ct::element_cast<CompT>(ct::reshape<ct::shape<BLOCK_QH, BLOCK_HD>>(q_tile_1_loaded));
 
@@ -100,8 +105,11 @@ __tile_global__ void rope_kernel(
     pQ.store(new_q_tile_2_reshaped, batch_idx, 0, row_idx, 1);
 
     // Process K tensor
-    auto pK = ct::partition_view(ct::tensor_span{k, ct::extents{BATCH, K_HEADS, SEQ_LEN, HEAD_DIM}},
-                                 ct::shape<1, BLOCK_KH, 1, BLOCK_HD>{});
+    auto pK = ct::partition_view(
+        ct::tensor_span{k, ct::layout_strided_mapping{
+            ct::extents<uint32_t, BATCH, K_HEADS, SEQ_LEN, HEAD_DIM>{},
+            ct::extents<uint32_t, K_STRIDE_B, K_STRIDE_H, K_STRIDE_S, 1>{}}},
+        ct::shape<1, BLOCK_KH, 1, BLOCK_HD>{});
     auto k_tile_1_loaded = pK.load(batch_idx, 0, row_idx, 0);
     auto k_tile_1 = ct::element_cast<CompT>(ct::reshape<ct::shape<BLOCK_KH, BLOCK_HD>>(k_tile_1_loaded));
 

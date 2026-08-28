@@ -88,14 +88,12 @@ __tile_global__ void naive_absorb_mla(
     auto q_flat_offs = offs_h_2d * stride_qm + offs_d_2d;
     auto q_ptrs = Q_base + q_flat_offs;
     auto q_mask = ct::reshape(offs_h + ct::full<i32_H>(pid_x * BLOCK_H) < num_head, ct::shape<BLOCK_H, 1>{});
-    auto q_t = ct::load_masked(q_ptrs, q_mask, zero_tile<T>());
-    auto q = ct::element_cast<float>(q_t);
+    auto q = ct::load_masked(q_ptrs, q_mask, zero_tile<T>());
 
     // Load QPE: [BLOCK_H, BLOCK_KPE]
     auto qpe_flat_offs = offs_h_2d * stride_qpem + offs_kpe_2d;
     auto qpe_ptrs = QPE_base + qpe_flat_offs;
-    auto qpe_t = ct::load_masked(qpe_ptrs, q_mask, zero_tile<T>());
-    auto qpe = ct::element_cast<float>(qpe_t);
+    auto qpe = ct::load_masked(qpe_ptrs, q_mask, zero_tile<T>());
 
     // Initialize accumulators
     auto m_i = ct::full<f32_H>(-1e30f);
@@ -111,13 +109,11 @@ __tile_global__ void naive_absorb_mla(
         auto k_flat_offs = k_row_2d * stride_kvn + offs_d_2d;
         auto k_ptrs = KV_base + k_flat_offs;
         auto k_mask = ct::reshape(k_row_base < S_kv, ct::shape<BLOCK_N, 1>{});
-        auto k_t = ct::load_masked(k_ptrs, k_mask, zero_tile<T>());
-        auto k = ct::element_cast<float>(k_t);  // [BLOCK_N, BLOCK_D]
+        auto k = ct::load_masked(k_ptrs, k_mask, zero_tile<T>());  // [BLOCK_N, BLOCK_D]
 
         auto kpe_flat_offs = k_row_2d * stride_kpem + offs_kpe_2d;
         auto kpe_ptrs = KPE_base + kpe_flat_offs;
-        auto kpe_block_t = ct::load_masked(kpe_ptrs, k_mask, zero_tile<T>());
-        auto kpe_block = ct::element_cast<float>(kpe_block_t);  // [BLOCK_N, BLOCK_KPE]
+        auto kpe_block = ct::load_masked(kpe_ptrs, k_mask, zero_tile<T>());  // [BLOCK_N, BLOCK_KPE]
 
         // Compute QK = Q @ K^T: [BLOCK_H, BLOCK_D] @ [BLOCK_D, BLOCK_N] = [BLOCK_H, BLOCK_N]
         auto k_trans = ct::transpose(k);  // [BLOCK_D, BLOCK_N]
@@ -148,18 +144,16 @@ __tile_global__ void naive_absorb_mla(
         auto alpha_2d = ct::reshape(alpha, ct::shape<BLOCK_H, 1>{});
         acc = acc * alpha_2d;
 
-        auto v_t = ct::load_masked(k_ptrs, k_mask, zero_tile<T>());
-        auto v = ct::element_cast<float>(v_t);
+        auto v = ct::load_masked(k_ptrs, k_mask, zero_tile<T>());
 
-        // Accumulate: acc += P @ V: [BLOCK_H, BLOCK_N] @ [BLOCK_N, BLOCK_D]
-        acc = ct::mma(p, v, acc);
+        acc = ct::mma(ct::element_cast<T>(p), v, acc);
 
         m_i = m_ij;
     }
 
     // Finalize: output = acc / l_i
     auto l_i_2d = ct::reshape(l_i, ct::shape<BLOCK_H, 1>{});
-    auto output = acc / l_i_2d;
+    auto output = ct::div(acc, l_i_2d, ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
 
     // Store output: [BLOCK_H, BLOCK_D]
     T* O_base = Out + batch_idx * stride_ob + pid_x * BLOCK_H * stride_om;
@@ -185,7 +179,7 @@ __tile_global__ void naive_absorb_mla(
  * Computes: QK = K @ Q^T + KPE @ QPE^T (in transposed [N, H] order)
  * Then transposes back for final output.
  */
-template<typename T, int BLOCK_D, int BLOCK_H, int BLOCK_N, int BLOCK_KPE>
+template<typename T, int BLOCK_D, int BLOCK_H, int BLOCK_N, int BLOCK_KPE, int EVEN_STRIDES>
 __tile_global__ void naive_absorb_mla_transpose(
     T* __restrict__ Q, T* __restrict__ QPE,
     T* __restrict__ KV, T* __restrict__ KPE_in,
@@ -202,6 +196,15 @@ __tile_global__ void naive_absorb_mla_transpose(
     KPE_in = ct::assume_aligned<16>(KPE_in);
     Out    = ct::assume_aligned<16>(Out);
     L      = ct::assume_aligned<16>(L);
+
+    if constexpr (EVEN_STRIDES) {
+        using tma_elems_t = ct::integral_constant<static_cast<int>(16 / sizeof(T))>;
+        stride_qm = ct::assume_divisible(stride_qm, tma_elems_t{});
+        stride_qpem = ct::assume_divisible(stride_qpem, tma_elems_t{});
+        stride_kvn = ct::assume_divisible(stride_kvn, tma_elems_t{});
+        stride_kpem = ct::assume_divisible(stride_kpem, tma_elems_t{});
+        stride_om = ct::assume_divisible(stride_om, tma_elems_t{});
+    }
 
     // Tile type definitions - use float for accumulation
     using f32_HxD = ct::tile<float, ct::shape<BLOCK_H, BLOCK_D>>;
@@ -226,37 +229,37 @@ __tile_global__ void naive_absorb_mla_transpose(
     int batch_idx = ct::bid().y;
     float qk_scale = sm_scale * INV_LOG_2;
 
-    // Base pointers
-    T* Q_base = Q + batch_idx * stride_qb + pid_x * BLOCK_H * stride_qm;
-    T* QPE_base = QPE + batch_idx * stride_qpeb + pid_x * BLOCK_H * stride_qpem;
-    T* KV_base = KV + batch_idx * stride_kvb;
-    T* KPE_base = KPE_in + batch_idx * stride_kpeb;
+    auto q_view = ct::partition_view{
+        ct::tensor_span{Q + batch_idx * stride_qb,
+                        ct::layout_strided_mapping{
+                            ct::extents{ct::integral_constant<BLOCK_D>{}, num_head},
+                            ct::extents{ct::integral_constant<1>{}, stride_qm}}},
+        ct::shape<BLOCK_D, BLOCK_H>{}};
+    auto qpe_view = ct::partition_view{
+        ct::tensor_span{QPE + batch_idx * stride_qpeb,
+                        ct::layout_strided_mapping{
+                            ct::extents{ct::integral_constant<BLOCK_KPE>{}, num_head},
+                            ct::extents{ct::integral_constant<1>{}, stride_qpem}}},
+        ct::shape<BLOCK_KPE, BLOCK_H>{}};
+    auto kv_view = ct::partition_view{
+        ct::tensor_span{KV + batch_idx * stride_kvb,
+                        ct::layout_strided_mapping{
+                            ct::extents{S_kv, ct::integral_constant<BLOCK_D>{}},
+                            ct::extents{stride_kvn, ct::integral_constant<1>{}}}},
+        ct::shape<BLOCK_N, BLOCK_D>{}};
+    auto kpe_view = ct::partition_view{
+        ct::tensor_span{KPE_in + batch_idx * stride_kpeb,
+                        ct::layout_strided_mapping{
+                            ct::extents{S_kv, ct::integral_constant<BLOCK_KPE>{}},
+                            ct::extents{stride_kpem, ct::integral_constant<1>{}}}},
+        ct::shape<BLOCK_N, BLOCK_KPE>{}};
 
-    // Generate 1D offset tiles
     auto offs_h = ct::iota<i32_H>();
-    auto offs_d = ct::iota<i32_D>();
-    auto offs_kpe = ct::iota<i32_KPE>();
     auto offs_n = ct::iota<i32_N>();
 
-    // Reshape to 2D for broadcasting
-    auto offs_h_2d = ct::reshape(offs_h, ct::shape<BLOCK_H, 1>{});
-    auto offs_d_2d = ct::reshape(offs_d, ct::shape<1, BLOCK_D>{});
-    auto offs_kpe_2d = ct::reshape(offs_kpe, ct::shape<1, BLOCK_KPE>{});
+    auto q = q_view.load_masked(0, pid_x);
 
-    // Load Q: [BLOCK_H, BLOCK_D] and transpose to [BLOCK_D, BLOCK_H]
-    auto q_flat_offs = offs_h_2d * stride_qm + offs_d_2d;
-    auto q_ptrs = Q_base + q_flat_offs;
-    auto q_mask = ct::reshape(offs_h + ct::full<i32_H>(pid_x * BLOCK_H) < num_head, ct::shape<BLOCK_H, 1>{});
-    auto q_hd_t = ct::load_masked(q_ptrs, q_mask, zero_tile<T>());
-    auto q_hd = ct::element_cast<float>(q_hd_t);  // [BLOCK_H, BLOCK_D]
-    auto q = ct::transpose(q_hd);  // [BLOCK_D, BLOCK_H]
-
-    // Load QPE: [BLOCK_H, BLOCK_KPE] and transpose to [BLOCK_KPE, BLOCK_H]
-    auto qpe_flat_offs = offs_h_2d * stride_qpem + offs_kpe_2d;
-    auto qpe_ptrs = QPE_base + qpe_flat_offs;
-    auto qpe_hk_t = ct::load_masked(qpe_ptrs, q_mask, zero_tile<T>());
-    auto qpe_hk = ct::element_cast<float>(qpe_hk_t);  // [BLOCK_H, BLOCK_KPE]
-    auto qpe = ct::transpose(qpe_hk);  // [BLOCK_KPE, BLOCK_H]
+    auto qpe = qpe_view.load_masked(0, pid_x);
 
     // Initialize accumulators in transposed layout [BLOCK_D, BLOCK_H]
     auto m_i = ct::full<f32_H>(-1e30f);
@@ -270,17 +273,8 @@ __tile_global__ void naive_absorb_mla_transpose(
         int curr_n = block_idx * BLOCK_N;
 
         auto k_row_base = ct::full<i32_N>(curr_n) + offs_n;
-        auto k_row_2d = ct::reshape(k_row_base, ct::shape<BLOCK_N, 1>{});
-        auto k_flat_offs = k_row_2d * stride_kvn + offs_d_2d;
-        auto k_ptrs = KV_base + k_flat_offs;
-        auto k_mask = ct::reshape(k_row_base < S_kv, ct::shape<BLOCK_N, 1>{});
-        auto k_t = ct::load_masked(k_ptrs, k_mask, zero_tile<T>());
-        auto k = ct::element_cast<float>(k_t);  // [BLOCK_N, BLOCK_D]
-
-        auto kpe_flat_offs = k_row_2d * stride_kpem + offs_kpe_2d;
-        auto kpe_ptrs = KPE_base + kpe_flat_offs;
-        auto kpe_block_t = ct::load_masked(kpe_ptrs, k_mask, zero_tile<T>());
-        auto kpe_block = ct::element_cast<float>(kpe_block_t);  // [BLOCK_N, BLOCK_KPE]
+        auto k = kv_view.load_masked(block_idx, 0);  // [BLOCK_N, BLOCK_D]
+        auto kpe_block = kpe_view.load_masked(block_idx, 0);  // [BLOCK_N, BLOCK_KPE]
 
         // Compute QK = K @ Q^T: [BLOCK_N, BLOCK_D] @ [BLOCK_D, BLOCK_H] = [BLOCK_N, BLOCK_H]
         auto qk = ct::mma(k, q, ct::zeros<f32_NxH>());  // [BLOCK_N, BLOCK_H]
@@ -313,12 +307,10 @@ __tile_global__ void naive_absorb_mla_transpose(
         acc = acc * alpha_bcast;
 
         // Load V: [BLOCK_N, BLOCK_D] and transpose to [BLOCK_D, BLOCK_N]
-        auto v_t = ct::load_masked(k_ptrs, k_mask, zero_tile<T>());
-        auto v = ct::element_cast<float>(v_t);  // [BLOCK_N, BLOCK_D]
+        auto v = kv_view.load_masked(block_idx, 0);  // [BLOCK_N, BLOCK_D]
         auto v_trans = ct::transpose(v);  // [BLOCK_D, BLOCK_N]
 
-        // Accumulate: acc += V^T @ P: [BLOCK_D, BLOCK_N] @ [BLOCK_N, BLOCK_H] = [BLOCK_D, BLOCK_H]
-        acc = ct::mma(v_trans, p, acc);
+        acc = ct::mma(v_trans, ct::element_cast<T>(p), acc);
 
         m_i = m_ij;
     }
@@ -329,19 +321,22 @@ __tile_global__ void naive_absorb_mla_transpose(
 
     // Finalize: output = acc / l_sum, transposed back to [BLOCK_H, BLOCK_D]
     auto l_sum_bcast = ct::reshape(l_sum, ct::shape<1, BLOCK_H>{});
-    acc = acc / l_sum_bcast;  // [BLOCK_D, BLOCK_H]
-    auto output = ct::transpose(acc);  // [BLOCK_H, BLOCK_D]
+    acc = ct::div(acc, l_sum_bcast, ct::round_approximate_t{},
+                  ct::round_subnormals_to_zero_t{});  // [BLOCK_D, BLOCK_H]
+    auto output = ct::transpose(ct::element_cast<T>(acc));  // [BLOCK_H, BLOCK_D]
 
     // Store output: [BLOCK_H, BLOCK_D]
-    T* O_base = Out + batch_idx * stride_ob + pid_x * BLOCK_H * stride_om;
-    auto o_flat_offs = offs_h_2d * stride_om + offs_d_2d;
-    auto o_ptrs = O_base + o_flat_offs;
-    ct::store_masked(o_ptrs, ct::element_cast<T>(output), q_mask);
+    auto o_view = ct::partition_view{
+        ct::tensor_span{Out + batch_idx * stride_ob,
+                        ct::layout_strided_mapping{
+                            ct::extents{num_head, ct::integral_constant<BLOCK_D>{}},
+                            ct::extents{stride_om, ct::integral_constant<1>{}}}},
+        ct::shape<BLOCK_H, BLOCK_D>{}};
+    o_view.store_masked(output, pid_x, 0);
 
     // Store L = m_i + log2(l_sum): [BLOCK_H]
-    float* L_base = L + batch_idx * num_head + pid_x * BLOCK_H;
-    auto l_result = m_i + ct::log2(l_sum);
-    auto l_ptrs = L_base + offs_h;
-    auto l_mask = offs_h + ct::full<i32_H>(pid_x * BLOCK_H) < num_head;
-    ct::store_masked(l_ptrs, l_result, l_mask);
+    auto l_view = ct::partition_view{
+        ct::tensor_span{L + batch_idx * num_head, ct::extents{num_head}},
+        ct::shape<BLOCK_H>{}};
+    l_view.store_masked(m_i + ct::log2(l_sum), pid_x);
 }

@@ -32,7 +32,7 @@
  *   n_cols: Number of columns (power of 2, must equal BLOCK_SIZE)
  *   num_programs: Total number of CTA programs for persistent scheduling
  */
-template<typename T, int BLOCK_SIZE>
+template<typename T, int BLOCK_SIZE, int TMA_ROWS>
 __tile_global__ void softmax_kernel(
     T* __restrict__ _output,
     const T* __restrict__ _input,
@@ -56,6 +56,34 @@ __tile_global__ void softmax_kernel(
     // Persistent scheduling: each program handles multiple rows
     int row_start = ct::bid().x;
     int row_step = num_programs;
+
+    if constexpr (TMA_ROWS) {
+        constexpr int TMA_ELEMS = static_cast<int>(16 / sizeof(T));
+        using tma_elems_t = ct::integral_constant<TMA_ELEMS>;
+        input_row_stride = ct::assume_divisible(input_row_stride, tma_elems_t{});
+        output_row_stride = ct::assume_divisible(output_row_stride, tma_elems_t{});
+
+        for (auto row_idx : ct::irange(row_start, n_rows, row_step)) {
+            auto pIn = ct::partition_view{
+                ct::tensor_span{input + row_idx * input_row_stride,
+                                ct::extents{ct::integral_constant<BLOCK_SIZE>{}}},
+                ct::shape<BLOCK_SIZE>{}};
+            auto pOut = ct::partition_view{
+                ct::tensor_span{output + row_idx * output_row_stride,
+                                ct::extents{ct::integral_constant<BLOCK_SIZE>{}}},
+                ct::shape<BLOCK_SIZE>{}};
+
+            auto row = ct::element_cast<float>(pIn.load(0));
+            float row_max = static_cast<float>(ct::reduce_max(row, 0_ic));
+            auto numerator = ct::exp(row - row_max);
+            float denominator = static_cast<float>(ct::sum(numerator, 0_ic));
+            auto softmax_output = ct::div(numerator, ct::full<f32xN>(denominator),
+                                         ct::round_approximate_t{},
+                                         ct::round_subnormals_to_zero_t{});
+            pOut.store(ct::element_cast<T>(softmax_output), 0);
+        }
+        return;
+    }
 
     for (auto row_idx : ct::irange(row_start, n_rows, row_step)) {
         // row_start_ptr = input + row_idx * input_row_stride
@@ -85,8 +113,9 @@ __tile_global__ void softmax_kernel(
 
         float denominator = static_cast<float>(ct::sum(numerator, 0_ic));
 
-        // softmax_output = numerator / denominator
-        auto softmax_output = numerator / denominator;
+        auto softmax_output = ct::div(numerator, ct::full<f32xN>(denominator),
+                                     ct::round_approximate_t{},
+                                     ct::round_subnormals_to_zero_t{});
 
         // Convert back to output type and store (only valid columns)
         auto softmax_output_T = ct::element_cast<T>(softmax_output);

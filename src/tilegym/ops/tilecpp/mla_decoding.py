@@ -72,10 +72,15 @@ def _launch_mla_decoding_kernel(
     # Select kernel
     kernel_wrapper = _naive_absorb_mla_transpose_kernel if transpose else _naive_absorb_mla_kernel
 
+    tma_elems = 16 // q.element_size()
+    even_strides = all(
+        s % tma_elems == 0 for s in (q.stride(1), qpe.stride(1), kv.stride(1), kpe.stride(1), out.stride(1))
+    )
+
     # Get kernel with template parameters
     kernel, _, _ = kernel_wrapper.get_kernel(
         dtype=dtype,
-        template_params=[BLOCK_D, BLOCK_H, BLOCK_N, BLOCK_KPE],
+        template_params=[BLOCK_D, BLOCK_H, BLOCK_N, BLOCK_KPE] + ([int(even_strides)] if transpose else []),
         signature="{T}*, {T}*, {T}*, {T}*, {T}*, float*, float, "
         "long long, int, long long, int, long long, int, long long, int, long long, int, int, int, int",
     )
@@ -136,7 +141,7 @@ class _mla_decoding(torch.autograd.Function):
         # BLOCK_D and BLOCK_KPE are determined by input dimensions
         # BLOCK_H and BLOCK_N are tuning parameters
         BLOCK_H = min(32, _next_power_of_2(num_head))
-        BLOCK_N = 64  # Default block size for sequence dimension
+        BLOCK_N = 64
 
         _launch_mla_decoding_kernel(
             q=q,
