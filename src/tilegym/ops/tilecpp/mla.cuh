@@ -35,7 +35,11 @@ constexpr float MLA_NEG_INF = -1.0e6f;
  * Prefill MLA Forward Kernel
  */
 template<typename T, int B, int H, int H_KV, int S_QO, int S_KV,
-         int TILE_D, int TILE_KPE, int TILE_M, int TILE_N, int QUERY_GROUP_SIZE, bool IS_CAUSAL>
+         int TILE_D, int TILE_KPE, int TILE_M, int TILE_N, int QUERY_GROUP_SIZE, bool IS_CAUSAL,
+         int NUM_CTAS = 1, int OCCUPANCY = 1>
+[[ using cutile : hint(800,num_cta_in_cga=NUM_CTAS, occupancy=OCCUPANCY) ]]
+[[ using cutile : hint(900,num_cta_in_cga=NUM_CTAS, occupancy=OCCUPANCY) ]]
+[[ using cutile : hint(1000,num_cta_in_cga=NUM_CTAS, occupancy=OCCUPANCY) ]]
 __tile_global__ void prefill_mla_kernel(
     const T* __restrict__ _Q_ptr,
     const T* __restrict__ _QPE_ptr,

@@ -20,8 +20,11 @@ import torch
 
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
+from tilegym.ops.tilecpp.autotuner import Config
+from tilegym.ops.tilecpp.autotuner import TileCppAutotuner
+from tilegym.ops.tilecpp.autotuner import autotune
+from tilegym.ops.tilecpp.autotuner import is_autotuning_enabled
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
-from tilegym.ops.tilecpp.utils._cuda_utils import get_dtype_info
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 logger = get_logger(__name__)
@@ -40,6 +43,30 @@ _prefill_mla_kernel = TileCppKernel(
     source_path=Path(__file__).parent / "mla.cuh",
     kernel_name="prefill_mla_kernel",
 )
+
+
+def _mla_sm80_autotune_configs():
+    configs = [Config(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=2) for tm in [64, 128] for tn in [64, 128]]
+    configs.append(Config(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=3))
+    return configs
+
+
+def _mla_sm90_autotune_configs():
+    configs = [Config(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=1) for tm in [64, 128, 256] for tn in [64, 128]]
+    configs.extend(Config(TILE_M=tm, TILE_N=tn, num_ctas=1, occupancy=2) for tm in [64, 128] for tn in [64, 128])
+    return configs
+
+
+def _mla_autotune_configs():
+    gpu_capability = torch.cuda.get_device_capability()
+    return _mla_sm80_autotune_configs() if gpu_capability[0] < 9 else _mla_sm90_autotune_configs()
+
+
+def _default_mla_config():
+    gpu_capability = torch.cuda.get_device_capability()
+    if gpu_capability[0] < 9:
+        return Config(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2)
+    return Config(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1)
 
 
 def _get_cpp_type(dtype: torch.dtype) -> str:
@@ -75,6 +102,8 @@ def _launch_prefill_mla_kernel(
     TILE_N: int,
     QUERY_GROUP_SIZE: int,
     IS_CAUSAL: bool,
+    num_ctas: int = 1,
+    occupancy: int = 1,
 ):
     """Launch the prefill MLA kernel."""
     dtype = Q.dtype
@@ -82,8 +111,21 @@ def _launch_prefill_mla_kernel(
 
     dump_kernel_types("prefill_mla_kernel", Q, QPE, K, KPE, V)
 
-    # Template params: B, H, H_KV, S_QO, S_KV, TILE_D, TILE_KPE, TILE_M, TILE_N, QUERY_GROUP_SIZE, IS_CAUSAL
-    template_params = [B, H, H_KV, S_QO, S_KV, TILE_D, TILE_KPE, TILE_M, TILE_N, QUERY_GROUP_SIZE, IS_CAUSAL]
+    template_params = [
+        B,
+        H,
+        H_KV,
+        S_QO,
+        S_KV,
+        TILE_D,
+        TILE_KPE,
+        TILE_M,
+        TILE_N,
+        QUERY_GROUP_SIZE,
+        IS_CAUSAL,
+        num_ctas,
+        occupancy,
+    ]
 
     # Simplified signature: just pointers + scale (all dims are template params)
     kernel, _, _ = _prefill_mla_kernel.get_kernel(
@@ -107,6 +149,74 @@ def _launch_prefill_mla_kernel(
             np.uint64(Out.data_ptr()),
             np.float32(sm_scale),
         ],
+    )
+
+
+@autotune(search_space=_mla_autotune_configs())
+def _autotune_prefill_mla(
+    q,
+    qpe,
+    k,
+    kpe,
+    v,
+    out,
+    sm_scale,
+    is_causal,
+    query_group_size,
+    autotuner: TileCppAutotuner | None = None,
+):
+    B, H, S_qo, TILE_D = q.shape
+    H_kv = k.shape[1]
+    S_kv = k.shape[2]
+    TILE_KPE = qpe.shape[3]
+    key = (
+        "tilecpp_mla",
+        B,
+        H,
+        H_kv,
+        S_qo,
+        S_kv,
+        TILE_D,
+        TILE_KPE,
+        query_group_size,
+        is_causal,
+        q.dtype,
+        str(q.device),
+    )
+
+    def launch_fn(cfg: Config):
+        _launch_prefill_mla_kernel(
+            q,
+            qpe,
+            k,
+            kpe,
+            v,
+            out,
+            sm_scale,
+            B,
+            H,
+            H_kv,
+            S_qo,
+            S_kv,
+            TILE_D,
+            TILE_KPE,
+            cfg.TILE_M,
+            cfg.TILE_N,
+            query_group_size,
+            is_causal,
+            num_ctas=cfg.num_ctas,
+            occupancy=cfg.occupancy,
+        )
+
+    def grid_fn(_args: dict, cfg: Config) -> tuple:
+        return (cdiv(S_qo, cfg.TILE_M), B * H, 1)
+
+    autotuner(
+        torch.cuda.current_stream(),
+        key=key,
+        launch_fn=launch_fn,
+        grid_fn=grid_fn,
+        named_args={},
     )
 
 
@@ -149,31 +259,41 @@ class _attention(torch.autograd.Function):
             assert H % H_kv == 0
             query_group_size = int(H / H_kv)
 
-        TILE_M = kernel_configs.get("TILE_M", 256)
-        TILE_N = kernel_configs.get("TILE_N", 128)
-
-        dump_kernel_types("prefill_mla", q, qpe, k, kpe, v)
-
-        _launch_prefill_mla_kernel(
-            q,
-            qpe,
-            k,
-            kpe,
-            v,
-            o,
-            sm_scale,
-            B,
-            H,
-            H_kv,
-            S_qo,
-            S_kv,
-            TILE_D,
-            TILE_KPE,
-            TILE_M,
-            TILE_N,
-            query_group_size,
-            IS_CAUSAL,
-        )
+        if kernel_configs is None:
+            _autotune_prefill_mla(
+                q,
+                qpe,
+                k,
+                kpe,
+                v,
+                o,
+                sm_scale,
+                IS_CAUSAL,
+                query_group_size,
+            )
+        else:
+            _launch_prefill_mla_kernel(
+                q,
+                qpe,
+                k,
+                kpe,
+                v,
+                o,
+                sm_scale,
+                B,
+                H,
+                H_kv,
+                S_qo,
+                S_kv,
+                TILE_D,
+                TILE_KPE,
+                kernel_configs["TILE_M"],
+                kernel_configs["TILE_N"],
+                query_group_size,
+                IS_CAUSAL,
+                num_ctas=kernel_configs["num_ctas"],
+                occupancy=kernel_configs["occupancy"],
+            )
 
         ctx.save_for_backward(q, k, v, o)
         ctx.sm_scale = sm_scale
@@ -219,12 +339,18 @@ def tilecpp_mla(q, k, v, qpe, kpe, is_causal, scaling, **kwargs):
     if scaling is None:
         scaling = 1.0 / math.sqrt(q.size(-1) + qpe.size(-1))
 
-    defaults = {"TILE_M": 256, "TILE_N": 128}
     user_cfg = kwargs.get("kernel_configs")
-    if user_cfg is None:
-        kernel_configs = defaults
+    if user_cfg is None and is_autotuning_enabled():
+        kernel_configs = None
     else:
-        kernel_configs = {**defaults, **user_cfg}
+        default_cfg = _default_mla_config()
+        user_cfg = user_cfg or {}
+        kernel_configs = {
+            "TILE_M": user_cfg.get("TILE_M", user_cfg.get("BLOCK_M", default_cfg.TILE_M)),
+            "TILE_N": user_cfg.get("TILE_N", user_cfg.get("BLOCK_N", default_cfg.TILE_N)),
+            "num_ctas": user_cfg.get("num_ctas", default_cfg.num_ctas),
+            "occupancy": user_cfg.get("occupancy", default_cfg.occupancy),
+        }
 
     attention = Attention(is_causal, kernel_configs)
     o = attention(q, k, v, scaling, qpe, kpe)
