@@ -50,11 +50,19 @@ def _launch_dropout_kernel(
     dtype = x.dtype
 
     num_blocks = (n_elements + block_size - 1) // block_size
+    p_literal = f"{np.float32(p):.9g}"
+    if "." not in p_literal and "e" not in p_literal:
+        p_literal += ".0"
 
     kernel, _, _ = _seeded_dropout_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size],
-        signature="const {T}*, {T}*, float, uint64_t, int",
+        template_params=[
+            block_size,
+            n_elements,
+            f"{p_literal}f",
+            f"{_mix_seed(seed)}u",
+        ],
+        signature="const {T}*, {T}*",
     )
 
     _seeded_dropout_kernel.launch(
@@ -63,9 +71,6 @@ def _launch_dropout_kernel(
         args=[
             np.uint64(x.data_ptr()),
             np.uint64(output.data_ptr()),
-            np.float32(p),
-            np.uint64(_mix_seed(seed)),
-            np.int32(n_elements),
         ],
     )
 
