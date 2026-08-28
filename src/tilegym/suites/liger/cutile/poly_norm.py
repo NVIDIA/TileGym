@@ -13,9 +13,13 @@ Reference:
 2. https://arxiv.org/pdf/2411.03884
 """
 
+from types import SimpleNamespace
+
 import cuda.tile as ct
 import torch
+from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 
 from .utils import next_power_of_2
@@ -112,9 +116,6 @@ def _poly_norm_fwd_kernel(
             ct.scatter(y_output, (row_idx, col_indices), ct.astype(y_f32, x_tile.dtype), check_bounds=True)
 
 
-_poly_norm_fwd_kernel_occ8 = _poly_norm_fwd_kernel.replace_hints(occupancy=8)
-
-
 @ct.kernel(occupancy=4)
 def _poly_norm_fwd_kernel_sc_large(
     x_input,
@@ -170,11 +171,6 @@ def _poly_norm_fwd_kernel_sc_large(
         ct.scatter(y_output, (row_idx, col_indices), ct.astype(y_f32, x_tile2.dtype), check_bounds=False)
     else:
         ct.scatter(y_output, (row_idx, col_indices), ct.astype(y_f32, x_tile2.dtype), check_bounds=True)
-
-
-_poly_norm_fwd_kernel_sc_large_occ4 = _poly_norm_fwd_kernel_sc_large.replace_hints(occupancy=4)
-_poly_norm_fwd_kernel_sc_large_occ8 = _poly_norm_fwd_kernel_sc_large.replace_hints(occupancy=8)
-_poly_norm_fwd_kernel_sc_large_occ16 = _poly_norm_fwd_kernel_sc_large.replace_hints(occupancy=16)
 
 
 @ct.kernel(occupancy=2)
@@ -277,6 +273,86 @@ def _poly_norm_bwd_kernel(
 _poly_norm_bwd_kernel_large = _poly_norm_bwd_kernel.replace_hints(occupancy=4, num_worker_warps=8)
 
 
+# ---------------------------------------------------------------------------
+# Forward schedule autotune (tune-once / cache / launch)
+# ---------------------------------------------------------------------------
+# The best forward (kernel-variant, BLOCK_SIZE, occupancy) triple is
+# shape- and board-dependent, so it is selected by exhaustive_search once per
+# (n_rows, n_cols, dtype, device) and cached. Only forward schedule/config
+# selection depends on this; kernel math, the backward path, and dispatch
+# registration are unaffected.
+_fwd_tune_cache: dict = {}
+
+# Body key -> base @ct.kernel object. "mc" = fold-accumulator multi-chunk kernel
+# (BLOCK_SIZE may be < n_cols); "sc" = single-chunk re-gather kernel (one tile
+# covers the whole row, so BLOCK_SIZE >= n_cols).
+_FWD_BODY = {"mc": _poly_norm_fwd_kernel, "sc": _poly_norm_fwd_kernel_sc_large}
+
+
+def _fwd_configs(n_cols):
+    """Candidate (body_key, BLOCK_SIZE, occupancy) triples for this row width.
+
+    The first entry doubles as the fixed schedule used when autotune is
+    disabled, so is_autotune_disabled() never needs a separately maintained
+    default. Occupancy is higher for narrow tiles (to hide gather latency) and
+    lower for wide tiles (higher per-CTA tile pressure).
+    """
+    np2 = next_power_of_2(n_cols)
+    cfgs = []
+    # Single-chunk: one tile covers the whole row (BLOCK_SIZE >= n_cols).
+    sc_block = min(MAX_FUSED_SIZE, np2)
+    if sc_block >= n_cols:
+        if sc_block <= 2048:
+            sc_occ = (8, 16)
+        elif sc_block <= 4096:
+            sc_occ = (4, 8)
+        else:
+            sc_occ = (2, 4)
+        for occ in sc_occ:
+            cfgs.append(("sc", sc_block, occ))
+    # Multi-chunk fold-accumulator (BLOCK < n_cols): only competitive at wide
+    # rows, and the only usable body when next_pow2(n_cols) > MAX_FUSED_SIZE
+    # leaves no single-chunk tile.
+    mc_blocks = [2048, 4096] if n_cols >= 8192 else []
+    for blk in mc_blocks:
+        for occ in (4, 8):
+            cfgs.append(("mc", blk, occ))
+    return cfgs
+
+
+def _tune_forward(stream, grid, launch_args, n_cols):
+    """Search forward schedules and return (tuned_kernel, BLOCK_SIZE).
+
+    Runs one exhaustive_search per kernel body (each body is a distinct
+    @ct.kernel object, so it cannot share a single search), then keeps the
+    globally fastest measured config. _fwd_configs() always yields at least
+    one candidate per body that has any, so no separate fallback is needed
+    here — same as the other cuTile autotune sites (mla.py, attention_varlen.py).
+    """
+    configs = _fwd_configs(n_cols)
+    best = None  # (mean_us, body_key, BLOCK_SIZE, occupancy)
+    for body_key in ("sc", "mc"):
+        sub = [SimpleNamespace(BLOCK_SIZE=blk, occupancy=occ) for (k, blk, occ) in configs if k == body_key]
+        if not sub:
+            continue
+        base = _FWD_BODY[body_key]
+        with ct.compiler_timeout(60):
+            result = exhaustive_search(
+                sub,
+                stream,
+                lambda cfg: grid,
+                base,
+                lambda cfg: launch_args(cfg.BLOCK_SIZE),
+                lambda cfg: {"occupancy": cfg.occupancy},
+            )
+        m = result.best
+        if best is None or m.mean_us < best[0]:
+            best = (m.mean_us, body_key, m.config.BLOCK_SIZE, m.config.occupancy)
+
+    _, body_key, blk, occ = best
+    return _FWD_BODY[body_key].replace_hints(occupancy=occ), blk
+
+
 class PolyNormCuTileFunction(torch.autograd.Function):
     """
     PolyNorm autograd function with CuTile forward and backward kernels.
@@ -297,62 +373,49 @@ class PolyNormCuTileFunction(torch.autograd.Function):
         bias_shape = B.shape
         B = B.reshape(1)
 
-        # Per-shape BLOCK_SIZE & kernel variant. Single-chunk uses the SC kernel
-        # (re-gather, lower live-tile pressure); multi-chunk uses the fold-accumulator kernel.
-        # n_cols=2048 keeps BLOCK=1024 (multi-chunk) because BLOCK=2048 single-chunk
-        # spills the 3 fp32 accumulators (sum_sq_3/2/1).
-        if n_cols <= 1024:
-            BLOCK_SIZE = next_power_of_2(n_cols)
-        elif n_cols == 2048:
-            BLOCK_SIZE = 1024
-        elif n_cols <= 8192:
-            BLOCK_SIZE = 4096
-        else:
-            BLOCK_SIZE = min(MAX_FUSED_SIZE, next_power_of_2(n_cols))
-        aligned = (n_cols % BLOCK_SIZE) == 0
-        single_chunk = n_cols <= BLOCK_SIZE
-
-        if n_cols <= 1024:
-            fwd_kernel = _poly_norm_fwd_kernel_sc_large_occ16
-        elif n_cols == 2048:
-            fwd_kernel = _poly_norm_fwd_kernel
-        elif n_cols == 4096:
-            fwd_kernel = _poly_norm_fwd_kernel_sc_large_occ8
-        elif n_cols <= 8192:
-            fwd_kernel = _poly_norm_fwd_kernel_occ8
-        elif single_chunk:
-            fwd_kernel = _poly_norm_fwd_kernel_sc_large_occ4
-        else:
-            fwd_kernel = _poly_norm_fwd_kernel
-
         Y = torch.empty_like(X_2d)
         RSTD3 = torch.empty(n_rows, dtype=torch.float32, device=X.device)
         RSTD2 = torch.empty(n_rows, dtype=torch.float32, device=X.device)
         RSTD1 = torch.empty(n_rows, dtype=torch.float32, device=X.device)
 
+        stream = torch.cuda.current_stream()
         grid = (n_rows, 1, 1)
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            fwd_kernel,
-            (
+        Wc = W.contiguous()
+        Bc = B.contiguous()
+
+        # launch_args(blk): full kernel-arg tuple for a given BLOCK_SIZE. Both
+        # forward bodies share this signature, so autotune and the final launch
+        # reuse it. aligned=True (hardware TMA path) whenever BLOCK_SIZE divides
+        # n_cols evenly.
+        def launch_args(blk):
+            return (
                 X_2d,
                 Y,
-                W.contiguous(),
-                B.contiguous(),
+                Wc,
+                Bc,
                 RSTD3,
                 RSTD2,
                 RSTD1,
                 int(n_cols),
                 float(eps),
-                int(BLOCK_SIZE),
-                bool(aligned),
-            ),
-        )
+                int(blk),
+                bool((n_cols % blk) == 0),
+            )
+
+        # Per-shape schedule autotune: tune once, cache the winning specialized
+        # kernel + BLOCK_SIZE, then launch directly on every later call.
+        if is_autotune_disabled():
+            body_key, BLOCK_SIZE, occ = _fwd_configs(n_cols)[0]
+            fwd_kernel = _FWD_BODY[body_key].replace_hints(occupancy=occ)
+        else:
+            cache_key = (n_rows, n_cols, X_2d.dtype, str(X_2d.device))
+            if cache_key not in _fwd_tune_cache:
+                _fwd_tune_cache[cache_key] = _tune_forward(stream, grid, launch_args, n_cols)
+            fwd_kernel, BLOCK_SIZE = _fwd_tune_cache[cache_key]
+
+        ct.launch(stream, grid, fwd_kernel, launch_args(BLOCK_SIZE))
 
         ctx.save_for_backward(X_2d, W, RSTD3, RSTD2, RSTD1)
-        ctx.BLOCK_SIZE = BLOCK_SIZE
-        ctx.aligned = aligned
         ctx.shape = shape
         ctx.bias_shape = bias_shape
 
