@@ -95,9 +95,18 @@ def _launch_softmax_forward(
     dump_kernel_types("softmax_kernel", input_tensor, output_tensor)
     dtype = input_tensor.dtype
 
+    TMA_MIN_ROW_BYTES = 32768
+    tma_elems = 16 // input_tensor.element_size()
+    tma_rows = int(
+        n_cols == block_size
+        and n_cols * input_tensor.element_size() >= TMA_MIN_ROW_BYTES
+        and input_tensor.stride(0) % tma_elems == 0
+        and output_tensor.stride(0) % tma_elems == 0
+    )
+
     kernel, _, _ = _softmax_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size],
+        template_params=[block_size, tma_rows],
         signature="{T}*, const {T}*, int, int, int, int, int",
     )
 

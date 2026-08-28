@@ -95,8 +95,6 @@ def rope_forward(q, k, cos, sin, rope_dim=None):
 
     n_row = batch_size * seq_len
 
-    q = q.contiguous()
-    k = k.contiguous()
     cos = cos.contiguous()
     sin = sin.contiguous()
 
@@ -120,6 +118,12 @@ def rope_forward(q, k, cos, sin, rope_dim=None):
         head_dim,
         cos_bs,
         seq_len,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
     ]
 
     kernel, _, _ = _rope_forward_kernel.get_kernel(
