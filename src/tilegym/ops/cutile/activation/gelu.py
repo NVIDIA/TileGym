@@ -73,22 +73,13 @@ def standard_normal_pdf_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
 
 def gelu_tanh_forward_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     # f(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
+    # ct.tanh uses the default (precise) rounding mode; the APPROX mode is not
+    # used because its 2-4 ULP deviation breaks cross-backend numeric parity.
     sqrt_2_div_pi = 0.7978845608028654
     coeff_044715 = 0.044715
-    half = ct.full((BLOCK_SIZE,), 0.5, dtype=x_val.dtype)
-    one = ct.ones((BLOCK_SIZE,), dtype=x_val.dtype)
-    sqrt_2_div_pi_tensor = ct.full((BLOCK_SIZE,), sqrt_2_div_pi, dtype=x_val.dtype)
-    coeff_tensor = ct.full((BLOCK_SIZE,), coeff_044715, dtype=x_val.dtype)
 
-    x_cubed = x_val * x_val * x_val
-    coeff_x_cubed = coeff_tensor * x_cubed
-    inner_sum = x_val + coeff_x_cubed
-    scaled_inner = sqrt_2_div_pi_tensor * inner_sum
-    tanh_val = _tanh_ct(scaled_inner, BLOCK_SIZE)
-    one_plus_tanh = one + tanh_val
-    half_x = half * x_val
-
-    return half_x * one_plus_tanh
+    inner = sqrt_2_div_pi * (x_val + coeff_044715 * x_val * x_val * x_val)
+    return 0.5 * x_val * (1.0 + ct.tanh(inner))
 
 
 def gelu_forward_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
@@ -149,7 +140,9 @@ class _GeluCuTileFunction(torch.autograd.Function):
         approx_mode = GELU_TANH if approximate == "tanh" else GELU_EXACT
         y = torch.empty_like(x)
         n_elements = y.numel()
-        BLOCK_SIZE = 1024
+        # Wider tile for large (memory-bound) launches; 1024 for small
+        # (latency-bound) launches.
+        BLOCK_SIZE = 4096 if n_elements >= (1 << 24) else 1024
         grid = (math.ceil(n_elements / BLOCK_SIZE), 1, 1)
         x_flat = x.view(-1)
         y_flat = y.view(-1)
