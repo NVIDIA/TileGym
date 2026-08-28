@@ -17,25 +17,29 @@ def _moe_align_block_size_stage1_kernel(
     NUM_EXPERTS: ct.Constant[int],
     NUMEL: ct.Constant[int],
     TOKENS_PER_THREAD: ct.Constant[int],
+    SUB_CHUNK: ct.Constant[int],
+    NUM_EXPERTS_POW2: ct.Constant[int],
 ):
     bid = ct.bid(0)
 
     start_idx = bid * TOKENS_PER_THREAD
     off_c = (bid + 1) * NUM_EXPERTS
-    token_cnt = ct.zeros((1,), dtype=ct.int32)
 
-    limit = max(0, min(TOKENS_PER_THREAD, NUMEL - start_idx))
-    for i in range(limit):
-        current_idx = start_idx + i
-        current_idx_tile = ct.full((1,), current_idx, dtype=ct.int32)
-        idx = ct.gather(topk_ids, current_idx_tile, padding_value=0)
+    # Vectorized histogram: process this program's token chunk in sub-chunks of
+    # SUB_CHUNK tokens.
+    expert_idx = ct.arange(NUM_EXPERTS_POW2, dtype=ct.int32)
+    expert_mask = expert_idx < NUM_EXPERTS
+    counts = ct.zeros((NUM_EXPERTS_POW2,), dtype=ct.int32)
 
-        off_c_tile = ct.full((1,), off_c, dtype=ct.int32)
-        cnt_offset = off_c_tile + idx
-        token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
+    sub_arange = ct.arange(SUB_CHUNK, dtype=ct.int32)
+    for sub_start in range(0, TOKENS_PER_THREAD, SUB_CHUNK):
+        tok_offs = start_idx + sub_start + sub_arange
+        tok_mask = (tok_offs < NUMEL) & ((sub_start + sub_arange) < TOKENS_PER_THREAD)
+        ids = ct.gather(topk_ids, tok_offs, mask=tok_mask, padding_value=NUM_EXPERTS)
+        match = (ids[:, None] == expert_idx[None, :]).astype(ct.int32)
+        counts = counts + ct.sum(match, axis=0)
 
-        new_cnt = token_cnt + ct.ones((1,), dtype=ct.int32)
-        ct.scatter(tokens_cnts, cnt_offset, new_cnt)
+    ct.scatter(tokens_cnts, off_c + expert_idx, counts, mask=expert_mask)
 
 
 @ct.kernel
@@ -61,9 +65,12 @@ def _moe_align_block_size_stage3_kernel(
     cumsum,
     NUM_EXPERTS: ct.Constant[int],
     BLOCK_SIZE: ct.Constant[int],
+    NUM_PROGRAMS: ct.Constant[int],
 ):
     last_cumsum = ct.zeros((1,), dtype=ct.int32)
-    off_cnt = NUM_EXPERTS * NUM_EXPERTS
+    # tokens_cnts has NUM_PROGRAMS + 1 rows; row NUM_PROGRAMS holds the total
+    # per-expert count (inclusive prefix over all token programs) after stage2.
+    off_cnt = NUM_PROGRAMS * NUM_EXPERTS
     max_cnt = ct.zeros((1,), dtype=ct.int32)
 
     for i in range(1, NUM_EXPERTS + 1):
@@ -86,7 +93,7 @@ def _moe_align_block_size_stage3_kernel(
 
 
 @ct.kernel
-def _moe_align_block_size_stage4_kernel(
+def _moe_align_block_size_stage4b_scatter_kernel(
     topk_ids,
     sorted_token_ids,
     expert_ids,
@@ -96,13 +103,18 @@ def _moe_align_block_size_stage4_kernel(
     BLOCK_SIZE: ct.Constant[int],
     NUMEL: ct.Constant[int],
     TOKENS_PER_THREAD: ct.Constant[int],
+    SUB_CHUNK: ct.Constant[int],
+    NUM_EXPERTS_POW2: ct.Constant[int],
 ):
+    # One program per token range: scatter its tokens into sorted positions.
     bid = ct.bid(0)
     off_t = bid * NUM_EXPERTS
 
+    # Stamp expert_ids. Programs 0..NUM_EXPERTS-1 own expert `bid`'s blocks;
+    # for programs with bid >= NUM_EXPERTS the cumsum gathers fall out of bounds
+    # (padding 0), so num_blocks == 0 and nothing is written.
     start_idx_cumsum = ct.gather(cumsum, bid, padding_value=0)
     end_idx_cumsum = ct.gather(cumsum, bid + 1, padding_value=0)
-
     start_block = start_idx_cumsum // BLOCK_SIZE
     end_block = (end_idx_cumsum + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_blocks = max(0, end_block - start_block)
@@ -110,27 +122,45 @@ def _moe_align_block_size_stage4_kernel(
         block_idx = start_block + i
         ct.scatter(expert_ids, block_idx, bid)
 
+    expert_idx = ct.arange(NUM_EXPERTS_POW2, dtype=ct.int32)
+    expert_mask = expert_idx < NUM_EXPERTS
+    pre_cnt = ct.gather(tokens_cnts, off_t + expert_idx, mask=expert_mask, padding_value=0)
+    cum_off = ct.gather(cumsum, expert_idx, mask=expert_mask, padding_value=0)
+    running_off = pre_cnt + cum_off  # per-expert global write start for this program
+
     start_idx_tokens = bid * TOKENS_PER_THREAD
-    limit = max(0, min(TOKENS_PER_THREAD, NUMEL - start_idx_tokens))
-    for i in range(limit):
-        current_idx = start_idx_tokens + i
-        current_idx_tile = ct.full((1,), current_idx, dtype=ct.int32)
-        expert_id = ct.gather(topk_ids, current_idx_tile, padding_value=0)
+    sub_arange = ct.arange(SUB_CHUNK, dtype=ct.int32)
+    for sub_start in range(0, TOKENS_PER_THREAD, SUB_CHUNK):
+        tok_offs = start_idx_tokens + sub_start + sub_arange
+        in_range = (tok_offs < NUMEL) & ((sub_start + sub_arange) < TOKENS_PER_THREAD)
+        ids = ct.gather(topk_ids, tok_offs, mask=in_range, padding_value=NUM_EXPERTS)
 
-        off_t_tile = ct.full((1,), off_t, dtype=ct.int32)
-        cnt_offset = off_t_tile + expert_id
-        token_cnt = ct.gather(tokens_cnts, cnt_offset, padding_value=0)
+        match = (ids[:, None] == expert_idx[None, :]).astype(ct.int32)
+        rank_2d = ct.cumsum(match, axis=0) - match  # exclusive prefix per expert column
+        rank_per_token = ct.sum(rank_2d * match, axis=1)  # [SUB_CHUNK]
+        base_per_token = ct.sum(running_off[None, :] * match, axis=1)  # [SUB_CHUNK]
+        rank_post_pad = base_per_token + rank_per_token
 
-        cumsum_val = ct.gather(cumsum, expert_id, padding_value=0)
-        rank_post_pad = token_cnt + cumsum_val
+        ct.scatter(sorted_token_ids, rank_post_pad, tok_offs, mask=in_range)
 
-        ct.scatter(sorted_token_ids, rank_post_pad, current_idx_tile)
-        new_token_cnt = token_cnt + ct.ones((1,), dtype=ct.int32)
-        ct.scatter(tokens_cnts, cnt_offset, new_token_cnt)
+        running_off = running_off + ct.sum(match, axis=0)
 
 
 def _ceil_div(a, b):
     return (a + b - 1) // b
+
+
+# Cap on the vectorized sub-chunk width (tokens processed per inner iteration).
+# Bounds the [SUB_CHUNK, NUM_EXPERTS_POW2] match-matrix working set while still
+# vectorizing the histogram (stage1) and scatter (stage4b) hot loops.
+_SUB_CHUNK_CAP = 256
+
+# Target tokens processed per program. The launcher derives the number of
+# token-processing programs as ceil(numel / this), so large token counts spread
+# across more CTAs / SMs instead of being pinned to num_experts programs. 128
+# keeps each program to a single vectorized sub-chunk iteration (tokens_per_thread
+# <= this <= SUB_CHUNK) while maximizing CTA-level parallelism.
+_TARGET_TOKENS_PER_PROGRAM = 128
 
 
 def _moe_align_block_size(
@@ -146,46 +176,57 @@ def _moe_align_block_size(
     topk_ids_flat = topk_ids.reshape(-1)
 
     numel = topk_ids.numel()
-    grid = (num_experts,)
+
+    # Number of token-processing programs (stage1 / stage4b). Decoupled from
+    # num_experts so large token counts spread across more CTAs (more SMs, fewer
+    # serial sub-chunk iterations per program) instead of only num_experts CTAs.
+    num_programs = max(num_experts, _ceil_div(numel, _TARGET_TOKENS_PER_PROGRAM))
+    tokens_per_thread = _ceil_div(numel, num_programs)
+
     tokens_cnts = torch.zeros(
-        (num_experts + 1, num_experts),
+        (num_programs + 1, num_experts),
         dtype=torch.int32,
         device=topk_ids.device,
     )
     tokens_cnts_flat = tokens_cnts.reshape(-1)
     cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
-    tokens_per_thread = _ceil_div(numel, num_experts)
 
-    # Launch stage 1
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        _moe_align_block_size_stage1_kernel,
-        (topk_ids_flat, tokens_cnts_flat, num_experts, numel, tokens_per_thread),
-    )
-
-    # Launch stage 2
     num_experts_pow2 = next_power_of_2(num_experts)
+    num_programs_pow2 = next_power_of_2(num_programs)
+    # Vectorized sub-chunk width: power-of-two <= tokens_per_thread, capped so the
+    # match-matrix tile stays bounded for large chunks.
+    sub_chunk = min(next_power_of_2(tokens_per_thread), _SUB_CHUNK_CAP)
+
+    # Launch stage 1 (histogram): one program per token range.
     ct.launch(
         torch.cuda.current_stream(),
-        grid,
-        _moe_align_block_size_stage2_kernel,
-        (tokens_cnts_flat, num_experts, num_experts_pow2),
+        (num_programs,),
+        _moe_align_block_size_stage1_kernel,
+        (topk_ids_flat, tokens_cnts_flat, num_experts, numel, tokens_per_thread, sub_chunk, num_experts_pow2),
     )
 
-    # Launch stage 3
+    # Launch stage 2 (per-expert prefix over programs): one program per expert.
+    ct.launch(
+        torch.cuda.current_stream(),
+        (num_experts,),
+        _moe_align_block_size_stage2_kernel,
+        (tokens_cnts_flat, num_experts, num_programs_pow2),
+    )
+
+    # Launch stage 3 (per-expert padding + totals): single program.
     ct.launch(
         torch.cuda.current_stream(),
         (1,),
         _moe_align_block_size_stage3_kernel,
-        (num_tokens_post_pad, max_expert_cnt, tokens_cnts_flat, cumsum, num_experts, block_size),
+        (num_tokens_post_pad, max_expert_cnt, tokens_cnts_flat, cumsum, num_experts, block_size, num_programs),
     )
 
-    # Launch stage 4
+    # Launch stage 4 (expert_ids stamp + token scatter): one program per token
+    # range; programs 0..num_experts-1 additionally stamp their expert's blocks.
     ct.launch(
         torch.cuda.current_stream(),
-        grid,
-        _moe_align_block_size_stage4_kernel,
+        (num_programs,),
+        _moe_align_block_size_stage4b_scatter_kernel,
         (
             topk_ids_flat,
             sorted_token_ids,
@@ -196,6 +237,8 @@ def _moe_align_block_size(
             block_size,
             numel,
             tokens_per_thread,
+            sub_chunk,
+            num_experts_pow2,
         ),
     )
 
