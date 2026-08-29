@@ -11,6 +11,9 @@ from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
+from tilegym.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Module-level tune caches for prefill kernels
 _prefill_paged_lpt_tune_cache: dict = {}
@@ -23,8 +26,6 @@ INV_LOG_2 = 1.0 / math.log(2)
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
-
-_RAGGED_TWO_LOOP_MIN_SEQ = 4096
 
 
 def _get_prefill_autotune_configs(page_size=None):
@@ -56,6 +57,48 @@ def _get_prefill_autotune_configs(page_size=None):
                 yield cfg
         else:
             yield cfg
+
+
+def _autotune_ragged_two_loop(cache, cache_key, stream, kernel, grid_fn, args_fn, label):
+    """Tune the KV loop structure jointly with BLOCK_M/N/occupancy for ragged prefill.
+
+    Runs exhaustive_search once per USE_TWO_LOOP value and keeps the global best by
+    measured mean_us; a variant whose whole search space fails to build on an arch is
+    skipped. Memoizes (best_cfg, best_two_loop, hinted_kernel) in ``cache`` under
+    ``cache_key``. ``grid_fn(cfg)`` builds the launch grid; ``args_fn(cfg, two_loop)``
+    the kernel args.
+    """
+    if cache_key not in cache:
+        best = None
+        for two_loop in (True, False):
+            try:
+                result = exhaustive_search(
+                    list(_get_prefill_autotune_configs(None)),
+                    stream,
+                    grid_fn,
+                    kernel,
+                    lambda cfg, _tl=two_loop: args_fn(cfg, _tl),
+                    lambda cfg: {"occupancy": cfg.occupancy},
+                )
+            except ValueError as exc:
+                # exhaustive_search swallows per-config build/runtime failures and
+                # raises ValueError only when no config in the space is viable, i.e.
+                # this two_loop variant does not build on this arch -> skip it. Other
+                # error types (e.g. bugs in grid_fn/args_fn) propagate.
+                logger.debug("%s autotune skipped two_loop=%s: %s", label, two_loop, exc)
+                continue
+            if best is None or result.best.mean_us < best[0]:
+                best = (result.best.mean_us, two_loop, result.best.config)
+        if best is None:
+            raise RuntimeError(f"{label} autotune found no working configuration")
+        _, best_two_loop, best_cfg = best
+        logger.debug("%s chosen best_two_loop=%s key=%s", label, best_two_loop, cache_key)
+        cache[cache_key] = (
+            best_cfg,
+            best_two_loop,
+            kernel.replace_hints(occupancy=best_cfg.occupancy),
+        )
+    return cache[cache_key]
 
 
 def _load_page_prefill(
@@ -563,6 +606,8 @@ def _prefill_attention_ragged_body(
     offs_n_base = ct.arange(BLOCK_N, dtype=ct.int32)
     offs_m = start_m + ct.arange(BLOCK_M, dtype=ct.int32)
 
+    # USE_TWO_LOOP (compile-time const) picks two-loop causal split vs single
+    # fused loop; autotune measures both and keeps the faster per problem size.
     if USE_TWO_LOOP:
         if IS_CAUSAL:
             off_band_hi = ct.minimum(seq_len_kv, start_m)
@@ -795,9 +840,9 @@ def _prefill_attention_ragged_kernel(
 ):
     """
     Prefill attention kernel with ragged (contiguous) KV cache.
-    The KV loop structure is architecture-gated by USE_TWO_LOOP: a two-loop
-    causal split (unmasked off-band + masked diagonal) on consumer Blackwell, or
-    a unified single loop with an in-loop diagonal mask elsewhere.
+    The KV loop structure is selected by autotune via USE_TWO_LOOP: a two-loop
+    causal split (unmasked off-band + masked diagonal), or a unified single loop
+    with an in-loop diagonal mask.
     """
     seq_block_id = ct.bid(0)
     batch_id = ct.bid(1)
@@ -1173,15 +1218,7 @@ def prefill_attention_kv_ragged(
     BLOCK_R = head_dim_qk - head_dim_vo
     QUERY_GROUP_SIZE = num_qo_heads // num_kv_heads
 
-    # Two-loop causal split is the default (wins on consumer Blackwell, fp8, and
-    # long seq). Only datacenter Blackwell (sm10x) bf16/fp16 at short seq prefers
-    # the single fused loop — carve out exactly that niche.
-    _fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
-    is_fp8 = q.dtype in _fp8_dtypes or k_cache.dtype in _fp8_dtypes
-    use_two_loop = True
-    if torch.cuda.get_device_capability()[0] == 10 and not is_fp8 and max_seq_len < _RAGGED_TWO_LOOP_MIN_SEQ:
-        use_two_loop = False
-
+    # KV loop structure (USE_TWO_LOOP) is tuned below, not host-gated.
     outputs = (
         torch.empty(
             [q.shape[0], num_qo_heads, head_dim_vo],
@@ -1205,6 +1242,9 @@ def prefill_attention_kv_ragged(
         num_kv_heads,
         BLOCK_R,
         head_dim_vo,
+        q.dtype,
+        k_cache.dtype,
+        v_cache.dtype,
         k_scale,
         v_scale,
         max_seq_len,
@@ -1225,52 +1265,13 @@ def prefill_attention_kv_ragged(
         num_hb_remainder = (num_qo_heads * num_batch) % swizzle
 
         ragged_lpt_stream = torch.cuda.current_stream()
-        ragged_lpt_cache_key = (autotune_key, swizzle, str(q.device), use_two_loop)
-        if ragged_lpt_cache_key not in _prefill_ragged_lpt_tune_cache:
-            result = exhaustive_search(
-                list(_get_prefill_autotune_configs(None)),
-                ragged_lpt_stream,
-                lambda cfg: ((max_seq_len + cfg.BLOCK_M - 1) // cfg.BLOCK_M * num_qo_heads * num_batch, 1, 1),
-                _prefill_attention_ragged_lpt_kernel,
-                lambda cfg: (
-                    q,
-                    k_cache,
-                    v_cache,
-                    actual_seq_lens_q_flat,
-                    actual_seq_lens_kv_flat,
-                    batch_offsets_flat,
-                    outputs,
-                    out_lse,
-                    k_scale,
-                    v_scale,
-                    num_kv_heads,
-                    cfg.BLOCK_M,
-                    cfg.BLOCK_N,
-                    head_dim_vo,
-                    BLOCK_R,
-                    QUERY_GROUP_SIZE,
-                    is_causal,
-                    use_two_loop,
-                    num_qo_heads,
-                    num_batch,
-                    max_seq_len,
-                    swizzle,
-                    num_hb_quotient,
-                    max(num_hb_remainder, 1),
-                ),
-                lambda cfg: {"occupancy": cfg.occupancy},
-            )
-            best_cfg = result.best.config
-            _prefill_ragged_lpt_tune_cache[ragged_lpt_cache_key] = (
-                best_cfg,
-                _prefill_attention_ragged_lpt_kernel.replace_hints(occupancy=best_cfg.occupancy),
-            )
-        best_cfg, tuned_kernel = _prefill_ragged_lpt_tune_cache[ragged_lpt_cache_key]
-        ct.launch(
-            ragged_lpt_stream,
-            ((max_seq_len + best_cfg.BLOCK_M - 1) // best_cfg.BLOCK_M * num_qo_heads * num_batch, 1, 1),
-            tuned_kernel,
-            (
+        ragged_lpt_cache_key = (autotune_key, swizzle, str(q.device))
+
+        def _lpt_grid(cfg):
+            return ((max_seq_len + cfg.BLOCK_M - 1) // cfg.BLOCK_M * num_qo_heads * num_batch, 1, 1)
+
+        def _lpt_args(cfg, two_loop):
+            return (
                 q,
                 k_cache,
                 v_cache,
@@ -1282,63 +1283,40 @@ def prefill_attention_kv_ragged(
                 k_scale,
                 v_scale,
                 num_kv_heads,
-                best_cfg.BLOCK_M,
-                best_cfg.BLOCK_N,
+                cfg.BLOCK_M,
+                cfg.BLOCK_N,
                 head_dim_vo,
                 BLOCK_R,
                 QUERY_GROUP_SIZE,
                 is_causal,
-                use_two_loop,
+                two_loop,
                 num_qo_heads,
                 num_batch,
                 max_seq_len,
                 swizzle,
                 num_hb_quotient,
                 max(num_hb_remainder, 1),
-            ),
+            )
+
+        best_cfg, best_two_loop, tuned_kernel = _autotune_ragged_two_loop(
+            _prefill_ragged_lpt_tune_cache,
+            ragged_lpt_cache_key,
+            ragged_lpt_stream,
+            _prefill_attention_ragged_lpt_kernel,
+            _lpt_grid,
+            _lpt_args,
+            "prefill ragged lpt",
         )
+        ct.launch(ragged_lpt_stream, _lpt_grid(best_cfg), tuned_kernel, _lpt_args(best_cfg, best_two_loop))
     else:
         ragged_stream = torch.cuda.current_stream()
-        ragged_cache_key = (autotune_key, str(q.device), use_two_loop)
-        if ragged_cache_key not in _prefill_ragged_tune_cache:
-            result = exhaustive_search(
-                list(_get_prefill_autotune_configs(None)),
-                ragged_stream,
-                lambda cfg: ((max_seq_len + cfg.BLOCK_M - 1) // cfg.BLOCK_M, num_batch, num_qo_heads),
-                _prefill_attention_ragged_kernel,
-                lambda cfg: (
-                    q,
-                    k_cache,
-                    v_cache,
-                    actual_seq_lens_q_flat,
-                    actual_seq_lens_kv_flat,
-                    batch_offsets_flat,
-                    outputs,
-                    out_lse,
-                    k_scale,
-                    v_scale,
-                    num_kv_heads,
-                    cfg.BLOCK_M,
-                    cfg.BLOCK_N,
-                    head_dim_vo,
-                    BLOCK_R,
-                    QUERY_GROUP_SIZE,
-                    is_causal,
-                    use_two_loop,
-                ),
-                lambda cfg: {"occupancy": cfg.occupancy},
-            )
-            best_cfg = result.best.config
-            _prefill_ragged_tune_cache[ragged_cache_key] = (
-                best_cfg,
-                _prefill_attention_ragged_kernel.replace_hints(occupancy=best_cfg.occupancy),
-            )
-        best_cfg, tuned_kernel = _prefill_ragged_tune_cache[ragged_cache_key]
-        ct.launch(
-            ragged_stream,
-            ((max_seq_len + best_cfg.BLOCK_M - 1) // best_cfg.BLOCK_M, num_batch, num_qo_heads),
-            tuned_kernel,
-            (
+        ragged_cache_key = (autotune_key, str(q.device))
+
+        def _grid(cfg):
+            return ((max_seq_len + cfg.BLOCK_M - 1) // cfg.BLOCK_M, num_batch, num_qo_heads)
+
+        def _args(cfg, two_loop):
+            return (
                 q,
                 k_cache,
                 v_cache,
@@ -1350,14 +1328,24 @@ def prefill_attention_kv_ragged(
                 k_scale,
                 v_scale,
                 num_kv_heads,
-                best_cfg.BLOCK_M,
-                best_cfg.BLOCK_N,
+                cfg.BLOCK_M,
+                cfg.BLOCK_N,
                 head_dim_vo,
                 BLOCK_R,
                 QUERY_GROUP_SIZE,
                 is_causal,
-                use_two_loop,
-            ),
+                two_loop,
+            )
+
+        best_cfg, best_two_loop, tuned_kernel = _autotune_ragged_two_loop(
+            _prefill_ragged_tune_cache,
+            ragged_cache_key,
+            ragged_stream,
+            _prefill_attention_ragged_kernel,
+            _grid,
+            _args,
+            "prefill ragged",
         )
+        ct.launch(ragged_stream, _grid(best_cfg), tuned_kernel, _args(best_cfg, best_two_loop))
 
     return outputs, out_lse
