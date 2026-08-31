@@ -152,6 +152,11 @@ def _fmha_variant_kernel_bnsd(
     if WINDOW_SIZE > 0:
         kv_start = max(0, (prefix_kvlen + start_m - WINDOW_SIZE) // TILE_N * TILE_N)
         kv_end = min(kv_len_val, prefix_kvlen + (bid_x + 1) * TILE_M + WINDOW_SIZE)
+    elif CAUSAL:
+        # Causal: KV positions past this query tile's last causal key are fully
+        # masked, so the loop is bounded at the diagonal rather than all of S_kv.
+        kv_start = 0
+        kv_end = min(kv_len_val, prefix_kvlen + (bid_x + 1) * TILE_M)
     else:
         kv_start = 0
         kv_end = kv_len_val
@@ -203,11 +208,13 @@ def _fmha_variant_kernel_bnsd(
             rmask = rmask.reshape((TILE_M, TILE_N))
             qk = ct.where(rmask != 0, ct.full((TILE_M, TILE_N), NEG_INF, dtype=ct.float32), qk)
 
-        # Apply causal mask
+        # Tiles whose last key is at or before this query tile's first causal
+        # position are entirely visible, so the causal mask is skipped for them.
         if CAUSAL:
-            offs_n_full = kv_pos + offs_n_tile
-            causal_mask = (offs_m + prefix_kvlen) >= offs_n_full
-            qk = ct.where(causal_mask, qk, ct.full((TILE_M, TILE_N), NEG_INF, dtype=ct.float32))
+            if kv_pos + TILE_N > start_m + prefix_kvlen + 1:
+                offs_n_full = kv_pos + offs_n_tile
+                causal_mask = (offs_m + prefix_kvlen) >= offs_n_full
+                qk = ct.where(causal_mask, qk, ct.full((TILE_M, TILE_N), NEG_INF, dtype=ct.float32))
 
         # Apply window mask
         if WINDOW_SIZE > 0:
@@ -334,6 +341,11 @@ def _fmha_variant_kernel_nsbd(
     if WINDOW_SIZE > 0:
         kv_start = max(0, (prefix_kvlen + start_m - WINDOW_SIZE) // TILE_N * TILE_N)
         kv_end = min(kv_len_val, prefix_kvlen + (bid_x + 1) * TILE_M + WINDOW_SIZE)
+    elif CAUSAL:
+        # Causal: KV positions past this query tile's last causal key are fully
+        # masked, so the loop is bounded at the diagonal rather than all of S_kv.
+        kv_start = 0
+        kv_end = min(kv_len_val, prefix_kvlen + (bid_x + 1) * TILE_M)
     else:
         kv_start = 0
         kv_end = kv_len_val
@@ -380,9 +392,10 @@ def _fmha_variant_kernel_nsbd(
             qk = ct.where(rmask != 0, ct.full((TILE_M, TILE_N), NEG_INF, dtype=ct.float32), qk)
 
         if CAUSAL:
-            offs_n_full = kv_pos + offs_n_tile
-            causal_mask = (offs_m + prefix_kvlen) >= offs_n_full
-            qk = ct.where(causal_mask, qk, ct.full((TILE_M, TILE_N), NEG_INF, dtype=ct.float32))
+            if kv_pos + TILE_N > start_m + prefix_kvlen + 1:
+                offs_n_full = kv_pos + offs_n_tile
+                causal_mask = (offs_m + prefix_kvlen) >= offs_n_full
+                qk = ct.where(causal_mask, qk, ct.full((TILE_M, TILE_N), NEG_INF, dtype=ct.float32))
 
         if WINDOW_SIZE > 0:
             offs_n_full = kv_pos + offs_n_tile
