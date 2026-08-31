@@ -38,6 +38,7 @@ dev = [
   "flashinfer-bench==0.1.2",
   "pytest-html",
   "pytest-split",
+  "pytest-timeout",
   "pytest-xdist",
   "ruff",
 ]

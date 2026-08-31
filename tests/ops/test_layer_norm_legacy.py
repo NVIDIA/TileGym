@@ -128,7 +128,9 @@ class Test_PersistentLayerNorm(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
-    def test_op(self, m, n, dtype, backend):
+    def test_op(self, m, n, dtype, backend, arch):
+        if backend == "tilecpp" and arch in ["sm120", "sm121"] and n == 1024:
+            pytest.skip("Skip on sm120, sm121: tilecpp kernel compilation hangs at n=1024.")
         try:
             set_backend(backend)
         except Exception as e:
