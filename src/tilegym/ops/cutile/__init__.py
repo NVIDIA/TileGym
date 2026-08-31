@@ -24,6 +24,7 @@ if is_backend_available("cutile"):
     from . import gemma_attention_decode
     from . import group_gemm
     from . import layer_norm_legacy
+    from . import linear_gluact_linear
     from . import matmul
     from . import mla
     from . import mla_decoding
@@ -103,6 +104,7 @@ if is_backend_available("cutile"):
         "matmul",
         "group_gemm",
         "mhc",
+        "linear_gluact_linear",
         "chunk_gated_delta_rule",
         "recurrent_gated_delta_rule",
         "sparse_mla",
