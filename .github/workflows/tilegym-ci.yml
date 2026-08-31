@@ -575,17 +575,20 @@ jobs:
             echo "Pure timing drift does not trigger this PR. Review and merge to keep the shards balanced."
             echo ""
             echo "## CI Configuration"
+            echo "<!-- ops must run: the point of the refresh is that the new map balances the"
+            echo "     shards, and the only way to see that is a real test-ops run, which needs"
+            echo "     the image -- hence build: true. -->"
             echo '```yaml'
             echo "config:"
-            echo "  build: false"
+            echo "  build: true"
             echo "  # valid options are \"ops\", \"benchmark\", and \"sanity\""
-            echo "  test: []"
+            echo "  test: [ops]"
             echo '```'
             echo ""
             echo "## Checklist"
             echo "- [x] Code formatted and imports sorted via repo specifications (\`./format.sh\`) — N/A, data-only change"
             echo "- [x] Documentation updated (if needed) — N/A"
-            echo "- [ ] CI configuration reviewed"
+            echo "- [x] CI configuration reviewed"
           } > pr_body.md
           if [ -z "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')" ]; then
             gh pr create --base main --head "${BRANCH}" \
@@ -1017,17 +1020,20 @@ jobs:
             echo "Pure timing drift does not trigger this PR. Review and merge to keep the shards balanced."
             echo ""
             echo "## CI Configuration"
+            echo "<!-- benchmark must run: the point of the refresh is that the new map balances"
+            echo "     the shards, and the only way to see that is a real test-benchmark run,"
+            echo "     which needs the image -- hence build: true. -->"
             echo '```yaml'
             echo "config:"
-            echo "  build: false"
+            echo "  build: true"
             echo "  # valid options are \"ops\", \"benchmark\", and \"sanity\""
-            echo "  test: []"
+            echo "  test: [benchmark]"
             echo '```'
             echo ""
             echo "## Checklist"
             echo "- [x] Code formatted and imports sorted via repo specifications (\`./format.sh\`) — N/A, data-only change"
             echo "- [x] Documentation updated (if needed) — N/A"
-            echo "- [ ] CI configuration reviewed"
+            echo "- [x] CI configuration reviewed"
           } > pr_body.md
           if [ -z "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')" ]; then
             gh pr create --base main --head "${BRANCH}" \
