@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,13 @@ logging.basicConfig(
     format="%(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Wall-clock budget for a single benchmark file. The GPU runners are ephemeral
+# pods whose hosts differ by up to ~1.35x in speed, so this needs enough slack
+# that the slowest pod still finishes the longest benchmark. bench_bmm.py is
+# currently the longest at ~16 min on a fast pod, which leaves no margin under
+# the previous 20 min budget and made test-benchmark fail roughly half the time.
+BENCHMARK_TIMEOUT_S = int(os.environ.get("BENCH_TIMEOUT_S", "1800"))
 
 
 def get_gpu_info() -> Dict[str, Any]:
@@ -214,15 +222,26 @@ def parse_error_details(error_output: str) -> Dict[str, Any]:
 
 
 def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
-    """Run a single benchmark file and return structured results."""
+    """Run a single benchmark file and return structured results.
+
+    ``benchmark_id`` is the benchmark-dir-relative path and is what keys
+    ``.github/.bench_durations``; ``benchmark_file`` is only the basename and
+    collides across subdirectories. ``duration_s`` is measured here rather than
+    parsed out of stdout so the durations map does not depend on the output
+    parser recognising the benchmark's table format.
+    """
+    benchmark_id = benchmark_file.relative_to(Path(__file__).parent).as_posix()
+    common = {"benchmark_file": benchmark_file.name, "benchmark_id": benchmark_id}
+    started = time.monotonic()
     try:
         result = subprocess.run(
             [sys.executable, str(benchmark_file)],
             capture_output=True,
             text=True,
-            timeout=1200,  # 20 minute timeout per benchmark
+            timeout=BENCHMARK_TIMEOUT_S,
             cwd=benchmark_file.parent,
         )
+        duration_s = time.monotonic() - started
 
         if result.returncode != 0:
             # Combine stdout and stderr for complete error details
@@ -230,8 +249,9 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
             error_details = parse_error_details(error_output)
 
             return {
-                "benchmark_file": benchmark_file.name,
+                **common,
                 "status": "FAILED",
+                "duration_s": round(duration_s, 2),
                 "error_type": error_details["error_type"],
                 "error_message": error_details["error_message"],
                 "partial_results": error_details["partial_results"],
@@ -243,24 +263,27 @@ def run_benchmark(benchmark_file: Path) -> Dict[str, Any]:
         benchmarks = parse_benchmark_output(result.stdout)
 
         return {
-            "benchmark_file": benchmark_file.name,
+            **common,
             "status": "PASSED",
+            "duration_s": round(duration_s, 2),
             "benchmarks": benchmarks,
         }
 
     except subprocess.TimeoutExpired:
         return {
-            "benchmark_file": benchmark_file.name,
+            **common,
             "status": "TIMEOUT",
+            "duration_s": round(time.monotonic() - started, 2),
             "error_type": "TimeoutError",
-            "error_message": "Benchmark exceeded 20 minute timeout",
-            "error": "Benchmark exceeded 20 minute timeout",
+            "error_message": f"Benchmark exceeded {BENCHMARK_TIMEOUT_S}s timeout",
+            "error": f"Benchmark exceeded {BENCHMARK_TIMEOUT_S}s timeout",
             "benchmarks": [],
         }
     except Exception as e:
         return {
-            "benchmark_file": benchmark_file.name,
+            **common,
             "status": "ERROR",
+            "duration_s": round(time.monotonic() - started, 2),
             "error_type": type(e).__name__,
             "error_message": str(e)[:200],
             "error": str(e),
@@ -276,14 +299,66 @@ def setup_output_directory() -> Path:
     return output_dir
 
 
+def load_bench_durations() -> Dict[str, float]:
+    """Load the committed per-benchmark durations map, or {} when unavailable.
+
+    Path resolution mirrors ``.github/.test_durations``: repo-root relative, with
+    BENCH_DURATIONS_PATH as an override for out-of-tree runs.
+    """
+    default = Path(__file__).resolve().parents[2] / ".github" / ".bench_durations"
+    path = Path(os.environ.get("BENCH_DURATIONS_PATH", default))
+    try:
+        with open(path) as fh:
+            return {k: float(v) for k, v in json.load(fh).items()}
+    except (OSError, ValueError) as e:
+        logger.info(f"No usable benchmark durations at {path} ({e}); falling back to round-robin sharding")
+        return {}
+
+
+def assign_shard(files: List[Path], durations: Dict[str, float], num_shards: int, shard: int) -> List[Path]:
+    """Pick this shard's files, balancing by recorded duration.
+
+    Longest-processing-time first: walk the benchmarks from slowest to fastest and
+    drop each one into the shard with the least work queued so far. A single very
+    slow benchmark therefore ends up alone with small ones rather than stacked on
+    top of another slow one, which is what plain round-robin does whenever two big
+    benchmarks land on the same index.
+
+    Benchmarks missing from the map are charged the median of the known ones, so a
+    newly added file is neither ignored nor allowed to swamp a shard before its
+    first nightly measurement lands.
+    """
+    known = sorted(durations.values())
+    fallback = known[len(known) // 2] if known else 1.0
+
+    def cost(p: Path) -> float:
+        return durations.get(p.relative_to(Path(__file__).parent).as_posix(), fallback)
+
+    # Sort by descending cost, then by path so equal-cost files assign deterministically.
+    ordered = sorted(files, key=lambda p: (-cost(p), p.as_posix()))
+    buckets: List[List[Path]] = [[] for _ in range(num_shards)]
+    loads = [0.0] * num_shards
+    for f in ordered:
+        i = loads.index(min(loads))
+        buckets[i].append(f)
+        loads[i] += cost(f)
+
+    for i, load in enumerate(loads, start=1):
+        marker = " <- this shard" if i == shard else ""
+        logger.info(f"  shard {i}/{num_shards}: {len(buckets[i - 1])} files, ~{load:.0f}s{marker}")
+    return sorted(buckets[shard - 1])
+
+
 def find_benchmark_files() -> List[Path]:
     """Find all benchmark files recursively under the benchmark directory.
 
     Supports optional sharding for parallel CI via environment variables:
       BENCH_NUM_SHARDS - total number of shards (default 1 = no sharding)
       BENCH_SHARD      - this shard's index, 1-based
-    Files are assigned round-robin across shards so the mix of small/large
-    benchmarks is spread evenly.
+    Files are balanced across shards by their recorded runtime from
+    ``.github/.bench_durations``. Without that map the split falls back to
+    round-robin, which only balances file counts -- with one benchmark taking a
+    third of the total that leaves the shards close to 2x apart.
     """
     benchmark_dir = Path(__file__).parent
     benchmark_files = sorted(benchmark_dir.rglob("bench_*.py"))
@@ -298,7 +373,12 @@ def find_benchmark_files() -> List[Path]:
         if not (1 <= shard <= num_shards):
             logger.error(f"BENCH_SHARD={shard} is out of range 1..{num_shards}")
             sys.exit(1)
-        selected = benchmark_files[shard - 1 :: num_shards]
+        durations = load_bench_durations()
+        if durations:
+            logger.info(f"Sharding by recorded duration ({len(durations)} benchmarks in the map):")
+            selected = assign_shard(benchmark_files, durations, num_shards, shard)
+        else:
+            selected = benchmark_files[shard - 1 :: num_shards]
         logger.info(
             f"Sharding enabled: shard {shard}/{num_shards} -> {len(selected)}/{len(benchmark_files)} benchmark files"
         )

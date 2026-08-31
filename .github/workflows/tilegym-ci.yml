@@ -300,8 +300,11 @@ jobs:
       - name: Checkout code (sparse - need ops tests and shared utilities)
         uses: actions/checkout@v4
         with:
+          # .test_durations is needed on the host so the nightly can seed the
+          # shard's durations file before pytest-split reads it.
           sparse-checkout: |
             tests
+            .github/.test_durations
           sparse-checkout-cone-mode: false
 
       - name: Create test results directory
@@ -339,19 +342,31 @@ jobs:
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
 
           # PR builds read the committed durations map to balance shards. Nightly
-          # builds (main/schedule) instead record fresh per-test timings to an
+          # builds (main/schedule) additionally record fresh per-test timings to an
           # uploaded file, which the update-test-durations job merges and commits
           # back so the committed map stays current as tests are added.
+          #
+          # pytest-split uses one path for both reading and writing, so the nightly
+          # seeds the shard's output file with the committed map: without it
+          # pytest-split finds no durations and falls back to splitting by test
+          # count, which leaves the shards badly unbalanced. --clean-durations then
+          # makes it write back only the tests this shard actually ran, so the
+          # per-shard files stay disjoint and the merge below keeps working.
           if [ "${{ needs.config.outputs.is_pr }}" == "false" ]; then
-            DURATIONS_ARGS="--durations-path /test-results/durations-${{ matrix.shard }}.json --store-durations"
+            cp ${{ github.workspace }}/.github/.test_durations \
+               ${{ github.workspace }}/test-results/durations-${{ matrix.shard }}.json
+            DURATIONS_ARGS="--durations-path /test-results/durations-${{ matrix.shard }}.json --store-durations --clean-durations"
           else
             DURATIONS_ARGS="--durations-path /workspace/tilegym/.github/.test_durations"
           fi
 
           docker pull ${IMAGE}
+          # No autotune-disable flag: ops tests exercise the autotuned paths. The
+          # switch is TILEGYM_DISABLE_AUTOTUNE (src/tilegym/autotune.py); the
+          # DISABLE_AUTOTUNE name that used to be passed here has not been read by
+          # any operator since 2c6b3b3, so it was doing nothing.
           docker run --rm \
             --gpus all \
-            -e DISABLE_AUTOTUNE=1 \
             -e ENABLE_TILE=1 \
             -e PYTHONPATH=/opt/triton-cuda-tileir \
             -e PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8 \
@@ -560,17 +575,20 @@ jobs:
             echo "Pure timing drift does not trigger this PR. Review and merge to keep the shards balanced."
             echo ""
             echo "## CI Configuration"
+            echo "<!-- ops must run: the point of the refresh is that the new map balances the"
+            echo "     shards, and the only way to see that is a real test-ops run, which needs"
+            echo "     the image -- hence build: true. -->"
             echo '```yaml'
             echo "config:"
-            echo "  build: false"
+            echo "  build: true"
             echo "  # valid options are \"ops\", \"benchmark\", and \"sanity\""
-            echo "  test: []"
+            echo "  test: [ops]"
             echo '```'
             echo ""
             echo "## Checklist"
             echo "- [x] Code formatted and imports sorted via repo specifications (\`./format.sh\`) — N/A, data-only change"
             echo "- [x] Documentation updated (if needed) — N/A"
-            echo "- [ ] CI configuration reviewed"
+            echo "- [x] CI configuration reviewed"
           } > pr_body.md
           if [ -z "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')" ]; then
             gh pr create --base main --head "${BRANCH}" \
@@ -879,6 +897,151 @@ jobs:
           echo "❌ One or more benchmark shards failed (a benchmark errored)."
           echo "   See the test-benchmark shard logs for details."
           exit 1
+
+  update-bench-durations:
+    name: update-bench-durations
+    needs: [config, test-benchmark]
+    # Nightly counterpart of update-test-durations, for tests/benchmark. Refreshes
+    # .github/.bench_durations ONLY when the set of benchmark files changed, so the
+    # file does not churn on timing noise. Kept as its own job and its own rolling
+    # branch rather than folded into update-test-durations: the two read different
+    # artifacts and would race on a shared branch, and a red test-benchmark should
+    # not block the ops durations refresh. Reuses the nightly run -- no extra GPU
+    # time. Skipped on PRs.
+    if: |
+      needs.config.outputs.is_pr == 'false' &&
+      needs.test-benchmark.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: |
+            .github
+            tests/benchmark
+          sparse-checkout-cone-mode: false
+
+      - name: Download benchmark shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-shard-results-*
+          path: ${{ github.workspace }}/bench-artifacts
+
+      - name: Refresh durations only if the benchmark set changed
+        id: refresh
+        run: |
+          python3 - <<'PY'
+          import glob, json, os
+
+          merged = {}
+          files = sorted(glob.glob("bench-artifacts/*/*_results.json"))
+          for f in files:
+              try:
+                  d = json.load(open(f))
+              except Exception as e:
+                  print(f"skip {f}: {e}")
+                  continue
+              # Only trust a clean run: a TIMEOUT/FAILED duration is not the real cost.
+              if d.get("status") != "PASSED":
+                  continue
+              bid, dur = d.get("benchmark_id"), d.get("duration_s")
+              if bid and isinstance(dur, (int, float)):
+                  merged[bid] = round(float(dur), 2)
+          print(f"collected {len(merged)} benchmark durations from {len(files)} result file(s)")
+
+          out = ".github/.bench_durations"
+          old = json.load(open(out)) if os.path.exists(out) else {}
+
+          def emit(k, v):
+              with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+                  fh.write(f"{k}={v}\n")
+
+          if not merged:
+              print("No durations collected; nothing to do.")
+              emit("changed", "false")
+              raise SystemExit(0)
+
+          # The benchmark set on disk is the source of truth for removals: a shard
+          # that failed contributes no entries, and must not look like a deletion.
+          on_disk = {
+              os.path.relpath(p, "tests/benchmark").replace(os.sep, "/")
+              for p in glob.glob("tests/benchmark/**/bench_*.py", recursive=True)
+          }
+          added = sorted(k for k in merged if k not in old)
+          removed = sorted(k for k in old if k not in on_disk)
+          if not added and not removed:
+              print("Benchmark set unchanged; skipping update (timing drift ignored).")
+              emit("changed", "false")
+              raise SystemExit(0)
+
+          print(f"Benchmark set changed: +{len(added)} added, -{len(removed)} removed -> proposing update")
+          for b in added:
+              print(f"  + {b}")
+          for b in removed:
+              print(f"  - {b}")
+          # Keep a stale-but-known duration for anything this run did not measure,
+          # so one flaky shard cannot wipe the map down to a partial set.
+          refreshed = {k: v for k, v in old.items() if k in on_disk}
+          refreshed.update(merged)
+          with open(out, "w") as fh:
+              json.dump({k: refreshed[k] for k in sorted(refreshed)}, fh, indent=0)
+              fh.write("\n")
+          emit("changed", "true")
+          emit("added", str(len(added)))
+          emit("removed", str(len(removed)))
+          PY
+
+      - name: Open / update PR with refreshed durations
+        if: steps.refresh.outputs.changed == 'true'
+        # Best-effort, same as update-test-durations: a refresh-PR hiccup must never
+        # turn the nightly run red. The committed map stays valid until refreshed.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="ci/update-bench-durations"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add .github/.bench_durations
+          git commit -m "ci: refresh .bench_durations (benchmark set changed: +${{ steps.refresh.outputs.added }}/-${{ steps.refresh.outputs.removed }})"
+          # Rolling branch: force-push so an existing PR updates in place.
+          git push -f origin "${BRANCH}"
+          {
+            echo "## Description"
+            echo "Automated refresh of \`.github/.bench_durations\` (duration-balanced shard assignment for test-benchmark)."
+            echo ""
+            echo "Triggered because the **benchmark set changed** in the nightly run:"
+            echo "**+${{ steps.refresh.outputs.added }}** benchmark(s) added, **-${{ steps.refresh.outputs.removed }}** removed."
+            echo "Pure timing drift does not trigger this PR. Review and merge to keep the shards balanced."
+            echo ""
+            echo "## CI Configuration"
+            echo "<!-- benchmark must run: the point of the refresh is that the new map balances"
+            echo "     the shards, and the only way to see that is a real test-benchmark run,"
+            echo "     which needs the image -- hence build: true. -->"
+            echo '```yaml'
+            echo "config:"
+            echo "  build: true"
+            echo "  # valid options are \"ops\", \"benchmark\", and \"sanity\""
+            echo "  test: [benchmark]"
+            echo '```'
+            echo ""
+            echo "## Checklist"
+            echo "- [x] Code formatted and imports sorted via repo specifications (\`./format.sh\`) — N/A, data-only change"
+            echo "- [x] Documentation updated (if needed) — N/A"
+            echo "- [x] CI configuration reviewed"
+          } > pr_body.md
+          if [ -z "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')" ]; then
+            gh pr create --base main --head "${BRANCH}" \
+              --title "ci: refresh .bench_durations" \
+              --body-file pr_body.md
+          else
+            echo "Existing PR for ${BRANCH} updated in place."
+          fi
 
   publish-wheel:
     name: publish-verified-wheel
