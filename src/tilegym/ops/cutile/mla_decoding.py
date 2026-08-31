@@ -15,6 +15,8 @@ ConstBool = ct.Constant[bool]
 
 INV_LOG_2 = 1.0 / math.log(2)
 
+_MLA_LOAD_LATENCY = 2
+
 
 @ct.kernel
 def _naive_absorb_mla_transpose_kernel(
@@ -73,6 +75,7 @@ def _naive_absorb_mla_transpose_kernel(
             index=(batch_idx, cnt, 0),
             shape=(1, TILE_N, TILE_D),
             allow_tma=True,
+            latency=_MLA_LOAD_LATENCY,
         )
         k = ct.reshape(k, (TILE_N, TILE_D))
         qk = ct.full((TILE_N, TILE_H), 0.0, dtype=ct.float32)
@@ -84,6 +87,7 @@ def _naive_absorb_mla_transpose_kernel(
             index=(batch_idx, cnt, 0),
             shape=(1, TILE_N, TILE_KPE),
             allow_tma=True,
+            latency=_MLA_LOAD_LATENCY,
         )
         kpe = ct.reshape(kpe, (TILE_N, TILE_KPE))
         qk = ct.mma(kpe, qpe, qk)
@@ -110,6 +114,7 @@ def _naive_absorb_mla_transpose_kernel(
             shape=(TILE_N, 1, TILE_D),
             order=(1, 0, 2),
             allow_tma=True,
+            latency=_MLA_LOAD_LATENCY,
         )
         v = ct.reshape(v, (TILE_N, TILE_D))
         v = ct.transpose(v, axis0=1, axis1=0)
@@ -129,6 +134,21 @@ def _naive_absorb_mla_transpose_kernel(
     acc = ct.transpose(acc, axis0=1, axis1=0)
     acc = ct.reshape(acc, (1, TILE_H, TILE_D))
     ct.store(Out, index=(batch_idx, bid_x, 0), tile=acc, allow_tma=True)
+
+
+def _select_tile_config() -> tuple[int, int]:
+    """Pick (TILE_H, TILE_N) for the current GPU architecture.
+
+    The kernel streams the whole KV cache through a (TILE_N, TILE_D=512) tile.
+    A TILE_N=128 tile throttles occupancy outside datacenter Blackwell, so those
+    architectures use the narrower TILE_N=64 tile while the datacenter parts the
+    wide tile was tuned for keep it. TILE_H stays 16 for all.
+    """
+    major, _ = torch.cuda.get_device_capability()
+    # sm_100: datacenter Blackwell keeps the wider KV tile.
+    if major == 10:
+        return 16, 128
+    return 16, 64
 
 
 class _MlaDecodingFunction(torch.autograd.Function):
@@ -191,10 +211,9 @@ def mla_decoding(
     transpose: bool = True,
     **kwargs,
 ) -> torch.Tensor:
-    TILE_H = 16
-    TILE_N = 128
-    num_ctas = None  # Let compiler auto-pick
     assert transpose == True, "CuTile MLA Decoding only supports transpose=True"
+    TILE_H, TILE_N = _select_tile_config()
+    num_ctas = None  # Let compiler auto-pick
     if sm_scale is None:
         sm_scale = 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
     return _MlaDecodingFunction.apply(q, qpe, kv, kpe, sm_scale, TILE_H, TILE_N, num_ctas)
