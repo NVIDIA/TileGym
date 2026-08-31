@@ -221,6 +221,55 @@ def _autotune_fwd_kernel(base_kernel, args, n_rows, cache_key, stream):
     return tuned
 
 
+_BWD_1CHUNK_NWW = 4
+
+
+def _bwd_autotune_configs():
+    for blocks_per_sm in (1, 2, 4, 8):
+        yield SimpleNamespace(blocks_per_sm=blocks_per_sm, num_worker_warps=_BWD_1CHUNK_NWW)
+
+
+_bwd_tune_cache: dict = {}
+
+
+def _autotune_bwd_kernel(
+    base_kernel, n_rows, n_cols, sm_count, device, cache_key, stream, args_fn_for_blocks, BLOCK_SIZE
+):
+    """Pick blocks_per_sm for the 1-chunk backward path via exhaustive_search.
+
+    ``args_fn_for_blocks(n_blocks)`` returns the full kernel-arg tuple (real dY/dS_out/
+    dX/S/W/RSTD buffers, a freshly-allocated dW_partial sized for n_blocks, and the
+    scalar constants) for a given block count. Returns a cached (blocks_per_sm,
+    tuned_kernel) tuple; the kernel is hint-specialized once here so the hot backward
+    path never re-runs replace_hints (which perturbs the launch).
+    """
+    if cache_key in _bwd_tune_cache:
+        return _bwd_tune_cache[cache_key]
+
+    kernel = base_kernel.replace_hints(num_worker_warps=_BWD_1CHUNK_NWW)
+
+    def _grid_fn(cfg):
+        n_blocks = min(sm_count * cfg.blocks_per_sm, n_rows)
+        return (n_blocks, 1, 1)
+
+    def _args_fn(cfg):
+        n_blocks = min(sm_count * cfg.blocks_per_sm, n_rows)
+        return args_fn_for_blocks(n_blocks)
+
+    result = exhaustive_search(
+        list(_bwd_autotune_configs()),
+        stream,
+        _grid_fn,
+        kernel,
+        _args_fn,
+        quiet=True,
+    )
+    best = result.best.config
+    tuned = (best.blocks_per_sm, kernel)
+    _bwd_tune_cache[cache_key] = tuned
+    return tuned
+
+
 @ct.kernel(occupancy=1)
 def _fused_add_rms_norm_bwd_persistent_ct(
     dY,  # (n_rows, n_cols) gradient of Y
@@ -462,7 +511,8 @@ def _fused_add_rms_norm_bwd_persistent_2c_ct(
     ct.scatter(dW_partial, (sm_id, col_idx_hi), dW_acc_hi, check_bounds=True)
 
 
-_fused_add_rms_norm_bwd_persistent_ct_nww8 = _fused_add_rms_norm_bwd_persistent_ct.replace_hints(num_worker_warps=8)
+# Large-shape 2-chunk path keeps its fixed nww=8 launch (already qualifies). The
+# 1-chunk small-shape path selects num_worker_warps per shape via _autotune_bwd_kernel.
 _fused_add_rms_norm_bwd_persistent_2c_ct_nww8 = _fused_add_rms_norm_bwd_persistent_2c_ct.replace_hints(
     num_worker_warps=8
 )
@@ -520,34 +570,38 @@ def _fused_add_rms_norm_backward_ct(dY, dS_out, S, W, RSTD, offset, casting_mode
     S2d = S.view(-1, dim)
     n_rows, n_cols = dY2d.shape
 
-    # Persistent kernel: one block per SM, each handles ceil(n_rows/sm_count) rows.
-    # Grid = (sm_count,) → exactly 1 block/SM → full 256KB register file available.
-    # When BLOCK_SIZE > _BWD_MAX_CHUNK_SIZE, use the 2-chunk kernel to reduce
-    # register pressure (CHUNK_SIZE/128 elements/thread vs BLOCK_SIZE/128).
+    # Persistent kernel: each block owns a contiguous slice of rows and loops over
+    # them, writing its dW partial once. When BLOCK_SIZE > _BWD_MAX_CHUNK_SIZE, use
+    # the 2-chunk kernel to reduce register pressure (CHUNK_SIZE/128 elements/thread
+    # vs BLOCK_SIZE/128).
     sm_count = torch.cuda.get_device_properties(W.device).multi_processor_count
-    num_iters = math.ceil(n_rows / sm_count)
 
     dX = torch.empty_like(dY2d)
-    # Per-SM partial dW: shape (sm_count, n_cols).
-    # Each SM accumulates dW in registers across its rows, writes once.
-    dW_partial = torch.empty(sm_count, n_cols, dtype=torch.float32, device=W.device)
+    stream = torch.cuda.current_stream()
 
-    grid = (sm_count, 1, 1)
+    dY_c = dY2d.contiguous()
+    dS_out_c = dS_out2d.contiguous()
+    S_c = S2d.contiguous()
+    W_c = W.contiguous()
+
     # gather+latency=3 gives explicit cp.async-style pipelining that outperforms TMA
-    # at every test shape on this kernel. 2-chunk variant caps per-thread register
-    # usage when BLOCK_SIZE > _BWD_MAX_CHUNK_SIZE (splits cols into lo/hi halves).
+    # at every test shape on this kernel.
     if BLOCK_SIZE > _BWD_MAX_CHUNK_SIZE:
+        # Large-shape 2-chunk path: one block per SM, splits cols into lo/hi halves.
+        # These shapes already saturate the SMs and qualify; keep the launch fixed.
         CHUNK_SIZE = BLOCK_SIZE // 2
+        num_iters = math.ceil(n_rows / sm_count)
+        dW_partial = torch.empty(sm_count, n_cols, dtype=torch.float32, device=W.device)
         ct.launch(
-            torch.cuda.current_stream(),
-            grid,
+            stream,
+            (sm_count, 1, 1),
             _fused_add_rms_norm_bwd_persistent_2c_ct_nww8,
             (
-                dY2d.contiguous(),
-                dS_out2d.contiguous(),
+                dY_c,
+                dS_out_c,
                 dX,
-                S2d.contiguous(),
-                W.contiguous(),
+                S_c,
+                W_c,
                 RSTD,
                 dW_partial,
                 int(n_cols),
@@ -559,31 +613,77 @@ def _fused_add_rms_norm_backward_ct(dY, dS_out, S, W, RSTD, offset, casting_mode
                 int(casting_mode),
             ),
         )
-    else:
+        dX = dX.view(*shape)
+        dW = dW_partial.sum(dim=0).to(W.dtype)
+        return dX, dX, dW  # dR == dX (gradient flows equally to X and R)
+
+    # Small-shape 1-chunk path: at small n_cols the one-block-per-SM grid leaves the
+    # SMs under-occupied (memory-latency bound). Tune the effective occupancy
+    # (blocks_per_sm) per shape; the persistent kernel is unchanged — each block just
+    # loops over a smaller slice of rows and writes its own dW partial row.
+    def _launch(kernel, n_blocks, dW_partial):
+        num_iters = math.ceil(n_rows / n_blocks)
         ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            _fused_add_rms_norm_bwd_persistent_ct_nww8,
+            stream,
+            (n_blocks, 1, 1),
+            kernel,
             (
-                dY2d.contiguous(),
-                dS_out2d.contiguous(),
+                dY_c,
+                dS_out_c,
                 dX,
-                S2d.contiguous(),
-                W.contiguous(),
+                S_c,
+                W_c,
                 RSTD,
                 dW_partial,
                 int(n_cols),
                 float(offset),
                 int(num_iters),
-                int(sm_count),
+                int(n_blocks),
                 int(n_rows),
                 int(BLOCK_SIZE),
                 int(casting_mode),
             ),
         )
 
-    dX = dX.view(*shape)
+    def _args_fn_for_blocks(n_blocks):
+        num_iters = math.ceil(n_rows / n_blocks)
+        dW_partial = torch.empty(n_blocks, n_cols, dtype=torch.float32, device=W.device)
+        return (
+            dY_c,
+            dS_out_c,
+            dX,
+            S_c,
+            W_c,
+            RSTD,
+            dW_partial,
+            int(n_cols),
+            float(offset),
+            int(num_iters),
+            int(n_blocks),
+            int(n_rows),
+            int(BLOCK_SIZE),
+            int(casting_mode),
+        )
+
+    cache_key = (n_cols, BLOCK_SIZE, casting_mode, S.dtype, str(W.device))
+    blocks_per_sm, tuned_kernel = _autotune_bwd_kernel(
+        _fused_add_rms_norm_bwd_persistent_ct,
+        n_rows,
+        n_cols,
+        sm_count,
+        W.device,
+        cache_key,
+        stream,
+        _args_fn_for_blocks,
+        BLOCK_SIZE,
+    )
+
+    n_blocks = min(sm_count * blocks_per_sm, n_rows)
+    dW_partial = torch.empty(n_blocks, n_cols, dtype=torch.float32, device=W.device)
+    _launch(tuned_kernel, n_blocks, dW_partial)
     dW = dW_partial.sum(dim=0).to(W.dtype)
+
+    dX = dX.view(*shape)
     return dX, dX, dW  # dR == dX (gradient flows equally to X and R)
 
 
