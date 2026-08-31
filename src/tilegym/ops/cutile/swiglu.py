@@ -24,17 +24,17 @@ def _silu(x):
     return x * _sigmoid(x)
 
 
-@ct.kernel
-def _swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int]):
+@ct.kernel(occupancy=1, num_worker_warps=8)
+def _swiglu_forward_kernel(a, b, c, TILE_SIZE: ct.Constant[int], check_bounds: ct.Constant[bool]):
     row = ct.bid(0)
     offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
 
-    a_tile = ct.gather(a, (row, offsets), check_bounds=True, padding_value=0.0)
-    b_tile = ct.gather(b, (row, offsets), check_bounds=True, padding_value=0.0)
+    a_tile = ct.gather(a, (row, offsets), check_bounds=check_bounds, padding_value=0.0)
+    b_tile = ct.gather(b, (row, offsets), check_bounds=check_bounds, padding_value=0.0)
 
     a_tile_f32 = a_tile.astype(ct.float32)
     c_tile = _silu(a_tile_f32).astype(a.dtype) * b_tile
-    ct.scatter(c, (row, offsets), c_tile, check_bounds=True)
+    ct.scatter(c, (row, offsets), c_tile, check_bounds=check_bounds)
 
 
 # Backward kernel for swiglu
@@ -88,6 +88,9 @@ def _swiglu_forward(a, b):
     n_rows = a.shape[0]
 
     TILE_SIZE = next_power_of_2(n_cols)
+    # Drop bounds checking only when the power-of-2 tile exactly covers n_cols
+    # (every lane in-bounds); irregular shapes keep masking on the partial tile.
+    check_bounds = TILE_SIZE != n_cols
     grid = (n_rows,)
     ct.launch(
         torch.cuda.current_stream(),
@@ -98,6 +101,7 @@ def _swiglu_forward(a, b):
             b,
             c,
             TILE_SIZE,
+            check_bounds,
         ),
     )
     return c.view(*ori_shape)
