@@ -3,6 +3,7 @@
 "bench_dropout.py": 40.14,
 "bench_fused_attention.py": 75.49,
 "bench_gemma_attention.py": 97.12,
+"bench_gemma_attention_decode.py": 70.65,
 "bench_group_gemm.py": 43.47,
 "bench_layernorm.py": 251.77,
 "bench_matrix_multiplication.py": 99.36,
