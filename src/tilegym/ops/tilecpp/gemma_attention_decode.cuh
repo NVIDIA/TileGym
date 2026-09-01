@@ -35,7 +35,6 @@ template<typename T,
          int WINDOW_SIZE,
          bool HAS_SOFT_CAP,
          int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy) ]]
 __tile_global__ void gemma_attention_decode_kernel(
     const T* __restrict__ Q_ptr,      // [B, H_KV, Q_PER_KV, HEAD_DIM]
     const T* __restrict__ K_ptr,      // [B, H_KV, S_KV, HEAD_DIM]

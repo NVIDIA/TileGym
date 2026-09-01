@@ -73,11 +73,11 @@ __tile_global__ void rms_norm_kernel(
         auto cols = ct::iota<i32xBS>() + j;
         TxBS xj_raw;
         if constexpr (EVEN_N) {
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             xj_raw = ct::load(X_row + cols);
         } else {
             auto mask = cols < N;
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             xj_raw = ct::load_masked(X_row + cols, mask, zero_pad);
         }
         auto xj = ct::element_cast<float>(xj_raw);
@@ -97,15 +97,15 @@ __tile_global__ void rms_norm_kernel(
         WxBS wj_raw;
         TxBS xj_raw;
         if constexpr (EVEN_N) {
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             wj_raw = ct::load(W_aligned + cols);
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             xj_raw = ct::load(X_row + cols);
         } else {
             auto mask = cols < N;
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             wj_raw = ct::load_masked(W_aligned + cols, mask, zero_pad_w);
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             xj_raw = ct::load_masked(X_row + cols, mask, zero_pad);
         }
         auto wj = ct::element_cast<float>(wj_raw);
@@ -113,11 +113,11 @@ __tile_global__ void rms_norm_kernel(
         auto yj_f32 = xj * rms * (OFFSET + wj);
         auto yj = ct::element_cast<T>(yj_f32);
         if constexpr (EVEN_N) {
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             ct::store(Y_row + cols, yj);
         } else {
             auto mask = cols < N;
-            [[ using cutile : hint(1000, latency=1) ]]
+            [[ using cutile : hint(0, latency=1) ]]
             ct::store_masked(Y_row + cols, yj, mask);
         }
     }
@@ -175,7 +175,7 @@ __tile_global__ void rms_norm_multi_wave_cached_kernel(
     auto mask = cols < N;
 
     // Cache the row in registers: loaded once, reused after the reduction.
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     auto xj_raw = ct::load_masked(X_row + cols, mask, ct::zeros<TxTS>());
     auto xj = ct::element_cast<float>(xj_raw);
 
@@ -184,13 +184,13 @@ __tile_global__ void rms_norm_multi_wave_cached_kernel(
 
     rstd_aligned[row] = rms;
 
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     auto wj_raw = ct::load_masked(W_aligned + cols, mask, ct::zeros<WxTS>());
     auto wj = ct::element_cast<float>(wj_raw);
 
     auto yj = ct::element_cast<T>(xj * rms * (OFFSET + wj));
 
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     ct::store_masked(Y_row + cols, yj, mask);
 }
 
@@ -201,7 +201,6 @@ __tile_global__ void rms_norm_multi_wave_cached_kernel(
  *   T, M, N, BLOCK_SIZE (= N).
  */
 template<typename T, typename WT, int M, int N, int BLOCK_SIZE>
-[[ using cutile : hint(1000, num_cta_in_cga=1) ]]
 __tile_global__ void rms_norm_kernel_pv(
     const T* __restrict__ X,
     const WT* __restrict__ W,
@@ -232,12 +231,12 @@ __tile_global__ void rms_norm_kernel_pv(
         ct::shape<BLOCK_SIZE>{});
 
     ct::tile<WT, ct::shape<BLOCK_SIZE>> w_loaded;
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     w_loaded = W_view.load(0);
     auto w = ct::element_cast<float>(w_loaded);
 
     TxBS x_loaded;
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     x_loaded = X_view.load(row, 0);
     auto x = ct::element_cast<float>(x_loaded);
 
@@ -255,7 +254,7 @@ __tile_global__ void rms_norm_kernel_pv(
     auto y_2d  = ct::reshape<ct::shape<1, BLOCK_SIZE>>(y_1d);
     auto y_out = ct::element_cast<T>(y_2d);
 
-    [[ using cutile : hint(1000, allow_tma=false) ]]
+    [[ using cutile : hint(0, allow_tma=false) ]]
     Y_view.store(y_out, row, 0);
 }
 
@@ -290,7 +289,6 @@ template<typename T,
          int NUM_SMS,   // ← compile-time so the persistent for-loop step is constant.
          float EPS,     // ← compile-time so (var + eps) hoists out of the loop.
          float OFFSET>
-[[ using cutile : hint(1000, num_cta_in_cga=1, occupancy=occupancy) ]]
 __tile_global__ void rms_norm_static_persistent_kernel(
     const T* __restrict__ X,
     T* __restrict__ Y,
@@ -338,7 +336,7 @@ __tile_global__ void rms_norm_static_persistent_kernel(
     constexpr float inv_N = 1.0f / static_cast<float>(N);
 
     for (auto current_bid : ct::irange(pid, upper_bound, NUM_SMS)) {
-        [[ using cutile : hint(1000, latency=10) ]]
+        [[ using cutile : hint(0, latency=10) ]]
         auto x_tile = pX.load_masked(current_bid, 0);
         auto x = ct::element_cast<float>(x_tile);
 
@@ -348,14 +346,14 @@ __tile_global__ void rms_norm_static_persistent_kernel(
         auto variance = sq_sum * inv_N;
         auto rstd_col = ct::rsqrt(variance + EPS);                   // (TILE_M, 1)
 
-        [[ using cutile : hint(1000, allow_tma=false) ]]
+        [[ using cutile : hint(0, allow_tma=false) ]]
         pRstd.store(ct::reshape<ct::shape<TILE_SIZE_M>>(rstd_col), current_bid);
 
         auto x_norm = x * rstd_col;                                  // broadcast (TILE_M,1)
         auto y_f32  = x_norm * w_bcast;                              // broadcast (1,TILE_N)
         auto y_T    = ct::element_cast<T>(y_f32);
 
-        [[ using cutile : hint(1000, allow_tma=false, latency=3) ]]
+        [[ using cutile : hint(0, allow_tma=false, latency=3) ]]
         pY.store_masked(y_T, current_bid, 0);
     }
 }
@@ -387,6 +385,7 @@ __tile_global__ void rms_norm_static_persistent_kernel(
  *   N: Number of columns
  */
 template<typename T, typename WT, int BLOCK_SIZE>
+[[ using cutile : hint(0, occupancy=1) ]]
 __tile_global__ void rms_norm_backward_dx_kernel(
     T* __restrict__ DX,
     const T* __restrict__ DY,

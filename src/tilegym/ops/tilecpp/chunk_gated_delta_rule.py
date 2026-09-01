@@ -63,7 +63,7 @@ def _launch_intra(
     dtype = Q.dtype
     dump_kernel_types("chunk_gated_delta_rule_intra_kernel", Q, K, V, Beta, G)
 
-    occupancy = 1
+    occupancy = 2
     bool_to_str = lambda b: "true" if b else "false"
     beta_cpp_type = get_cpp_type(Beta.dtype)
     g_cpp_type = get_cpp_type(G.dtype)

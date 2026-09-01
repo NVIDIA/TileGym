@@ -36,8 +36,8 @@ template<typename T, int M, int N, int K,
          bool TRANSPOSE_A, bool TRANSPOSE_B,
          int num_ctas, int occupancy>
 [[ using cutile :
-    hint(1000, num_cta_in_cga=num_ctas),
-    hint(1000, occupancy=occupancy)
+    hint(0, num_cta_in_cga=num_ctas),
+    hint(0, occupancy=occupancy)
 ]]
 __tile_global__ void matmul_kernel(
     const T* __restrict__ _A,
