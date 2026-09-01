@@ -28,6 +28,8 @@ from typing import Iterator
 from tilegym.kernel_inventory.composition import DefinitionCompositionError
 from tilegym.kernel_inventory.composition import validate_definition_composition
 from tilegym.kernel_inventory.layout import iter_inventory_json_paths
+from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+from tilegym.kernel_inventory.layout import mirrored_workload_path
 from tilegym.kernel_inventory.layout import solution_paths_for_definition
 from tilegym.kernel_inventory.return_contract import ReturnContractError
 from tilegym.kernel_inventory.return_contract import instrument_reference_returns
@@ -39,6 +41,14 @@ from tilegym.kernel_inventory.review import validate_leaf_review_manifest
 from tilegym.kernel_inventory.source_contract import SourceContractError
 from tilegym.kernel_inventory.source_contract import resolve_repo_relative_path
 from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
+from tilegym.kernel_inventory.workloads import KernelWorkloadError
+from tilegym.kernel_inventory.workloads import WorkloadRecord
+from tilegym.kernel_inventory.workloads import iter_workload_records
+from tilegym.kernel_inventory.workloads import load_workload_jsonl
+from tilegym.kernel_inventory.workloads import materialize_workload_inputs
+from tilegym.kernel_inventory.workloads import resolve_torch_dtype
+from tilegym.kernel_inventory.workloads import validate_workload_against_definition
+from tilegym.kernel_inventory.workloads import validate_workload_catalog
 
 DEFINITION_SCHEMA_URL = (
     "https://github.com/flashinfer-ai/flashinfer-bench/blob/main/docs/flashinfer-trace/definition.mdx"

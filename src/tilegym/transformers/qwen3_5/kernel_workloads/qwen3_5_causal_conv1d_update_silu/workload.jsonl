@@ -1,0 +1,1 @@
+{"uuid":"f408cd90-e29e-43e3-939b-f1ca533daf4c","axes":{"D":64},"inputs":{"conv_state":{"type":"random"},"hidden_states":{"type":"random"},"weight":{"type":"random"}},"tolerance":{"allow_negative_inf":false,"max_atol":0.02,"max_error_cap":null,"max_rtol":0.02,"required_matched_ratio":1.0},"eval_mode":"full"}

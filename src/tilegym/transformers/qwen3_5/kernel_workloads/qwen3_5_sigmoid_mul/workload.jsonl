@@ -1,0 +1,1 @@
+{"uuid":"5f1a21cf-36b0-428f-8729-ecfc71d7469b","axes":{"D":64,"N":3},"inputs":{"gate":{"type":"random"},"x":{"type":"random"}},"tolerance":{"allow_negative_inf":false,"max_atol":0.02,"max_error_cap":null,"max_rtol":0.02,"required_matched_ratio":1.0},"eval_mode":"full"}

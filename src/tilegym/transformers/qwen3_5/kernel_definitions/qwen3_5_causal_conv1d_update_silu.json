@@ -34,7 +34,8 @@
         "D",
         "K_state"
       ],
-      "dtype": "bfloat16"
+      "dtype": "bfloat16",
+      "inplace_output": true
     },
     "hidden_states": {
       "shape": [

@@ -16,8 +16,12 @@ if _original_tilegym is None:
     tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
     sys.modules["tilegym"] = tilegym_pkg
 try:
+    from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
     from tilegym.kernel_inventory.layout import inventory_coordinate
     from tilegym.kernel_inventory.layout import iter_inventory_json_paths
+    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+    from tilegym.kernel_inventory.layout import mirrored_definition_path
+    from tilegym.kernel_inventory.layout import mirrored_workload_path
     from tilegym.kernel_inventory.layout import solution_paths_for_definition
     from tilegym.kernel_inventory.layout import validate_hierarchical_operation_topology
 finally:
@@ -48,7 +52,7 @@ def test_hierarchical_coordinates_are_path_scoped(tmp_path):
     assert len({public_coordinate.canonical_id, wrapper_coordinate.canonical_id, leaf_coordinate.canonical_id}) == 3
 
 
-def test_wrapper_acceptance_matrix_and_leaf_pairing(tmp_path):
+def test_public_wrapper_and_leaf_pairing_policy(tmp_path):
     inventory = tmp_path / "src/tilegym/suites/example"
     public = _touch(inventory / "kernel_definitions/op/op.json")
     cutile_wrapper = _touch(inventory / "kernel_definitions/op/cutile/op.json")
@@ -60,9 +64,56 @@ def test_wrapper_acceptance_matrix_and_leaf_pairing(tmp_path):
 
     expected_wrappers = [triton_solution, cutile_solution]
     assert list(solution_paths_for_definition(public)) == expected_wrappers
-    assert list(solution_paths_for_definition(cutile_wrapper)) == expected_wrappers
-    assert list(solution_paths_for_definition(triton_wrapper)) == expected_wrappers
+    assert list(solution_paths_for_definition(cutile_wrapper)) == [cutile_solution]
+    assert list(solution_paths_for_definition(triton_wrapper)) == [triton_solution]
     assert list(solution_paths_for_definition(cutile_leaf)) == [leaf_solution]
+
+
+def test_workload_coordinates_mirror_definitions_and_resolve_pairs(tmp_path):
+    inventory = tmp_path / "src/tilegym/suites/example"
+    public = _touch(inventory / "kernel_definitions/op/op.json")
+    _touch(inventory / "kernel_definitions/op/triton/op.json")
+    _touch(inventory / "kernel_definitions/op/cutile/op.json")
+    triton_solution = _touch(inventory / "kernel_solutions/op/triton/op.json")
+    cutile_solution = _touch(inventory / "kernel_solutions/op/cutile/op.json")
+    workload = _touch(inventory / "kernel_workloads/op/op/workload.jsonl")
+
+    coordinate = inventory_coordinate(workload)
+
+    assert coordinate.kind == "workload"
+    assert coordinate.level == "public"
+    assert coordinate.canonical_id.endswith("::workload::op/op")
+    assert mirrored_workload_path(public) == workload
+    assert mirrored_definition_path(workload) == public
+    assert list(definition_solution_paths_for_workload(workload)) == [
+        (public, triton_solution),
+        (public, cutile_solution),
+    ]
+
+
+def test_workload_pairing_rejects_missing_mirrored_definition(tmp_path):
+    inventory = tmp_path / "src/tilegym/suites/example"
+    (inventory / "kernel_definitions").mkdir(parents=True)
+    (inventory / "kernel_solutions").mkdir()
+    workload = _touch(inventory / "kernel_workloads/op/op/workload.jsonl")
+
+    with pytest.raises(ValueError, match="Missing mirrored Definition"):
+        list(definition_solution_paths_for_workload(workload))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "kernel_definitions/op/op.jsonl",
+        "kernel_solutions/op/cutile/op.jsonl",
+        "kernel_workloads/op/op/workload.json",
+    ],
+)
+def test_inventory_coordinate_rejects_kind_suffix_mismatch(tmp_path, path):
+    inventory_path = _touch(tmp_path / "src/tilegym/suites/example" / path)
+
+    with pytest.raises(ValueError, match="Expected"):
+        inventory_coordinate(inventory_path)
 
 
 def test_leaf_semantic_variants_can_share_one_raw_entry_point_without_collapsing(tmp_path):
@@ -115,6 +166,31 @@ def test_recursive_discovery_ignores_archived_directories(tmp_path):
     assert list(iter_inventory_json_paths(tmp_path, "kernel_definitions")) == [definition]
 
 
+def test_recursive_workload_discovery_requires_active_plural_inventory(tmp_path):
+    active = tmp_path / "src/tilegym/suites/active"
+    _touch(active / "kernel_definitions/op/op.json")
+    _touch(active / "kernel_solutions/op/cutile/op.json")
+    workload = _touch(active / "kernel_workloads/op/op/workload.jsonl")
+    _touch(active / "_kernel_workloads/op/archived.jsonl")
+    _touch(active / "workload/op/existing-dataset.jsonl")
+
+    inactive = tmp_path / "src/tilegym/suites/inactive"
+    _touch(inactive / "kernel_definitions/op/op.json")
+    _touch(inactive / "kernel_workloads/op/op/workload.jsonl")
+
+    assert list(iter_inventory_workload_paths(tmp_path)) == [workload]
+
+
+def test_recursive_workload_discovery_rejects_noncanonical_jsonl(tmp_path):
+    inventory = tmp_path / "src/tilegym/suites/example"
+    _touch(inventory / "kernel_definitions/op/op.json")
+    _touch(inventory / "kernel_solutions/op/cutile/op.json")
+    _touch(inventory / "kernel_workloads/op/op.jsonl")
+
+    with pytest.raises(ValueError, match="Expected workload.jsonl"):
+        list(iter_inventory_workload_paths(tmp_path))
+
+
 def test_legacy_cutile_rs_solution_coordinate_and_pairing(tmp_path):
     inventory = tmp_path / "src/tilegym/suites/example"
     definition = _touch(inventory / "kernel_definitions/op.json")
@@ -126,7 +202,7 @@ def test_legacy_cutile_rs_solution_coordinate_and_pairing(tmp_path):
     assert list(solution_paths_for_definition(definition)) == [solution]
 
 
-def test_hierarchical_operation_topology_requires_literal_matrix_and_leaf_pairs(tmp_path):
+def test_hierarchical_operation_topology_requires_public_local_and_leaf_pairs(tmp_path):
     inventory = tmp_path / "src/tilegym/suites/example"
     public = _touch(inventory / "kernel_definitions/op/op.json")
     del public

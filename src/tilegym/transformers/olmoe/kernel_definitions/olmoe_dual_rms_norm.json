@@ -17,6 +17,7 @@
     },
     "k": {
       "dtype": "bfloat16",
+      "inplace_output": true,
       "shape": [
         "N",
         "D"
@@ -30,6 +31,7 @@
     },
     "q": {
       "dtype": "bfloat16",
+      "inplace_output": true,
       "shape": [
         "N",
         "D"
