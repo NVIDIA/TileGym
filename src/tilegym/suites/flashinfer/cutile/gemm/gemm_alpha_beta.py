@@ -387,9 +387,7 @@ def gemm_alpha_beta(
     # Check if autotune is requested
     use_autotune = kwargs.get("use_autotune", True)
 
-    # For very low SM counts (1-16), disable autotune and use fixed config
-    # to avoid autotune overhead dominating runtime
-    if num_sms is not None and num_sms <= 16:
+    if num_sms is not None and num_sms <= 1:
         use_autotune = False
 
     if use_autotune:
