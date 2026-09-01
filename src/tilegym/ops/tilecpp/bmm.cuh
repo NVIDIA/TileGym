@@ -137,8 +137,8 @@ __tile_global__ void bmm_kernel(
  */
 template<typename T, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int GROUP_SIZE_M, bool TRANSPOSE_A, bool TRANSPOSE_B, int Q, int M, int N, int K, int num_ctas, int occupancy>
 [[ using cutile :
-    hint(1000, num_cta_in_cga=num_ctas),
-    hint(1000, occupancy=occupancy)
+    hint(0, num_cta_in_cga=num_ctas),
+    hint(0, occupancy=occupancy)
 ]]
 __tile_global__ void bmm_static_persistent_kernel(
     const T* __restrict__ _a_ptr,

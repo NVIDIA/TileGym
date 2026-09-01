@@ -25,7 +25,7 @@ template<typename T,
          int GROUP_SIZE_M,
          bool TRANSPOSE_A, bool TRANSPOSE_B,
          int num_ctas, int occupancy>
-[[ using cutile : hint(1000, num_cta_in_cga=num_ctas, occupancy=occupancy) ]]
+[[ using cutile : hint(0, num_cta_in_cga=num_ctas, occupancy=occupancy) ]]
 __tile_global__ void static_persistent_matmul_kernel(
     const T* __restrict__ _A,
     const T* __restrict__ _B,

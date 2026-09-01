@@ -28,7 +28,6 @@ template<typename T,
          int BANDWIDTH,
          bool HAS_SINKS,
          int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy) ]]
 __tile_global__ void attention_sink_decode_kernel(
     const T*   __restrict__ Q_ptr,        // [B, H_KV, NUM_Q_HEAD_PER_KV, HEAD_DIM]
     const T*   __restrict__ K_ptr,        // [B, H_KV, S_KV, HEAD_DIM]

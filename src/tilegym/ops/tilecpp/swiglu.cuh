@@ -198,9 +198,9 @@ __tile_global__ void swiglu_forward_kernel_gather(
     auto mask     = col_offs < n_cols;
 
     TxN a_val, b_val;
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     a_val = ct::load_masked(a_row + col_offs, mask, T(0));
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     b_val = ct::load_masked(b_row + col_offs, mask, T(0));
 
     auto a_f32 = ct::element_cast<float>(a_val);
@@ -219,6 +219,6 @@ __tile_global__ void swiglu_forward_kernel_gather(
     auto silu_T = ct::element_cast<T>(silu_f32);
     auto c_val  = silu_T * b_val;
 
-    [[ using cutile : hint(1000, latency=1) ]]
+    [[ using cutile : hint(0, latency=1) ]]
     ct::store_masked(c_row + col_offs, c_val, mask);
 }

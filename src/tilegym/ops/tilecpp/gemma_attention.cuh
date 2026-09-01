@@ -32,7 +32,7 @@ template<typename T,
          int WINDOW_SIZE,
          bool HAS_SOFT_CAP,
          int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy) ]]
+[[ using cutile : hint(0, occupancy=occupancy) ]]
 __tile_global__ void gemma_attention_fwd_kernel(
     const T* __restrict__ Q_ptr,
     const T* __restrict__ K_ptr,
@@ -128,7 +128,7 @@ __tile_global__ void gemma_attention_fwd_kernel(
         int curr_n = kv_block * BLOCK_N;
 
         T_4D_N k_raw;
-        [[ using cutile : hint(1000, latency=3) ]]
+        [[ using cutile : hint(0, latency=3) ]]
         k_raw = K_view.load(batch_idx, off_kv_h, kv_block, 0);
         auto k_4d_T = ct::permute(k_raw, ct::dimension_map<0, 1, 3, 2>{});
         auto k_t    = ct::reshape(k_4d_T, ct::shape<BLOCK_D, BLOCK_N>{});
@@ -202,7 +202,7 @@ __tile_global__ void gemma_attention_fwd_kernel(
                       ct::round_subnormals_to_zero_t{});
 
         T_4D_N v_4d;
-        [[ using cutile : hint(1000, latency=3) ]]
+        [[ using cutile : hint(0, latency=3) ]]
         v_4d = V_view.load(batch_idx, off_kv_h, kv_block, 0);
         auto v   = ct::reshape(v_4d, ct::shape<BLOCK_N, BLOCK_D>{});
         auto p_T = ct::element_cast<T>(p);
@@ -216,7 +216,7 @@ __tile_global__ void gemma_attention_fwd_kernel(
         int curr_n = kv_block * BLOCK_N;
 
         T_4D_N k_raw;
-        [[ using cutile : hint(1000, latency=3) ]]
+        [[ using cutile : hint(0, latency=3) ]]
         k_raw = K_view.load(batch_idx, off_kv_h, kv_block, 0);
         auto k_4d_T = ct::permute(k_raw, ct::dimension_map<0, 1, 3, 2>{});
         auto k_t    = ct::reshape(k_4d_T, ct::shape<BLOCK_D, BLOCK_N>{});
@@ -284,7 +284,7 @@ __tile_global__ void gemma_attention_fwd_kernel(
                       ct::round_subnormals_to_zero_t{});
 
         T_4D_N v_4d;
-        [[ using cutile : hint(1000, latency=3) ]]
+        [[ using cutile : hint(0, latency=3) ]]
         v_4d = V_view.load(batch_idx, off_kv_h, kv_block, 0);
         auto v   = ct::reshape(v_4d, ct::shape<BLOCK_N, BLOCK_D>{});
         auto p_T = ct::element_cast<T>(p);

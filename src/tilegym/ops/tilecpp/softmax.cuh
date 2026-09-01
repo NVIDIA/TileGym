@@ -33,6 +33,7 @@
  *   num_programs: Total number of CTA programs for persistent scheduling
  */
 template<typename T, int BLOCK_SIZE, int TMA_ROWS>
+[[ using cutile : hint(0, occupancy=(TMA_ROWS ? 2 : 4)) ]]
 __tile_global__ void softmax_kernel(
     T* __restrict__ _output,
     const T* __restrict__ _input,
@@ -137,6 +138,7 @@ __tile_global__ void softmax_kernel(
  * and stores so out-of-bounds lanes are not written.
  */
 template<typename T, int BLOCK_SIZE>
+[[ using cutile : hint(0, occupancy=2) ]]
 __tile_global__ void online_softmax_kernel(
     T* __restrict__ output,
     const T* __restrict__ input,

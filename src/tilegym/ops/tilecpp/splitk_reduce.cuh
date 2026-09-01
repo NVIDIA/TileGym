@@ -38,7 +38,8 @@ constexpr float SPLITK_NEG_INF = -1e30f; // Use large negative instead of -INFIN
 template<typename T,
          int B, int NUM_HEADS, int HEAD_DIM,
          int NUM_KV_SPLITS, int NUM_KV_SPLITS_POW2, int BLOCK_D, bool USE_DOT>
-[[ using cutile : hint(1000, occupancy=4) ]]
+[[ using cutile : hint(0, occupancy=4) ]]
+[[ using cutile : hint(800, occupancy=2) ]]
 __tile_global__ void splitk_reduce_kernel(
     const T* __restrict__ attn_splitk_out,
     const float* __restrict__ lse_splitk_out,
@@ -113,7 +114,7 @@ __tile_global__ void splitk_reduce_kernel(
 
     using Tx4D = ct::tile<T, ct::shape<1, 1, NUM_KV_SPLITS_POW2, BLOCK_D>>;
     Tx4D out_splitk_raw_4d;
-    [[ using cutile : hint(1000, latency=2) ]]
+    [[ using cutile : hint(0, latency=2) ]]
     out_splitk_raw_4d = Att_view.template load_masked<zero_pad>(
         batch_id, head_id, 0, block_id);
     auto out_splitk_raw = ct::reshape(
@@ -141,6 +142,6 @@ __tile_global__ void splitk_reduce_kernel(
     // Convert back to output type and store via partition_view.
     auto acc_out = ct::element_cast<T>(acc);
     auto acc_out_3d = ct::reshape(acc_out, ct::shape<1, 1, BLOCK_D>{});
-    [[ using cutile : hint(1000, latency=2) ]]
+    [[ using cutile : hint(0, latency=2) ]]
     Out_view.store_masked(acc_out_3d, batch_id, head_id, block_id);
 }
