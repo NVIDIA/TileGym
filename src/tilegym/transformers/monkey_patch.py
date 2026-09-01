@@ -15,6 +15,7 @@ from tilegym.ops import get_rms_norm_module
 from tilegym.ops import get_swiglu_module
 from tilegym.transformers.deepseek2.modeling_deepseek import DeepseekV2MoETileGym
 from tilegym.transformers.deepseek2.modeling_deepseek import tilegym_deepseek_v2_forward
+from tilegym.transformers.lfm2_moe.modeling_lfm2_moe import Lfm2MoeSparseMoeBlockTileGym
 from tilegym.transformers.phi3.modeling_phi3 import Phi3MLPTileGym
 from tilegym.transformers.phi3.modeling_phi3 import get_fmha_phi3_interface
 
@@ -552,6 +553,104 @@ def apply_tilegym_kernel_to_olmo3(
         logger.info("Patched Olmo3DecoderLayer.forward with fused residual_add+RMSNorm")
 
 
+def apply_tilegym_kernel_to_lfm2_moe(
+    rope: bool = True,
+    rms_norm: bool = True,
+    attn: bool = True,
+    moe: bool = True,
+    swiglu: bool = True,
+    conv: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace LFM2-MoE models
+    (e.g. LiquidAI/LFM2-8B-A1B).
+
+    LFM2-MoE is a hybrid Mixture-of-Experts model. For LFM2-8B-A1B (24 layers): the
+    token mixer is a short convolution in 18 layers and grouped-query attention in 6
+    layers; the channel mixer is a dense MLP in the first `num_dense_layers` (2) layers
+    and a sparse MoE block (32 experts, top-4) in the remaining 22 layers.
+    Per-component compute this patch replaces:
+    - Llama-style RMSNorm (operator/ffn/embedding norms + per-head Q/K norms)
+    - Standard RoPE (full rotation, rope_theta=1e6)
+    - GQA FMHA for the `full_attention` layers (32 Q heads, 8 KV heads, head_dim=64)
+    - Lfm2MoeSparseMoeBlock with Lfm2MoeTopKRouter (sigmoid routing + expert-bias
+      selection, norm_topk_prob, routed_scaling_factor) and Lfm2MoeExperts whose
+      gate_up_proj (E, 2I, H) and down_proj (E, H, I) are already stacked in the format
+      TileGym's fused_moe expects.
+    - Dense SwiGLU MLP (`Lfm2MoeMLP`, w1/w3/w2) with a fused silu-and-mul path.
+    - Short-convolution operator layers via fused cuTile depthwise causal conv1d
+      kernels (prefill + decode-update, kernel_size=3, no activation). Requires
+      `use_cutile=True` since these are cuTile kernels.
+
+    Args:
+        rope (bool): Patch `apply_rotary_pos_emb`. Default True.
+        rms_norm (bool): Patch `Lfm2MoeRMSNorm`. Default True.
+        attn (bool): Patch `ALL_ATTENTION_FUNCTIONS["sdpa"]` with FMHA. Default True.
+        moe (bool): Patch `Lfm2MoeSparseMoeBlock` with the TileGym fused-MoE variant. Default True.
+        swiglu (bool): Patch the dense `Lfm2MoeMLP` with a fused silu-and-mul MLP. Default True.
+        conv (bool): Patch the short-conv path with fused cuTile causal conv1d kernels.
+            Only takes effect when `use_cutile=True` (cuTile kernels). Default True.
+        model (PreTrainedModel): Unused; present for API symmetry with sibling helpers.
+        use_cutile (bool): Switch the TileGym backend to cuTile. Default False.
+    """
+    import transformers
+    from packaging import version
+
+    # Degrade gracefully on transformers installs that predate
+    # `transformers.models.lfm2_moe` rather than crashing the dispatcher.
+    if version.parse(transformers.__version__) < version.parse("4.57.0"):
+        logger.warning("LFM2-MoE support requires a transformers release that ships `models.lfm2_moe`")
+        return
+
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_lfm2_moe")
+    logger.info("--------------------------------")
+
+    try:
+        from transformers.models.lfm2_moe import modeling_lfm2_moe
+    except ImportError:
+        logger.warning("transformers.models.lfm2_moe is not available in this transformers install")
+        return
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        # `apply_rotary_pos_emb` is a module-level global resolved at call time in
+        # Lfm2MoeAttention.forward, so reassigning it takes effect like the other
+        # models. (A user-invoked kernels-hub `kernelize()` exchange could shadow
+        # this, but that is not the default generate path.)
+        modeling_lfm2_moe.apply_rotary_pos_emb = get_apply_rope_func(model="llama")
+    if rms_norm:
+        modeling_lfm2_moe.Lfm2MoeRMSNorm = get_rms_norm_module()
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
+    if moe:
+        modeling_lfm2_moe.Lfm2MoeSparseMoeBlock = Lfm2MoeSparseMoeBlockTileGym
+    if swiglu:
+        from tilegym.transformers.lfm2_moe.modeling_lfm2_moe import Lfm2MoeMLPTileGym
+
+        modeling_lfm2_moe.Lfm2MoeMLP = Lfm2MoeMLPTileGym
+
+    if use_cutile and conv:
+        # Fused cuTile depthwise causal conv1d for the short-conv operator layers.
+        # `causal_conv1d_fn` / `causal_conv1d_update` are read as module-level
+        # globals in Lfm2MoeShortConv.forward at call time, so patching the
+        # globals routes both the prefill and the single-token decode-update
+        # through the TileGym kernels. `is_fast_path_available` only exists on
+        # some transformers versions; flipping it on is harmless where absent.
+        from tilegym.transformers.lfm2_moe.kernels.causal_conv1d_prefill import lfm2_causal_conv1d_fn_cutile
+        from tilegym.transformers.lfm2_moe.kernels.causal_conv1d_update import lfm2_causal_conv1d_update_cutile
+
+        modeling_lfm2_moe.causal_conv1d_fn = lfm2_causal_conv1d_fn_cutile
+        modeling_lfm2_moe.causal_conv1d_update = lfm2_causal_conv1d_update_cutile
+        modeling_lfm2_moe.is_fast_path_available = True
+
+
 MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "llama": apply_tilegym_kernel_to_llama,
     "deepseek_v2": apply_tilegym_kernel_to_deepseek_v2,
@@ -563,6 +662,7 @@ MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "phi3": apply_tilegym_kernel_to_phi3,
     "olmo3": apply_tilegym_kernel_to_olmo3,
     "olmoe": apply_tilegym_kernel_to_olmoe,
+    "lfm2_moe": apply_tilegym_kernel_to_lfm2_moe,
 }
 
 

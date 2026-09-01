@@ -14,3 +14,5 @@ cases:
     mutates: [q, k]
   src/tilegym/transformers/qwen3_5::definition::qwen3_5_causal_conv1d_update_silu:
     mutates: [conv_state]
+  src/tilegym/transformers/lfm2_moe::definition::lfm2_moe_causal_conv1d_update:
+    mutates: [conv_state]

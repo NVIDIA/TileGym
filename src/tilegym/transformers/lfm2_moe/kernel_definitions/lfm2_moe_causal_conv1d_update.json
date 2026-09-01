@@ -1,0 +1,67 @@
+{
+  "axes": {
+    "B": {
+      "description": "Supported batch size.",
+      "type": "const",
+      "value": 1
+    },
+    "D": {
+      "description": "Channel dimension.",
+      "type": "var"
+    },
+    "K": {
+      "description": "Convolution kernel size / cached window length (conv_L_cache).",
+      "type": "const",
+      "value": 3
+    },
+    "T": {
+      "description": "Sequence length (single-token decode path).",
+      "type": "const",
+      "value": 1
+    }
+  },
+  "description": "LFM2-MoE decode-path depthwise causal conv1d update (kernel_size=3, no activation). The conv_state input holds the full K-wide window and is rolled/updated in place.",
+  "inputs": {
+    "conv_state": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "K"
+      ]
+    },
+    "weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D",
+        "K"
+      ]
+    },
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    }
+  },
+  "name": "lfm2_moe_causal_conv1d_update",
+  "op_type": "causal_conv1d_update",
+  "outputs": {
+    "output": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T"
+      ]
+    }
+  },
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/5eddc12edfaf8cafde8c9bae4ccb12f8a139b4f9/src/transformers/models/lfm2_moe/modeling_lfm2_moe.py#L365-L382\nimport torch\nimport torch.nn.functional as F\n\ndef run(x, conv_state, weight, bias=None, activation=None):\n    # `conv_state` holds the full K-wide window and is rolled in place.\n    # LFM2 short-conv fuses no activation, so `activation` is always None.\n    _, hidden_size, seq_len = x.shape\n    state_len = conv_state.shape[-1]\n    hidden_states_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)\n    conv_state.copy_(hidden_states_new[:, :, -state_len:])\n    out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)\n    return out[:, :, -seq_len:].to(x.dtype)",
+  "tags": [
+    "model:lfm2_moe",
+    "stage:decode",
+    "status:unverified"
+  ]
+}

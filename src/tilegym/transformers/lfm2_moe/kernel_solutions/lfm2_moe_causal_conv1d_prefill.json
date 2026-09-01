@@ -1,0 +1,25 @@
+{
+  "author": "tilegym-agent",
+  "definition": "lfm2_moe_causal_conv1d_prefill",
+  "description": "cuTile prefill-path depthwise causal conv1d (kernel_size=3, no activation) for LFM2-MoE.",
+  "name": "lfm2_moe_causal_conv1d_prefill_cutile",
+  "sources": {
+    "path": [
+      "src/tilegym/transformers/lfm2_moe/kernels/causal_conv1d_prefill.py"
+    ]
+  },
+  "spec": {
+    "dependencies": [
+      "torch",
+      "cuda-tile"
+    ],
+    "destination_passing_style": false,
+    "entry_point": "src/tilegym/transformers/lfm2_moe/kernels/causal_conv1d_prefill.py::lfm2_causal_conv1d_fn_cutile",
+    "language": "cuda-tile",
+    "target_hardware": [
+      "SM100",
+      "SM103",
+      "SM120"
+    ]
+  }
+}

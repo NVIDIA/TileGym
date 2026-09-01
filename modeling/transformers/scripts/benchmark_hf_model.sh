@@ -22,7 +22,7 @@ usage() {
     cat <<EOF
 Usage: $0 --model-key KEY [options]
 
-Model keys: llama, deepseek, qwen, qwen3_5, gemma3, gpt_oss, mistral, phi3, olmo3, olmoe
+Model keys: llama, deepseek, qwen, qwen3_5, gemma3, gpt_oss, mistral, phi3, olmo3, olmoe, lfm2_moe
 
 Options:
   --model-id ID           Override Hugging Face model id or local model path
@@ -144,6 +144,14 @@ case "${MODEL_KEY}" in
         DEFAULT_BATCH_SIZE=1
         DEFAULT_SUMMARY_FILE="${LOG_DIR}/olmoe_benchmark_summary.txt"
         TITLE="OLMoE-1B-7B-0924"
+        ;;
+    lfm2_moe)
+        DEFAULT_MODEL_ID="LiquidAI/LFM2-8B-A1B"
+        DEFAULT_INPUT_FILE="${PROJECT_DIR}/sample_inputs/input_prompt_small.txt"
+        DEFAULT_OUTPUT_LENGTH=50
+        DEFAULT_BATCH_SIZE=1
+        DEFAULT_SUMMARY_FILE="${LOG_DIR}/lfm2_moe_benchmark_summary.txt"
+        TITLE="LFM2-8B-A1B"
         ;;
     *)
         echo "Unknown --model-key: ${MODEL_KEY}"
