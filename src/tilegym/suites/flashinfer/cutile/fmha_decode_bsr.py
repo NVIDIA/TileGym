@@ -19,6 +19,19 @@ from tilegym.ops.cutile.utils import next_power_of_2
 # Module-level tune caches for paged decode and MLA decode
 _decode_kv_paged_tune_cache: dict = {}
 _decode_mla_paged_tune_cache: dict = {}
+_mla_scratch_cache: dict = {}
+
+
+def _mla_dummy_lse(device):
+    key = str(device)
+    t = _mla_dummy_lse_cache.get(key)
+    if t is None:
+        t = torch.zeros(1, device=device, dtype=torch.float32)
+        _mla_dummy_lse_cache[key] = t
+    return t
+
+
+_mla_dummy_lse_cache: dict = {}
 
 INV_LOG_2 = 1.0 / math.log(2)
 
@@ -104,6 +117,8 @@ def _splitk_reduce_kernel(
     out_all = ct.load(attn_splitk_out, (0, batch_id, head_id, 0), shape=(NUM_KV_SPLITS_POW2, 1, 1, BLOCK_D))
     out_all = ct.reshape(out_all, (NUM_KV_SPLITS_POW2, BLOCK_D))
     out_all = ct.astype(out_all, ct.float32)
+    valid_2d = ct.reshape(valid_mask, (NUM_KV_SPLITS_POW2, 1))
+    out_all = ct.where(valid_2d, out_all, ct.zeros((NUM_KV_SPLITS_POW2, BLOCK_D), dtype=ct.float32))
 
     weights_row = ct.reshape(weights, (1, NUM_KV_SPLITS_POW2))
     acc = ct.mma(weights_row, out_all, ct.zeros((1, BLOCK_D), dtype=ct.float32))
@@ -111,6 +126,60 @@ def _splitk_reduce_kernel(
 
     result = ct.astype(acc, dtype)
     ct.store(attn_out, (batch_id, head_id, 0), ct.reshape(result, (1, 1, BLOCK_D)))
+
+
+@ct.kernel
+def _splitk_reduce_kernel_htile(
+    attn_splitk_out,
+    lse_splitk_out,
+    attn_out,
+    actual_seq_lens,
+    NUM_KV_LEN_PER_SPLIT: ConstInt,
+    NUM_KV_SPLITS: ConstInt,
+    NUM_KV_SPLITS_POW2: ConstInt,
+    BLOCK_H: ConstInt,
+    BLOCK_D: ConstInt,
+):
+    # Head-tiled variant of _splitk_reduce_kernel: one CTA merges BLOCK_H heads
+    # with a broadcast multiply + axis-sum instead of a degenerate
+    # [1, S] x [S, D] mma per (batch, head).
+    batch_id = ct.bid(0)
+    head_block = ct.bid(1)
+    dtype = attn_out.dtype
+
+    # Scratch buffers are uninitialized (cached torch.empty); rows at or beyond
+    # this batch's actual split count are garbage and must be masked out with a
+    # select (a plain multiply-by-zero would propagate NaN from the garbage).
+    seq_len_tile = ct.load(actual_seq_lens, (batch_id,), shape=(1,))
+    seq_len = seq_len_tile.item()
+    actual_num_splits = (seq_len + NUM_KV_LEN_PER_SPLIT - 1) // NUM_KV_LEN_PER_SPLIT
+    actual_num_splits = ct.minimum(actual_num_splits, NUM_KV_SPLITS)
+
+    lse = ct.reshape(
+        ct.load(lse_splitk_out, (batch_id, head_block, 0), shape=(1, BLOCK_H, NUM_KV_SPLITS_POW2)),
+        (BLOCK_H, NUM_KV_SPLITS_POW2),
+    )
+    split_indices = ct.arange(NUM_KV_SPLITS_POW2, dtype=ct.int32)
+    valid_row = ct.reshape(split_indices, (1, NUM_KV_SPLITS_POW2)) < actual_num_splits
+    lse = ct.where(valid_row, lse, ct.full((BLOCK_H, NUM_KV_SPLITS_POW2), -1e30, dtype=ct.float32))
+    lse_max = ct.max(lse, axis=1, keepdims=True)
+    weights = ct.exp2(lse - lse_max)
+    weights = weights / ct.sum(weights, axis=1, keepdims=True)
+
+    x = ct.load(
+        attn_splitk_out,
+        (0, batch_id, head_block, 0),
+        shape=(NUM_KV_SPLITS_POW2, 1, BLOCK_H, BLOCK_D),
+        latency=10,
+    )
+    x = ct.astype(ct.reshape(x, (NUM_KV_SPLITS_POW2, BLOCK_H, BLOCK_D)), ct.float32)
+    valid_x = ct.reshape(split_indices, (NUM_KV_SPLITS_POW2, 1, 1)) < actual_num_splits
+    x = ct.where(valid_x, x, ct.zeros((NUM_KV_SPLITS_POW2, BLOCK_H, BLOCK_D), dtype=ct.float32))
+    w = ct.reshape(ct.transpose(weights), (NUM_KV_SPLITS_POW2, BLOCK_H, 1))
+    acc = ct.sum(x * w, axis=0, keepdims=False)
+
+    result = ct.astype(acc, dtype)
+    ct.store(attn_out, (batch_id, head_block, 0), ct.reshape(result, (1, BLOCK_H, BLOCK_D)))
 
 
 def _splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens, num_kv_len_per_split, attn_out=None):
@@ -123,17 +192,6 @@ def _splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens
         attn_out.copy_(attn_splitk_out[0])
         return attn_out
 
-    if NUM_KV_SPLITS == 2:
-        lse_0, lse_1 = lse_splitk_out[:, :, 0], lse_splitk_out[:, :, 1]
-        lse_max = torch.maximum(lse_0, lse_1)
-        w0, w1 = torch.exp2(lse_0 - lse_max), torch.exp2(lse_1 - lse_max)
-        w_sum = w0 + w1
-        result = (
-            attn_splitk_out[0].float() * w0.unsqueeze(-1) + attn_splitk_out[1].float() * w1.unsqueeze(-1)
-        ) / w_sum.unsqueeze(-1)
-        attn_out.copy_(result.to(attn_out.dtype))
-        return attn_out
-
     NUM_KV_SPLITS_POW2 = next_power_of_2(NUM_KV_SPLITS)
     BLOCK_D = next_power_of_2(head_dim)
 
@@ -144,6 +202,26 @@ def _splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens
         lse_padded[:, :, :NUM_KV_SPLITS] = lse_splitk_out
     else:
         lse_padded = lse_splitk_out
+
+    BLOCK_H_R = 4 if num_heads % 4 == 0 else 1
+    if BLOCK_H_R > 1:
+        ct.launch(
+            torch.cuda.current_stream(),
+            (B, num_heads // BLOCK_H_R, 1),
+            _splitk_reduce_kernel_htile,
+            (
+                attn_splitk_out,
+                lse_padded,
+                attn_out,
+                actual_seq_lens,
+                num_kv_len_per_split,
+                NUM_KV_SPLITS,
+                NUM_KV_SPLITS_POW2,
+                BLOCK_H_R,
+                BLOCK_D,
+            ),
+        )
+        return attn_out
 
     ct.launch(
         torch.cuda.current_stream(),
@@ -823,10 +901,18 @@ def _decode_mla_kv_paged_kernel(
     NUM_PAGES_PER_BLOCK: ConstInt,
     TRANS_QK: ConstBool,
     USE_GATHER_PAGE_LOAD: ConstBool,
+    DV_SPLITS: ConstInt,
 ):
     batch_id = ct.bid(0)
     head_block_id = ct.bid(1)
-    kv_split_id = ct.bid(2)
+    if DV_SPLITS > 1:
+        _z = ct.bid(2)
+        kv_split_id = _z // DV_SPLITS
+        dv_id = _z % DV_SPLITS
+    else:
+        kv_split_id = ct.bid(2)
+        dv_id = 0
+    DV_CHUNK = BLOCK_D // DV_SPLITS
 
     seq_len_tile = ct.gather(actual_seq_lens, (batch_id,), padding_value=0)
     seq_len = seq_len_tile.item()
@@ -877,9 +963,9 @@ def _decode_mla_kv_paged_kernel(
     # TRANS_QK=True: swap Q/K operands in MMA so the M-dim = BLOCK_N (128) instead of BLOCK_H (16/32),
     # matching the WGMMA tile size on B200 and achieving full tensor-core utilisation.
     if TRANS_QK:
-        acc = ct.full((BLOCK_D, BLOCK_H), 0.0, dtype=ct.float32)
+        acc = ct.full((DV_CHUNK, BLOCK_H), 0.0, dtype=ct.float32)
     else:
-        acc = ct.full((BLOCK_H, BLOCK_D), 0.0, dtype=ct.float32)
+        acc = ct.full((BLOCK_H, DV_CHUNK), 0.0, dtype=ct.float32)
 
     for iter_idx in range(num_iters):
         curr_n = start_n + iter_idx * BLOCK_N
@@ -921,13 +1007,13 @@ def _decode_mla_kv_paged_kernel(
                 v_tile = ct.reshape(
                     ct.load(
                         v_cache,
-                        index=(page_id, token_block_idx, 0),
-                        shape=(1, BLOCK_N, BLOCK_D),
+                        index=(page_id, token_block_idx, dv_id),
+                        shape=(1, BLOCK_N, DV_CHUNK),
                         order=(0, 1, 2),
                         allow_tma=True,
                         latency=4,
                     ),
-                    (BLOCK_N, BLOCK_D),
+                    (BLOCK_N, DV_CHUNK),
                 )
         elif USE_GATHER_PAGE_LOAD:
             # Multi-page on datacenter Blackwell: gather TMA, page_ids computed once
@@ -958,10 +1044,10 @@ def _decode_mla_kv_paged_kernel(
             v_tile = ct.reshape(
                 ct.load_advanced_indexing(
                     v_cache,
-                    (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(0, BLOCK_D)),
+                    (page_ids, ct.Slice(token, LOAD_BLOCK_N), ct.Slice(dv_id * DV_CHUNK, DV_CHUNK)),
                     padding_mode=PAD_ZERO,
                 ),
-                (BLOCK_N, BLOCK_D),
+                (BLOCK_N, DV_CHUNK),
             )
         else:
             # Multi-page on sm120/sm121/A100: per-page TMA loads (gather regresses the
@@ -1025,13 +1111,13 @@ def _decode_mla_kv_paged_kernel(
                 v_tile = ct.reshape(
                     ct.load(
                         v_cache,
-                        index=(page_id, token_block_idx, 0),
-                        shape=(1, BLOCK_N, BLOCK_D),
+                        index=(page_id, token_block_idx, dv_id),
+                        shape=(1, BLOCK_N, DV_CHUNK),
                         order=(0, 1, 2),
                         allow_tma=True,
                         latency=2,
                     ),
-                    (BLOCK_N, BLOCK_D),
+                    (BLOCK_N, DV_CHUNK),
                 )
             else:
                 v_tile = _load_page_mla(
@@ -1072,15 +1158,15 @@ def _decode_mla_kv_paged_kernel(
     if TRANS_QK:
         # acc: [BLOCK_D, BLOCK_H] → divide by l_i, transpose to [BLOCK_H, BLOCK_D], then store
         acc = ct.truediv((acc * V_SCALE), ct.reshape(l_i, (1, BLOCK_H)), flush_to_zero=True, rounding_mode=RMd.APPROX)
-        acc_out = ct.astype(ct.transpose(acc), output.dtype)  # [BLOCK_H, BLOCK_D]
+        acc_out = ct.astype(ct.transpose(acc), output.dtype)  # [BLOCK_H, DV_CHUNK]
     else:
         acc = ct.truediv((acc * V_SCALE), ct.reshape(l_i, (BLOCK_H, 1)), flush_to_zero=True, rounding_mode=RMd.APPROX)
-        acc_out = ct.astype(acc, output.dtype)  # [BLOCK_H, BLOCK_D]
+        acc_out = ct.astype(acc, output.dtype)  # [BLOCK_H, DV_CHUNK]
 
-    acc_4d = ct.reshape(acc_out, (1, 1, BLOCK_H, BLOCK_D))
+    acc_4d = ct.reshape(acc_out, (1, 1, BLOCK_H, DV_CHUNK))
     ct.store(
         output,
-        index=(kv_split_id, batch_id, head_block_idx, 0),
+        index=(kv_split_id, batch_id, head_block_idx, dv_id),
         tile=acc_4d,
         order=(0, 1, 2, 3),
         allow_tma=True,
@@ -1088,6 +1174,8 @@ def _decode_mla_kv_paged_kernel(
     )
 
     if HAS_LSE_OUT:
+        if DV_SPLITS > 1 and dv_id != 0:
+            return
         lse = m_i + ct.log2(l_i)
         offs_h = ct.arange(BLOCK_H, dtype=ct.int32)
         lse_indices = (batch_id, head_offset + offs_h, kv_split_id)
@@ -1389,6 +1477,7 @@ def _mla_decode_autotune_base(
     stride_block_table,
     TRANS_QK,
     USE_GATHER_PAGE_LOAD,
+    DV_SPLITS,
 ):
     mla_cache_key = (
         num_batch,
@@ -1402,6 +1491,7 @@ def _mla_decode_autotune_base(
         HAS_LSE_OUT,
         TRANS_QK,
         USE_GATHER_PAGE_LOAD,
+        DV_SPLITS,
         q.dtype,
         str(q.device),
     )
@@ -1409,7 +1499,7 @@ def _mla_decode_autotune_base(
         result = exhaustive_search(
             list(_mla_decode_autotune_configs(trans_qk=TRANS_QK)),
             stream,
-            lambda cfg: (num_batch, (num_qo_heads + cfg.BLOCK_H - 1) // cfg.BLOCK_H, NUM_KV_SPLITS),
+            lambda cfg: (num_batch, (num_qo_heads + cfg.BLOCK_H - 1) // cfg.BLOCK_H, NUM_KV_SPLITS * DV_SPLITS),
             _decode_mla_kv_paged_kernel,
             lambda cfg: (
                 q,
@@ -1437,6 +1527,7 @@ def _mla_decode_autotune_base(
                 max(cfg.BLOCK_N // page_size, 1),
                 TRANS_QK,
                 USE_GATHER_PAGE_LOAD,
+                DV_SPLITS,
             ),
             lambda cfg: {"occupancy": cfg.occupancy},
         )
@@ -1448,7 +1539,7 @@ def _mla_decode_autotune_base(
     best_cfg, tuned_kernel = _decode_mla_paged_tune_cache[mla_cache_key]
     ct.launch(
         stream,
-        (num_batch, (num_qo_heads + best_cfg.BLOCK_H - 1) // best_cfg.BLOCK_H, NUM_KV_SPLITS),
+        (num_batch, (num_qo_heads + best_cfg.BLOCK_H - 1) // best_cfg.BLOCK_H, NUM_KV_SPLITS * DV_SPLITS),
         tuned_kernel,
         (
             q,
@@ -1476,6 +1567,7 @@ def _mla_decode_autotune_base(
             max(best_cfg.BLOCK_N // page_size, 1),
             TRANS_QK,
             USE_GATHER_PAGE_LOAD,
+            DV_SPLITS,
         ),
     )
     return Att_Out
@@ -1528,28 +1620,65 @@ def decode_mla_kv_paged(
             kv_len_per_split = max(1 << (kv_len_per_split - 1).bit_length() if kv_len_per_split > 0 else 128, 128)
             NUM_KV_SPLITS = (estimated_seq_len + kv_len_per_split - 1) // kv_len_per_split
             max_seq_len = estimated_seq_len
+            if NUM_KV_SPLITS <= 1:
+                # A single split degenerates to the non-split path; writing straight
+                # into `outputs` avoids the scratch buffer and the trailing copy.
+                should_use_split_kv = False
+                NUM_KV_SPLITS = 1
+                kv_len_per_split = -1
         else:
             should_use_split_kv = False
             NUM_KV_SPLITS = 1
             kv_len_per_split = -1
 
         if should_use_split_kv:
-            # Initialize to 0 and -inf so empty splits contribute nothing
-            Att_Out = torch.zeros((NUM_KV_SPLITS, num_batch, num_qo_heads, head_dim_qk), device=q.device, dtype=q.dtype)
-            LSE_Out = torch.full(
-                (num_batch, num_qo_heads, NUM_KV_SPLITS), float("-inf"), device=q.device, dtype=torch.float32
+            # Scratch buffers are cached and left uninitialized: the reduce kernel
+            # masks rows at/beyond each batch's actual split count, so no zero /
+            # -inf fill kernels are needed per call. Buffers use the pow2 width
+            # the reduce kernel loads (narrower would be an OOB read).
+            _splits_pow2 = next_power_of_2(NUM_KV_SPLITS)
+            # Keyed by stream as well: concurrent calls on different streams must
+            # not share split scratch, or their writes would overlap.
+            _skey = (
+                _splits_pow2,
+                num_batch,
+                num_qo_heads,
+                head_dim_qk,
+                q.dtype,
+                str(q.device),
+                torch.cuda.current_stream().cuda_stream,
             )
+            _scratch = _mla_scratch_cache.get(_skey)
+            if _scratch is None:
+                _scratch = (
+                    torch.empty((_splits_pow2, num_batch, num_qo_heads, head_dim_qk), device=q.device, dtype=q.dtype),
+                    torch.empty((num_batch, num_qo_heads, _splits_pow2), device=q.device, dtype=torch.float32),
+                )
+                _mla_scratch_cache[_skey] = _scratch
+            Att_Out, LSE_Out = _scratch
         else:
             outputs = torch.empty_like(q) if outputs is None else outputs
             Att_Out = outputs.reshape(1, num_batch, num_qo_heads, head_dim_qk)
-            LSE_Out = torch.zeros(1, device=q.device, dtype=torch.float32)
+            LSE_Out = _mla_dummy_lse(q.device)
 
         actual_seq_lens_flat = actual_seq_lens.reshape(-1).contiguous()
         block_tables_flat = block_tables.reshape(-1).contiguous()
         stride_block_table = block_tables.shape[1] if block_tables.dim() > 1 else 1
 
         HAS_LSE_OUT = should_use_split_kv
-        LSE_Out_arg = LSE_Out if should_use_split_kv else torch.zeros(1, device=q.device, dtype=torch.float32)
+        LSE_Out_arg = LSE_Out if should_use_split_kv else _mla_dummy_lse(q.device)
+
+        # Head-dim split: when the launch would leave most SMs idle, split V's
+        # head_dim across extra CTAs. K is re-read by each dv CTA (in MLA, K is
+        # the V latent), so this only pays off at low CTA counts.
+        DV_SPLITS = 1
+        if USE_GATHER_PAGE_LOAD and head_dim_qk % 4 == 0:
+            # Budget with the smallest BLOCK_H the autotuner may pick (16), an
+            # upper bound on head blocks, so DV never over-splits the grid.
+            _head_blocks_ub = max(-(-QUERY_GROUP_SIZE // 16), 1)
+            _total_ctas = num_batch * _head_blocks_ub * NUM_KV_SPLITS
+            while DV_SPLITS < 4 and _total_ctas * DV_SPLITS * 2 <= NUM_SMS:
+                DV_SPLITS *= 2
 
         _mla_decode_autotune_base(
             torch.cuda.current_stream(),
@@ -1576,6 +1705,7 @@ def decode_mla_kv_paged(
             stride_block_table,
             TRANS_QK,
             USE_GATHER_PAGE_LOAD,
+            DV_SPLITS,
         )
 
         if should_use_split_kv:
@@ -1651,10 +1781,13 @@ def decode_mla_kv_paged(
         kv_len_per_split = estimated_seq_len
 
     if should_use_split_kv:
-        # Initialize to 0 and -inf so empty splits contribute nothing
-        Att_Out = torch.zeros((NUM_KV_SPLITS, num_batch, num_qo_heads, head_dim_qk), device=q.device, dtype=q.dtype)
+        # Initialize to 0 and -inf so empty splits contribute nothing. Buffers are
+        # sized to the pow2 row count the reduce kernel loads; narrower would be
+        # an out-of-bounds read for non-power-of-two split counts.
+        _splits_pow2 = next_power_of_2(NUM_KV_SPLITS)
+        Att_Out = torch.zeros((_splits_pow2, num_batch, num_qo_heads, head_dim_qk), device=q.device, dtype=q.dtype)
         LSE_Out = torch.full(
-            (num_batch, num_qo_heads, NUM_KV_SPLITS), float("-inf"), device=q.device, dtype=torch.float32
+            (num_batch, num_qo_heads, _splits_pow2), float("-inf"), device=q.device, dtype=torch.float32
         )
         grid = (num_batch, num_head_blocks, NUM_KV_SPLITS)
     else:
@@ -1666,7 +1799,7 @@ def decode_mla_kv_paged(
     block_tables_flat = block_tables.reshape(-1).contiguous()
     stride_block_table = block_tables.shape[1] if block_tables.dim() > 1 else 1
 
-    LSE_Out_arg = LSE_Out if LSE_Out is not None else torch.zeros(1, device=q.device, dtype=torch.float32)
+    LSE_Out_arg = LSE_Out if LSE_Out is not None else _mla_dummy_lse(q.device)
     HAS_LSE_OUT = LSE_Out is not None
 
     num_ctas = 2 if (num_batch >= 16 and BLOCK_H >= 64) else None
@@ -1706,6 +1839,7 @@ def decode_mla_kv_paged(
             NUM_PAGES_PER_BLOCK,
             TRANS_QK,
             USE_GATHER_PAGE_LOAD,
+            1,
         ),
     )
 
