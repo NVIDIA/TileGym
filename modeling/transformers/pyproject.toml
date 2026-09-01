@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 name = "tilegym-hf-bench"
 version = "0.1.0"
 description = "Hugging Face inference benchmarks and profiler tooling for TileGym"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
   "accelerate==1.13.0",
   "cuda-bindings>=13.2.0",
