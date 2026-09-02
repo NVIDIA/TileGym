@@ -20,7 +20,7 @@ __tile__ auto sigmoid_f32(tile_t<float, BLOCK_SIZE> x) {
 
 template<int BLOCK_SIZE>
 __tile__ auto tanh_approx_f32(tile_t<float, BLOCK_SIZE> x) {
-    return 2.0f * sigmoid_f32<BLOCK_SIZE>(2.0f * x) - 1.0f;
+    return cuda::tiles::tanh(x);
 }
 
 template<int BLOCK_SIZE>

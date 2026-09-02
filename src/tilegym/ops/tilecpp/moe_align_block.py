@@ -95,6 +95,9 @@ def _launch_stage1(
     )
 
 
+_TARGET_TOKENS_PER_PROGRAM = 128
+
+
 def _next_power_of_2(n: int) -> int:
     """Return the smallest power of 2 >= n."""
     v = 1
@@ -106,17 +109,18 @@ def _next_power_of_2(n: int) -> int:
 def _launch_stage2(
     tokens_cnts: torch.Tensor,
     num_experts: int,
+    num_programs: int,
     grid: int,
 ):
     """Launch stage 2 kernel."""
     dump_kernel_types("moe_align_block_size_stage2", tokens_cnts)
 
-    padded_experts = _next_power_of_2(num_experts)
+    padded_programs = _next_power_of_2(num_programs)
 
-    # Template params: T (int), NUM_EXPERTS, PADDED_EXPERTS (next power of 2)
+    # Template params: T (int), NUM_EXPERTS, NUM_PROGRAMS, PADDED_PROGRAMS
     kernel, _, _ = _stage2_kernel.get_kernel(
         dtype=torch.int32,
-        template_params=[num_experts, padded_experts],
+        template_params=[num_experts, num_programs, padded_programs],
         signature="int*",
     )
 
@@ -136,12 +140,13 @@ def _launch_stage3(
     cumsum: torch.Tensor,
     num_experts: int,
     block_size: int,
+    num_programs: int,
 ):
     dump_kernel_types("moe_align_block_size_stage3", tokens_cnts, cumsum)
 
     kernel, _, _ = _stage3_kernel.get_kernel(
         dtype=torch.int32,
-        template_params=[num_experts, block_size],
+        template_params=[num_experts, block_size, num_programs],
         signature="int*, int*, const int*, int*",
     )
 
@@ -216,14 +221,15 @@ def _moe_align_block_size(
         cumsum: Cumulative sum tensor for block alignment.
     """
     numel = topk_ids.numel()
-    grid = num_experts
+    num_programs = max(num_experts, ceil_div(numel, _TARGET_TOKENS_PER_PROGRAM))
+    grid = num_programs
     tokens_cnts = torch.zeros(
-        (num_experts + 1, num_experts),
+        (num_programs + 1, num_experts),
         dtype=torch.int32,
         device=topk_ids.device,
     )
     cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
-    tokens_per_thread = ceil_div(numel, num_experts)
+    tokens_per_thread = ceil_div(numel, num_programs)
 
     _launch_stage1(
         topk_ids,
@@ -237,7 +243,8 @@ def _moe_align_block_size(
     _launch_stage2(
         tokens_cnts,
         num_experts,
-        grid,
+        num_programs,
+        num_experts,
     )
 
     _launch_stage3(
@@ -247,6 +254,7 @@ def _moe_align_block_size(
         cumsum,
         num_experts,
         block_size,
+        num_programs,
     )
 
     # Launch stage 4: Assign tokens to sorted positions
