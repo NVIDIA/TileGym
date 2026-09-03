@@ -103,6 +103,20 @@ def _static_persistent_matmul_autotune_configs():
         yield SimpleNamespace(
             TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
         )
+        # Narrow-K (K=32) / wide-N candidates for extreme-skinny shapes (large M,
+        # small N/K), where the K=64 tiles above underutilize the persistent grid.
+        yield SimpleNamespace(
+            TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2, LOAD_LATENCY=-1
+        )
+        yield SimpleNamespace(
+            TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=1, LOAD_LATENCY=-1
+        )
     elif gpu_capability[0] < 9:
         # sm80 (A100)
         yield SimpleNamespace(
