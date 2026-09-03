@@ -172,8 +172,14 @@ __tile_global__ void moe_align_block_size_stage4(
 
     int off_t = bid * NUM_EXPERTS;
 
-    auto start_idx_cumsum_tile = ct::load(cumsum + bid);
-    auto end_idx_cumsum_tile = ct::load(cumsum + bid + 1);
+    auto cumsum_limit = ct::full<i32x1>(NUM_EXPERTS + 1);
+    auto start_idx_off = ct::full<i32x1>(bid);
+    auto end_idx_off = ct::full<i32x1>(bid + 1);
+    auto zero_cnt = ct::zeros<i32x1>();
+    auto start_idx_cumsum_tile =
+        ct::load_masked(cumsum + start_idx_off, start_idx_off < cumsum_limit, zero_cnt);
+    auto end_idx_cumsum_tile =
+        ct::load_masked(cumsum + end_idx_off, end_idx_off < cumsum_limit, zero_cnt);
     int start_idx_cumsum = static_cast<int>(start_idx_cumsum_tile);
     int end_idx_cumsum = static_cast<int>(end_idx_cumsum_tile);
 
