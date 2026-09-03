@@ -18,22 +18,16 @@ from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 
-def _next_power_of_2(n):
-    """Return the smallest power of 2 >= n."""
-    if n <= 0:
-        return 1
-    n -= 1
-    n |= n >> 1
-    n |= n >> 2
-    n |= n >> 4
-    n |= n >> 8
-    n |= n >> 16
-    return n + 1
-
-
 def _cdiv(a, b):
     """Ceiling division."""
     return (a + b - 1) // b
+
+
+def _select_tile_config() -> tuple[int, int]:
+    major, _ = torch.cuda.get_device_capability()
+    if major == 10:
+        return 16, 128
+    return 16, 64
 
 
 # Define kernels
@@ -74,15 +68,36 @@ def _launch_mla_decoding_kernel(
 
     tma_elems = 16 // q.element_size()
     even_strides = all(
-        s % tma_elems == 0 for s in (q.stride(1), qpe.stride(1), kv.stride(1), kpe.stride(1), out.stride(1))
+        s % tma_elems == 0
+        for s in (
+            q.stride(0),
+            q.stride(1),
+            qpe.stride(0),
+            qpe.stride(1),
+            kv.stride(0),
+            kv.stride(1),
+            kpe.stride(0),
+            kpe.stride(1),
+            out.stride(0),
+            out.stride(1),
+        )
     )
 
-    # Get kernel with template parameters
+    template_params = [BLOCK_D, BLOCK_H, BLOCK_N, BLOCK_KPE]
+    signature = (
+        "{T}*, {T}*, {T}*, {T}*, {T}*, float*, float, "
+        "long long, int, long long, int, long long, int, long long, int, "
+        "long long, int, int, int"
+    )
+    if transpose:
+        template_params.extend([int(even_strides), S_kv, int(S_kv % BLOCK_N == 0)])
+    else:
+        signature += ", int"
+
     kernel, _, _ = kernel_wrapper.get_kernel(
         dtype=dtype,
-        template_params=[BLOCK_D, BLOCK_H, BLOCK_N, BLOCK_KPE] + ([int(even_strides)] if transpose else []),
-        signature="{T}*, {T}*, {T}*, {T}*, {T}*, float*, float, "
-        "long long, int, long long, int, long long, int, long long, int, long long, int, int, int, int",
+        template_params=template_params,
+        signature=signature,
     )
 
     # Calculate grid
@@ -90,32 +105,30 @@ def _launch_mla_decoding_kernel(
     grid_y = B
 
     # Launch kernel with 2D grid
-    kernel_wrapper.launch(
-        grid=(grid_x, grid_y),
-        kernel=kernel,
-        args=[
-            np.uint64(q.data_ptr()),
-            np.uint64(qpe.data_ptr()),
-            np.uint64(kv.data_ptr()),
-            np.uint64(kpe.data_ptr()),
-            np.uint64(out.data_ptr()),
-            np.uint64(l.data_ptr()),
-            np.float32(sm_scale),
-            np.int64(q.stride(0)),
-            np.int32(q.stride(1)),
-            np.int64(qpe.stride(0)),
-            np.int32(qpe.stride(1)),
-            np.int64(kv.stride(0)),
-            np.int32(kv.stride(1)),
-            np.int64(kpe.stride(0)),
-            np.int32(kpe.stride(1)),
-            np.int64(out.stride(0)),
-            np.int32(out.stride(1)),
-            np.int32(B),
-            np.int32(num_head),
-            np.int32(S_kv),
-        ],
-    )
+    args = [
+        np.uint64(q.data_ptr()),
+        np.uint64(qpe.data_ptr()),
+        np.uint64(kv.data_ptr()),
+        np.uint64(kpe.data_ptr()),
+        np.uint64(out.data_ptr()),
+        np.uint64(l.data_ptr()),
+        np.float32(sm_scale),
+        np.int64(q.stride(0)),
+        np.int32(q.stride(1)),
+        np.int64(qpe.stride(0)),
+        np.int32(qpe.stride(1)),
+        np.int64(kv.stride(0)),
+        np.int32(kv.stride(1)),
+        np.int64(kpe.stride(0)),
+        np.int32(kpe.stride(1)),
+        np.int64(out.stride(0)),
+        np.int32(out.stride(1)),
+        np.int32(B),
+        np.int32(num_head),
+    ]
+    if not transpose:
+        args.append(np.int32(S_kv))
+    kernel_wrapper.launch(grid=(grid_x, grid_y), kernel=kernel, args=args)
 
 
 class _mla_decoding(torch.autograd.Function):
@@ -137,11 +150,7 @@ class _mla_decoding(torch.autograd.Function):
         o = torch.empty_like(q)
         l = torch.empty((B, num_head), device=q.device, dtype=torch.float32).contiguous()
 
-        # Choose block sizes - use power of 2 values
-        # BLOCK_D and BLOCK_KPE are determined by input dimensions
-        # BLOCK_H and BLOCK_N are tuning parameters
-        BLOCK_H = min(32, _next_power_of_2(num_head))
-        BLOCK_N = 64
+        BLOCK_H, BLOCK_N = _select_tile_config()
 
         _launch_mla_decoding_kernel(
             q=q,
