@@ -58,12 +58,20 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "fast: indicate whether the test is in fast CI pipeline")
 
 
+def _detect_arch_default() -> str:
+    try:
+        major, minor = torch.cuda.get_device_capability("cuda")
+    except RuntimeError:
+        return "sm100"
+    return f"sm{major}{minor}"
+
+
 def pytest_addoption(parser):
     try:
         parser.addoption(
             "--arch",
             type=str,
-            default=f"sm{torch.cuda.get_device_capability('cuda')[0]}{torch.cuda.get_device_capability('cuda')[1]}",
+            default=_detect_arch_default(),
             help="GPU Backend Type",
         )
         parser.addoption("--quick-run", action="store_true", default=False, help="Quick Run")
