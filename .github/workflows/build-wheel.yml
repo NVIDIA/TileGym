@@ -131,18 +131,11 @@ jobs:
               f.write('\n'.join(deps))
           print('Auditing deps:\n' + '\n'.join(deps))
           EOF
-          # Temporary ignores for transformers==5.3.0 (fix available in 5.5.0); revisit when transformers dependency is upgraded.
+          # Temporary ignores for transformers==5.3.0; revisit when the transformers dependency is upgraded.
+          # The 2025 PYSEC ignores were dropped because those advisories no longer match this version.
           pip-audit -r audit-requirements.txt \
-            --ignore-vuln CVE-2026-4539 \
-            --ignore-vuln PYSEC-2025-211 \
-            --ignore-vuln PYSEC-2025-212 \
-            --ignore-vuln PYSEC-2025-213 \
-            --ignore-vuln PYSEC-2025-214 \
-            --ignore-vuln PYSEC-2025-215 \
-            --ignore-vuln PYSEC-2025-216 \
-            --ignore-vuln PYSEC-2025-217 \
-            --ignore-vuln PYSEC-2025-218 \
-            --ignore-vuln CVE-2026-5241
+            --ignore-vuln PYSEC-2026-2290 \
+            --ignore-vuln CVE-2026-9856
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}
