@@ -51,7 +51,7 @@ We have verified that `torch==2.9.1` works. You can also get `triton` packages w
 
 #### 2. Install TileGym
 
-TileGym uses [`cuda-tile`](https://github.com/nvidia/cutile-python) (≥ 1.3.0) for GPU kernel programming, which depends on the `tileiras` compiler at runtime.
+TileGym uses [`cuda-tile`](https://github.com/nvidia/cutile-python) (≥ 1.5.0) for GPU kernel programming, which depends on the `tileiras` compiler at runtime.
 
 ##### Install from PyPI (recommended)
 

@@ -51,7 +51,7 @@ pip install --pre torch --index-url https://download.pytorch.org/whl/cu130
 
 #### 2. TileGym のインストール
 
-TileGym は GPU カーネルプログラミングに [`cuda-tile`](https://github.com/nvidia/cutile-python)（≥ 1.3.0）を使用しており、実行時に `tileiras` コンパイラに依存しています。
+TileGym は GPU カーネルプログラミングに [`cuda-tile`](https://github.com/nvidia/cutile-python)（≥ 1.5.0）を使用しており、実行時に `tileiras` コンパイラに依存しています。
 
 ##### PyPI からインストール（推奨）
 
