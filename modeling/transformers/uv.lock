@@ -2996,7 +2996,7 @@ dependencies = [
 requires-dist = [
     { name = "cuda-bindings", specifier = ">=13.2.0" },
     { name = "cuda-core", specifier = ">=0.7.0" },
-    { name = "cuda-tile", specifier = ">=1.3.0" },
+    { name = "cuda-tile", specifier = ">=1.5.0" },
     { name = "cuda-tile", extras = ["tileiras"], marker = "extra == 'tileiras'" },
     { name = "filelock", specifier = ">=3.20.3" },
     { name = "huggingface-hub" },

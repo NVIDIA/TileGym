@@ -51,7 +51,7 @@ Nous avons vérifié que `torch==2.9.1` fonctionne. Vous pouvez également obten
 
 #### 2. Installer TileGym
 
-TileGym utilise [`cuda-tile`](https://github.com/nvidia/cutile-python) (≥ 1.3.0) pour la programmation de noyaux GPU, qui dépend du compilateur `tileiras` à l'exécution.
+TileGym utilise [`cuda-tile`](https://github.com/nvidia/cutile-python) (≥ 1.5.0) pour la programmation de noyaux GPU, qui dépend du compilateur `tileiras` à l'exécution.
 
 ##### Installer depuis PyPI (recommandé)
 

@@ -51,7 +51,7 @@ pip install --pre torch --index-url https://download.pytorch.org/whl/cu130
 
 #### 2. 安裝 TileGym
 
-TileGym 使用 [`cuda-tile`](https://github.com/nvidia/cutile-python)（≥ 1.3.0）進行 GPU 核心程式設計，執行時期依賴 `tileiras` 編譯器。
+TileGym 使用 [`cuda-tile`](https://github.com/nvidia/cutile-python)（≥ 1.5.0）進行 GPU 核心程式設計，執行時期依賴 `tileiras` 編譯器。
 
 ##### 從 PyPI 安裝（建議）
 
