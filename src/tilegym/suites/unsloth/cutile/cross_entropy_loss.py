@@ -64,10 +64,8 @@ def _cross_entropy_forward_ct(
     # tensor_view/partition_view abstraction that causes predicate explosion)
     # Bounds-check elimination when BLOCK_SIZE == VOCAB_SIZE (power-of-2 vocab)
     no_padding = BLOCK_SIZE == VOCAB_SIZE
-    logits_row = ct.gather(logits, (row_idx, col_offsets), check_bounds=not no_padding, padding_value=0)
+    logits_row = ct.gather(logits, (row_idx, col_offsets), check_bounds=not no_padding, padding_value=-math.inf)
     logits_row = ct.astype(logits_row, ct.float32)
-    if BLOCK_SIZE > VOCAB_SIZE:
-        logits_row = ct.where(col_offsets < VOCAB_SIZE, logits_row, -math.inf)
 
     # Apply logit scaling (Cohere): t * x
     if DO_LOGIT_SCALING:
@@ -77,9 +75,8 @@ def _cross_entropy_forward_ct(
     if DO_SOFTCAPPING:
         logits_row = SOFTCAP * ct.tanh(logits_row / SOFTCAP)
 
-    # Numerically stable logsumexp: c + log(sum(exp(x - c)))
     c = ct.max(logits_row, 0)
-    lse = c + ct.log(ct.sum(ct.exp(logits_row - c), 0))
+    lse = c + ct.log(ct.sum(ct.exp2((logits_row - c) * 1.4426950408889634, flush_to_zero=True), 0))
 
     # Compute loss = logsumexp - x_label
     # Direct O(1) gather from original logits + re-apply transforms (not O(BLOCK_SIZE) scan)
@@ -170,7 +167,7 @@ def _chunked_cross_entropy_forward_ct(
 # ---- CuTile kernel: cross-entropy backward ----
 
 
-@ct.kernel
+@ct.kernel(num_ctas=2)
 def _cross_entropy_backward_ct(
     logits,  # (n_rows, vocab_size) — 2D, read-only: original logits from forward
     grad_logits,  # (n_rows, vocab_size) — 2D, write-only: output gradient buffer
@@ -204,8 +201,7 @@ def _cross_entropy_backward_ct(
     if label_idx != -100:
         dloss_val = ct.gather(dloss, (row_idx,), padding_value=0).item()
 
-    # Load logits chunk via gather (read-only access to saved logits)
-    x = ct.gather(logits, (row_idx, col_offsets), check_bounds=True, padding_value=0)
+    x = ct.gather(logits, (row_idx, col_offsets), check_bounds=True, padding_value=0, latency=10)
     x = ct.astype(x, ct.float32)
 
     # Apply logit scaling
@@ -222,9 +218,7 @@ def _cross_entropy_backward_ct(
 
     # Load saved logsumexp
     lse = ct.gather(logsumexp_in, (row_idx,), padding_value=0).item()
-
-    # Compute softmax: exp(x - logsumexp)
-    y = ct.exp(x - lse)
+    y = ct.exp2((x - lse) * 1.4426950408889634, flush_to_zero=True)
 
     # Subtract 1 at label position: softmax - 1_{label}
     y = ct.where(col_offsets == label_idx, y - 1.0, y)
@@ -239,7 +233,7 @@ def _cross_entropy_backward_ct(
 
     # Store gradient to separate output buffer, masked to valid vocab positions
     result = ct.astype(dloss_val * y, grad_logits.dtype)
-    ct.scatter(grad_logits, (row_idx, col_offsets), result, check_bounds=True)
+    ct.scatter(grad_logits, (row_idx, col_offsets), result, check_bounds=True, latency=10)
 
 
 # ---- Autograd Function ----
@@ -326,12 +320,9 @@ class _Fast_CrossEntropyLoss_CT(torch.autograd.Function):
         logits, logsumexp, labels = ctx.saved_tensors
         n_rows, vocab_size = logits.shape
 
-        BLOCK_SIZE = 4096
+        BLOCK_SIZE = 8192 if 8192 < vocab_size <= MAX_FUSED_SIZE else 4096
         div, mod = divmod(vocab_size, BLOCK_SIZE)
         n_blocks = div + (mod != 0)
-
-        # Ensure dlosses is contiguous for gather access
-        dlosses = dlosses.contiguous()
 
         # Allocate separate output buffer to avoid in-place modification of
         # saved tensors (violates PyTorch autograd version tracking)

@@ -201,9 +201,11 @@ class Test_SwiGLU(common.PyTestCase):
     @pytest.mark.parametrize(
         "batch_size,seq_len,hidden_size,intermediate_size",
         [
-            # (1, 128, 1024, 4096),
-            # (2, 256, 2048, 8192),
-            (8, 1, 4096, 14336)
+            (8, 1, 4096, 14336),
+            (2, 512, 1024, 4096),
+            (4, 1024, 2048, 8192),
+            (8, 512, 4096, 14336),
+            (8, 2048, 4096, 14336),
         ],
         ids=lambda x: str(x),
     )
@@ -226,7 +228,7 @@ class Test_SwiGLU(common.PyTestCase):
                 backend_fn = lambda: self.reference(a, b)
             else:
                 try:
-                    backend_fn = lambda: get_swiglu()(a, b)[2]
+                    backend_fn = lambda: get_swiglu()(a, b)
                 except Exception as e:
                     pytest.skip(f"Cutile backend not available: {e}")
 

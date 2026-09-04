@@ -942,6 +942,44 @@ def bmm(
 
 
 @dispatch(
+    "linear_gluact_linear",
+)
+def linear_gluact_linear(
+    input: torch.Tensor,
+    weight_act: torch.Tensor,
+    weight_noact: torch.Tensor,
+    weight2: torch.Tensor,
+    act_type: str = "silu",
+    **kwargs: Any,
+):
+    """
+    Fused Linear + GLU Activation + Linear operation that automatically selects implementation based on current backend.
+
+    Computation Flow (GLU - Gated Linear Unit):
+        1. input -> Linear1_act   : act_in = input @ weight_act^T
+        2. act_in -> activation   : act_out = activation(act_in)
+        3. input -> Linear1_noact : noact_out = input @ weight_noact^T
+        4. element-wise multiply  : mul_out = act_out * noact_out  [gating mechanism]
+        5. mul_out -> Linear2     : output = mul_out @ weight2^T
+
+    Mathematical Expression:
+        output = activation(input @ W1_act^T) ⊙ (input @ W1_noact^T) @ W2^T
+
+    Args:
+        input: Input tensor (*, in_features)
+        weight_act: Weight for activation branch (out_features, in_features)
+        weight_noact: Weight for non-activation branch (out_features, in_features)
+        weight2: Weight for final linear (final_features, out_features)
+        act_type: Activation type. Supported: 'silu', 'relu', 'gelu', 'gelu-tanh'. Default: 'silu'
+        **kwargs: Additional arguments, including kernel_configs if needed
+
+    Returns:
+        torch.Tensor: Output tensor (*, final_features)
+    """
+    raise NotImplementedError(f"linear_gluact_linear is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
     "recurrent_gated_delta_rule",
 )
 def recurrent_gated_delta_rule(

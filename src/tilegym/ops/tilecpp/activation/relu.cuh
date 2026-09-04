@@ -28,7 +28,7 @@ __tile_global__ void relu_activation_fwd_kernel(const T* __restrict__ x, T* __re
     auto zero = ct::zeros<f32xN>();
     f32xN out;
     if constexpr (OP == 0) { // relu
-        out = ct::select(xf > zero, xf, zero);
+        out = ct::max(xf, zero);
     } else if constexpr (OP == 1) { // elu
         out = ct::select(xf > zero, xf, alpha * (ct::exp(xf) - 1.0f));
     } else if constexpr (OP == 2) { // leaky_relu

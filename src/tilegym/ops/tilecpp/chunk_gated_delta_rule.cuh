@@ -80,7 +80,7 @@ template<typename T,
          int BLOCK_K,
          bool USE_QK_L2NORM,
          int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy) ]]
+[[ using cutile : hint(0, occupancy=occupancy) ]]
 __tile_global__ void chunk_gated_delta_rule_intra_kernel(
     const T* __restrict__ Q,           // (B, T, H, K)
     const T* __restrict__ K,           // (B, T, H, K)
@@ -274,7 +274,6 @@ template<typename T,
          bool HAS_INITIAL_STATE,
          bool OUTPUT_FINAL_STATE,
          int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy) ]]
 __tile_global__ void chunk_gated_delta_rule_inter_kernel(
     const float* __restrict__ Q_ch,        // (B, H, num_chunks, CS, K)
     const float* __restrict__ K_ch,        // (B, H, num_chunks, CS, K)

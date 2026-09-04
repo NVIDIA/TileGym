@@ -58,14 +58,14 @@ __tile_global__ void moe_align_block_size_stage1(
  * Stage 2: Compute cumulative sum of token counts across programs.
  * Each program computes cumsum for one expert column.
  */
-template<typename T, int NUM_EXPERTS, int PADDED_EXPERTS>
+template<typename T, int NUM_EXPERTS, int NUM_PROGRAMS, int PADDED_PROGRAMS>
 __tile_global__ void moe_align_block_size_stage2(
     int* __restrict__ tokens_cnts
 ) {
     namespace ct = cuda::tiles;
 
-    // PADDED_EXPERTS must be next power of 2 >= NUM_EXPERTS (enforced by Python)
-    using i32xP = ct::tile<int32_t, ct::shape<PADDED_EXPERTS>>;
+    // PADDED_PROGRAMS must be next power of 2 >= NUM_PROGRAMS (enforced by Python)
+    using i32xP = ct::tile<int32_t, ct::shape<PADDED_PROGRAMS>>;
 
     tokens_cnts = ct::assume_aligned<16>(tokens_cnts);
 
@@ -76,8 +76,8 @@ __tile_global__ void moe_align_block_size_stage2(
 
     auto offsets = ct::iota<i32xP>() * NUM_EXPERTS + base_offset;
 
-    // Mask: only first NUM_EXPERTS elements are valid
-    auto mask = ct::iota<i32xP>() < NUM_EXPERTS;
+    // Mask: only first NUM_PROGRAMS rows are valid
+    auto mask = ct::iota<i32xP>() < NUM_PROGRAMS;
 
     // Gather-load with mask (zero-fill padding positions)
     auto token_cnts_vec = ct::load_masked(tokens_cnts + offsets, mask,
@@ -94,7 +94,7 @@ __tile_global__ void moe_align_block_size_stage2(
  * Stage 3: Compute padded cumsum for block alignment.
  * Single program - computes cumulative padded counts and max expert count.
  */
-template<typename T, int NUM_EXPERTS, int BLOCK_SIZE>
+template<typename T, int NUM_EXPERTS, int BLOCK_SIZE, int NUM_PROGRAMS>
 __tile_global__ void moe_align_block_size_stage3(
     int* __restrict__ total_tokens_post_pad,
     int* __restrict__ max_expert_cnt,
@@ -111,7 +111,7 @@ __tile_global__ void moe_align_block_size_stage3(
     cumsum = ct::assume_aligned<16>(cumsum);
 
     auto last_cumsum = ct::zeros<i32x1>();
-    int off_cnt = NUM_EXPERTS * NUM_EXPERTS;
+    int off_cnt = NUM_PROGRAMS * NUM_EXPERTS;
     auto token_cnt = ct::zeros<i32x1>();
     auto padded_cnt = ct::zeros<i32x1>();
     auto max_cnt = ct::zeros<i32x1>();
@@ -172,8 +172,14 @@ __tile_global__ void moe_align_block_size_stage4(
 
     int off_t = bid * NUM_EXPERTS;
 
-    auto start_idx_cumsum_tile = ct::load(cumsum + bid);
-    auto end_idx_cumsum_tile = ct::load(cumsum + bid + 1);
+    auto cumsum_limit = ct::full<i32x1>(NUM_EXPERTS + 1);
+    auto start_idx_off = ct::full<i32x1>(bid);
+    auto end_idx_off = ct::full<i32x1>(bid + 1);
+    auto zero_cnt = ct::zeros<i32x1>();
+    auto start_idx_cumsum_tile =
+        ct::load_masked(cumsum + start_idx_off, start_idx_off < cumsum_limit, zero_cnt);
+    auto end_idx_cumsum_tile =
+        ct::load_masked(cumsum + end_idx_off, end_idx_off < cumsum_limit, zero_cnt);
     int start_idx_cumsum = static_cast<int>(start_idx_cumsum_tile);
     int end_idx_cumsum = static_cast<int>(end_idx_cumsum_tile);
 

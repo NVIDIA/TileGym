@@ -49,7 +49,7 @@ constexpr float ATTENTION_INV_LOG_2 = 1.442695040888963f;
 template<typename T, int B, int H, int H_KV, int S_QO, int S_KV,
          int BLOCK_M, int BLOCK_N, int BLOCK_D, bool IS_CAUSAL, bool HAS_BACKWARD,
          int occupancy, int NUM_CTAS = 1>
-[[ using cutile : hint(1000, num_cta_in_cga=NUM_CTAS, occupancy=occupancy)]]
+[[ using cutile : hint(0, num_cta_in_cga=NUM_CTAS, occupancy=occupancy)]]
 __tile_global__ void prefill_fmha_fwd_kernel(
     const T* __restrict__ Q_ptr,
     const T* __restrict__ K_ptr,
@@ -158,7 +158,7 @@ __tile_global__ void prefill_fmha_fwd_kernel(
     // ---------------------------------------------------------------------
     for (auto kv_block : ct::irange(0, unmasked_end)) {
         T_4D_N k_raw;
-        [[ using cutile : hint(1000, latency=2) ]]
+        [[ using cutile : hint(0, latency=2) ]]
         k_raw = K_view.load(batch_idx, off_kv_h, kv_block, 0);
         auto k_4d_T = ct::permute(k_raw, ct::dimension_map<0, 1, 3, 2>{});
         auto k_t    = ct::reshape(k_4d_T, ct::shape<BLOCK_D, BLOCK_N>{});
@@ -177,7 +177,7 @@ __tile_global__ void prefill_fmha_fwd_kernel(
         acc = acc * alpha;
 
         T_4D_N v_4d;
-        [[ using cutile : hint(1000, latency=4) ]]
+        [[ using cutile : hint(0, latency=4) ]]
         v_4d = V_view.load(batch_idx, off_kv_h, kv_block, 0);
         auto v = ct::reshape(v_4d, ct::shape<BLOCK_N, BLOCK_D>{});
 
@@ -195,10 +195,10 @@ __tile_global__ void prefill_fmha_fwd_kernel(
 
             T_4D_N k_raw;
             if constexpr (EVEN_K) {
-                [[ using cutile : hint(1000, latency=2) ]]
+                [[ using cutile : hint(0, latency=2) ]]
                 k_raw = K_view.load(batch_idx, off_kv_h, kv_block, 0);
             } else {
-                [[ using cutile : hint(1000, latency=2) ]]
+                [[ using cutile : hint(0, latency=2) ]]
                 k_raw = K_view.load_masked(batch_idx, off_kv_h, kv_block, 0);
             }
             auto k_4d_T = ct::permute(k_raw, ct::dimension_map<0, 1, 3, 2>{});
@@ -232,10 +232,10 @@ __tile_global__ void prefill_fmha_fwd_kernel(
 
             T_4D_N v_4d;
             if constexpr (EVEN_K) {
-                [[ using cutile : hint(1000, latency=4) ]]
+                [[ using cutile : hint(0, latency=4) ]]
                 v_4d = V_view.load(batch_idx, off_kv_h, kv_block, 0);
             } else {
-                [[ using cutile : hint(1000, latency=4) ]]
+                [[ using cutile : hint(0, latency=4) ]]
                 v_4d = V_view.load_masked(batch_idx, off_kv_h, kv_block, 0);
             }
             auto v = ct::reshape(v_4d, ct::shape<BLOCK_N, BLOCK_D>{});
@@ -281,7 +281,7 @@ __tile_global__ void prefill_fmha_fwd_kernel(
  *   minus_L = -L
  */
 template<typename T, int B, int H, int S_QO, int BLOCK_M, int BLOCK_D, int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy)]]
+[[ using cutile : hint(0, occupancy=occupancy)]]
 __tile_global__ void fmha_bwd_preprocess_kernel(
     const T* __restrict__ Out_ptr,
     const T* __restrict__ dO_ptr,
@@ -358,7 +358,7 @@ __tile_global__ void fmha_bwd_preprocess_kernel(
  * Computes gradients for Q, K, V in the attention backward pass.
  */
 template<typename T, int B, int H, int S_QO, int S_KV, int BLOCK_M, int BLOCK_N, int BLOCK_D, bool IS_CAUSAL, int occupancy>
-[[ using cutile : hint(1000, occupancy=occupancy)]]
+[[ using cutile : hint(0, occupancy=occupancy)]]
 __tile_global__ void fmha_bwd_main_kernel(
     const T* __restrict__ Q_ptr,
     const T* __restrict__ K_ptr,

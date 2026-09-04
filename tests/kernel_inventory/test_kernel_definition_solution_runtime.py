@@ -18,7 +18,6 @@ from tests.kernel_inventory.kernel_runtime_utils import _assert_matching_entry_s
 from tests.kernel_inventory.kernel_runtime_utils import _assert_matching_entry_signatures_static
 from tests.kernel_inventory.kernel_runtime_utils import _assert_return_contract
 from tests.kernel_inventory.kernel_runtime_utils import _assert_triton_autotune_argument_ownership
-from tests.kernel_inventory.kernel_runtime_utils import _boolean_branch_assignments
 from tests.kernel_inventory.kernel_runtime_utils import _call_entry_strictly
 from tests.kernel_inventory.kernel_runtime_utils import _current_compute_capability_label
 from tests.kernel_inventory.kernel_runtime_utils import _current_triton_backend
@@ -26,19 +25,44 @@ from tests.kernel_inventory.kernel_runtime_utils import _isolated_solution_modul
 from tests.kernel_inventory.kernel_runtime_utils import _launch_raw_solution
 from tests.kernel_inventory.kernel_runtime_utils import _load_reference
 from tests.kernel_inventory.kernel_runtime_utils import _require_solution_runtime_dependencies
-from tests.kernel_inventory.kernel_runtime_utils import _run_definition_solution_runtime
+from tests.kernel_inventory.kernel_runtime_utils import _run_definition_solution_workload_runtime
 from tests.kernel_inventory.kernel_runtime_utils import _run_runtime_branch
 from tests.kernel_inventory.kernel_runtime_utils import _runtime_case_id
-from tests.kernel_inventory.kernel_runtime_utils import _satisfy_boolean_constraints
 from tests.kernel_inventory.kernel_runtime_utils import _skip_if_solution_does_not_target_current_compute_capability
 from tests.kernel_inventory.kernel_runtime_utils import _skip_if_solution_does_not_target_current_triton_backend
 from tests.kernel_inventory.kernel_runtime_utils import _unwrap_triton_heuristics
 from tests.kernel_inventory.kernel_runtime_utils import installed_reference_modules
-from tests.kernel_inventory.kernel_runtime_utils import run_definition_solution_runtime
+from tests.kernel_inventory.kernel_runtime_utils import materialize_workload_inputs
+from tests.kernel_inventory.kernel_runtime_utils import run_definition_solution_workload_runtime
+from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
+from tilegym.kernel_inventory.schema import Workload
+from tilegym.kernel_inventory.workloads import WorkloadRecord
 
 
-def test_kernel_definition_solution_runtime(definition_path, solution_path):
-    run_definition_solution_runtime(definition_path, solution_path)
+def _workload_record(tmp_path, *, inputs=None, axes=None):
+    return WorkloadRecord(
+        path=tmp_path / "workload.jsonl",
+        line_number=1,
+        workload=Workload.model_validate(
+            {
+                "uuid": "c8ab8964-8624-44f7-bd4f-bd1ace75c959",
+                "axes": axes or {},
+                "inputs": inputs or {},
+                "tolerance": {
+                    "max_atol": 0.02,
+                    "max_rtol": 0.02,
+                    "required_matched_ratio": 1.0,
+                    "max_error_cap": None,
+                    "allow_negative_inf": False,
+                },
+                "eval_mode": "full",
+            }
+        ),
+    )
+
+
+def test_kernel_definition_solution_runtime(workload_record, definition_path, solution_path):
+    run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
 
 
 class _FakeCuda:
@@ -208,14 +232,67 @@ def test_runtime_without_declared_triton_compiler_target_does_not_probe_backend(
     _skip_if_solution_does_not_target_current_triton_backend({"spec": {"language": "triton"}})
 
 
-def test_runtime_rejects_mismatched_reference_and_solution_signatures():
+def test_runtime_accepts_optional_solution_signature_extensions():
     def reference(q, scale=None):
         return q
 
     def solution(q, initial_state=None, scale=None):
         return q
 
-    definition = {"name": "test_definition"}
+    definition = {"name": "test_definition", "inputs": {"q": {}, "scale": {}}}
+    schema = {"spec": {"entry_point": "test.py::solution"}}
+    _assert_matching_entry_signatures(definition, reference, schema, solution)
+
+
+def test_runtime_preserves_exact_legacy_signature_with_noncanonical_input_order():
+    def reference(q, scale=None):
+        return q
+
+    def solution(q, scale=None):
+        return q
+
+    definition = {"name": "legacy_definition", "inputs": {"scale": {}, "q": {}}}
+    schema = {"spec": {"entry_point": "test.py::solution"}}
+    _assert_matching_entry_signatures(definition, reference, schema, solution)
+
+
+def test_static_runtime_accepts_exact_kwargs_only_unsupported_stub(tmp_path):
+    source = tmp_path / "solution.py"
+    source.write_text("def solution(**kwargs):\n    raise NotImplementedError\n", encoding="utf-8")
+    definition = {
+        "name": "unsupported",
+        "inputs": {},
+        "reference": "def run(**kwargs):\n    raise NotImplementedError\n",
+    }
+    solution = {"spec": {"entry_point": "solution.py::solution"}}
+
+    _assert_matching_entry_signatures_static(definition, solution, tmp_path / "definition.json", tmp_path)
+
+
+def test_static_runtime_accepts_reordered_optional_solution_extensions(tmp_path):
+    source = tmp_path / "solution.py"
+    source.write_text(
+        "def solution(q, initial_state=None, reverse=False, normalize=False):\n    return q\n",
+        encoding="utf-8",
+    )
+    definition = {
+        "name": "public",
+        "inputs": {"q": {}, "normalize": {}, "reverse": {}},
+        "reference": "def run(q, normalize=False, reverse=False):\n    return q\n",
+    }
+    solution = {"spec": {"entry_point": "solution.py::solution"}}
+
+    _assert_matching_entry_signatures_static(definition, solution, tmp_path / "definition.json", tmp_path)
+
+
+def test_runtime_rejects_required_solution_signature_extensions():
+    def reference(q, scale=None):
+        return q
+
+    def solution(q, initial_state, scale=None):
+        return q
+
+    definition = {"name": "test_definition", "inputs": {"q": {}, "scale": {}}}
     schema = {"spec": {"entry_point": "test.py::solution"}}
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
         _assert_matching_entry_signatures(definition, reference, schema, solution)
@@ -228,13 +305,14 @@ def test_runtime_rejects_reference_and_solution_default_mismatch():
     def solution(q, scale=None):
         return q
 
-    definition = {"name": "test_definition"}
+    definition = {"name": "test_definition", "inputs": {"q": {}, "scale": {}}}
     schema = {"spec": {"entry_point": "test.py::solution"}}
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
         _assert_matching_entry_signatures(definition, reference, schema, solution)
 
 
 def test_static_signature_mismatch_precedes_backend_dependency_gate(tmp_path, monkeypatch):
+    workload_record = _workload_record(tmp_path)
     definition_path = tmp_path / "definition.json"
     solution_path = tmp_path / "solution.json"
     definition_path.write_text(
@@ -280,14 +358,19 @@ def test_static_signature_mismatch_precedes_backend_dependency_gate(tmp_path, mo
         "tests.kernel_inventory.kernel_runtime_utils.validate_solution_entry_point",
         lambda *_, **__: None,
     )
+    monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils.validate_workload_against_definition",
+        lambda *_, **__: None,
+    )
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
-        _run_definition_solution_runtime(definition_path, solution_path)
+        _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
     assert static_signature_checked
     assert not dependency_gate_called
     assert not compiler_gate_called
 
 
 def test_launch_contract_validation_precedes_triton_compiler_gate(tmp_path, monkeypatch):
+    workload_record = _workload_record(tmp_path)
     definition_path = tmp_path / "definition.json"
     solution_path = tmp_path / "solution.json"
     definition_path.write_text(
@@ -323,11 +406,12 @@ def test_launch_contract_validation_precedes_triton_compiler_gate(tmp_path, monk
         compiler_gate,
     )
     with pytest.raises(ValueError, match="launch contract invalid"):
-        _run_definition_solution_runtime(definition_path, solution_path)
+        _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
     assert not compiler_gate_called
 
 
 def test_triton_compiler_mismatch_skips_before_solution_import(tmp_path, monkeypatch):
+    workload_record = _workload_record(tmp_path)
     definition_path = tmp_path / "definition.json"
     solution_path = tmp_path / "solution.json"
     definition_path.write_text(
@@ -358,6 +442,10 @@ def test_triton_compiler_mismatch_skips_before_solution_import(tmp_path, monkeyp
         lambda *_: None,
     )
     monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils.validate_workload_against_definition",
+        lambda *_, **__: None,
+    )
+    monkeypatch.setattr(
         "tests.kernel_inventory.kernel_runtime_utils._require_solution_runtime_dependencies",
         lambda *_: None,
     )
@@ -370,10 +458,11 @@ def test_triton_compiler_mismatch_skips_before_solution_import(tmp_path, monkeyp
         lambda *_: pytest.fail("mismatched compiler target must skip before importing the Solution"),
     )
     with pytest.raises(pytest.skip.Exception, match="current Triton compiler backend is oait"):
-        _run_definition_solution_runtime(definition_path, solution_path)
+        _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
 
 
 def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(tmp_path, monkeypatch):
+    workload_record = _workload_record(tmp_path, inputs={"value": {"type": "scalar", "value": 4}})
     definition_path = tmp_path / "definition.json"
     solution_path = tmp_path / "solution.json"
     module_name = "tilegym.hardware_gate_test.poison"
@@ -419,6 +508,10 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         lambda *_, **__: order.append("entry-point"),
     )
     monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils.validate_workload_against_definition",
+        lambda *_, **__: order.append("workload"),
+    )
+    monkeypatch.setattr(
         "tests.kernel_inventory.kernel_runtime_utils._assert_matching_entry_signatures_static",
         lambda *_: order.append("static-signature"),
     )
@@ -447,17 +540,12 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         "tests.kernel_inventory.kernel_runtime_utils._assert_matching_entry_signatures",
         lambda *_: order.append("dynamic-signature"),
     )
-    monkeypatch.setattr("tests.kernel_inventory.kernel_runtime_utils._axis_values", lambda *_: {})
     monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._make_inputs",
-        lambda *_: {"value": 4},
-    )
-    monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._boolean_branch_assignments",
-        lambda *_: ({},),
+        "tests.kernel_inventory.kernel_runtime_utils.materialize_workload_inputs",
+        lambda *_, **__: ({}, {"value": 4}),
     )
 
-    def run_branch(_definition, _reference, _solution, solution_fn, *_):
+    def run_branch(_definition, _reference, _solution, solution_fn, *_, **__):
         order.append("execute")
         assert solution_fn(4) == 5
 
@@ -465,19 +553,13 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         "tests.kernel_inventory.kernel_runtime_utils._run_runtime_branch",
         run_branch,
     )
-    monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils.RUNTIME_INPUT_CATALOG",
-        types.SimpleNamespace(
-            case_for_definition=lambda _path: types.SimpleNamespace(mutated_inputs=()),
-        ),
-    )
-
     with pytest.raises(pytest.skip.Exception, match="current compute capability is SM103"):
-        _run_definition_solution_runtime(definition_path, solution_path)
+        _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
     assert order == [
         "definition",
         "solution",
         "entry-point",
+        "workload",
         "static-signature",
         "import:torch",
         "dependency",
@@ -491,13 +573,14 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
 
     order.clear()
     try:
-        _run_definition_solution_runtime(definition_path, solution_path)
+        _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
     finally:
         sys.modules.pop(module_name, None)
     assert order == [
         "definition",
         "solution",
         "entry-point",
+        "workload",
         "static-signature",
         "import:torch",
         "dependency",
@@ -511,7 +594,7 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
 def test_static_signature_validation_rejects_actual_ast_mismatch(tmp_path):
     source = tmp_path / "solution.py"
     source.write_text("def entry(value, extra):\n    return value\n", encoding="utf-8")
-    definition = {"name": "wrapper", "reference": "def run(value):\n    return value\n"}
+    definition = {"name": "wrapper", "inputs": {"value": {}}, "reference": "def run(value):\n    return value\n"}
     solution = {"spec": {"entry_point": "solution.py::entry"}}
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
         _assert_matching_entry_signatures_static(definition, solution, tmp_path / "definition.json", tmp_path)
@@ -593,11 +676,15 @@ def test_runtime_case_id_contains_definition_coordinate_and_solution_backend(tmp
     solution.parent.mkdir(parents=True)
     definition.write_text("{}\n", encoding="utf-8")
     solution.write_text('{"spec": {"language": "triton"}}\n', encoding="utf-8")
-    case_id = _runtime_case_id(definition, solution)
-    assert case_id == "src/tilegym/suites/example::definition::op/cutile/op::triton"
+    record = _workload_record(tmp_path)
+    case_id = _runtime_case_id(record, definition, solution)
+    assert case_id == (
+        "src/tilegym/suites/example::definition::op/cutile/op::line=1::"
+        "uuid=c8ab8964-8624-44f7-bd4f-bd1ace75c959::backend=triton"
+    )
 
 
-def test_two_backend_wrapper_matrix_has_six_unique_runtime_case_ids(tmp_path):
+def test_public_and_wrapper_workloads_plan_four_adjacent_runtime_cases(tmp_path):
     inventory = tmp_path / "src/tilegym/suites/example"
     definitions = [
         inventory / "kernel_definitions/op/op.json",
@@ -608,137 +695,38 @@ def test_two_backend_wrapper_matrix_has_six_unique_runtime_case_ids(tmp_path):
         inventory / "kernel_solutions/op/cutile/op.json",
         inventory / "kernel_solutions/op/triton/op.json",
     ]
+    workload_paths = [
+        inventory / "kernel_workloads/op/op/workload.jsonl",
+        inventory / "kernel_workloads/op/cutile/op/workload.jsonl",
+        inventory / "kernel_workloads/op/triton/op/workload.jsonl",
+    ]
     for path in definitions:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n", encoding="utf-8")
     for backend, path in zip(("cutile", "triton"), solutions, strict=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"spec": {"language": backend}}), encoding="utf-8")
+    for path in workload_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
 
-    ids = {_runtime_case_id(definition, solution) for definition in definitions for solution in solutions}
-    assert len(ids) == 6
-
-
-def test_runtime_uses_boolean_constraints_to_select_a_schema_case():
-    definition = {
-        "name": "constrained_boolean_case",
-        "inputs": {
-            "layout": {"shape": None, "dtype": "bool"},
-            "emit": {"shape": None, "dtype": "bool"},
-        },
-        "constraints": ["layout is True", "emit is True"],
-    }
-    inputs = {"layout": False, "emit": False}
-
-    _satisfy_boolean_constraints(definition, inputs, {})
-
-    assert inputs == {"layout": True, "emit": True}
-
-
-def test_runtime_enumerates_every_unconstrained_boolean_branch():
-    definition = {
-        "inputs": {
-            "layout": {"shape": None, "dtype": "bool"},
-            "emit": {"shape": None, "dtype": "bool"},
-        },
-        "constraints": [],
-    }
-
-    assert _boolean_branch_assignments(definition) == [
-        {"layout": False, "emit": False},
-        {"layout": False, "emit": True},
-        {"layout": True, "emit": False},
-        {"layout": True, "emit": True},
+    records = [
+        WorkloadRecord(path=path, line_number=1, workload=_workload_record(tmp_path).workload)
+        for path in workload_paths
     ]
-
-
-def test_runtime_preserves_optional_boolean_none_during_branch_enumeration():
-    definition = {
-        "name": "optional_boolean_case",
-        "inputs": {
-            "optional": {"shape": None, "dtype": "bool"},
-            "emit": {"shape": None, "dtype": "bool"},
-        },
-        "constraints": [],
-    }
-    inputs = {"optional": None, "emit": False}
-
-    assignments = _boolean_branch_assignments(definition, inputs=inputs)
-    _satisfy_boolean_constraints(definition, inputs, {})
-
-    assert assignments == [{"emit": False}, {"emit": True}]
-    assert inputs == {"optional": None, "emit": False}
-
-
-def test_runtime_constrains_varying_boolean_with_fixed_optional_none():
-    definition = {
-        "name": "optional_boolean_constraint",
-        "inputs": {
-            "optional": {"shape": None, "dtype": "bool"},
-            "emit": {"shape": None, "dtype": "bool"},
-        },
-        "constraints": ["optional is None and emit"],
-    }
-    inputs = {"optional": None, "emit": False}
-
-    assert _boolean_branch_assignments(definition, inputs=inputs) == [{"emit": True}]
-    _satisfy_boolean_constraints(definition, inputs, {})
-    assert inputs == {"optional": None, "emit": True}
-
-
-def test_runtime_accepts_satisfied_constraint_on_sole_optional_none_boolean():
-    definition = {
-        "name": "satisfied_optional_boolean_constraint",
-        "inputs": {"optional": {"shape": None, "dtype": "bool"}},
-        "constraints": ["optional is None"],
-    }
-    assert _boolean_branch_assignments(definition, inputs={"optional": None}) == [{}]
-
-
-def test_runtime_rejects_violated_constraint_on_sole_optional_none_boolean():
-    definition = {
-        "name": "violated_optional_boolean_constraint",
-        "inputs": {"optional": {"shape": None, "dtype": "bool"}},
-        "constraints": ["optional is not None"],
-    }
-    with pytest.raises(pytest.fail.Exception, match="no Boolean input assignment satisfies"):
-        _boolean_branch_assignments(definition, inputs={"optional": None})
-
-
-def test_runtime_enumerates_boolean_branches_allowed_by_constraints():
-    definition = {
-        "name": "constrained_boolean_branches",
-        "inputs": {
-            "layout": {"shape": None, "dtype": "bool"},
-            "emit": {"shape": None, "dtype": "bool"},
-        },
-        "constraints": ["layout is True"],
-    }
-
-    assert _boolean_branch_assignments(definition) == [
-        {"layout": True, "emit": False},
-        {"layout": True, "emit": True},
+    planned = [
+        (record, definition, solution)
+        for record in records
+        for definition, solution in definition_solution_paths_for_workload(record.path)
     ]
+    ids = {_runtime_case_id(*case) for case in planned}
 
-
-def test_runtime_ignores_unrelated_constraints_when_enumerating_booleans():
-    definition = {
-        "name": "unrelated_constraints",
-        "inputs": {
-            "layout": {"shape": None, "dtype": "bool"},
-            "emit": {"shape": None, "dtype": "bool"},
-        },
-        "constraints": [
-            "H % 2 == 0",
-            "layout selects a documented implementation branch",
-        ],
-    }
-
-    assert _boolean_branch_assignments(definition, {"H": 2}) == [
-        {"layout": False, "emit": False},
-        {"layout": False, "emit": True},
-        {"layout": True, "emit": False},
-        {"layout": True, "emit": True},
+    assert len(planned) == len(ids) == 4
+    assert [(definition.parent.name, solution.parent.name) for _, definition, solution in planned] == [
+        ("op", "triton"),
+        ("op", "cutile"),
+        ("cutile", "cutile"),
+        ("triton", "triton"),
     ]
 
 
@@ -979,7 +967,38 @@ def test_runtime_rejects_undeclared_solution_input_mutation(tmp_path):
         )
 
 
-def test_cpu_composed_wrapper_runtime_canary_covers_modules_mutation_and_boolean_branches(tmp_path):
+def test_runtime_return_comparison_uses_explicit_workload_tolerance():
+    torch = pytest.importorskip("torch")
+    actual = torch.tensor([1.01], dtype=torch.float32)
+    expected = torch.tensor([1.0], dtype=torch.float32)
+    output_specs = {"output": {"shape": ["N"], "dtype": "float32"}}
+
+    _assert_return_contract(
+        actual,
+        expected,
+        "output",
+        output_specs,
+        {"N": 1},
+        torch,
+        "loose-row",
+        rtol=0.0,
+        atol=0.02,
+    )
+    with pytest.raises(AssertionError, match="strict-row output output mismatch"):
+        _assert_return_contract(
+            actual,
+            expected,
+            "output",
+            output_specs,
+            {"N": 1},
+            torch,
+            "strict-row",
+            rtol=0.0,
+            atol=0.001,
+        )
+
+
+def test_cpu_composed_wrapper_runtime_canary_executes_each_explicit_boolean_row_once(tmp_path):
     torch = pytest.importorskip("torch")
     leaf_scale = {
         "name": "leaf_scale",
@@ -995,7 +1014,7 @@ def test_cpu_composed_wrapper_runtime_canary_covers_modules_mutation_and_boolean
         "axes": {"N": {"type": "const", "value": 3}},
         "inputs": {
             "input": {"shape": ["N"], "dtype": "float32"},
-            "state": {"shape": ["N"], "dtype": "float32"},
+            "state": {"shape": ["N"], "dtype": "float32", "inplace_output": True},
             "negate": {"shape": None, "dtype": "bool"},
         },
         "outputs": {"output": {"shape": ["N"], "dtype": "float32"}},
@@ -1012,7 +1031,10 @@ def test_cpu_composed_wrapper_runtime_canary_covers_modules_mutation_and_boolean
     for name, definition in (("leaf_scale", leaf_scale), ("leaf_update", leaf_update)):
         (tmp_path / f"{name}.json").write_text(json.dumps(definition), encoding="utf-8")
 
+    executed = []
+
     def solution(input, state, negate):
+        executed.append(negate)
         value = -input if negate else input
         state.add_(1)
         return value + state
@@ -1021,18 +1043,36 @@ def test_cpu_composed_wrapper_runtime_canary_covers_modules_mutation_and_boolean
         reference = _load_reference(wrapper, wrapper_path)
         solution_schema = {"spec": {"entry_point": "synthetic.py::solution"}}
         _assert_matching_entry_signatures(wrapper, reference, solution_schema, solution)
-        for negate in (False, True):
+        records = [
+            _workload_record(
+                tmp_path,
+                inputs={
+                    "input": {"type": "random"},
+                    "state": {"type": "random"},
+                    "negate": {"type": "scalar", "value": negate},
+                },
+            )
+            for negate in (False, True)
+        ]
+        for record in records:
+            torch.manual_seed(2026)
+            axes, inputs = materialize_workload_inputs(
+                record,
+                wrapper,
+                torch=torch,
+                device=torch.device("cpu"),
+            )
             _run_runtime_branch(
                 wrapper,
                 reference,
                 solution_schema,
                 solution,
-                {
-                    "input": torch.arange(3, dtype=torch.float32),
-                    "state": torch.zeros(3, dtype=torch.float32),
-                    "negate": negate,
-                },
-                {"N": 3},
+                inputs,
+                axes,
                 torch,
                 ("state",),
+                tolerance=record.workload.tolerance,
+                case_label=record.source_label,
             )
+
+    assert executed == [False, True]

@@ -23,7 +23,7 @@ constexpr float MLA_INV_LOG_2 = 1.0f / 0.693147180559945309417232121458176568f;
 template<typename T, int B, int NUM_HEADS, int S_KV,
          int TILE_D, int TILE_H, int TILE_N, int TILE_KPE,
          int NUM_KV_SPLITS, int KV_LEN_PER_SPLIT, bool EVEN_N>
-[[ using cutile : hint(1000, occupancy=2) ]]
+[[ using cutile : hint(0, occupancy=2) ]]
 __tile_global__ void naive_absorb_mla_transpose(
     const T* __restrict__ Q_ptr,       // [B, NUM_HEADS, TILE_D]
     const T* __restrict__ QPE_ptr,     // [B, NUM_HEADS, TILE_KPE]
@@ -83,7 +83,7 @@ __tile_global__ void naive_absorb_mla_transpose(
         ct::tensor_span{Q_ptr, ct::extents<uint32_t, B, NUM_HEADS, TILE_D>{}},
         ct::shape<1, TILE_H, TILE_D>{});
     Q_3D_Tile q_loaded;
-    [[ using cutile : hint(1000, latency=2) ]]
+    [[ using cutile : hint(0, latency=2) ]]
     q_loaded = Q_view.template load_masked<zero_pad>(batch_idx, pid_x, 0);
     auto q_3d = ct::permute(q_loaded, ct::dimension_map<0, 2, 1>{});
     auto q = ct::reshape(q_3d, ct::shape<TILE_D, TILE_H>{});
@@ -93,7 +93,7 @@ __tile_global__ void naive_absorb_mla_transpose(
         ct::tensor_span{QPE_ptr, ct::extents<uint32_t, B, NUM_HEADS, TILE_KPE>{}},
         ct::shape<1, TILE_H, TILE_KPE>{});
     QPE_3D_Tile qpe_loaded;
-    [[ using cutile : hint(1000, latency=2) ]]
+    [[ using cutile : hint(0, latency=2) ]]
     qpe_loaded = QPE_view.template load_masked<zero_pad>(batch_idx, pid_x, 0);
     auto qpe_3d = ct::permute(qpe_loaded, ct::dimension_map<0, 2, 1>{});
     auto qpe = ct::reshape(qpe_3d, ct::shape<TILE_KPE, TILE_H>{});
@@ -116,7 +116,7 @@ __tile_global__ void naive_absorb_mla_transpose(
             ct::tensor_span{K_ptr, ct::extents<uint32_t, B, S_KV, TILE_D>{}},
             ct::shape<1, TILE_N, TILE_D>{});
         K_3D_Tile k_loaded;
-        [[ using cutile : hint(1000, latency=2) ]]
+        [[ using cutile : hint(0, latency=2) ]]
         k_loaded = K_view.template load_masked<zero_pad>(batch_idx, cnt, 0);
         auto k = ct::reshape(k_loaded, ct::shape<TILE_N, TILE_D>{});
         auto qk = ct::mma(k, q, ct::zeros<f32_NxH>());
@@ -127,7 +127,7 @@ __tile_global__ void naive_absorb_mla_transpose(
             ct::tensor_span{KPE_ptr, ct::extents<uint32_t, B, S_KV, TILE_KPE>{}},
             ct::shape<1, TILE_N, TILE_KPE>{});
         KPE_3D_Tile kpe_loaded;
-        [[ using cutile : hint(1000, latency=2) ]]
+        [[ using cutile : hint(0, latency=2) ]]
         kpe_loaded = KPE_view.template load_masked<zero_pad>(batch_idx, cnt, 0);
         auto kpe = ct::reshape(kpe_loaded, ct::shape<TILE_N, TILE_KPE>{});
         qk = ct::mma(kpe, qpe, qk);
@@ -164,7 +164,7 @@ __tile_global__ void naive_absorb_mla_transpose(
             ct::tensor_span{V_ptr, ct::extents<uint32_t, B, S_KV, TILE_D>{}},
             ct::shape<1, TILE_N, TILE_D>{});
         V_3D_Tile v_loaded;
-        [[ using cutile : hint(1000, latency=2) ]]
+        [[ using cutile : hint(0, latency=2) ]]
         v_loaded = V_view.template load_masked<zero_pad>(batch_idx, cnt, 0);
         auto v_3d = ct::permute(v_loaded, ct::dimension_map<0, 2, 1>{});
         auto v_t = ct::reshape(v_3d, ct::shape<TILE_D, TILE_N>{});
@@ -189,7 +189,7 @@ __tile_global__ void naive_absorb_mla_transpose(
     auto Out_span = ct::tensor_span{Att_Out_ptr, ct::extents<uint32_t, B, NUM_HEADS, NUM_KV_SPLITS, TILE_D>{}};
     auto Out_view = ct::partition_view(Out_span, ct::shape<1, TILE_H, 1, TILE_D>{});
     auto acc_out_4d = ct::reshape(acc_out_T, ct::shape<1, TILE_H, 1, TILE_D>{});
-    [[ using cutile : hint(1000, latency=2) ]]
+    [[ using cutile : hint(0, latency=2) ]]
     Out_view.store(acc_out_4d, batch_idx, pid_x, tile_idx, 0);
 
     // Store log sum exp for this tile with latency hint
@@ -197,6 +197,6 @@ __tile_global__ void naive_absorb_mla_transpose(
     auto lse_offsets = (batch_idx * NUM_HEADS + idx_head) * NUM_KV_SPLITS + tile_idx;
     auto lse_mask = idx_head < NUM_HEADS;
     auto lse_ptrs = LSE_Out_ptr + lse_offsets;
-    [[ using cutile : hint(1000, latency=2) ]]
+    [[ using cutile : hint(0, latency=2) ]]
     ct::store_masked(lse_ptrs, l_sum, lse_mask);
 }

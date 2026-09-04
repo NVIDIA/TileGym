@@ -29,6 +29,7 @@ __tile__ inline auto zero_tile() {
  *   BLOCK_KPE: Position embedding dimension
  */
 template<typename T, int BLOCK_D, int BLOCK_H, int BLOCK_N, int BLOCK_KPE>
+[[ using cutile : hint(0,num_cta_in_cga=1, occupancy=1) ]]
 __tile_global__ void naive_absorb_mla(
     T* __restrict__ Q, T* __restrict__ QPE,
     T* __restrict__ KV, T* __restrict__ KPE_in,
@@ -179,7 +180,8 @@ __tile_global__ void naive_absorb_mla(
  * Computes: QK = K @ Q^T + KPE @ QPE^T (in transposed [N, H] order)
  * Then transposes back for final output.
  */
-template<typename T, int BLOCK_D, int BLOCK_H, int BLOCK_N, int BLOCK_KPE, int EVEN_STRIDES>
+template<typename T, int BLOCK_D, int BLOCK_H, int BLOCK_N, int BLOCK_KPE,
+         int EVEN_STRIDES, int S_KV, bool EVEN_N>
 __tile_global__ void naive_absorb_mla_transpose(
     T* __restrict__ Q, T* __restrict__ QPE,
     T* __restrict__ KV, T* __restrict__ KPE_in,
@@ -187,7 +189,7 @@ __tile_global__ void naive_absorb_mla_transpose(
     float sm_scale,
     long long stride_qb, int stride_qm, long long stride_qpeb, int stride_qpem,
     long long stride_kvb, int stride_kvn, long long stride_kpeb, int stride_kpem,
-    long long stride_ob, int stride_om, int B, int num_head, int S_kv) {
+    long long stride_ob, int stride_om, int B, int num_head) {
     namespace ct = cuda::tiles;
 
     Q      = ct::assume_aligned<16>(Q);
@@ -199,11 +201,17 @@ __tile_global__ void naive_absorb_mla_transpose(
 
     if constexpr (EVEN_STRIDES) {
         using tma_elems_t = ct::integral_constant<static_cast<int>(16 / sizeof(T))>;
+        stride_qb = ct::assume_divisible(stride_qb, tma_elems_t{});
         stride_qm = ct::assume_divisible(stride_qm, tma_elems_t{});
+        stride_qpeb = ct::assume_divisible(stride_qpeb, tma_elems_t{});
         stride_qpem = ct::assume_divisible(stride_qpem, tma_elems_t{});
+        stride_kvb = ct::assume_divisible(stride_kvb, tma_elems_t{});
         stride_kvn = ct::assume_divisible(stride_kvn, tma_elems_t{});
+        stride_kpeb = ct::assume_divisible(stride_kpeb, tma_elems_t{});
         stride_kpem = ct::assume_divisible(stride_kpem, tma_elems_t{});
+        stride_ob = ct::assume_divisible(stride_ob, tma_elems_t{});
         stride_om = ct::assume_divisible(stride_om, tma_elems_t{});
+        num_head = ct::assume_divisible(num_head, ct::integral_constant<16>{});
     }
 
     // Tile type definitions - use float for accumulation
@@ -230,36 +238,42 @@ __tile_global__ void naive_absorb_mla_transpose(
     float qk_scale = sm_scale * INV_LOG_2;
 
     auto q_view = ct::partition_view{
-        ct::tensor_span{Q + batch_idx * stride_qb,
+        ct::tensor_span{Q,
                         ct::layout_strided_mapping{
-                            ct::extents{ct::integral_constant<BLOCK_D>{}, num_head},
-                            ct::extents{ct::integral_constant<1>{}, stride_qm}}},
-        ct::shape<BLOCK_D, BLOCK_H>{}};
+                            ct::extents{B, ct::integral_constant<BLOCK_D>{}, num_head},
+                            ct::extents{stride_qb, ct::integral_constant<1>{}, stride_qm}}},
+        ct::shape<1, BLOCK_D, BLOCK_H>{}};
     auto qpe_view = ct::partition_view{
-        ct::tensor_span{QPE + batch_idx * stride_qpeb,
+        ct::tensor_span{QPE,
                         ct::layout_strided_mapping{
-                            ct::extents{ct::integral_constant<BLOCK_KPE>{}, num_head},
-                            ct::extents{ct::integral_constant<1>{}, stride_qpem}}},
-        ct::shape<BLOCK_KPE, BLOCK_H>{}};
+                            ct::extents{B, ct::integral_constant<BLOCK_KPE>{}, num_head},
+                            ct::extents{stride_qpeb, ct::integral_constant<1>{}, stride_qpem}}},
+        ct::shape<1, BLOCK_KPE, BLOCK_H>{}};
     auto kv_view = ct::partition_view{
-        ct::tensor_span{KV + batch_idx * stride_kvb,
+        ct::tensor_span{KV,
                         ct::layout_strided_mapping{
-                            ct::extents{S_kv, ct::integral_constant<BLOCK_D>{}},
-                            ct::extents{stride_kvn, ct::integral_constant<1>{}}}},
-        ct::shape<BLOCK_N, BLOCK_D>{}};
+                            ct::extents{B, ct::integral_constant<S_KV>{}, ct::integral_constant<BLOCK_D>{}},
+                            ct::extents{stride_kvb, stride_kvn, ct::integral_constant<1>{}}}},
+        ct::shape<1, BLOCK_N, BLOCK_D>{}};
     auto kpe_view = ct::partition_view{
-        ct::tensor_span{KPE_in + batch_idx * stride_kpeb,
+        ct::tensor_span{KPE_in,
                         ct::layout_strided_mapping{
-                            ct::extents{S_kv, ct::integral_constant<BLOCK_KPE>{}},
-                            ct::extents{stride_kpem, ct::integral_constant<1>{}}}},
-        ct::shape<BLOCK_N, BLOCK_KPE>{}};
+                            ct::extents{B, ct::integral_constant<S_KV>{}, ct::integral_constant<BLOCK_KPE>{}},
+                            ct::extents{stride_kpeb, stride_kpem, ct::integral_constant<1>{}}}},
+        ct::shape<1, BLOCK_N, BLOCK_KPE>{}};
 
     auto offs_h = ct::iota<i32_H>();
     auto offs_n = ct::iota<i32_N>();
 
-    auto q = q_view.load_masked(0, pid_x);
+    typename decltype(q_view)::view_tile_type q_3d;
+    [[ using cutile : hint(0, allow_tma=true) ]]
+    q_3d = q_view.load_masked(batch_idx, 0, pid_x);
+    auto q = ct::reshape(q_3d, ct::shape<BLOCK_D, BLOCK_H>{});
 
-    auto qpe = qpe_view.load_masked(0, pid_x);
+    typename decltype(qpe_view)::view_tile_type qpe_3d;
+    [[ using cutile : hint(0, allow_tma=true) ]]
+    qpe_3d = qpe_view.load_masked(batch_idx, 0, pid_x);
+    auto qpe = ct::reshape(qpe_3d, ct::shape<BLOCK_KPE, BLOCK_H>{});
 
     // Initialize accumulators in transposed layout [BLOCK_D, BLOCK_H]
     auto m_i = ct::full<f32_H>(-1e30f);
@@ -268,13 +282,19 @@ __tile_global__ void naive_absorb_mla_transpose(
 
     // Loop over K/V blocks — use ct::irange to keep `m_i`, `l_i`, `acc`
     // accumulator tiles in shared memory (avoids local-memory spills).
-    int num_kv_blocks = (S_kv + BLOCK_N - 1) / BLOCK_N;
+    constexpr int num_kv_blocks = (S_KV + BLOCK_N - 1) / BLOCK_N;
     for (auto block_idx : ct::irange(0, num_kv_blocks)) {
         int curr_n = block_idx * BLOCK_N;
 
         auto k_row_base = ct::full<i32_N>(curr_n) + offs_n;
-        auto k = kv_view.load_masked(block_idx, 0);  // [BLOCK_N, BLOCK_D]
-        auto kpe_block = kpe_view.load_masked(block_idx, 0);  // [BLOCK_N, BLOCK_KPE]
+        typename decltype(kv_view)::view_tile_type k_3d;
+        [[ using cutile : hint(0, allow_tma=true, latency=2) ]]
+        k_3d = kv_view.load_masked(batch_idx, block_idx, 0);
+        auto k = ct::reshape(k_3d, ct::shape<BLOCK_N, BLOCK_D>{});
+        typename decltype(kpe_view)::view_tile_type kpe_3d;
+        [[ using cutile : hint(0, allow_tma=true, latency=2) ]]
+        kpe_3d = kpe_view.load_masked(batch_idx, block_idx, 0);
+        auto kpe_block = ct::reshape(kpe_3d, ct::shape<BLOCK_N, BLOCK_KPE>{});
 
         // Compute QK = K @ Q^T: [BLOCK_N, BLOCK_D] @ [BLOCK_D, BLOCK_H] = [BLOCK_N, BLOCK_H]
         auto qk = ct::mma(k, q, ct::zeros<f32_NxH>());  // [BLOCK_N, BLOCK_H]
@@ -282,21 +302,23 @@ __tile_global__ void naive_absorb_mla_transpose(
         // Add KPE @ QPE^T: [BLOCK_N, BLOCK_KPE] @ [BLOCK_KPE, BLOCK_H]
         qk = ct::mma(kpe_block, qpe, qk);
 
-        // Apply mask for out-of-bounds positions
-        auto n_valid = ct::reshape(k_row_base < S_kv, ct::shape<BLOCK_N, 1>{});
-        qk = ct::select(n_valid, qk, ct::full<f32_NxH>(-1e6f));
-
-        // Scale by qk_scale
-        qk = qk * qk_scale;
+        if constexpr (!EVEN_N) {
+            constexpr int mask_start = (S_KV / BLOCK_N) * BLOCK_N;
+            if (curr_n >= mask_start) {
+                auto n_valid = ct::reshape(k_row_base < S_KV, ct::shape<BLOCK_N, 1>{});
+                qk = ct::select(n_valid, qk, ct::full<f32_NxH>(-1e6f));
+            }
+        }
 
         // Compute column-wise max (dim 0): [BLOCK_H] - max over N dimension
         auto m_ij_2d = ct::reduce_max(qk, ct::integral_constant<0>{});  // [1, BLOCK_H]
         auto m_ij = ct::reshape(m_ij_2d, ct::shape<BLOCK_H>{});
+        m_ij = m_ij * qk_scale;
         m_ij = ct::max(m_i, m_ij);
 
-        // Compute exp2(qk - m_ij): [BLOCK_N, BLOCK_H]
+        // Compute exp2(qk * qk_scale - m_ij): [BLOCK_N, BLOCK_H]
         auto m_ij_bcast = ct::reshape(m_ij, ct::shape<1, BLOCK_H>{});
-        auto p = ct::exp2(qk - m_ij_bcast);
+        auto p = ct::exp2(qk * qk_scale - m_ij_bcast);
 
         // Update running statistics
         auto alpha = ct::exp2(m_i - m_ij);
@@ -307,7 +329,10 @@ __tile_global__ void naive_absorb_mla_transpose(
         acc = acc * alpha_bcast;
 
         // Load V: [BLOCK_N, BLOCK_D] and transpose to [BLOCK_D, BLOCK_N]
-        auto v = kv_view.load_masked(block_idx, 0);  // [BLOCK_N, BLOCK_D]
+        typename decltype(kv_view)::view_tile_type v_3d;
+        [[ using cutile : hint(0, allow_tma=true, latency=2) ]]
+        v_3d = kv_view.load_masked(batch_idx, block_idx, 0);
+        auto v = ct::reshape(v_3d, ct::shape<BLOCK_N, BLOCK_D>{});
         auto v_trans = ct::transpose(v);  // [BLOCK_D, BLOCK_N]
 
         acc = ct::mma(v_trans, ct::element_cast<T>(p), acc);
@@ -327,16 +352,20 @@ __tile_global__ void naive_absorb_mla_transpose(
 
     // Store output: [BLOCK_H, BLOCK_D]
     auto o_view = ct::partition_view{
-        ct::tensor_span{Out + batch_idx * stride_ob,
+        ct::tensor_span{Out,
                         ct::layout_strided_mapping{
-                            ct::extents{num_head, ct::integral_constant<BLOCK_D>{}},
-                            ct::extents{stride_om, ct::integral_constant<1>{}}}},
-        ct::shape<BLOCK_H, BLOCK_D>{}};
-    o_view.store_masked(output, pid_x, 0);
+                            ct::extents{B, num_head, ct::integral_constant<BLOCK_D>{}},
+                            ct::extents{stride_ob, stride_om, ct::integral_constant<1>{}}}},
+        ct::shape<1, BLOCK_H, BLOCK_D>{}};
+    auto output_3d = ct::reshape(output, ct::shape<1, BLOCK_H, BLOCK_D>{});
+    [[ using cutile : hint(0, allow_tma=true) ]]
+    o_view.store_masked(output_3d, batch_idx, pid_x, 0);
 
     // Store L = m_i + log2(l_sum): [BLOCK_H]
     auto l_view = ct::partition_view{
-        ct::tensor_span{L + batch_idx * num_head, ct::extents{num_head}},
-        ct::shape<BLOCK_H>{}};
-    l_view.store_masked(m_i + ct::log2(l_sum), pid_x);
+        ct::tensor_span{L, ct::extents{B, num_head}},
+        ct::shape<1, BLOCK_H>{}};
+    auto l_result = ct::reshape(m_i + ct::log2(l_sum), ct::shape<1, BLOCK_H>{});
+    [[ using cutile : hint(0, allow_tma=true) ]]
+    l_view.store_masked(l_result, batch_idx, pid_x);
 }
