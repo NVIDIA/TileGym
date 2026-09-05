@@ -62,9 +62,12 @@ echo ""
 echo "🦀 Formatting Rust (.rs) files..."
 # rustfmt is optional: most contributors are Python-only and have no Rust
 # toolchain. Skip (with a hint) when it is absent instead of force-installing.
+# Probe with --version rather than `command -v`: rustup puts a rustfmt shim on
+# PATH even when the component is not installed for the active toolchain, and
+# the shim only errors out once actually invoked.
 # Run rustfmt per-file rather than `cargo fmt` so standalone .rs (cutile-rs
 # skill examples, per-op kernel.rs/ffi.rs) are covered, not just crate members.
-if command -v rustfmt >/dev/null 2>&1; then
+if rustfmt --version >/dev/null 2>&1; then
     rs_files=$(git ls-files '*.rs')
     if [ -n "$rs_files" ]; then
         echo "$rs_files" | xargs rustfmt --edition 2024
@@ -73,7 +76,7 @@ if command -v rustfmt >/dev/null 2>&1; then
         echo "No tracked .rs files; skipping rustfmt."
     fi
 else
-    echo "⚠️  rustfmt not found — skipping .rs formatting."
+    echo "⚠️  rustfmt not available — skipping .rs formatting."
     echo "    Install with: rustup component add rustfmt   (see https://rustup.rs)"
 fi
 
