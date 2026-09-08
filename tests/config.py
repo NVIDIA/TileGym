@@ -164,6 +164,20 @@ class Config(metaclass=CacheMeta):
             help=("set MIN_REP to specify the minimum number of measured iterations for performance tests"),
         )
         parser.add_argument(
+            "--max-rep",
+            envvar="MAX_REP",
+            action=FromEnvironment,
+            default=1000,
+            type=int,
+            help=(
+                "set MAX_REP to specify the maximum number of measured iterations for "
+                "performance tests. REP is a time budget, so a kernel far below the "
+                "~50us launch-bound threshold would otherwise inflate the loop into tens "
+                "of thousands of profiled launches without adding signal. Set to 0 to "
+                "disable the cap"
+            ),
+        )
+        parser.add_argument(
             "--initial-rep",
             envvar="INITIAL_REP",
             action=FromEnvironment,
