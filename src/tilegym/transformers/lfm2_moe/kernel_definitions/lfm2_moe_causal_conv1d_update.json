@@ -28,7 +28,8 @@
         "B",
         "D",
         "K"
-      ]
+      ],
+      "inplace_output": true
     },
     "weight": {
       "dtype": "bfloat16",
