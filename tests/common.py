@@ -1153,6 +1153,25 @@ def _extract_kernel_times_from_profile(fn):
         return None, []
 
 
+def _iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep):
+    """Turn the millisecond budgets into iteration counts, bounded at both ends.
+
+    ``warmup``/``rep`` are time budgets, so the iteration count scales with
+    ``1 / estimate_ms``. A kernel well below the ~50us launch-bound threshold
+    would otherwise inflate the loop into tens of thousands of profiled
+    launches, which costs wall-clock without adding signal -- the extra samples
+    only measure launch overhead. ``max_rep`` caps that; ``max_rep <= 0``
+    restores the uncapped behaviour. The warmup cap keeps the original
+    ``warmup / rep`` ratio.
+    """
+    n_warmup = max(1, int(warmup / estimate_ms))
+    n_repeat = max(min_rep, int(rep / estimate_ms))
+    if max_rep and max_rep > 0:
+        n_repeat = min(n_repeat, max_rep)
+        n_warmup = min(n_warmup, max(1, int(max_rep * warmup / rep)))
+    return n_warmup, n_repeat
+
+
 # Adapted from https://github.com/openai/triton
 def benchmark_fn_cudagraph(
     fn,
@@ -1162,6 +1181,7 @@ def benchmark_fn_cudagraph(
     initial_rep=Config.initial_rep,
     grad_to_none=None,
     fast_flush=True,
+    max_rep=Config.max_rep,
 ):
     n_retries = 10
     rep = rep / n_retries
@@ -1190,7 +1210,9 @@ def benchmark_fn_cudagraph(
     end_event.record()
     torch.cuda.synchronize()
     estimate_ms = start_event.elapsed_time(end_event)
-    n_repeat = max(min_rep, int(rep / estimate_ms))
+    # The cap also bounds graph construction: `n_repeat` calls are unrolled into
+    # the graph below, so an uncapped count on a tiny kernel is paid twice.
+    _, n_repeat = _iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep)
     # step 2 - construct a cuda graph with `n_repeat` unrolled function calls to minimize
     # host overhead
     g = torch.cuda.CUDAGraph()
@@ -1241,6 +1263,7 @@ def benchmark_fn(
     grad_to_none=None,
     fast_flush=True,
     setup_fn=None,
+    max_rep=Config.max_rep,
 ):
     # setup_fn: optional callable run before each fn() call but outside the
     # CUDA timing events, so only fn() is measured. Used to recreate a fresh
@@ -1261,8 +1284,7 @@ def benchmark_fn(
     torch.cuda.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / initial_rep
     # compute number of warmup and repeat
-    n_warmup = max(1, int(warmup / estimate_ms))
-    n_repeat = max(min_rep, int(rep / estimate_ms))
+    n_warmup, n_repeat = _iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep)
     # We maintain a buffer of 256 MB that we clear
     # before each kernel call to make sure that the L2
     # doesn't contain any input data before the run
@@ -1373,6 +1395,7 @@ def benchmark_fn_cupti(
     grad_to_none=None,
     fast_flush=True,
     kernel_filter=None,
+    max_rep=Config.max_rep,
 ):
     """
     Benchmark a function using CUPTI via ``torch.profiler``.
@@ -1390,6 +1413,9 @@ def benchmark_fn_cupti(
         warmup: duration of warmup phase in milliseconds
         rep: duration of measurement phase in milliseconds
         min_rep: minimum number of measurement iterations
+        max_rep: maximum number of measurement iterations, so that a kernel far
+            below the launch-bound threshold does not turn the ``rep`` time
+            budget into tens of thousands of profiled launches; 0 disables
         initial_rep: initial iterations to estimate runtime
         grad_to_none: tensors whose ``.grad`` is set to None before each run
         fast_flush: if True, flush L2 cache before each measurement
@@ -1427,8 +1453,7 @@ def benchmark_fn_cupti(
     torch.cuda.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / initial_rep
 
-    n_warmup = max(1, int(warmup / estimate_ms))
-    n_repeat = max(min_rep, int(rep / estimate_ms))
+    n_warmup, n_repeat = _iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep)
 
     # Step 2: warmup
     for _ in range(n_warmup):
