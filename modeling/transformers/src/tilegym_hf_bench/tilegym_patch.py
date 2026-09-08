@@ -5,6 +5,7 @@
 from tilegym.transformers import apply_tilegym_kernel_to_deepseek_v2
 from tilegym.transformers import apply_tilegym_kernel_to_gemma3
 from tilegym.transformers import apply_tilegym_kernel_to_gpt_oss
+from tilegym.transformers import apply_tilegym_kernel_to_lfm2_moe
 from tilegym.transformers import apply_tilegym_kernel_to_llama
 from tilegym.transformers import apply_tilegym_kernel_to_mistral
 from tilegym.transformers import apply_tilegym_kernel_to_olmo3
@@ -42,5 +43,9 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         apply_tilegym_kernel_to_olmoe(rope=True, rms_norm=True, attn=use_attn, moe=True, use_cutile=use_cutile)
     elif "olmo-3" in model_name or "olmo3" in model_name:
         apply_tilegym_kernel_to_olmo3(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
+    elif "lfm2" in model_name and ("moe" in model_name or "a1b" in model_name):
+        # LFM2-MoE checkpoints (e.g. LiquidAI/LFM2-8B-A1B). The dense LFM2 family is
+        # not supported, so only match the MoE variants (…moe / …A1B).
+        apply_tilegym_kernel_to_lfm2_moe(rope=True, rms_norm=True, attn=use_attn, moe=True, use_cutile=use_cutile)
     else:
         print(f"Warning: Model {model_id} is not supported in tilegym patch. No optimizations will be applied.")
