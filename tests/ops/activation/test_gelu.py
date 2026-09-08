@@ -16,6 +16,12 @@ class Test_GeLU(common.PyTestCase):
     def reference(input, approximate):
         return torch.nn.functional.gelu(input, approximate=approximate)
 
+    _tolerances = {
+        torch.float32: dict(rtol=1e-6, atol=1e-6),
+        torch.float16: dict(rtol=2e-3, atol=1e-5),
+        torch.bfloat16: dict(rtol=1.6e-2, atol=1e-4),
+    }
+
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
@@ -28,6 +34,8 @@ class Test_GeLU(common.PyTestCase):
             (256, 2048, "tanh", torch.float32),
             (256, 2048, "none", torch.float16),
             (256, 2048, "tanh", torch.float16),
+            (256, 2048, "none", torch.bfloat16),
+            (256, 2048, "tanh", torch.bfloat16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
@@ -41,12 +49,12 @@ class Test_GeLU(common.PyTestCase):
 
         x_shape = (m, n)
 
-        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
+        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(12.0).add_(-6.0)
 
         self.assertCorrectness(
             tilegym.ops.activation.gelu,
             self.reference,
             {"input": x, "approximate": approximate},
-            rtol=0.0,
-            atol=1e-2,
+            rtol=self._tolerances[dtype]["rtol"],
+            atol=self._tolerances[dtype]["atol"],
         )

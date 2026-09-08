@@ -14,45 +14,26 @@ GELU_EXACT = 0
 GELU_TANH = 1
 
 
-def _sigmoid_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
-    # sigmoid(x) = 1 / (1 + exp(-x))
-    one = ct.ones((BLOCK_SIZE,), dtype=x_val.dtype)
-    neg_x = -x_val
-    exp_neg_x = ct.exp(neg_x)
-    denom = one + exp_neg_x
-    return one / denom
+def _erf_ct(x_val):
+    # erf from Abramowitz & Stegun 7.1.26 (|abs error| <= 1.5e-7)
+    p = 0.3275911
+    a1 = 0.254829592
+    a2 = -0.284496736
+    a3 = 1.421413741
+    a4 = -1.453152027
+    a5 = 1.061405429
 
-
-def _tanh_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
-    # tanh(x) = 2 * sigmoid(2*x) - 1
-    two = ct.full((BLOCK_SIZE,), 2.0, dtype=x_val.dtype)
-    one = ct.ones((BLOCK_SIZE,), dtype=x_val.dtype)
-    two_x = two * x_val
-    sigmoid_2x = _sigmoid_ct(two_x, BLOCK_SIZE)
-    two_sigmoid = two * sigmoid_2x
-    return two_sigmoid - one
+    ax = ct.abs(x_val)
+    t = 1.0 / (1.0 + p * ax)
+    poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t
+    r = 1.0 - poly * ct.exp(-ax * ax)
+    return ct.where(x_val < 0.0, -r, r)
 
 
 def standard_normal_cdf_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     # cdf = 0.5 * (1 + erf(x / sqrt(2)))
-    # Using tanh approximation for erf: erf(x) ≈ tanh(sqrt(2/π) * (x + 0.044715 * x^3))
-    sqrt_2_div_pi = 0.7978845608028654
-    coeff_044715 = 0.044715
-    half = ct.full((BLOCK_SIZE,), 0.5, dtype=x_val.dtype)
-    one = ct.ones((BLOCK_SIZE,), dtype=x_val.dtype)
-    sqrt_2_div_pi_tensor = ct.full((BLOCK_SIZE,), sqrt_2_div_pi, dtype=x_val.dtype)
-    coeff_tensor = ct.full((BLOCK_SIZE,), coeff_044715, dtype=x_val.dtype)
-
-    # Compute erf approximation
-    x_cubed = x_val * x_val * x_val
-    coeff_x_cubed = coeff_tensor * x_cubed
-    inner_sum = x_val + coeff_x_cubed
-    scaled_inner = sqrt_2_div_pi_tensor * inner_sum
-    erf_approx = _tanh_ct(scaled_inner, BLOCK_SIZE)
-
-    # Compute CDF
-    one_plus_erf = one + erf_approx
-    return half * one_plus_erf
+    inverse_sqrt_2 = 0.7071067811865476
+    return 0.5 * (1.0 + _erf_ct(x_val * inverse_sqrt_2))
 
 
 def standard_normal_pdf_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
@@ -112,15 +93,17 @@ def _gelu_kernel(
 
     # Load input data with padding_value to handle out-of-bounds reads safely
     x_tile = ct.gather(x, offsets, padding_value=0)
+    # Cast to fp32 to match C++ backend
+    x_f32 = ct.astype(x_tile, ct.float32)
 
     # Compute GELU based on approximation mode
     if APPROXIMATE == GELU_TANH:
-        gelu_output = gelu_tanh_forward_ct(x_tile, BLOCK_SIZE)
+        gelu_output = gelu_tanh_forward_ct(x_f32, BLOCK_SIZE)
     else:  # GELU_EXACT
-        gelu_output = gelu_forward_ct(x_tile, BLOCK_SIZE)
+        gelu_output = gelu_forward_ct(x_f32, BLOCK_SIZE)
 
     # Store result with check_bounds to prevent out-of-bounds writes
-    ct.scatter(y, offsets, gelu_output, check_bounds=True)
+    ct.scatter(y, offsets, ct.astype(gelu_output, x_tile.dtype), check_bounds=True)
 
 
 # Wrapper class for autograd integration
