@@ -751,6 +751,72 @@ def gemma_attention_decode(
     raise NotImplementedError(f"gemma_attention_decode is not implemented for {get_current_backend()}")
 
 
+@dispatch(
+    "moe_actgrad_bwd",
+)
+def moe_actgrad_bwd(
+    dout: torch.Tensor,
+    h: torch.Tensor,
+    w2: torch.Tensor,
+    dh: torch.Tensor,
+    ds: torch.Tensor,
+    b2: Optional[torch.Tensor],
+    db2: Optional[torch.Tensor],
+    a_prime: torch.Tensor,
+    topk_scores: torch.Tensor,
+    expert_frequency_offset: torch.Tensor,
+    x_gather_idx: torch.Tensor,
+    s_scatter_idx: torch.Tensor,
+    activation_type: str,
+    max_tokens_per_expert: Optional[int] = None,
+) -> None:
+    """
+    MoE Down-Projection Activation-Gradient Backward.
+
+    Tensor layout conventions:
+      * ``w2`` is ``[E, I, H]`` (expert-major).
+      * GLU ``h``/``dh`` use split layout ``[gate | up]`` (gate cols ``[0, I)``,
+        up cols ``[I, 2I)``), not interleaved.
+
+    Computes:
+      1. Grouped GEMM:               dy1   = dout[x_gather_idx] @ w2^T
+      2. Activation backward:        dh    = act_backward(h, dy1) * s
+      3. Weighted activation output: a_prime = act_forward(h) * s
+      4. Routing-score gradient:     ds    = sum(dy1 * act_forward(h), dim=N)
+
+    Supported activations: SwiGLU, GeGLU, ReGLU, SiLU, ReLU, GELU, ReLU^2.
+
+    Args:
+        dout:                    [T,  H]   upstream gradient, original token order.
+        h:                       [TK, N]   pre-activation values, grouped token order.
+                                           GLU split format: gate [0..I-1], up [I..2I-1].
+        w2:                      [E, I, H] down-projection weights.
+        dh:                      [TK, N]   OUT: gradient w.r.t. h. Caller pre-allocates,
+                                           the kernel writes into it.
+        ds:                      [TK]      OUT: routing-score gradient (FP32). MUST be
+                                           pre-zeroed; the kernel accumulates atomically.
+        b2:                      Unused — accepted for reference-signature compatibility.
+        db2:                     Unused — accepted for reference-signature compatibility.
+        a_prime:                 [TK, I]   OUT: score-weighted activation output. Caller
+                                           pre-allocates.
+        topk_scores:             [T*K]     flat routing scores indexed via s_scatter_idx.
+        expert_frequency_offset: [E+1]     exclusive prefix-sum of per-expert token counts.
+        x_gather_idx:            [TK]      grouped position -> original token index in dout.
+        s_scatter_idx:           [TK]      grouped position -> index into topk_scores.
+        activation_type:         str       One of "swiglu", "geglu", "reglu", "silu",
+                                           "relu", "gelu", "relu_sq".
+        max_tokens_per_expert:   Optional[int]  Maximum tokens assigned to any single
+                                           expert, used to size the kernel grid
+                                           M-dimension. If None, computed internally via
+                                           .item() which forces a GPU→CPU sync. Pass
+                                           when known to avoid the sync (~5-15% perf
+                                           hit on small shapes). Must be >= the true
+                                           max; overestimates safely early-exit
+                                           out-of-range blocks.
+    """
+    raise NotImplementedError(f"moe_actgrad_bwd is not implemented for {get_current_backend()}")
+
+
 # ============================================================================
 # Linear Algebra Operations
 # ============================================================================
