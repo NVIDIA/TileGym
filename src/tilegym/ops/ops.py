@@ -852,6 +852,49 @@ def matmul(
 
 
 @dispatch(
+    "w8a8_block_fp8_matmul",
+)
+def w8a8_block_fp8_matmul(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: Optional[List[int]] = None,
+    output_dtype: Optional[torch.dtype] = None,
+    use_tma: Optional[bool] = True,
+    **kwargs: Any,
+):
+    """
+    FP8 block-wise matrix multiplication with quantization scales
+
+    Performs matrix multiplication with block-wise quantization using FP8 precision.
+    Takes two input tensors A and B with their corresponding quantization scales As and Bs.
+
+    Args:
+        A: Input tensor A (FP8 format, e.g., activation)
+        B: Input tensor B (FP8 format, e.g., weight)
+        As: Per-token-group quantization scale for A
+        Bs: Per-block quantization scale for B
+        block_size: Block size for per-block quantization [block_n, block_k] (None uses backend default)
+        output_dtype: Output data type (None uses backend default)
+        use_tma: Whether to use TMA (default: True)
+        **kwargs: Additional arguments, including kernel_configs if needed with keys:
+            - BLOCK_SIZE_M: Tile size for M dimension
+            - BLOCK_SIZE_N: Tile size for N dimension
+            - BLOCK_SIZE_K: Tile size for K dimension
+            - GROUP_SIZE_M: Group size for M dimension
+            - num_ctas: Number of CTAs per cluster
+            - occupancy: Target occupancy
+            - swap_ab: Whether to swap the A and B operands
+            - use_tma: Whether to use TMA descriptors
+
+    Returns:
+        torch.Tensor: Matrix multiplication result in specified output dtype
+    """
+    raise NotImplementedError(f"w8a8_block_fp8_matmul is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
     "group_gemm",
 )
 def group_gemm(

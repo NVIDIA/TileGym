@@ -20,6 +20,7 @@ if is_backend_available("cutile"):
     from . import bmm
     from . import dropout
     from . import flash_decode
+    from . import fp8_quantization_matmul
     from . import gemma_attention
     from . import gemma_attention_decode
     from . import group_gemm
@@ -56,6 +57,7 @@ if is_backend_available("cutile"):
     from .experimental.sparse_mla import tile_sparse_mla
     from .experimental.swa_attention import tile_swa_attention
     from .flash_decode import fmha_decode
+    from .fp8_quantization_matmul import w8a8_block_fp8_matmul
     from .moe import invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .recurrent_gated_delta_rule import recurrent_gated_delta_rule
@@ -109,6 +111,7 @@ if is_backend_available("cutile"):
         "group_gemm",
         "mhc",
         "linear_gluact_linear",
+        "w8a8_block_fp8_matmul",
         "chunk_gated_delta_rule",
         "recurrent_gated_delta_rule",
         "sparse_mla",
