@@ -151,7 +151,10 @@ def _fmha_variant_kernel_bnsd(
     # Compute loop bounds with window attention support
     if WINDOW_SIZE > 0:
         kv_start = max(0, (prefix_kvlen + start_m - WINDOW_SIZE) // TILE_N * TILE_N)
-        kv_end = min(kv_len_val, prefix_kvlen + (bid_x + 1) * TILE_M + WINDOW_SIZE)
+        kv_end = prefix_kvlen + (bid_x + 1) * TILE_M
+        if not CAUSAL:
+            kv_end = kv_end + WINDOW_SIZE
+        kv_end = min(kv_len_val, kv_end)
     elif CAUSAL:
         # Causal: KV positions past this query tile's last causal key are fully
         # masked, so the loop is bounded at the diagonal rather than all of S_kv.
@@ -340,7 +343,10 @@ def _fmha_variant_kernel_nsbd(
 
     if WINDOW_SIZE > 0:
         kv_start = max(0, (prefix_kvlen + start_m - WINDOW_SIZE) // TILE_N * TILE_N)
-        kv_end = min(kv_len_val, prefix_kvlen + (bid_x + 1) * TILE_M + WINDOW_SIZE)
+        kv_end = prefix_kvlen + (bid_x + 1) * TILE_M
+        if not CAUSAL:
+            kv_end = kv_end + WINDOW_SIZE
+        kv_end = min(kv_len_val, kv_end)
     elif CAUSAL:
         # Causal: KV positions past this query tile's last causal key are fully
         # masked, so the loop is bounded at the diagonal rather than all of S_kv.
