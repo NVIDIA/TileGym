@@ -2,6 +2,48 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import Any
+from typing import Optional
+
+import torch
+
+# --- cuTile kernel caching utilities (local to autotune module) ---
+_CUTILE_KERNEL_CACHE: dict = {}
+
+
+def _get_device_capability(device: Optional[torch.device]) -> tuple:
+    if device is None:
+        device = torch.device("cuda")
+    return torch.cuda.get_device_capability(device)
+
+
+def get_cached_ct_kernel(
+    pyfunc: Any,
+    *,
+    num_ctas: Optional[int] = None,
+    occupancy: Optional[int] = None,
+    device: Optional[torch.device] = None,
+):
+    # Lazy import cuda.tile
+    import cuda.tile as ct
+
+    capability = _get_device_capability(device)
+    key = (id(pyfunc), num_ctas, occupancy, capability)
+    kernel = _CUTILE_KERNEL_CACHE.get(key)
+    if kernel is not None:
+        return kernel
+
+    kernel_kwargs = {}
+    if num_ctas is not None:
+        kernel_kwargs["num_ctas"] = num_ctas
+    if occupancy is not None:
+        kernel_kwargs["occupancy"] = occupancy
+
+    kernel = ct.kernel(**kernel_kwargs)(pyfunc)
+    _CUTILE_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
 DISABLE_AUTOTUNE_ENV = "TILEGYM_DISABLE_AUTOTUNE"
 _DISABLE_AUTOTUNE_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DISABLE_AUTOTUNE_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
