@@ -38,6 +38,7 @@ if is_backend_available("cutile"):
     from . import softmax
     from . import splitk_reduce
     from . import swiglu
+    from . import transpose
 
     # Import specific functions for direct access
     from .attention_sink import attention_sink
@@ -104,6 +105,7 @@ if is_backend_available("cutile"):
         # Linalg operations
         "bmm",
         "matmul",
+        "transpose",
         "group_gemm",
         "mhc",
         "linear_gluact_linear",
