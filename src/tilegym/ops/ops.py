@@ -1008,6 +1008,27 @@ def bmm(
 
 
 @dispatch(
+    "transpose",
+)
+def transpose(
+    inp: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    static_persistent: Optional[bool] = None,
+    **kwargs: Any,
+):
+    """
+    Transpose operation that automatically selects implementation based on current backend
+
+    Args:
+        inp: Input tensor
+        out: Optional output tensor
+        static_persistent: Whether to use static persistent mode
+        **kwargs: Additional arguments for backend-specific configurations
+    """
+    raise NotImplementedError(f"Transpose is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
     "linear_gluact_linear",
 )
 def linear_gluact_linear(
