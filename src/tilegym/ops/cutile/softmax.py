@@ -20,11 +20,10 @@ from .utils import next_power_of_2
 ConstInt = ct.Constant[int]
 
 _DEFAULT_TMA_OCCUPANCY = 2
-# Occupancy is tuned at first use per (device, dtype, shape) because the optimum
-# depends on the installed compiler and GPU. Each candidate costs one kernel
-# compile, so the grid is kept small.
-_TMA_OCCUPANCY_CANDIDATES = (2, 4, 6, 8)
-_softmax_tma_tune_cache: dict = {}
+_TMA_FWD_OCCUPANCY_CANDIDATES = (2, 4, 6, 8)
+# None keeps the compiler default; worker warps above 8 can hang the gather kernels.
+_GATHER_WORKER_WARP_CANDIDATES = (None, 4, 8)
+_softmax_tune_cache: dict = {}
 
 
 @ct.kernel(occupancy=4)
@@ -186,33 +185,14 @@ def _softmax_kernel_chunked(
 
 
 # Launch patterns for the kernels:
-def _softmax_tma_occupancy(input, output, n_rows, n_cols, tile_size, num_sms):
-    """Return the occupancy for the regular-TMA kernel, tuning once per shape."""
-    if is_autotune_disabled():
-        return _DEFAULT_TMA_OCCUPANCY
-
-    cache_key = (str(input.device), input.dtype, n_rows, n_cols)
-    if cache_key not in _softmax_tma_tune_cache:
-
-        def args_fn(cfg):
-            return (output, input, n_rows, n_cols, tile_size)
-
-        def grid_fn(cfg):
-            return (min(num_sms * cfg.occupancy, n_rows), 1, 1)
-
-        def hints_fn(cfg):
-            return {"occupancy": cfg.occupancy}
-
-        result = exhaustive_search(
-            [SimpleNamespace(occupancy=occupancy) for occupancy in _TMA_OCCUPANCY_CANDIDATES],
-            torch.cuda.current_stream(),
-            grid_fn,
-            _softmax_kernel_tma,
-            args_fn,
-            hints_fn,
-        )
-        _softmax_tma_tune_cache[cache_key] = result.best.config.occupancy
-    return _softmax_tma_tune_cache[cache_key]
+def _cfg_hints(cfg):
+    """Map a tuning-config namespace to a cuTile launch-hint dict."""
+    hints = {}
+    if getattr(cfg, "occupancy", None) is not None:
+        hints["occupancy"] = cfg.occupancy
+    if getattr(cfg, "num_worker_warps", None) is not None:
+        hints["num_worker_warps"] = cfg.num_worker_warps
+    return hints
 
 
 def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
@@ -234,19 +214,28 @@ def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
     num_programs = min(NUM_SM * 4, n_rows)
     grid = (num_programs, 1, 1)
+    args = (output, input, n_rows, TILE_SIZE, original_n_cols)
 
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        _softmax_kernel,
-        (
-            output,
-            input,
-            n_rows,
-            TILE_SIZE,
-            original_n_cols,
-        ),
-    )
+    candidates = [SimpleNamespace(num_worker_warps=w) for w in _GATHER_WORKER_WARP_CANDIDATES]
+    if is_autotune_disabled():
+        cfg = candidates[0]
+    else:
+        cache_key = ("gather_fwd", str(input.device), input.dtype, n_rows, original_n_cols)
+        cfg = _softmax_tune_cache.get(cache_key)
+        if cfg is None:
+            result = exhaustive_search(
+                candidates,
+                torch.cuda.current_stream(),
+                lambda _: grid,
+                _softmax_kernel,
+                lambda _: args,
+                _cfg_hints,
+            )
+            cfg = _softmax_tune_cache[cache_key] = result.best.config
+    hints = _cfg_hints(cfg)
+    softmax_kernel_forward = cached_replace_hints(_softmax_kernel, **hints) if hints else _softmax_kernel
+
+    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args)
 
 
 def _launch_softmax_kernel_multi_wave_full_row_reg_cached_ldg(input, output, TILE_SIZE):
@@ -288,30 +277,33 @@ def _launch_softmax_kernel_tma(
     original_n_cols = n_cols
 
     # Regular TMA path (single tile per row, persistent scheduling)
-    softmax_kernel_forward = _softmax_kernel_tma
-
     # Ensure tensors are contiguous
     input = input.contiguous()
     output = output.contiguous()
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
-    occupancy = _softmax_tma_occupancy(input, output, n_rows, original_n_cols, TILE_SIZE, NUM_SM)
+    args = (output, input, n_rows, original_n_cols, TILE_SIZE)
+    candidates = [SimpleNamespace(occupancy=o) for o in _TMA_FWD_OCCUPANCY_CANDIDATES]
+    if is_autotune_disabled():
+        cfg = candidates[0]
+    else:
+        cache_key = ("tma_fwd", str(input.device), input.dtype, n_rows, original_n_cols)
+        cfg = _softmax_tune_cache.get(cache_key)
+        if cfg is None:
+            result = exhaustive_search(
+                candidates,
+                torch.cuda.current_stream(),
+                lambda candidate: (min(NUM_SM * candidate.occupancy, n_rows), 1, 1),
+                _softmax_kernel_tma,
+                lambda _: args,
+                _cfg_hints,
+            )
+            cfg = _softmax_tune_cache[cache_key] = result.best.config
+    occupancy = cfg.occupancy
     softmax_kernel_forward = cached_replace_hints(_softmax_kernel_tma, occupancy=occupancy)
-    num_programs = min(NUM_SM * occupancy, n_rows)
-    grid = (num_programs, 1, 1)
+    grid = (min(NUM_SM * occupancy, n_rows), 1, 1)
 
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        softmax_kernel_forward,
-        (
-            output,
-            input,
-            n_rows,
-            original_n_cols,
-            TILE_SIZE,
-        ),
-    )
+    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args)
 
 
 def _launch_softmax_kernel_chunked(
