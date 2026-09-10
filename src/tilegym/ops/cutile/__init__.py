@@ -24,6 +24,7 @@ if is_backend_available("cutile"):
     from . import gemma_attention
     from . import gemma_attention_decode
     from . import group_gemm
+    from . import layer_norm
     from . import layer_norm_legacy
     from . import linear_gluact_linear
     from . import matmul
@@ -98,6 +99,7 @@ if is_backend_available("cutile"):
         "dropout",
         "softmax",
         "mla_decoding_split_kv",
+        "layer_norm",
         "moe",
         "moe_actgrad_bwd",
         "moe_align_block",
