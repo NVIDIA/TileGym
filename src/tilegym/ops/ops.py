@@ -355,6 +355,40 @@ def fmha_variant(
 
 
 @dispatch(
+    "layer_norm",
+)
+def layer_norm(
+    x: torch.Tensor,
+    start_dim: int,
+    end_dim: int,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    weight_shift: float = 0.0,
+    **kwargs: Any,
+):
+    """
+    Layer Normalization. Normalization is performed starting from `start_dim`
+    and ending with `end_dim` (non inclusive).
+
+    Args:
+        x: Tensor of shape (*, C1, ..., Ck, *)
+            where C1 is at start_dim and Ck is at end_dim-1
+        start_dim: Starting dimension of the normalized axes
+        end_dim: Ending dimension of the normalized axes (non inclusive).
+        weight: Tensor of shape (C1, ..., Ck)
+        bias: Tensor of shape (C1, ..., Ck)
+        eps: Numerical stability epsilon
+        weight_shift: Float value to be added to the weight
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Normalized tensor with same shape as `x`
+    """
+    raise NotImplementedError(f"layer_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "fmha",
 )
 def fmha(
