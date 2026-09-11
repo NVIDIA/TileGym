@@ -95,6 +95,7 @@ class TileGymBuildSpec(BaseModel):
     destination_passing_style: bool = True
     binding: str | None = None
     target_triton_backends: list[Literal["nvt", "oait"]] | None = Field(default=None, min_length=1)
+    requires_backend_registration: bool = False
 
     @model_validator(mode="after")
     def _validate_spec(self) -> "TileGymBuildSpec":
@@ -172,6 +173,10 @@ class TileGymSolution(BaseModel):
                 raise ValueError(
                     f"Launch binding target_triton_backends is valid only for language='triton': {scoped_parameters}"
                 )
+        if self.launch is not None and self.spec.requires_backend_registration:
+            raise ValueError(
+                "Solution.spec.requires_backend_registration is valid only for launch-less registered entrances"
+            )
         return self
 
     def to_fib_solution(
@@ -200,6 +205,7 @@ class TileGymSolution(BaseModel):
         fib_data = self.model_dump(mode="json", exclude_none=True, exclude={"launch"})
         fib_data["spec"]["language"] = self.spec.fib_language()
         fib_data["spec"].pop("target_triton_backends", None)
+        fib_data["spec"].pop("requires_backend_registration", False)
         fib_data["sources"] = sources
         return Solution.model_validate(fib_data)
 

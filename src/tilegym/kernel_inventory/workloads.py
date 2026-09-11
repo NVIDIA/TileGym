@@ -57,6 +57,11 @@ _EXPECTED_TOLERANCE = {
     "max_error_cap": None,
     "allow_negative_inf": False,
 }
+# Argmin/argmax-style integer outputs can flip a small fraction of elements
+# when near-tie distances differ across parallel accumulation orders. Rows
+# may relax only the matched-ratio knob; every other tolerance field stays on
+# the checked-in migration policy.
+_MATCHED_RATIO_POLICY = frozenset({1.0, 0.98})
 
 
 class KernelWorkloadError(ValueError):
@@ -405,9 +410,18 @@ def _validate_checked_in_policy(payload: dict[str, Any], label: str) -> None:
         raise KernelWorkloadError(
             f"{label}: tolerance fields mismatch: missing={missing_tolerance}, unknown={unknown_tolerance}"
         )
-    if tolerance != _EXPECTED_TOLERANCE:
+    matched_ratio = tolerance["required_matched_ratio"]
+    ratio_is_numeric = isinstance(matched_ratio, (int, float)) and not isinstance(matched_ratio, bool)
+    if (
+        {field: value for field, value in tolerance.items() if field != "required_matched_ratio"}
+        != {field: value for field, value in _EXPECTED_TOLERANCE.items() if field != "required_matched_ratio"}
+        or not ratio_is_numeric
+        or matched_ratio not in _MATCHED_RATIO_POLICY
+    ):
         raise KernelWorkloadError(
-            f"{label}: tolerance must equal the checked-in Workload migration policy {_EXPECTED_TOLERANCE}"
+            f"{label}: tolerance must equal the checked-in Workload migration policy {_EXPECTED_TOLERANCE} "
+            f"(only required_matched_ratio may relax to one of {sorted(_MATCHED_RATIO_POLICY)}; "
+            "booleans and non-numeric values are rejected even though True == 1.0 in Python)"
         )
     if payload["eval_mode"] != "full":
         raise KernelWorkloadError(f"{label}: eval_mode must be 'full'")

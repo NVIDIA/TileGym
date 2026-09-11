@@ -363,6 +363,100 @@ def test_solution_accepts_triton_compiler_targets_and_strips_them_from_fib(tmp_p
     assert not hasattr(fib_solution.spec, "target_triton_backends")
 
 
+def _suite_registration_solution(tmp_path):
+    """A flag-bearing Solution whose entry module lives inside a probe suite."""
+    source = "src/tilegym/suites/probe/impl.py"
+    source_path = tmp_path / source
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("def run(input):\n    return input\n", encoding="utf-8")
+    solution = _solution()
+    solution["spec"]["entry_point"] = f"{source}::run"
+    solution["sources"] = {"path": [source]}
+    solution["spec"]["requires_backend_registration"] = True
+    return solution
+
+
+def test_backend_registration_flag_accepts_suite_wrapper_coordinate_and_strips_it_from_fib(tmp_path):
+    solution = _suite_registration_solution(tmp_path)
+    wrapper_path = tmp_path / "src/tilegym/suites/probe/kernel_solutions/probe_op/triton/probe_op.json"
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+
+    validate_solution(solution, repo_root=tmp_path)
+    validate_solution_entry_point(solution, repo_root=tmp_path, solution_path=wrapper_path)
+    fib_solution = materialize_solution_for_fib(solution, repo_root=tmp_path)
+
+    assert solution["spec"]["requires_backend_registration"] is True
+    assert not hasattr(fib_solution.spec, "requires_backend_registration")
+
+
+def test_backend_registration_flag_requires_solution_path(tmp_path):
+    source_path = tmp_path / "src/tilegym/suites/probe/impl.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def run(input):\n    return input\n", encoding="utf-8")
+    solution = _solution()
+    solution["spec"]["entry_point"] = "src/tilegym/suites/probe/impl.py::run"
+    solution["sources"] = {"path": ["src/tilegym/suites/probe/impl.py"]}
+    solution["spec"]["requires_backend_registration"] = True
+
+    with pytest.raises(KernelInventoryError, match="requires the Solution's own path"):
+        validate_solution_entry_point(solution, repo_root=tmp_path)
+
+
+def test_backend_registration_flag_rejects_non_suite_solution_path(tmp_path):
+    source_path = tmp_path / "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("def run(input, weight, eps):\n    return input\n", encoding="utf-8")
+    solution = _solution()
+    solution["spec"]["requires_backend_registration"] = True
+    legacy_path = (
+        tmp_path / "src/tilegym/transformers/test_model/kernel_solutions/rmsnorm_d128/triton/rmsnorm_d128.json"
+    )
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(KernelInventoryError, match="requires_backend_registration is valid only"):
+        validate_solution_entry_point(solution, repo_root=tmp_path, solution_path=legacy_path)
+
+
+def test_backend_registration_flag_rejects_suite_leaf_coordinate(tmp_path):
+    solution = _suite_registration_solution(tmp_path)
+    leaf_path = tmp_path / "src/tilegym/suites/probe/kernel_solutions/probe_op/triton/leaf_kernel.json"
+    leaf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(KernelInventoryError, match="requires_backend_registration is valid only"):
+        validate_solution_entry_point(solution, repo_root=tmp_path, solution_path=leaf_path)
+
+
+def test_backend_registration_flag_rejects_entry_module_outside_the_suite(tmp_path):
+    suite_source = tmp_path / "src/tilegym/suites/probe/impl.py"
+    suite_source.parent.mkdir(parents=True, exist_ok=True)
+    suite_source.write_text("def run(input):\n    return input\n", encoding="utf-8")
+    outside_source = tmp_path / "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"
+    outside_source.parent.mkdir(parents=True, exist_ok=True)
+    outside_source.write_text("def run(input):\n    return input\n", encoding="utf-8")
+    solution = _solution()
+    solution["spec"]["entry_point"] = "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py::run"
+    solution["sources"] = {"path": ["src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"]}
+    solution["spec"]["requires_backend_registration"] = True
+    wrapper_path = tmp_path / "src/tilegym/suites/probe/kernel_solutions/probe_op/triton/probe_op.json"
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(KernelInventoryError, match="requires_backend_registration is valid only"):
+        validate_solution_entry_point(solution, repo_root=tmp_path, solution_path=wrapper_path)
+
+
+def test_solution_rejects_backend_registration_flag_on_raw_launches():
+    solution = _solution()
+    solution["spec"]["requires_backend_registration"] = True
+    solution["launch"] = {
+        "grid": [1],
+        "arguments": [
+            {"parameter": "out", "kind": "output", "name": "output", "initialize": "empty"},
+        ],
+    }
+    with pytest.raises(KernelInventoryError, match="requires_backend_registration"):
+        validate_solution(solution)
+
+
 def test_make_solution_preserves_triton_compiler_targets_in_tilegym_json(tmp_path):
     source = "src/tilegym/transformers/test_model/kernels/rmsnorm_d128.py"
     source_path = tmp_path / source
@@ -475,7 +569,7 @@ def test_all_current_kernel_solutions_validate():
             f"{path}: Solution.name must be derived from Solution.definition"
         )
         validate_solution(solution, repo_root=REPO_ROOT)
-        validate_solution_entry_point(solution, repo_root=REPO_ROOT)
+        validate_solution_entry_point(solution, repo_root=REPO_ROOT, solution_path=path)
 
 
 def test_kernel_definition_solution_catalog_is_complete():

@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import inspect
+import numbers
 import os
 import sys
 import types
@@ -201,7 +202,7 @@ def _run_definition_solution_workload_runtime(
     solution = load_json(solution_path)
     validate_definition(definition, definition_path)
     validate_solution(solution, repo_root=REPO_ROOT, definition=definition)
-    validate_solution_entry_point(solution, repo_root=REPO_ROOT)
+    validate_solution_entry_point(solution, repo_root=REPO_ROOT, solution_path=solution_path)
     validate_workload_against_definition(workload_record, definition, definition_path)
     if solution.get("launch") is None:
         _assert_matching_entry_signatures_static(definition, solution, definition_path)
@@ -216,32 +217,78 @@ def _run_definition_solution_workload_runtime(
     with installed_reference_modules(definition, definition_path):
         reference_fn = _load_reference(definition, definition_path)
         solution_fn = _load_solution_entry(solution)
+        previous_backend = None
         if solution.get("launch") is None:
             _assert_matching_entry_signatures(definition, reference_fn, solution, solution_fn)
+            if solution.get("spec", {}).get("requires_backend_registration"):
+                from tilegym.backend.selector import get_current_backend
 
-        device = torch.device("cuda")
-        torch.manual_seed(2026)
-        axes, inputs = materialize_workload_inputs(
-            workload_record,
-            definition,
-            torch=torch,
-            device=device,
-        )
-        mutated_inputs = tuple(
-            name for name, spec in definition["inputs"].items() if spec.get("inplace_output") is True
-        )
-        _run_runtime_branch(
-            definition,
-            reference_fn,
-            solution,
-            solution_fn,
-            inputs,
-            axes,
-            torch,
-            mutated_inputs,
-            tolerance=workload_record.workload.tolerance,
-            case_label=workload_record.source_label,
-        )
+                previous_backend = get_current_backend()
+            _prepare_registered_backend_environment(solution, solution_path)
+
+        try:
+            device = torch.device("cuda")
+            torch.manual_seed(2026)
+            axes, inputs = materialize_workload_inputs(
+                workload_record,
+                definition,
+                torch=torch,
+                device=device,
+            )
+            mutated_inputs = tuple(
+                name for name, spec in definition["inputs"].items() if spec.get("inplace_output") is True
+            )
+            _run_runtime_branch(
+                definition,
+                reference_fn,
+                solution,
+                solution_fn,
+                inputs,
+                axes,
+                torch,
+                mutated_inputs,
+                tolerance=workload_record.workload.tolerance,
+                case_label=workload_record.source_label,
+            )
+        finally:
+            if previous_backend is not None:
+                from tilegym.backend.selector import set_backend
+
+                set_backend(previous_backend)
+
+
+def _derive_backend_registration_target(solution_path: Path) -> tuple[str, str]:
+    """Return the registrable backend module for a launch-less registered Solution."""
+    from tilegym.kernel_inventory.layout import inventory_coordinate
+
+    suite_root = next((parent for parent in solution_path.parents if (parent / "kernel_solutions").is_dir()), None)
+    if suite_root is None or suite_root.parent.name != "suites" or suite_root.parent.parent.name != "tilegym":
+        raise ValueError(f"Cannot derive a suite backend module for Solution outside a suite: {solution_path}")
+    backend = inventory_coordinate(solution_path).backend
+    if backend not in {"triton", "cutile"}:
+        raise ValueError(f"Solution backend coordinate has no registrable subpackage: {backend!r}")
+    return f"tilegym.suites.{suite_root.name}.{backend}", backend
+
+
+def _prepare_registered_backend_environment(solution: dict[str, Any], solution_path: str | Path) -> None:
+    """Prepare dispatch routing for entrances that route internal calls through tilegym.backend.
+
+    Some registered entrances (for example iterative host wrappers) call sibling
+    public operations through the TileGym dispatcher instead of calling their
+    backend host functions directly. Loading the entry module alone leaves the
+    backend subpackages unimported and the current backend unselected, so such
+    an entrance would dispatch to the unimplemented public stub. Solutions that
+    declare ``spec.requires_backend_registration`` get the same environment a
+    real user obtains by importing the suite: the adjacent backend subpackage is
+    imported and selected as the current backend.
+    """
+    if not solution.get("spec", {}).get("requires_backend_registration"):
+        return
+    module_name, backend = _derive_backend_registration_target(Path(solution_path))
+    importlib.import_module(module_name)
+    from tilegym.backend.selector import set_backend
+
+    set_backend(backend)
 
 
 def _require_solution_runtime_dependencies(solution: dict[str, Any]) -> None:
@@ -274,6 +321,7 @@ def _run_runtime_branch(
     branch = case_label or _boolean_branch_label(inputs)
     rtol = float(tolerance.max_rtol) if tolerance is not None else 2e-2
     atol = float(tolerance.max_atol) if tolerance is not None else 2e-2
+    matched_ratio = float(tolerance.required_matched_ratio) if tolerance is not None else 1.0
 
     if "runtime:unsupported" in definition.get("tags", []):
         _assert_unsupported_solution_matches_reference(
@@ -285,8 +333,13 @@ def _run_runtime_branch(
         )
         return
 
+    # Give both sides an identical fresh RNG baseline: implementations and
+    # references that consume torch RNG (for example random centroid
+    # initialization) draw identical values on each side.
+    torch.manual_seed(2026)
     reference_result = _call_entry_strictly(reference_fn, reference_inputs, "Definition.reference")
     if solution.get("launch") is None:
+        torch.manual_seed(2026)
         solution_result = _call_entry_strictly(solution_fn, solution_inputs, "Solution entry point")
     else:
         solution_result = _launch_raw_solution(definition, solution, solution_fn, solution_inputs, axes, torch)
@@ -306,16 +359,37 @@ def _run_runtime_branch(
         f"{definition['name']} {branch}",
         rtol=rtol,
         atol=atol,
+        matched_ratio=matched_ratio,
     )
 
     for name in mutated_inputs:
-        torch.testing.assert_close(
-            solution_inputs[name],
-            reference_inputs[name],
-            rtol=rtol,
-            atol=atol,
-            msg=lambda msg: f"{definition['name']} {branch} mutated input {name} mismatch\n{msg}",
-        )
+        # Integer destination-passed mutations share the row's matched-ratio
+        # semantics; floating and bool mutations keep the full assert_close
+        # tolerance (booleans have no partial-credit semantics).
+        mutated_value = solution_inputs[name]
+        if (
+            matched_ratio < 1.0
+            and isinstance(mutated_value, torch.Tensor)
+            and not mutated_value.is_floating_point()
+            and mutated_value.dtype is not torch.bool
+        ):
+            _assert_matched_ratio(
+                mutated_value,
+                reference_inputs[name],
+                torch,
+                f"{definition['name']} {branch} mutated input {name}",
+                rtol=rtol,
+                atol=atol,
+                matched_ratio=matched_ratio,
+            )
+        else:
+            torch.testing.assert_close(
+                mutated_value,
+                reference_inputs[name],
+                rtol=rtol,
+                atol=atol,
+                msg=lambda msg: f"{definition['name']} {branch} mutated input {name} mismatch\n{msg}",
+            )
     for name in sorted(set(definition["inputs"]) - set(mutated_inputs)):
         if not hasattr(inputs[name], "shape"):
             continue
@@ -497,9 +571,37 @@ def _boolean_branch_label(inputs: dict[str, Any]) -> str:
     return f"[{', '.join(values)}]" if values else "[no Boolean inputs]"
 
 
+def _assert_scalar_output_matches_spec(value: Any, spec: dict[str, Any], torch: Any, label: str) -> None:
+    """Check a scalar output (shape None) against its Definition TensorSpec.
+
+    Scalar outputs accept plain Python scalars or 0-d tensors of the declared
+    dtype. Registered entrances commonly return Python scalars (upstream API
+    parity), so no tensor conversion is required on the Solution side.
+    """
+    expected_dtype = resolve_torch_dtype(spec["dtype"], torch)
+    if isinstance(value, torch.Tensor):
+        assert value.dim() == 0, f"{label} scalar output must be 0-dimensional, got shape {tuple(value.shape)}"
+        assert value.dtype == expected_dtype, f"{label} has dtype {value.dtype}; Definition declares {expected_dtype}"
+        return
+    if spec["dtype"] == "bool":
+        assert isinstance(value, bool), f"{label} must be a bool scalar for dtype bool"
+        return
+    if expected_dtype.is_floating_point:
+        assert isinstance(value, numbers.Real) and not isinstance(value, bool), (
+            f"{label} must be a real scalar for dtype {spec['dtype']}, got {type(value).__name__}"
+        )
+        return
+    assert isinstance(value, numbers.Integral) and not isinstance(value, bool), (
+        f"{label} must be an integer scalar for dtype {spec['dtype']}, got {type(value).__name__}"
+    )
+
+
 def _assert_output_matches_spec(value: Any, spec: dict[str, Any], axes: dict[str, int], torch: Any, label: str) -> None:
-    """Check one concrete tensor output against its Definition TensorSpec."""
-    expected_shape = () if spec["shape"] is None else tuple(axes[axis] for axis in spec["shape"])
+    """Check one concrete output value against its Definition TensorSpec."""
+    if spec["shape"] is None:
+        _assert_scalar_output_matches_spec(value, spec, torch, label)
+        return
+    expected_shape = tuple(axes[axis] for axis in spec["shape"])
     assert tuple(value.shape) == expected_shape, (
         f"{label} has shape {tuple(value.shape)}; Definition declares {expected_shape}"
     )
@@ -518,6 +620,7 @@ def _assert_return_contract(
     *,
     rtol: float = 2e-2,
     atol: float = 2e-2,
+    matched_ratio: float = 1.0,
 ) -> None:
     """Recursively compare values using the executed reference return-name tree."""
     if contract is None:
@@ -543,6 +646,7 @@ def _assert_return_contract(
                 f"{label}[{index}]",
                 rtol=rtol,
                 atol=atol,
+                matched_ratio=matched_ratio,
             )
         return
 
@@ -551,14 +655,75 @@ def _assert_return_contract(
         assert actual is expected is None, f"{label} output {contract}: tensor/None mismatch"
         return
     spec = output_specs[contract]
+    if spec["shape"] is None:
+        # Scalar outputs compare strictly, independent of the row's matched-ratio
+        # knob: iteration counts and other scalars have no partial-credit semantics.
+        if actual is None or expected is None:
+            assert actual is expected is None, f"{label} output {contract}: scalar/None mismatch"
+            return
+        _assert_output_matches_spec(actual, spec, axes, torch, f"Solution entry point output {contract}")
+        _assert_output_matches_spec(expected, spec, axes, torch, f"Definition.reference output {contract}")
+        actual_value = actual.item() if isinstance(actual, torch.Tensor) else actual
+        expected_value = expected.item() if isinstance(expected, torch.Tensor) else expected
+        assert actual_value == expected_value, (
+            f"{label} output {contract}: scalar mismatch {actual_value!r} != {expected_value!r}"
+        )
+        return
     _assert_output_matches_spec(actual, spec, axes, torch, f"Solution entry point output {contract}")
     _assert_output_matches_spec(expected, spec, axes, torch, f"Definition.reference output {contract}")
-    torch.testing.assert_close(
+    # The matched-ratio relaxation applies only to non-floating, non-boolean tensor
+    # outputs: floating and bool outputs keep the full assert_close tolerance contract
+    # (boolean outputs have no partial-credit semantics).
+    strict_output = matched_ratio >= 1.0 or (
+        isinstance(actual, torch.Tensor) and (actual.is_floating_point() or actual.dtype is torch.bool)
+    )
+    if strict_output:
+        torch.testing.assert_close(
+            actual,
+            expected,
+            rtol=rtol,
+            atol=atol,
+            msg=lambda msg: f"{label} output {contract} mismatch\n{msg}",
+        )
+        return
+    _assert_matched_ratio(
         actual,
         expected,
+        torch,
+        f"{label} output {contract}",
         rtol=rtol,
         atol=atol,
-        msg=lambda msg: f"{label} output {contract} mismatch\n{msg}",
+        matched_ratio=matched_ratio,
+    )
+
+
+def _assert_matched_ratio(
+    actual: Any,
+    expected: Any,
+    torch: Any,
+    label: str,
+    *,
+    rtol: float,
+    atol: float,
+    matched_ratio: float,
+) -> None:
+    """Require a per-element matched fraction instead of an exact assertion.
+
+    Mirrors ``torch.testing.assert_close`` element-wise bounds
+    ``|actual - expected| <= atol + rtol * |expected|`` and requires that at
+    least ``matched_ratio`` of the elements satisfy them. Exact-match behavior
+    is preserved for ``required_matched_ratio == 1.0`` rows.
+    """
+    if actual.numel() == 0:
+        return
+    actual_cmp = actual if actual.is_floating_point() else actual.to(torch.float64)
+    expected_cmp = expected if expected.is_floating_point() else expected.to(torch.float64)
+    difference = (actual_cmp - expected_cmp).abs()
+    bound = atol + rtol * expected_cmp.abs()
+    matched = difference <= bound
+    observed = matched.to(torch.float64).mean().item()
+    assert observed >= matched_ratio, (
+        f"{label} matched ratio {observed:.6f} is below the required {matched_ratio:.6f} (atol={atol}, rtol={rtol})"
     )
 
 
