@@ -178,10 +178,73 @@ def validate_solution(
             raise KernelInventoryError(f"Solution launch contract invalid: {exc}") from exc
 
 
-def validate_solution_entry_point(solution: dict[str, Any], repo_root: str | Path) -> None:
+def _assert_backend_registration_scope(
+    solution: dict[str, Any],
+    solution_path: Path,
+    entry_point: str,
+) -> None:
+    """Restrict requires_backend_registration to hierarchical suite backend wrappers.
+
+    The flag tells the runtime harness to import a suite backend subpackage
+    and ``set_backend`` before launching a launch-less registered entrance. The
+    derivation requires the Solution to sit at a hierarchical suite wrapper
+    coordinate (``kernel_solutions/<op>/<backend>/<op>.json`` inside
+    ``src/tilegym/suites/<suite>/``) with its entry module inside the same
+    suite; anything else would only fail later at runtime derivation, so
+    reject it at schema-validation time.
+    """
+    spec = solution.get("spec") or {}
+    if not spec.get("requires_backend_registration"):
+        return
+    from tilegym.kernel_inventory.layout import inventory_coordinate
+
+    try:
+        coordinate = inventory_coordinate(solution_path)
+    except ValueError as exc:
+        raise KernelInventoryError(
+            f"Solution.spec.requires_backend_registration is valid only for launch-less registered "
+            f"hierarchical suite backend wrapper Solutions: {solution_path}"
+        ) from exc
+    suite_root = next(
+        (parent for parent in solution_path.parents if (parent / "kernel_solutions").is_dir()),
+        None,
+    )
+    entry_file = entry_point.split("::", 1)[0]
+    entry_inside_suite = (
+        suite_root is not None
+        and suite_root.parent.name == "suites"
+        and suite_root.parent.parent.name == "tilegym"
+        and entry_file.startswith(f"src/tilegym/suites/{suite_root.name}/")
+    )
+    if (
+        coordinate.kind != "solution"
+        or coordinate.level != "wrapper"
+        or coordinate.backend not in {"triton", "cutile"}
+        or not entry_inside_suite
+    ):
+        raise KernelInventoryError(
+            "Solution.spec.requires_backend_registration is valid only for launch-less registered "
+            f"hierarchical suite backend wrapper Solutions: {solution_path}"
+        )
+
+
+def validate_solution_entry_point(
+    solution: dict[str, Any],
+    repo_root: str | Path,
+    solution_path: str | Path | None = None,
+) -> None:
     """Validate that a Python Solution entry point file exists and defines the symbol."""
     validate_solution(solution, repo_root)
     entry_point = solution["spec"]["entry_point"]
+    spec = solution.get("spec") or {}
+    if spec.get("requires_backend_registration") and solution_path is None:
+        raise KernelInventoryError(
+            "Solution.spec.requires_backend_registration requires the Solution's own path: "
+            "pass solution_path to validate_solution_entry_point so the hierarchical suite "
+            "wrapper scope can be enforced"
+        )
+    if solution_path is not None:
+        _assert_backend_registration_scope(solution, Path(solution_path), entry_point)
     file_path, symbol = entry_point.split("::", 1)
     if not file_path.endswith(".py"):
         return

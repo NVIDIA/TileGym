@@ -159,10 +159,13 @@ def _validate_composition_tree(path: Path, definition: dict[str, Any], stack: tu
     includes = _include_names(definition)
     tree = ast.parse(definition["reference"], filename=str(path))
     run = _global_run(tree, path)
+    _validate_reference_compiles(tree, path)
     _validate_flat_module(tree, run, includes, path)
     _validate_run_header(run, includes, path)
     imported_roots, imported_names = _import_bindings(tree, includes)
     _validate_supported_control_flow(run, path)
+    _validate_bounded_iterators(run, path)
+    _validate_loop_termination_reachability(run, includes, path)
 
     child_runs = {}
     for child_path in included_definition_paths(definition, path):
@@ -305,6 +308,106 @@ def _included_call_name(node: ast.Call) -> str | None:
     return None
 
 
+def _validate_reference_compiles(tree: ast.Module, path: Path) -> None:
+    """Reject references that parse but fail compilation.
+
+    ``ast.parse`` accepts statements such as ``break`` or ``continue`` outside
+    any loop; the ``SyntaxError`` only surfaces when the reference is compiled
+    for execution. Static composition validation must reject those before
+    runtime, so compile the parsed module here.
+    """
+    try:
+        compile(tree, filename=str(path), mode="exec")
+    except SyntaxError as exc:
+        raise DefinitionCompositionError(f"{path}: reference does not compile: {exc.msg} (line {exc.lineno})") from exc
+
+
+def _validate_bounded_iterators(run: ast.FunctionDef | ast.AsyncFunctionDef, path: Path) -> None:
+    """Require statically provable-finite ``for`` loop iterables.
+
+    Bounded ``for`` loops are part of the wrapper subset, but boundedness must
+    hold statically: an unbounded iterable such as ``itertools.count()`` or
+    ``itertools.cycle()`` would hang runtime validation. Only the builtin
+    ``range(...)`` calls (always finite for any arguments) and literal sequence
+    constants are accepted; every other iterable form is rejected. A locally
+    bound ``range`` (parameter or assigned name) shadows the builtin and its
+    call no longer proves boundedness, so such references are rejected too.
+    """
+    range_is_shadowed = "range" in _run_local_names(run) or any(
+        isinstance(node, ast.Name) and node.id == "range" and isinstance(node.ctx, ast.Store) for node in ast.walk(run)
+    )
+    for node in ast.walk(run):
+        if not isinstance(node, ast.For):
+            continue
+        iterator = node.iter
+        if (
+            isinstance(iterator, ast.Call)
+            and isinstance(iterator.func, ast.Name)
+            and iterator.func.id == "range"
+            and not range_is_shadowed
+        ):
+            continue
+        if isinstance(iterator, (ast.List, ast.Tuple, ast.Set)) and all(
+            isinstance(element, ast.Constant) for element in iterator.elts
+        ):
+            continue
+        if isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name) and iterator.func.id == "range":
+            raise DefinitionCompositionError(
+                f"{path}: wrapper reference for-loop iterates over a locally shadowed 'range', which no "
+                "longer proves the iterable is the finite builtin"
+            )
+        raise DefinitionCompositionError(
+            f"{path}: wrapper reference for-loop iterable must be a range(...) call or a finite literal "
+            "sequence; unbounded iterables (e.g. itertools.count/cycle/repeat without count) would hang "
+            "runtime validation"
+        )
+
+
+def _validate_loop_termination_reachability(
+    run: ast.FunctionDef | ast.AsyncFunctionDef,
+    includes: list[str],
+    path: Path,
+) -> None:
+    """Reject include calls positioned after break/continue in the same block.
+
+    Bounded ``for`` loops are part of the wrapper subset, so the earlier blanket
+    loop rejection no longer covers unreachable include calls. A call to an
+    included Definition that textually follows a ``break``/``continue`` within
+    one statement list can never execute; deeper semantic reachability stays
+    unproven by design.
+    """
+    if not includes:
+        return
+
+    def walk_block(statements: list[ast.stmt]) -> None:
+        terminated = ""
+        for statement in statements:
+            if isinstance(statement, ast.Break):
+                terminated = "break"
+                continue
+            if isinstance(statement, ast.Continue):
+                terminated = "continue"
+                continue
+            if terminated:
+                for node in ast.walk(statement):
+                    if isinstance(node, ast.Call) and _included_call_name(node) in includes:
+                        raise DefinitionCompositionError(
+                            f"{path}: wrapper reference calls included Definition "
+                            f"{_included_call_name(node)!r} after {terminated} loop termination"
+                        )
+            for block in _statement_blocks(statement):
+                walk_block(block)
+
+    walk_block(run.body)
+
+
+def _statement_blocks(statement: ast.stmt) -> Iterator[list[ast.stmt]]:
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(statement, field, None)
+        if isinstance(block, list):
+            yield block
+
+
 def _validate_supported_control_flow(
     run: ast.FunctionDef | ast.AsyncFunctionDef,
     path: Path,
@@ -317,7 +420,10 @@ def _validate_supported_control_flow(
         ast.AnnAssign,
         ast.Assign,
         ast.AugAssign,
+        ast.Break,
+        ast.Continue,
         ast.Expr,
+        ast.For,
         ast.If,
         ast.Pass,
         ast.Raise,
