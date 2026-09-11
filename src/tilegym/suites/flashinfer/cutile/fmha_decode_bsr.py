@@ -203,7 +203,12 @@ def _splitk_reduce_with_seq_len(attn_splitk_out, lse_splitk_out, actual_seq_lens
     else:
         lse_padded = lse_splitk_out
 
-    BLOCK_H_R = 4 if num_heads % 4 == 0 else 1
+    # The 4-heads-per-CTA htile reduce is measured faster on B200, but on A100
+    # (sm80) its fp32 working set overwhelms the register/SMEM budget and it
+    # runs ~2.5x slower than the per-head kernel, so pre-sm90 parts keep the
+    # per-head reduce.
+    _htile_ok = torch.cuda.get_device_capability("cuda")[0] >= 9
+    BLOCK_H_R = 4 if num_heads % 4 == 0 and _htile_ok else 1
     if BLOCK_H_R > 1:
         ct.launch(
             torch.cuda.current_stream(),
