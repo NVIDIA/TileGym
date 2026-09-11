@@ -335,7 +335,7 @@ def test_wrapper_composition_rejects_include_after_loop_termination(tmp_path, co
     )
     wrapper_path = _write(tmp_path / "op.json", wrapper)
     _write(tmp_path / "leaf.json", leaf)
-    with pytest.raises(DefinitionCompositionError, match="unsupported For control flow"):
+    with pytest.raises(DefinitionCompositionError, match="loop termination"):
         validate_definition_composition(wrapper, wrapper_path)
 
 
@@ -354,7 +354,6 @@ def test_wrapper_composition_rejects_include_after_loop_termination(tmp_path, co
             "while True:\n        try:\n            return value\n        except Exception:\n"
             "            break\n    return leaf.run(value)"
         ),
-        "for _ in (1,):\n        break\n    else:\n        return leaf.run(value)\n    return value",
     ],
 )
 def test_wrapper_composition_rejects_unsupported_structured_control_flow(tmp_path, body):
@@ -364,6 +363,181 @@ def test_wrapper_composition_rejects_unsupported_structured_control_flow(tmp_pat
     _write(tmp_path / "leaf.json", leaf)
     with pytest.raises(DefinitionCompositionError, match="unsupported .* control flow"):
         validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_allows_bounded_for_loop_include_calls(tmp_path):
+    leaf = _definition("leaf", "def run(value, extra=0):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import leaf\n\n"
+            "def run(value, iterations=2):\n"
+            "    for it in range(iterations):\n"
+            "        value = leaf.run(value)\n"
+            "        if value < 0:\n"
+            "            break\n"
+            "    if value == 0:\n"
+            "        return leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_allows_include_call_after_completed_for_loop(tmp_path):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        "import leaf\n\ndef run(value):\n    for _ in (1,):\n        break\n    return leaf.run(value)\n",
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_allows_for_else_include_calls(tmp_path):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import leaf\n\n"
+            "def run(value):\n"
+            "    for _ in (1,):\n"
+            "        break\n"
+            "    else:\n"
+            "        return leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    validate_definition_composition(wrapper, wrapper_path)
+
+
+@pytest.mark.parametrize(
+    "iterator",
+    [
+        "itertools.count()",
+        "itertools.cycle(items)",
+        "itertools.repeat(item)",
+        "items",
+        "iter(items)",
+    ],
+)
+def test_wrapper_composition_rejects_unbounded_for_loop_iterators(tmp_path, iterator):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import itertools\n\n"
+            "import leaf\n\n"
+            "def run(value, items, item):\n"
+            f"    for _ in {iterator}:\n"
+            "        value = leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    with pytest.raises(DefinitionCompositionError, match="for-loop iterable must be a range"):
+        validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_rejects_shadowed_range_iterator(tmp_path):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import leaf\n\n"
+            "def run(value, range):\n"
+            "    for _ in range():\n"
+            "        value = leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    with pytest.raises(DefinitionCompositionError, match="locally shadowed 'range'"):
+        validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_rejects_assigned_range_iterator(tmp_path):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import leaf\n\n"
+            "def run(value, items):\n"
+            "    range = iter(items)\n"
+            "    for _ in range(2):\n"
+            "        value = leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    with pytest.raises(DefinitionCompositionError, match="locally shadowed 'range'"):
+        validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_allows_finite_literal_sequence_iterator(tmp_path):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import leaf\n\n"
+            "def run(value):\n"
+            "    for _ in (0, 1, 2):\n"
+            "        value = leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    validate_definition_composition(wrapper, wrapper_path)
+
+
+@pytest.mark.parametrize("terminator", ["break", "continue"])
+def test_wrapper_composition_rejects_loop_terminator_outside_loop(tmp_path, terminator):
+    leaf = _definition("leaf", "def run(value):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (f"import leaf\n\ndef run(value, stop):\n    if stop:\n        {terminator}\n    return leaf.run(value)\n"),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    with pytest.raises(DefinitionCompositionError, match="reference does not compile"):
+        validate_definition_composition(wrapper, wrapper_path)
+
+
+def test_wrapper_composition_allows_loop_terminator_inside_nested_if(tmp_path):
+    leaf = _definition("leaf", "def run(value, extra=0):\n    return value\n")
+    wrapper = _definition(
+        "op",
+        (
+            "import leaf\n\n"
+            "def run(value, iterations=2):\n"
+            "    for it in range(iterations):\n"
+            "        if it > 0:\n"
+            "            break\n"
+            "        value = leaf.run(value)\n"
+            "    return value\n"
+        ),
+        ["leaf"],
+    )
+    wrapper_path = _write(tmp_path / "op.json", wrapper)
+    _write(tmp_path / "leaf.json", leaf)
+    validate_definition_composition(wrapper, wrapper_path)
 
 
 def test_wrapper_composition_rejects_loop_even_when_following_call_is_reachable(tmp_path):
@@ -487,7 +661,9 @@ def test_wrapper_composition_binds_distinct_semantic_variants_of_one_raw_kernel(
         ("value, scale", "leaf.run(value, value=scale, scale=scale)", "more than once"),
         ("value", "leaf.run(value, value)", "too many positional"),
         ("value", "leaf.run(value, unknown=1)", "unknown keyword"),
-        ("value", "leaf.run(value=value, value=scale)", "duplicate keyword"),
+        # A repeated keyword fails Python compilation before the call-binding
+        # checks run; the compile gate rejects it first with the same static guarantee.
+        ("value", "leaf.run(value=value, value=scale)", "reference does not compile: keyword argument repeated"),
         ("value, *, scale", "leaf.run(value)", "missing required"),
     ],
 )

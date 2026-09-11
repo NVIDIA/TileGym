@@ -21,6 +21,7 @@ from tests.kernel_inventory.kernel_runtime_utils import _assert_triton_autotune_
 from tests.kernel_inventory.kernel_runtime_utils import _call_entry_strictly
 from tests.kernel_inventory.kernel_runtime_utils import _current_compute_capability_label
 from tests.kernel_inventory.kernel_runtime_utils import _current_triton_backend
+from tests.kernel_inventory.kernel_runtime_utils import _derive_backend_registration_target
 from tests.kernel_inventory.kernel_runtime_utils import _isolated_solution_modules
 from tests.kernel_inventory.kernel_runtime_utils import _launch_raw_solution
 from tests.kernel_inventory.kernel_runtime_utils import _load_reference
@@ -996,6 +997,315 @@ def test_runtime_return_comparison_uses_explicit_workload_tolerance():
             rtol=0.0,
             atol=0.001,
         )
+
+
+def test_runtime_matched_ratio_relaxes_integer_destination_mutation():
+    torch = pytest.importorskip("torch")
+    definition = {
+        "name": "inplace_ids",
+        "axes": {"N": {"type": "var"}},
+        "inputs": {"out": {"shape": ["N"], "dtype": "int32", "inplace_output": True}},
+        "outputs": {"ids": {"shape": ["N"], "dtype": "int32"}},
+        "reference": (
+            "import torch\n\n"
+            "def run(out):\n"
+            "    ids = torch.arange(out.shape[0], dtype=torch.int32, device=out.device)\n"
+            "    out.copy_(ids)\n"
+            "    return ids\n"
+        ),
+    }
+    reference = _load_reference(definition, Path("inplace_ids_definition.json"))
+
+    def near_tie_solution(out):
+        ids = torch.arange(out.shape[0], dtype=torch.int32, device=out.device)
+        out.copy_(ids)
+        out[0] += 100
+        return ids
+
+    tolerance = types.SimpleNamespace(max_rtol=0.02, max_atol=0.02, required_matched_ratio=0.98)
+
+    # One mismatched element among 50: 49/50 = 0.98, exactly at the threshold -
+    # the inplace mutation comparison must relax for integer destinations.
+    _run_runtime_branch(
+        definition,
+        reference,
+        {"spec": {"language": "triton", "entry_point": "synthetic.py::near_tie_solution"}},
+        near_tie_solution,
+        {"out": torch.zeros(50, dtype=torch.int32)},
+        {"N": 50},
+        torch,
+        ("out",),
+        tolerance=tolerance,
+        case_label="relaxed-row",
+    )
+
+    def doubly_off_solution(out):
+        ids = torch.arange(out.shape[0], dtype=torch.int32, device=out.device)
+        out.copy_(ids)
+        out[0] += 100
+        out[1] += 100
+        return ids
+
+    # Two mismatched elements: 48/50 = 0.96, below the threshold - the mutation
+    # comparison must fail through the same matched-ratio semantics.
+    with pytest.raises(AssertionError, match="mutated input out"):
+        _run_runtime_branch(
+            definition,
+            reference,
+            {"spec": {"language": "triton", "entry_point": "synthetic.py::doubly_off_solution"}},
+            doubly_off_solution,
+            {"out": torch.zeros(50, dtype=torch.int32)},
+            {"N": 50},
+            torch,
+            ("out",),
+            tolerance=tolerance,
+            case_label="relaxed-row",
+        )
+
+
+def test_runtime_matched_ratio_does_not_relax_floating_outputs():
+    torch = pytest.importorskip("torch")
+    output_specs = {"centroids": {"shape": ["N"], "dtype": "float32"}}
+
+    # A floating output keeps the full assert_close tolerance even on a 0.98 row.
+    _assert_return_contract(
+        torch.tensor([1.0, 1.005], dtype=torch.float32),
+        torch.tensor([1.0, 1.0], dtype=torch.float32),
+        "centroids",
+        output_specs,
+        {"N": 2},
+        torch,
+        "float-row",
+        rtol=0.02,
+        atol=0.02,
+        matched_ratio=0.98,
+    )
+    with pytest.raises(AssertionError, match="output centroids mismatch"):
+        _assert_return_contract(
+            torch.tensor([1.0, 2.0], dtype=torch.float32),
+            torch.tensor([1.0, 1.0], dtype=torch.float32),
+            "centroids",
+            output_specs,
+            {"N": 2},
+            torch,
+            "float-row",
+            rtol=0.02,
+            atol=0.02,
+            matched_ratio=0.98,
+        )
+
+
+def test_runtime_scalar_outputs_compare_strictly():
+    torch = pytest.importorskip("torch")
+    output_specs = {"n_iters": {"shape": None, "dtype": "int32"}}
+
+    # Python scalar vs Python scalar: strict equality, matched-ratio knob ignored.
+    _assert_return_contract(
+        3,
+        3,
+        "n_iters",
+        output_specs,
+        {},
+        torch,
+        "scalar-row",
+        rtol=0.02,
+        atol=0.02,
+        matched_ratio=0.98,
+    )
+    with pytest.raises(AssertionError, match="scalar mismatch"):
+        _assert_return_contract(
+            2,
+            3,
+            "n_iters",
+            output_specs,
+            {},
+            torch,
+            "scalar-row",
+            rtol=0.02,
+            atol=0.02,
+            matched_ratio=0.98,
+        )
+
+    # 0-d tensors are accepted and cross-compare with Python scalars.
+    _assert_return_contract(
+        torch.tensor(3, dtype=torch.int32),
+        3,
+        "n_iters",
+        output_specs,
+        {},
+        torch,
+        "scalar-row",
+        matched_ratio=0.98,
+    )
+    with pytest.raises(AssertionError, match="must be an integer scalar"):
+        _assert_return_contract(
+            1.5,
+            1.5,
+            "n_iters",
+            output_specs,
+            {},
+            torch,
+            "scalar-row",
+        )
+    with pytest.raises(AssertionError, match="must be 0-dimensional"):
+        _assert_return_contract(
+            torch.tensor([3], dtype=torch.int32),
+            3,
+            "n_iters",
+            output_specs,
+            {},
+            torch,
+            "scalar-row",
+        )
+    with pytest.raises(AssertionError, match="has dtype"):
+        _assert_return_contract(
+            torch.tensor(3, dtype=torch.int64),
+            3,
+            "n_iters",
+            output_specs,
+            {},
+            torch,
+            "scalar-row",
+        )
+
+
+def test_runtime_matched_ratio_relaxes_integer_output_comparison():
+    torch = pytest.importorskip("torch")
+    expected = torch.arange(50, dtype=torch.int32)
+    output_specs = {"ids": {"shape": ["N"], "dtype": "int32"}}
+
+    actual = expected.clone()
+    actual[0] += 100  # one mismatched element: 49/50 = 0.98, exactly at the threshold
+    _assert_return_contract(
+        actual,
+        expected,
+        "ids",
+        output_specs,
+        {"N": 50},
+        torch,
+        "relaxed-row",
+        rtol=0.02,
+        atol=0.02,
+        matched_ratio=0.98,
+    )
+
+    actual[1] += 100  # second mismatch: 48/50 = 0.96, below the threshold
+    with pytest.raises(AssertionError, match="matched ratio"):
+        _assert_return_contract(
+            actual,
+            expected,
+            "ids",
+            output_specs,
+            {"N": 50},
+            torch,
+            "relaxed-row",
+            rtol=0.02,
+            atol=0.02,
+            matched_ratio=0.98,
+        )
+
+    with pytest.raises(AssertionError, match="strict-row output ids mismatch"):
+        _assert_return_contract(
+            actual,
+            expected,
+            "ids",
+            output_specs,
+            {"N": 50},
+            torch,
+            "strict-row",
+            rtol=0.02,
+            atol=0.02,
+            matched_ratio=1.0,
+        )
+
+
+def test_derive_backend_registration_target_resolves_suite_backend_module(tmp_path):
+    solution_path = tmp_path / "src/tilegym/suites/toy/kernel_solutions/op/triton/op.json"
+    solution_path.parent.mkdir(parents=True)
+
+    module_name, backend = _derive_backend_registration_target(solution_path)
+
+    assert module_name == "tilegym.suites.toy.triton"
+    assert backend == "triton"
+
+
+def test_derive_backend_registration_target_rejects_non_suite_solutions(tmp_path):
+    solution_path = tmp_path / "kernel_solutions/op/triton/op.json"
+    solution_path.parent.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="outside a suite"):
+        _derive_backend_registration_target(solution_path)
+
+
+def test_runtime_reseeds_rng_before_each_entry_call(tmp_path):
+    torch = pytest.importorskip("torch")
+    definition = {
+        "name": "draw_op",
+        "axes": {"N": {"type": "const", "value": 4}},
+        "inputs": {},
+        "outputs": {"ids": {"shape": ["N"], "dtype": "int32"}},
+        "reference": "import torch\n\ndef run():\n    ids = torch.randint(0, 2**30, (4,)).to(torch.int32)\n    return ids\n",
+    }
+    reference = _load_reference(definition, tmp_path / "definition.json")
+
+    def consuming_solution():
+        ids = torch.randint(0, 2**30, (4,)).to(torch.int32)
+        return ids
+
+    _run_runtime_branch(
+        definition,
+        reference,
+        {"spec": {"entry_point": "synthetic.py::consuming_solution"}},
+        consuming_solution,
+        {},
+        {"N": 4},
+        torch,
+        (),
+    )
+
+
+def test_runtime_branch_threads_matched_ratio_from_workload(tmp_path):
+    torch = pytest.importorskip("torch")
+    definition = {
+        "name": "ids_op",
+        "axes": {"N": {"type": "const", "value": 50}},
+        "inputs": {"x": {"shape": ["N"], "dtype": "float32"}},
+        "outputs": {"ids": {"shape": ["N"], "dtype": "int32"}},
+        "reference": "import torch\n\ndef run(x):\n    ids = x.to(torch.int32)\n    return ids\n",
+    }
+    reference = _load_reference(definition, tmp_path / "definition.json")
+
+    def near_reference_solution(x):
+        ids = x.to(torch.int32)
+        ids[0] += 100
+        return ids
+
+    workload = Workload.model_validate(
+        {
+            "uuid": "3d1d4c9e-0d61-4b7f-9a2b-8f0f2f2f2f2f",
+            "axes": {},
+            "inputs": {"x": {"type": "random"}},
+            "tolerance": {
+                "max_atol": 0.02,
+                "max_rtol": 0.02,
+                "required_matched_ratio": 0.98,
+                "max_error_cap": None,
+                "allow_negative_inf": False,
+            },
+            "eval_mode": "full",
+        }
+    )
+    _run_runtime_branch(
+        definition,
+        reference,
+        {"spec": {"entry_point": "synthetic.py::near_reference_solution"}},
+        near_reference_solution,
+        {"x": torch.randn(50)},
+        {"N": 50},
+        torch,
+        (),
+        tolerance=workload.tolerance,
+    )
 
 
 def test_cpu_composed_wrapper_runtime_canary_executes_each_explicit_boolean_row_once(tmp_path):

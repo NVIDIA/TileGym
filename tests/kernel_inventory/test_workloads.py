@@ -119,6 +119,7 @@ def test_load_workload_jsonl_rejects_noncanonical_physical_lines(tmp_path, conte
         (lambda payload: payload.pop("tolerance"), "missing explicit Workload fields"),
         (lambda payload: payload["tolerance"].pop("max_error_cap"), "tolerance fields mismatch"),
         (lambda payload: payload["tolerance"].update(max_atol=0.01), "migration policy"),
+        (lambda payload: payload["tolerance"].update(required_matched_ratio=0.97), "migration policy"),
         (lambda payload: payload.update(eval_mode="correctness_only"), "eval_mode must be 'full'"),
         (lambda payload: payload.update(uuid="not-a-uuid"), "UUIDv4"),
         (lambda payload: payload.update(uuid="00000000-0000-1000-8000-000000000000"), "UUIDv4"),
@@ -134,6 +135,27 @@ def test_checked_in_workload_policy_is_stricter_than_schema(tmp_path, mutate, ma
     path = _write_jsonl(tmp_path / "invalid.jsonl", payload)
 
     with pytest.raises(KernelWorkloadError, match=match):
+        load_workload_jsonl(path)
+
+
+def test_checked_in_workload_policy_allows_relaxed_matched_ratio(tmp_path):
+    payload = _payload()
+    payload["tolerance"]["required_matched_ratio"] = 0.98
+    path = _write_jsonl(tmp_path / "relaxed.jsonl", payload)
+
+    records = load_workload_jsonl(path)
+
+    assert len(records) == 1
+    assert records[0].workload.tolerance.required_matched_ratio == 0.98
+
+
+@pytest.mark.parametrize("ratio", [True, False])
+def test_checked_in_workload_policy_rejects_boolean_matched_ratio(tmp_path, ratio):
+    payload = _payload()
+    payload["tolerance"]["required_matched_ratio"] = ratio
+    path = _write_jsonl(tmp_path / "boolean.jsonl", payload)
+
+    with pytest.raises(KernelWorkloadError, match="booleans and non-numeric values are rejected"):
         load_workload_jsonl(path)
 
 
