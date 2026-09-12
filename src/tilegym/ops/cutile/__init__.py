@@ -20,9 +20,11 @@ if is_backend_available("cutile"):
     from . import bmm
     from . import dropout
     from . import flash_decode
+    from . import fp8_quantization_matmul
     from . import gemma_attention
     from . import gemma_attention_decode
     from . import group_gemm
+    from . import layer_norm
     from . import layer_norm_legacy
     from . import linear_gluact_linear
     from . import matmul
@@ -30,6 +32,7 @@ if is_backend_available("cutile"):
     from . import mla_decoding
     from . import mla_decoding_split_kv
     from . import moe
+    from . import moe_actgrad_bwd
     from . import moe_align_block
     from . import rms_norm
     from . import rope
@@ -37,6 +40,7 @@ if is_backend_available("cutile"):
     from . import softmax
     from . import splitk_reduce
     from . import swiglu
+    from . import transpose
 
     # Import specific functions for direct access
     from .attention_sink import attention_sink
@@ -54,6 +58,7 @@ if is_backend_available("cutile"):
     from .experimental.sparse_mla import tile_sparse_mla
     from .experimental.swa_attention import tile_swa_attention
     from .flash_decode import fmha_decode
+    from .fp8_quantization_matmul import w8a8_block_fp8_matmul
     from .moe import invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .recurrent_gated_delta_rule import recurrent_gated_delta_rule
@@ -94,7 +99,9 @@ if is_backend_available("cutile"):
         "dropout",
         "softmax",
         "mla_decoding_split_kv",
+        "layer_norm",
         "moe",
+        "moe_actgrad_bwd",
         "moe_align_block",
         "rope",
         "swiglu",
@@ -102,9 +109,11 @@ if is_backend_available("cutile"):
         # Linalg operations
         "bmm",
         "matmul",
+        "transpose",
         "group_gemm",
         "mhc",
         "linear_gluact_linear",
+        "w8a8_block_fp8_matmul",
         "chunk_gated_delta_rule",
         "recurrent_gated_delta_rule",
         "sparse_mla",
