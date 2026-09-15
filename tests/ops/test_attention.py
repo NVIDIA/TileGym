@@ -29,7 +29,9 @@ def get_data(
     return out
 
 
-class Test_FMHA(common.PyTestCase):
+class _FMHAPerfBase(common.PyTestCase):
+    """Shared FMHA correctness and perf bodies; subclasses choose the backends and the entry point."""
+
     @staticmethod
     def reference(q, k, v, scaling=None, attention_mask=None, is_causal=False):
         if q.dtype == torch.float8_e5m2:
@@ -49,22 +51,11 @@ class Test_FMHA(common.PyTestCase):
         )
         return ref
 
-    _backends = ["cutile"]
-    if is_backend_available("tilecpp"):
-        _backends = _backends + ["tilecpp"]
-    _perf_backends = _backends + ["pytorch"]
+    def _fmha(self, q, k, v, **kwargs):
+        """Attention entry point under test; subclasses may route to another implementation."""
+        return fmha_interface(q, k, v, **kwargs)
 
-    @pytest.mark.parametrize(
-        "batch_size, num_heads, seq_len, head_dim, is_causal, dtype",
-        [
-            (1, 1, 9, 128, False, torch.bfloat16),
-            (1, 32, 2047, 128, True, torch.float16),
-            (2, 32, 4095, 128, True, torch.bfloat16),
-            (2, 32, 4095, 128, True, torch.float8_e5m2),
-        ],
-    )
-    @pytest.mark.parametrize("backend", _backends)
-    def test_op(
+    def _run_op(
         self,
         batch_size,
         num_heads,
@@ -75,6 +66,7 @@ class Test_FMHA(common.PyTestCase):
         backend,
         arch,
     ):
+        """Correctness check of the entry point against the SDPA reference."""
         if arch in ["sm120", "sm121"]:
             pytest.skip("Skip on sm120, sm121: limited shared memory size.")
         if arch in ["sm80"] and dtype == torch.float8_e5m2:
@@ -119,7 +111,7 @@ class Test_FMHA(common.PyTestCase):
             atol = 5e-2
             rtol = 1e-2
         self.assertCorrectness(
-            fmha_interface,
+            self._fmha,
             self.reference,
             {
                 "q": q,
@@ -133,32 +125,8 @@ class Test_FMHA(common.PyTestCase):
             check_stride=False,
         )
 
-    @pytest.mark.parametrize(
-        "batch,heads,seq_len,head_dim,dtype",
-        [
-            (4, 32, seq_len, head_dim, dtype)
-            for dtype in [torch.float16, torch.bfloat16, torch.float8_e5m2]
-            for seq_len in (
-                [
-                    2**9,
-                    2**10,
-                    2**11,
-                    2**12,
-                    2**13,
-                ]  # can be divided by BLOCK
-                + [
-                    2**10 + 1,
-                    2**11 + 1,
-                    2**12 + 1,
-                ]  # can not be divided by BLOCK
-            )
-            for head_dim in ([64] if torch.cuda.get_device_capability()[0] == 8 else [128])
-        ],
-        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
-    )
-    @pytest.mark.parametrize("is_causal", [True, False])
-    @pytest.mark.parametrize("backend", _perf_backends)
-    def test_perf(self, batch, heads, seq_len, head_dim, dtype, is_causal, backend, record_property):
+    def _run_perf(self, batch, heads, seq_len, head_dim, dtype, is_causal, backend, record_property):
+        """Benchmark one (shape, dtype, causal) point on ``backend`` and record it."""
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
         if torch.cuda.get_device_capability()[0] == 8:
@@ -207,9 +175,7 @@ class Test_FMHA(common.PyTestCase):
             backend_fn = lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=is_causal)
         elif is_backend_available(backend):
             set_backend(backend)
-            backend_fn = lambda: fmha_interface(
-                q, k, v, scaling=sm_scale, is_causal=is_causal, has_backward=has_backward
-            )
+            backend_fn = lambda: self._fmha(q, k, v, scaling=sm_scale, is_causal=is_causal, has_backward=has_backward)
         else:
             pytest.skip(f"Backend {backend} is not available")
         skip_correctness = backend == "pytorch"
@@ -239,29 +205,8 @@ class Test_FMHA(common.PyTestCase):
         torch.cuda.empty_cache()
         gc.collect()
 
-    @pytest.mark.parametrize(
-        "model, batch_size, num_heads, seq_len, head_dim",
-        [
-            (
-                "llama",
-                1,
-                32,
-                9,
-                128,
-            ),  # BLOCK_M: 64, BLOCK_N: 128, num_warps: 4, num_ctas: 1, num_stages: 2,
-            (
-                "llama",
-                1,
-                32,
-                31072,
-                128,
-            ),  # BLOCK_M: 128, BLOCK_N: 128, num_warps: 8, num_ctas: 1, num_stages: 2
-        ],
-        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
-    )
-    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e5m2])
-    @pytest.mark.parametrize("backend", _perf_backends)
-    def test_perf_llm(self, model, batch_size, num_heads, seq_len, head_dim, dtype, backend, record_property):
+    def _run_perf_llm(self, model, batch_size, num_heads, seq_len, head_dim, dtype, backend, record_property):
+        """Benchmark an LLM-shaped causal prefill on ``backend`` and record it."""
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
         if torch.cuda.get_device_capability()[0] == 8:
@@ -279,7 +224,7 @@ class Test_FMHA(common.PyTestCase):
             backend_fn = lambda: self.reference(q, k, v, scaling=sm_scale, is_causal=True)
         elif is_backend_available(backend):
             set_backend(backend)
-            backend_fn = lambda: fmha_interface(q, k, v, scaling=sm_scale, is_causal=True, has_backward=False)
+            backend_fn = lambda: self._fmha(q, k, v, scaling=sm_scale, is_causal=True, has_backward=False)
         else:
             pytest.skip(f"Backend {backend} is not available")
         skip_correctness = backend == "pytorch"
@@ -308,3 +253,100 @@ class Test_FMHA(common.PyTestCase):
             del kernel_configs
         torch.cuda.empty_cache()
         gc.collect()
+
+
+class Test_FMHA(_FMHAPerfBase):
+    """Baseline FMHA: correctness on every backend plus the perf sweeps."""
+
+    _backends = ["cutile"]
+    if is_backend_available("tilecpp"):
+        _backends = _backends + ["tilecpp"]
+    _perf_backends = _backends + ["pytorch"]
+
+    @pytest.mark.parametrize(
+        "batch_size, num_heads, seq_len, head_dim, is_causal, dtype",
+        [
+            (1, 1, 9, 128, False, torch.bfloat16),
+            (1, 32, 2047, 128, True, torch.float16),
+            (2, 32, 4095, 128, True, torch.bfloat16),
+            (2, 32, 4095, 128, True, torch.float8_e5m2),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op(
+        self,
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        is_causal,
+        dtype,
+        backend,
+        arch,
+    ):
+        """Baseline FMHA correctness on every backend."""
+        self._run_op(
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+            is_causal,
+            dtype,
+            backend,
+            arch,
+        )
+
+    @pytest.mark.parametrize(
+        "batch,heads,seq_len,head_dim,dtype",
+        [
+            (4, 32, seq_len, head_dim, dtype)
+            for dtype in [torch.float16, torch.bfloat16, torch.float8_e5m2]
+            for seq_len in (
+                [
+                    2**9,
+                    2**10,
+                    2**11,
+                    2**12,
+                    2**13,
+                ]  # can be divided by BLOCK
+                + [
+                    2**10 + 1,
+                    2**11 + 1,
+                    2**12 + 1,
+                ]  # can not be divided by BLOCK
+            )
+            for head_dim in ([64] if torch.cuda.get_device_capability()[0] == 8 else [128])
+        ],
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
+    )
+    @pytest.mark.parametrize("is_causal", [True, False])
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch, heads, seq_len, head_dim, dtype, is_causal, backend, record_property):
+        """Baseline FMHA perf sweep."""
+        self._run_perf(batch, heads, seq_len, head_dim, dtype, is_causal, backend, record_property)
+
+    @pytest.mark.parametrize(
+        "model, batch_size, num_heads, seq_len, head_dim",
+        [
+            (
+                "llama",
+                1,
+                32,
+                9,
+                128,
+            ),  # BLOCK_M: 64, BLOCK_N: 128, num_warps: 4, num_ctas: 1, num_stages: 2,
+            (
+                "llama",
+                1,
+                32,
+                31072,
+                128,
+            ),  # BLOCK_M: 128, BLOCK_N: 128, num_warps: 8, num_ctas: 1, num_stages: 2
+        ],
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e5m2])
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf_llm(self, model, batch_size, num_heads, seq_len, head_dim, dtype, backend, record_property):
+        """Baseline FMHA perf on LLM shapes."""
+        self._run_perf_llm(model, batch_size, num_heads, seq_len, head_dim, dtype, backend, record_property)
