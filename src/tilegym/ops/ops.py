@@ -355,6 +355,40 @@ def fmha_variant(
 
 
 @dispatch(
+    "layer_norm",
+)
+def layer_norm(
+    x: torch.Tensor,
+    start_dim: int,
+    end_dim: int,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    weight_shift: float = 0.0,
+    **kwargs: Any,
+):
+    """
+    Layer Normalization. Normalization is performed starting from `start_dim`
+    and ending with `end_dim` (non inclusive).
+
+    Args:
+        x: Tensor of shape (*, C1, ..., Ck, *)
+            where C1 is at start_dim and Ck is at end_dim-1
+        start_dim: Starting dimension of the normalized axes
+        end_dim: Ending dimension of the normalized axes (non inclusive).
+        weight: Tensor of shape (C1, ..., Ck)
+        bias: Tensor of shape (C1, ..., Ck)
+        eps: Numerical stability epsilon
+        weight_shift: Float value to be added to the weight
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Normalized tensor with same shape as `x`
+    """
+    raise NotImplementedError(f"layer_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "fmha",
 )
 def fmha(
@@ -751,6 +785,72 @@ def gemma_attention_decode(
     raise NotImplementedError(f"gemma_attention_decode is not implemented for {get_current_backend()}")
 
 
+@dispatch(
+    "moe_actgrad_bwd",
+)
+def moe_actgrad_bwd(
+    dout: torch.Tensor,
+    h: torch.Tensor,
+    w2: torch.Tensor,
+    dh: torch.Tensor,
+    ds: torch.Tensor,
+    b2: Optional[torch.Tensor],
+    db2: Optional[torch.Tensor],
+    a_prime: torch.Tensor,
+    topk_scores: torch.Tensor,
+    expert_frequency_offset: torch.Tensor,
+    x_gather_idx: torch.Tensor,
+    s_scatter_idx: torch.Tensor,
+    activation_type: str,
+    max_tokens_per_expert: Optional[int] = None,
+) -> None:
+    """
+    MoE Down-Projection Activation-Gradient Backward.
+
+    Tensor layout conventions:
+      * ``w2`` is ``[E, I, H]`` (expert-major).
+      * GLU ``h``/``dh`` use split layout ``[gate | up]`` (gate cols ``[0, I)``,
+        up cols ``[I, 2I)``), not interleaved.
+
+    Computes:
+      1. Grouped GEMM:               dy1   = dout[x_gather_idx] @ w2^T
+      2. Activation backward:        dh    = act_backward(h, dy1) * s
+      3. Weighted activation output: a_prime = act_forward(h) * s
+      4. Routing-score gradient:     ds    = sum(dy1 * act_forward(h), dim=N)
+
+    Supported activations: SwiGLU, GeGLU, ReGLU, SiLU, ReLU, GELU, ReLU^2.
+
+    Args:
+        dout:                    [T,  H]   upstream gradient, original token order.
+        h:                       [TK, N]   pre-activation values, grouped token order.
+                                           GLU split format: gate [0..I-1], up [I..2I-1].
+        w2:                      [E, I, H] down-projection weights.
+        dh:                      [TK, N]   OUT: gradient w.r.t. h. Caller pre-allocates,
+                                           the kernel writes into it.
+        ds:                      [TK]      OUT: routing-score gradient (FP32). MUST be
+                                           pre-zeroed; the kernel accumulates atomically.
+        b2:                      Unused — accepted for reference-signature compatibility.
+        db2:                     Unused — accepted for reference-signature compatibility.
+        a_prime:                 [TK, I]   OUT: score-weighted activation output. Caller
+                                           pre-allocates.
+        topk_scores:             [T*K]     flat routing scores indexed via s_scatter_idx.
+        expert_frequency_offset: [E+1]     exclusive prefix-sum of per-expert token counts.
+        x_gather_idx:            [TK]      grouped position -> original token index in dout.
+        s_scatter_idx:           [TK]      grouped position -> index into topk_scores.
+        activation_type:         str       One of "swiglu", "geglu", "reglu", "silu",
+                                           "relu", "gelu", "relu_sq".
+        max_tokens_per_expert:   Optional[int]  Maximum tokens assigned to any single
+                                           expert, used to size the kernel grid
+                                           M-dimension. If None, computed internally via
+                                           .item() which forces a GPU→CPU sync. Pass
+                                           when known to avoid the sync (~5-15% perf
+                                           hit on small shapes). Must be >= the true
+                                           max; overestimates safely early-exit
+                                           out-of-range blocks.
+    """
+    raise NotImplementedError(f"moe_actgrad_bwd is not implemented for {get_current_backend()}")
+
+
 # ============================================================================
 # Linear Algebra Operations
 # ============================================================================
@@ -783,6 +883,49 @@ def matmul(
         torch.Tensor: Matrix multiplication result
     """
     raise NotImplementedError(f"Matmul is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
+    "w8a8_block_fp8_matmul",
+)
+def w8a8_block_fp8_matmul(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: Optional[List[int]] = None,
+    output_dtype: Optional[torch.dtype] = None,
+    use_tma: Optional[bool] = True,
+    **kwargs: Any,
+):
+    """
+    FP8 block-wise matrix multiplication with quantization scales
+
+    Performs matrix multiplication with block-wise quantization using FP8 precision.
+    Takes two input tensors A and B with their corresponding quantization scales As and Bs.
+
+    Args:
+        A: Input tensor A (FP8 format, e.g., activation)
+        B: Input tensor B (FP8 format, e.g., weight)
+        As: Per-token-group quantization scale for A
+        Bs: Per-block quantization scale for B
+        block_size: Block size for per-block quantization [block_n, block_k] (None uses backend default)
+        output_dtype: Output data type (None uses backend default)
+        use_tma: Whether to use TMA (default: True)
+        **kwargs: Additional arguments, including kernel_configs if needed with keys:
+            - BLOCK_SIZE_M: Tile size for M dimension
+            - BLOCK_SIZE_N: Tile size for N dimension
+            - BLOCK_SIZE_K: Tile size for K dimension
+            - GROUP_SIZE_M: Group size for M dimension
+            - num_ctas: Number of CTAs per cluster
+            - occupancy: Target occupancy
+            - swap_ab: Whether to swap the A and B operands
+            - use_tma: Whether to use TMA descriptors
+
+    Returns:
+        torch.Tensor: Matrix multiplication result in specified output dtype
+    """
+    raise NotImplementedError(f"w8a8_block_fp8_matmul is not implemented for this backend: {get_current_backend()}")
 
 
 @dispatch(
@@ -939,6 +1082,27 @@ def bmm(
         torch.Tensor: Matrix multiplication result
     """
     raise NotImplementedError(f"BMM is not implemented for this backend: {get_current_backend()}")
+
+
+@dispatch(
+    "transpose",
+)
+def transpose(
+    inp: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    static_persistent: Optional[bool] = None,
+    **kwargs: Any,
+):
+    """
+    Transpose operation that automatically selects implementation based on current backend
+
+    Args:
+        inp: Input tensor
+        out: Optional output tensor
+        static_persistent: Whether to use static persistent mode
+        **kwargs: Additional arguments for backend-specific configurations
+    """
+    raise NotImplementedError(f"Transpose is not implemented for this backend: {get_current_backend()}")
 
 
 @dispatch(
