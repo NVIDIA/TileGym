@@ -355,6 +355,38 @@ def fmha_variant(
 
 
 @dispatch(
+    "fmha_varlen",
+)
+def fmha_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scaling: Optional[float] = None,
+    is_causal: bool = True,
+    q_lens: Optional[torch.Tensor] = None,
+    kv_lens: Optional[torch.Tensor] = None,
+    **kwargs: Any,
+):
+    """
+    Fused Multi-Head Attention varlen implementation.
+
+    Args:
+        q: Query tensor of shape (B, N, S_qo, D)
+        k: Key tensor of shape (B, N, S_kv, D)
+        v: Value tensor of shape (B, N, S_kv, D)
+        scaling: Scale factor for attention scores
+        is_causal: Whether to apply causal masking
+        q_lens: Query sequence lengths
+        kv_lens: Key-value sequence lengths
+        **kwargs: Additional arguments, including kernel_configs if needed
+
+    Returns:
+        Output tensor after attention computation
+    """
+    raise NotImplementedError(f"fmha_varlen is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "layer_norm",
 )
 def layer_norm(
