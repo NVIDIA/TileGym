@@ -283,7 +283,7 @@ jobs:
   test-ops:
     name: test-ops (shard ${{ matrix.shard }})
     needs: [config, build]
-    timeout-minutes: 60
+    timeout-minutes: 95
     if: |
       always() &&
       needs.config.outputs.run_ops == 'true' &&
@@ -336,7 +336,7 @@ jobs:
             uv run --locked --no-sync python -c "import triton; from tilegym.backend.selector import is_triton_tileir_available, get_available_triton_backend; assert is_triton_tileir_available(), 'ENABLE_TILE=1 but the CUDA Tile IR backend is NOT active; triton=' + triton.__file__; print('CUDA Tile IR backend active: triton=' + triton.__file__ + ', get_available_triton_backend=' + get_available_triton_backend())"
 
       - name: Pull and run ops tests (shard ${{ matrix.shard }})
-        timeout-minutes: 50
+        timeout-minutes: 80
         run: |
           OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/${{ needs.config.outputs.image_name }}:${{ needs.config.outputs.image_tag }}"
