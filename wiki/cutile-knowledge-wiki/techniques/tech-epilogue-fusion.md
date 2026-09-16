@@ -87,5 +87,7 @@ Variants of the same move:
 ## Evidence
 
 - Prologue-vs-epilogue asymmetry: identical elementwise ops measured 10-100x costlier applied to mma operands than applied to the accumulator, across two independent board families (an elementwise census band and a computed-operand GEMM family). Previous measurements. [2026-07, B200, cuda-tile 1.2.0, N=2 board families]
+
+- moe_actgrad_bwd (core ops, cuTile): on the GLU path the activation-gradient epilogue is emitted in `EPI_NSUB` column slices (32 columns at the default `BLOCK_N=128`) to bound live fp32 tiles, with approx tanh; `EPI_NSUB=1` keeps the full-tile epilogue for short hidden dims, and the occupancy sweep is B200-gated. [2026-07]
 - fused_linear_cross_entropy (liger suite, cuTile): chunked backward-in-forward — per-chunk GEMM → CE with in-place dlogits → grad accumulation — keeps peak logit memory `O(chunk_size x V)` once BT x V x sizeof(dtype) crosses ~4 GB. [2026-07, B200]
 - Other in-repo instances (B200): multi_token_attention (fused softmax-bwd + causal mask, ~45% claimed), liger FLCE/JSD (deferred-grad path + 256 MB chunked fallback). [2026-07]

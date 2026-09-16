@@ -55,6 +55,8 @@ Data movement where the addresses come from another tensor:
   - TMA loses when descriptor setup dominates small transfers: unsloth RoPE replaced 4D/5D TMA loads with
     1D gather/scatter flat addressing at half_head_dim=32, taking all RoPE cases from 1.13–1.18x to 1.00x
     vs Triton on B200.
+  - fp8_quantization_matmul on B200 settled on the gather/scatter memory path; a later
+    TMA-transposed-load rewrite was reverted.
   - Converting a gather to a TMA load changes padding semantics: TMA cannot pad `-inf`, so the
     cross-entropy fwd conversion used `PaddingMode.ZERO` plus `ct.where` re-injection.
 - **Batch the indirection at the coarsest grain.** For paged KV, gather *pages*, not tokens:

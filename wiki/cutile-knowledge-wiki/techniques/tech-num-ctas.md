@@ -61,5 +61,6 @@ hints_fn=lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy}
 ## Evidence
 
 - In-repo per-arch pairings: sm80 forbids num_ctas=2 outright (in-file comment: CGA unsupported pre-SM90); pre-sm90 defaults pin num_ctas=1; sm90 matmul/mla wins pair num_ctas=2 with 256-wide tiles while sm90 attention stayed single-CTA; sm100+ pairs 2/4 with 256x256+ tiles. [2026-07]
+- B200, fp8_quantization_matmul: `num_ctas=1` plus a gather/scatter memory path chosen as the fix for a B200 performance issue. [2026-07]
 - B200, unsloth cross_entropy: search space extended to occupancy [1,2,4,8,16,32] x `num_ctas` [1,2] for a memory-bound large-vocab kernel. [2026-07]
 - B200, MLA decode (thin-tile counterexample): `num_ctas=2` measured 1.76x slower than `num_ctas=1` on the `TILE_H=16` fp16 MMA path (previous measurement). [2026-07]

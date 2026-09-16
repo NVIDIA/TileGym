@@ -42,6 +42,10 @@ Approximate tanh in an inner loop, with the cost/accuracy note kept at the call 
 tanh_x = ct.tanh(alpha * x, rounding_mode=RMd.APPROX)
 ```
 
+The same pair on a GLU gate's sigmoid reciprocal. The division runs on the fp32 accumulator tile, so the
+call site is independent of the kernel's input dtype and carries no dtype gate — see
+`reference/gluact-linear-sigmoid.md`.
+
 Prefer the per-call-site parameters over the env toggles in shipped kernels: call sites keep the tradeoff
 reviewable, testable, and scoped to the ops that tolerate it. The env toggles are for whole-kernel A/B triage
 ("would FTZ/APPROX matter here at all?") before editing.
@@ -77,5 +81,8 @@ reviewable, testable, and scoped to the ops that tolerate it. The env toggles ar
 ## Evidence
 
 - liger dyt bwd (B200): `ct.tanh(..., rounding_mode=APPROX)` with in-file note "~1.6x faster, 2-4 ULP off; well within bwd tolerance 1e-2". [2026-07]
+- linear_gluact_linear GLU gate: `flush_to_zero=True, rounding_mode=APPROX` on the sigmoid reciprocal, applied
+  unconditionally because the gate accumulates in fp32 — see `reference/gluact-linear-sigmoid.md`. [2026-07, B200]
 - gemma_attention soft cap: `ct.tanh(..., rounding_mode=APPROX)` and APPROX truediv in the attention inner loop.
+- moe_actgrad_bwd (cuTile): approx tanh adopted as part of the epilogue-subtiling optimization.
 - ops/cutile attention family ships `flush_to_zero=True` on softmax exp2/rescale and `flush_to_zero=True, rounding_mode=APPROX` on the final truediv across attention, varlen, sink, and decode variants — see `reference/attention-exp2-ftz.md` and `reference/attention-truediv-approx.md`. [2026-07, B200]

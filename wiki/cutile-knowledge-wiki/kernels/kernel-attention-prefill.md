@@ -98,3 +98,4 @@ never touches global memory:
   `flashinfer.attention.prefill_attention_kv_paged` and `...kv_ragged`, plus the LPT load-balanced variant.
 - Soft-cap / variant kernels: `src/tilegym/ops/cutile/gemma_attention.py`,
   `src/tilegym/ops/cutile/attention_sink.py`, `src/tilegym/ops/cutile/mla.py` (MLA prefill).
+- `src/tilegym/ops/cutile/attention_varlen.py` — `fmha_varlen` for ragged batches.

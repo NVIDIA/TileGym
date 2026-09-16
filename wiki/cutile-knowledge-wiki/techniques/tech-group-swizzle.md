@@ -41,12 +41,15 @@ def swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
 
 The shipped bmm kernel computes the same thing kernel-side, with `ct.minimum` for the boundary clamp
 (the extra `bid_q` handles the batch axis) — see `reference/bmm-group-swizzle.md`.
+
+Another in-repo instance: `_gemm_calculate_pid_ct` in `src/tilegym/ops/cutile/fp8_quantization_matmul.py`.
 In a persistent kernel, apply the swizzle to each tile index produced by the
 tile-stride loop, not once to `ct.bid(0)`.
 
 Treat `GROUP_SIZE_M` as a tunable: sweep {4, 8, 16}. The repo default is 8 across the persistent-matmul and
 bmm config generators (`src/tilegym/ops/cutile/matmul.py`, `src/tilegym/ops/cutile/bmm.py`;
 the non-persistent matmul configs carry no `GROUP_SIZE_M` field).
+The w8a8 FP8 matmul ships 16 (`src/tilegym/ops/cutile/fp8_quantization_matmul.py`).
 
 ## When to use
 
@@ -71,5 +74,7 @@ the non-persistent matmul configs carry no `GROUP_SIZE_M` field).
   full shape matrix, not from one flattering shape.
 
 ## Evidence
+
+- w8a8 FP8 matmul (B200): `GROUP_SIZE_M=16` pid swizzle for L2 locality shipped together with swap_ab/occupancy autotuning. [2026-07]
 - unsloth w8a8 block-fp8 matmul (B200): TMA kernel added with a `GROUP_SIZE_M` pid swizzle as part of the suite fill-in. [2026-07]
 - cuTile persistent matmul and bmm ship GROUP_SIZE_M=8 in every autotune config across all arch branches (sm80/sm90/sm100/sm120); the non-persistent matmul configs carry no GROUP_SIZE_M field — see `reference/matmul-autotune-configs.md` and `reference/bmm-group-swizzle.md`. [2026-07]
