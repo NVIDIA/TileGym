@@ -26,6 +26,11 @@ Layout variants:
 - **Contiguous last-dim** — normalize over the innermost dim of a `(M, N)` view: `rms_norm`
   (`src/tilegym/ops/cutile/rms_norm.py`), `layer_norm_legacy` and `persistent_layer_norm`
   (`src/tilegym/ops/cutile/layer_norm_legacy.py`).
+- **Strided mid-dim (NCHW-style)** — `layer_norm(x, start_dim, end_dim, ...)` normalizes over a
+  middle span of dims. The host squashes the tensor to `(N, C, W)` — batch dims, normalized dims,
+  trailing dims (`_squash_axis`) — so the reduction
+  dim `C` sits at stride `W`: the LayerNorm-over-channels-of-NCHW case. Statistics are per `(n, w)`
+  pair, giving `(N, W)`-shaped mean/rstd instead of per-row scalars.
 - **Backward** — forward passes save thin fp32 `mean`/`rstd` tensors; rms_norm has a persistent
   cuTile backward with fused weight-grad accumulation (`cutile/rms_norm.py`); the cuTile
   layer_norm variants raise `NotImplementedError` on backward.
@@ -86,8 +91,14 @@ system and how the strided variant assembles its tiles:
   The structural alternative is a tiled 3D load
   treating the tensor as `(N, C, W)` and letting the tile machinery handle the stride — denser
   transfers and no index algebra, available only when the layout is expressible as a real tensor
-  view. The gather route is the general fallback; expect it to trail a contiguous-equivalent kernel
-  because the strided axis defeats coalescing.
+  view. Which of the two wins is decided by the innermost (`W`) extent, not by the gather-vs-tiles
+  distinction on its own: a block-indexed tile's innermost box extent is only `W` elements, so once
+  `W` is narrow the channel reads serialise, while flat gather addressing walks the contiguous
+  `C*W` slab and keeps a `BLOCK_SIZE_C` channel run as wide accesses. The shipped kernel therefore
+  gates on the element extent — `use_tiles = W >= TMA_MIN_INNER_EXTENT`, 16 elements in both fp16
+  and fp32, not a fixed byte count — and routes narrow-`W` shapes to the gather kernel
+  (`src/tilegym/ops/cutile/layer_norm.py`; snippets: `reference/layer-norm-gather-load.md`,
+  `reference/layer-norm-mean-offsets.md`).
 - **Split reduction for weight grads.** rms_norm backward accumulates each block's `dw` contribution
   into a `(grid, TILE_N)` fp32 partial buffer inside the persistent loop, and the host finishes with
   `dwp.sum(0)` (`cutile/rms_norm.py`) — avoiding both atomics and an `M×N`
@@ -124,3 +135,5 @@ system and how the strided variant assembles its tiles:
 - `layer_norm_legacy` / `persistent_layer_norm` (contiguous last-dim): dispatch
   `src/tilegym/ops/ops.py`; cuTile `src/tilegym/ops/cutile/layer_norm_legacy.py`; tests
   `tests/ops/test_layer_norm_legacy.py`.
+- Strided `layer_norm` (start_dim/end_dim, NCHW-style): dispatch `src/tilegym/ops/ops.py`;
+  cuTile `src/tilegym/ops/cutile/layer_norm.py`; tests `tests/ops/test_layer_norm.py`.
