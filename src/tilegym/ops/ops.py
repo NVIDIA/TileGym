@@ -1316,3 +1316,55 @@ def nvfp4_quantize(
                     where num_tiles = ceil(rows / 128) * ceil(cols / 64).
     """
     raise NotImplementedError(f"nvfp4_quantize is not implemented for {get_current_backend()}")
+
+
+# ============================================================================
+# Mamba2 SSM chunk-scan kernels
+# ============================================================================
+
+
+@dispatch("mamba2_chunk_forward", fallback_backend="cutile")
+def mamba2_chunk_forward(
+    x: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    d: torch.Tensor,
+    dt: torch.Tensor,
+    init_state: torch.Tensor,
+    chunk_size: int = 64,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute the complete chunked Mamba-2 forward pass.
+
+    Returns:
+        out:         ``[batch, num_tokens, num_heads, head_size]``
+        final_state: ``[batch, num_heads, head_size, state_size]``
+    """
+    raise NotImplementedError(f"mamba2_chunk_forward is not implemented for {get_current_backend()}")
+
+
+@dispatch("mamba2_chunk_backward", fallback_backend="cutile")
+def mamba2_chunk_backward(
+    x: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    d: torch.Tensor,
+    dt: torch.Tensor,
+    init_state: torch.Tensor,
+    dout: torch.Tensor,
+    dfinal_state: torch.Tensor,
+    chunk_size: int = 64,
+    state_dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the complete chunked Mamba-2 backward pass.
+
+    Returns:
+        dx:          ``[batch, num_tokens, num_heads, head_size]``
+        da:          ``[num_heads]``
+        db, dc:      ``[batch, num_tokens, num_groups, state_size]``
+        dd:          ``[num_heads]``
+        ddt:         ``[batch, num_tokens, num_heads]``
+        dinit_state: ``[batch, num_heads, head_size, state_size]``
+    """
+    raise NotImplementedError(f"mamba2_chunk_backward is not implemented for {get_current_backend()}")

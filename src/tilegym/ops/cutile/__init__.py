@@ -28,6 +28,7 @@ if is_backend_available("cutile"):
     from . import layer_norm
     from . import layer_norm_legacy
     from . import linear_gluact_linear
+    from . import mamba2
     from . import matmul
     from . import mla
     from . import mla_decoding
@@ -61,6 +62,8 @@ if is_backend_available("cutile"):
     from .experimental.swa_attention import tile_swa_attention
     from .flash_decode import fmha_decode
     from .fp8_quantization_matmul import w8a8_block_fp8_matmul
+    from .mamba2 import mamba2_chunk_backward
+    from .mamba2 import mamba2_chunk_forward
     from .moe import invoke_fused_moe_kernel
     from .moe_align_block import moe_align_block_size
     from .recurrent_gated_delta_rule import recurrent_gated_delta_rule
@@ -124,6 +127,9 @@ if is_backend_available("cutile"):
         "swa_attention",
         "tile_swa_attention",
         "tile_nvfp4_quantize",
+        "mamba2",
+        "mamba2_chunk_forward",
+        "mamba2_chunk_backward",
     ]
 else:
     __all__ = []
