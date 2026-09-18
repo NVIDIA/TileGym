@@ -18,9 +18,9 @@ from .utils import cached_replace_hints
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
+_LOG2_E = 1.4426950408889634
 
-# Preserve the unhinted compiler default because explicit occupancy can regress some shapes.
-_SILU_OCCUPANCY_CONFIGS = tuple(SimpleNamespace(occupancy=occ) for occ in (None, 1, 2, 4, 8, 12, 16))
+_SILU_OCCUPANCY_CONFIGS = tuple(SimpleNamespace(occupancy=occupancy) for occupancy in (None, 1, 2, 4, 8, 12, 16))
 _SILU_TUNE_CACHE: dict = {}
 
 
@@ -41,7 +41,6 @@ def _silu_and_mul_kernel_row_wise(
     row_idx = bid
     a_col_idx = offsets  # First half: [0, hidden_size)
     b_col_idx = offsets + TOTAL_HIDDEN_SIZE  # Second half: [hidden_size, 2*hidden_size)
-
     # Load tiles using gather with 2D indices
     # gather broadcasts (scalar, tile) to (tile,)
     a_tile = ct.gather(input, (row_idx, a_col_idx), check_bounds=True)
@@ -50,7 +49,7 @@ def _silu_and_mul_kernel_row_wise(
     b_tile = ct.astype(b_tile, torch.float32)
 
     # Implement sigmoid for SiLU
-    denom = 1 + ct.exp(-a_tile)
+    denom = 1 + ct.exp2(ct.mul(-a_tile, _LOG2_E, flush_to_zero=True), flush_to_zero=True)
     sigmoid_a = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
 
     # Perform SiLU(a) * b
@@ -96,7 +95,7 @@ def _silu_and_mul_backward_kernel_row_wise(
     b_tile = ct.astype(b_tile, torch.float32)
 
     # Recompute sigmoid(a) and silu(a)
-    denom = 1 + ct.exp(-a_tile)
+    denom = 1 + ct.exp2(ct.mul(-a_tile, _LOG2_E, flush_to_zero=True), flush_to_zero=True)
     sigmoid_a = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
     silu_a = a_tile * sigmoid_a
 
@@ -127,26 +126,47 @@ def _ensure_contiguous(fn):
     return wrapper
 
 
-def _launch_silu_kernel(kernel, args, grid, cache_key):
-    stream = torch.cuda.current_stream()
+def _silu_autotune_hints(config, launch_hints):
+    hints = launch_hints.copy()
+    for name in ("occupancy", "num_ctas", "num_worker_warps"):
+        value = getattr(config, name, None)
+        if value is not None:
+            hints[name] = value
+    return hints
+
+
+def _silu_autotune_settings(tile_size, dtype, device):
+    tile_bytes = tile_size * dtype.itemsize
+    capability = torch.cuda.get_device_capability(device)
+    if tile_bytes <= 2048:
+        hints = {"num_ctas": 1, "num_worker_warps": 4}
+    elif tile_bytes <= 8192:
+        hints = {"num_ctas": 1, "num_worker_warps": 8}
+    elif capability[0] < 9:
+        hints = {"num_ctas": 1, "num_worker_warps": 8}
+    else:
+        hints = {"num_ctas": 2, "num_worker_warps": 8}
+    return _SILU_OCCUPANCY_CONFIGS, hints
+
+
+def _launch_silu_kernel(kernel, args, grid, cache_key, configs, launch_hints):
+    stream = torch.cuda.current_stream(args[0].device)
     if is_autotune_disabled():
         tuned_kernel = kernel
     else:
-        if cache_key not in _SILU_TUNE_CACHE:
+        tuned_kernel = _SILU_TUNE_CACHE.get(cache_key)
+        if tuned_kernel is None:
             result = exhaustive_search(
-                _SILU_OCCUPANCY_CONFIGS,
+                configs,
                 stream,
                 lambda _: grid,
                 kernel,
                 lambda _: args,
-                lambda cfg: {} if cfg.occupancy is None else {"occupancy": cfg.occupancy},
+                lambda config: _silu_autotune_hints(config, launch_hints),
             )
-            best_cfg = result.best.config
-            tuned_kernel = (
-                kernel if best_cfg.occupancy is None else cached_replace_hints(kernel, occupancy=best_cfg.occupancy)
-            )
-            _SILU_TUNE_CACHE[cache_key] = (best_cfg, tuned_kernel)
-        _, tuned_kernel = _SILU_TUNE_CACHE[cache_key]
+            best_hints = _silu_autotune_hints(result.best.config, launch_hints)
+            tuned_kernel = kernel if not best_hints else cached_replace_hints(kernel, **best_hints)
+            _SILU_TUNE_CACHE[cache_key] = tuned_kernel
 
     ct.launch(stream, grid, tuned_kernel, args)
 
@@ -155,7 +175,9 @@ def _silu_and_mul_forward(input_flat, output, hidden_size):
     tile_size = next_power_of_2(hidden_size)
     args = (input_flat, output, tile_size, hidden_size)
     cache_key = ("fwd", hidden_size, input_flat.dtype, str(input_flat.device))
-    _launch_silu_kernel(_silu_and_mul_kernel_row_wise, args, (input_flat.shape[0],), cache_key)
+    configs, launch_hints = _silu_autotune_settings(tile_size, input_flat.dtype, input_flat.device)
+
+    _launch_silu_kernel(_silu_and_mul_kernel_row_wise, args, (input_flat.shape[0],), cache_key, configs, launch_hints)
 
 
 def _silu_and_mul_backward(
@@ -186,7 +208,8 @@ def _silu_and_mul_backward(
     grid = (batch_size,)
     args = (grad_output_flat, input_flat, grad_a, grad_b, tile_size, hidden_size)
     cache_key = ("bwd", hidden_size, grad_output_flat.dtype, str(grad_output_flat.device))
-    _launch_silu_kernel(_silu_and_mul_backward_kernel_row_wise, args, grid, cache_key)
+    configs, launch_hints = _silu_autotune_settings(tile_size, grad_output_flat.dtype, grad_output_flat.device)
+    _launch_silu_kernel(_silu_and_mul_backward_kernel_row_wise, args, grid, cache_key, configs, launch_hints)
 
     return grad_a.view(*original_output_shape), grad_b.view(*original_output_shape)
 

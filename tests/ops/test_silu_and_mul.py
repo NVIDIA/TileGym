@@ -149,9 +149,7 @@ class Test_SiLUAndMul(common.PyTestCase):
         else:
             pytest.skip(f"Framework {framework} is not available")
 
-        result = common.benchmark_framework(
-            framework, framework_fn, use_cudagraph=(framework not in ("pytorch", "cutile"))
-        )
+        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=(framework != "pytorch"))
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
