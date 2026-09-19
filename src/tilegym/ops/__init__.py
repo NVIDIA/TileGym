@@ -72,8 +72,6 @@ from .ops import *
 
 __all__ = [
     # Export all operations from ops module
-    # Backend implementations
-    "tilecpp",
     # Interface modules
     "attn_interface",
     "moe_interface",
@@ -92,3 +90,7 @@ __all__ = [
 # Add cutile to exports only if successfully imported
 if cutile is not None:
     __all__.append("cutile")
+
+# Add tilecpp to exports only if it was imported above
+if is_backend_available("tilecpp"):
+    __all__.append("tilecpp")
