@@ -38,6 +38,24 @@ __tile__ auto normal_pdf_f32(tile_t<float, BLOCK_SIZE> x) {
     return inv_sqrt_2pi * ct::exp(-0.5f * x * x);
 }
 
+template<int BLOCK_SIZE>
+__tile__ auto gelu_grad_f32(tile_t<float, BLOCK_SIZE> x) {
+    // d/dx [x * Phi(x)] = Phi(x) + x * phi(x)
+    return normal_cdf_f32<BLOCK_SIZE>(x) + x * normal_pdf_f32<BLOCK_SIZE>(x);
+}
+
+template<int BLOCK_SIZE>
+__tile__ auto tanh_gelu_grad_f32(tile_t<float, BLOCK_SIZE> x) {
+    // d/dx [0.5 * x * (1 + tanh(u))] = 0.5 * (1 + t) + 0.5 * x * (1 - t^2) * u'
+    // with t = tanh(u), u = sqrt(2/pi) * (x + 0.044715 * x^3)
+    constexpr float sqrt_2_div_pi = 0.7978845608028654f;
+    constexpr float coeff_044715 = 0.044715f;
+    auto u = sqrt_2_div_pi * (x + coeff_044715 * x * x * x);
+    auto th = tanh_approx_f32<BLOCK_SIZE>(u);
+    auto du = sqrt_2_div_pi * (1.0f + 3.0f * coeff_044715 * x * x);
+    return 0.5f * (1.0f + th) + 0.5f * x * (1.0f - th * th) * du;
+}
+
 template<typename T, int BLOCK_SIZE, int APPROXIMATE>
 __tile_global__ void geglu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y, int N, int m_stride, int my_stride, int n_elements) {
     namespace ct = cuda::tiles;
@@ -73,6 +91,7 @@ __tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ 
     dy = ct::assume_aligned<16>(dy);
     x = ct::assume_aligned<16>(x);
     using TxN = tile_t<T, BLOCK_SIZE>;
+    using f32xN = tile_t<float, BLOCK_SIZE>;
     using i32xN = tile_t<int32_t, BLOCK_SIZE>;
 
     int base = ct::bid().x * BLOCK_SIZE;
@@ -95,7 +114,14 @@ __tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ 
         gelu_b = 0.5f * b * (1.0f + tanh_approx_f32<BLOCK_SIZE>(0.7978845608028654f * (b + 0.044715f * b * b * b)));
     }
     auto da = dyf * gelu_b;
-    auto db = dyf * a * (normal_cdf_f32<BLOCK_SIZE>(b) + b * normal_pdf_f32<BLOCK_SIZE>(b));
+    // Differentiate the same GELU geglu_fwd_kernel evaluated for this APPROXIMATE
+    f32xN dgelu_b;
+    if constexpr (APPROXIMATE == 1) {
+        dgelu_b = tanh_gelu_grad_f32<BLOCK_SIZE>(b);
+    } else {
+        dgelu_b = gelu_grad_f32<BLOCK_SIZE>(b);
+    }
+    auto db = dyf * a * dgelu_b;
     ct::store_masked(dx + left_offsets, ct::element_cast<T>(da), mask);
     ct::store_masked(dx + right_offsets, ct::element_cast<T>(db), mask);
 }
