@@ -88,6 +88,25 @@ def gelu_forward_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
     return x_val * cdf_val
 
 
+def gelu_backward_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
+    # d/dx [x * Phi(x)] = Phi(x) + x * phi(x)
+    cdf_val = standard_normal_cdf_ct(x_val, BLOCK_SIZE)
+    pdf_val = standard_normal_pdf_ct(x_val, BLOCK_SIZE)
+    return cdf_val + x_val * pdf_val
+
+
+def gelu_tanh_backward_ct(x_val, BLOCK_SIZE: ct.Constant[int]):
+    # d/dx [0.5 * x * (1 + tanh(u))] = 0.5 * (1 + t) + 0.5 * x * (1 - t^2) * u'
+    # with t = tanh(u), u = sqrt(2/pi) * (x + 0.044715 * x^3)
+    sqrt_2_div_pi = 0.7978845608028654
+    coeff_044715 = 0.044715
+
+    inner = sqrt_2_div_pi * (x_val + coeff_044715 * x_val * x_val * x_val)
+    tanh_inner = ct.tanh(inner)
+    d_inner = sqrt_2_div_pi * (1.0 + 3.0 * coeff_044715 * x_val * x_val)
+    return 0.5 * (1.0 + tanh_inner) + 0.5 * x_val * (1.0 - tanh_inner * tanh_inner) * d_inner
+
+
 @ct.kernel
 def _gelu_kernel(
     y,
@@ -123,6 +142,51 @@ def _gelu_kernel(
     ct.scatter(y, offsets, gelu_output, check_bounds=True)
 
 
+@ct.kernel
+def _gelu_kernel_backward(
+    dx,
+    dy,
+    x,
+    N_ELEMENTS: ct.Constant[int],
+    BLOCK_SIZE: ct.Constant[int],
+    APPROXIMATE: ct.Constant[int],
+):
+    """
+    cuTile GELU backward kernel supporting both exact and tanh approximation modes.
+
+    Args:
+        dx: Output gradient tensor
+        dy: Input gradient tensor
+        x: Original input tensor
+        n_elements: Total number of elements
+        BLOCK_SIZE: Block size for computation
+        approximate: 0 for exact GELU, 1 for tanh approximation
+    """
+    pid = ct.bid(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = ct.arange(BLOCK_SIZE, dtype=ct.int32) + block_start
+
+    # Load input data with padding_value to handle out-of-bounds reads safely
+    dy_tile = ct.gather(dy, offsets, padding_value=0)
+    x_tile = ct.gather(x, offsets, padding_value=0)
+
+    # Evaluate in fp32: Phi(x) + x * phi(x) cancels to zero at x = -0.7518,
+    # which costs an order of magnitude of accuracy in the storage dtype.
+    dy_f32 = ct.astype(dy_tile, ct.float32)
+    x_f32 = ct.astype(x_tile, ct.float32)
+
+    # Differentiate the same function the forward pass evaluated
+    if APPROXIMATE == GELU_TANH:
+        grad_factor = gelu_tanh_backward_ct(x_f32, BLOCK_SIZE)
+    else:  # GELU_EXACT
+        grad_factor = gelu_backward_ct(x_f32, BLOCK_SIZE)
+
+    gelu_grad_output = ct.astype(dy_f32 * grad_factor, x_tile.dtype)
+
+    # Store result with check_bounds to prevent out-of-bounds writes
+    ct.scatter(dx, offsets, gelu_grad_output, check_bounds=True)
+
+
 # Wrapper class for autograd integration
 class _GeluCuTileFunction(torch.autograd.Function):
     @staticmethod
@@ -155,11 +219,40 @@ class _GeluCuTileFunction(torch.autograd.Function):
         )
 
         ctx.x = x
+        ctx.approx_mode = approx_mode
         return y
 
     @staticmethod
     def backward(ctx, dy):
-        raise NotImplementedError("Backward pass for GELU activation is not implemented")
+        """
+        Backward pass for GELU activation.
+
+        Args:
+            dy: Gradient of output
+
+        Returns:
+            Gradient of input, None for approximate parameter
+        """
+        x = ctx.x
+        n_elements = dy.numel()
+
+        # Launch backward kernel
+        BLOCK_SIZE = 1024
+        grid = (math.ceil(n_elements / BLOCK_SIZE), 1, 1)
+
+        # dy can arrive non-contiguous from autograd, so flatten a copy.
+        dy_flat = dy.contiguous().view(-1)
+        x_flat = x.contiguous().view(-1)
+        dx_flat = torch.empty_like(dy_flat)
+
+        ct.launch(
+            torch.cuda.current_stream(),
+            grid,
+            _gelu_kernel_backward,
+            (dx_flat, dy_flat, x_flat, n_elements, BLOCK_SIZE, ctx.approx_mode),
+        )
+
+        return dx_flat.view(x.shape), None
 
 
 @register_impl("gelu", backend="cutile")

@@ -47,7 +47,7 @@ their own namespace (`tilegym.suites.*`) and are tracked in §1.3 instead.
 | Normalization | RMS Normalization | ✅ Available | 🧪 Experimental |
 | Activation | Dropout | ✅ Available | 📅 Planned |
 | Activation | GeGLU | ✅ Available | ✅ Available |
-| Activation | GeLU | ✅ Available | 📅 Planned |
+| Activation | GeLU | ✅ Available | ✅ Available |
 | Activation | ReLU | ✅ Available | 📅 Planned |
 | Activation | SiLU and Mul | ✅ Available | 🧪 Experimental |
 | Activation | Softmax | ✅ Available | 🚧 WIP (Internal) |
