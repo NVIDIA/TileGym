@@ -39,6 +39,33 @@ def _gelu_bwd_ct(x_val, dy_val, BLOCK_SIZE: ct.Constant[int]):
     return dy_val * grad_factor
 
 
+def _gelu_tanh_bwd_ct(x_val, dy_val, BLOCK_SIZE: ct.Constant[int]):
+    """
+    Compute tanh-approximation GELU backward gradient.
+
+    Analytic derivative of ``gelu_tanh_forward_ct``, i.e. of
+    0.5 * x * (1 + tanh(u)) with u = sqrt(2/pi) * (x + 0.044715 * x^3):
+        d/dx = 0.5 * (1 + tanh(u)) + 0.5 * x * (1 - tanh(u)^2) * u'
+        u'   = sqrt(2/pi) * (1 + 3 * 0.044715 * x^2)
+
+    Args:
+        x_val: Input value tile
+        dy_val: Output gradient tile
+        BLOCK_SIZE: Block size constant
+
+    Returns:
+        Gradient with respect to input
+    """
+    sqrt_2_div_pi = 0.7978845608028654
+    coeff_044715 = 0.044715
+
+    inner = sqrt_2_div_pi * (x_val + coeff_044715 * x_val * x_val * x_val)
+    tanh_inner = ct.tanh(inner)
+    d_inner = sqrt_2_div_pi * (1.0 + 3.0 * coeff_044715 * x_val * x_val)
+    grad_factor = 0.5 * (1.0 + tanh_inner) + 0.5 * x_val * (1.0 - tanh_inner * tanh_inner) * d_inner
+    return dy_val * grad_factor
+
+
 @ct.kernel
 def _geglu_fwd_kernel(
     y,
@@ -135,9 +162,12 @@ def _geglu_bwd_kernel(
     else:
         dy_da = gelu_forward_ct(b, BLOCK_SIZE)
 
-    # Compute gradients
+    # Compute gradients. db differentiates the same GELU the forward evaluated.
     da = dy_val * dy_da
-    db = a * _gelu_bwd_ct(b, dy_val, BLOCK_SIZE)
+    if APPROXIMATE == GELU_TANH:
+        db = a * _gelu_tanh_bwd_ct(b, dy_val, BLOCK_SIZE)
+    else:
+        db = a * _gelu_bwd_ct(b, dy_val, BLOCK_SIZE)
 
     # Store gradients
     ct.scatter(dx, (left_ptr_offsets,), da)
