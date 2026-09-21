@@ -38,6 +38,24 @@ __tile__ auto normal_pdf_f32(tile_t<float, BLOCK_SIZE> x) {
     return inv_sqrt_2pi * ct::exp(-0.5f * x * x);
 }
 
+template<int BLOCK_SIZE>
+__tile__ auto gelu_grad_f32(tile_t<float, BLOCK_SIZE> x) {
+    // d/dx [x * Phi(x)] = Phi(x) + x * phi(x)
+    return normal_cdf_f32<BLOCK_SIZE>(x) + x * normal_pdf_f32<BLOCK_SIZE>(x);
+}
+
+template<int BLOCK_SIZE>
+__tile__ auto tanh_gelu_grad_f32(tile_t<float, BLOCK_SIZE> x) {
+    // d/dx [0.5 * x * (1 + tanh(u))] = 0.5 * (1 + t) + 0.5 * x * (1 - t^2) * u'
+    // with t = tanh(u), u = sqrt(2/pi) * (x + 0.044715 * x^3)
+    constexpr float sqrt_2_div_pi = 0.7978845608028654f;
+    constexpr float coeff_044715 = 0.044715f;
+    auto u = sqrt_2_div_pi * (x + coeff_044715 * x * x * x);
+    auto th = tanh_approx_f32<BLOCK_SIZE>(u);
+    auto du = sqrt_2_div_pi * (1.0f + 3.0f * coeff_044715 * x * x);
+    return 0.5f * (1.0f + th) + 0.5f * x * (1.0f - th * th) * du;
+}
+
 template<typename T, int BLOCK_SIZE, int OP>
 __tile_global__ void gelu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y, int n_elements) {
     namespace ct = cuda::tiles;
@@ -86,7 +104,12 @@ __tile_global__ void gelu_bwd_kernel(const T* __restrict__ dy, const T* __restri
     auto xf = ct::element_cast<float>(x_T);
     f32xN grad;
 
-    grad = dyf * (normal_cdf_f32<BLOCK_SIZE>(xf) + xf * normal_pdf_f32<BLOCK_SIZE>(xf));
+    // Differentiate the same function gelu_fwd_kernel evaluated for this OP
+    if constexpr (OP == 1) {
+        grad = dyf * tanh_gelu_grad_f32<BLOCK_SIZE>(xf);
+    } else {
+        grad = dyf * gelu_grad_f32<BLOCK_SIZE>(xf);
+    }
 
     ct::store_masked(dx + offsets, ct::element_cast<T>(grad), mask);
 }

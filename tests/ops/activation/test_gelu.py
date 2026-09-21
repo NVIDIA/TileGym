@@ -42,11 +42,42 @@ class Test_GeLU(common.PyTestCase):
         x_shape = (m, n)
 
         x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
+        x = x.detach().requires_grad_(True)
+
+        dy = 0.1 * torch.randn_like(x)
 
         self.assertCorrectness(
             tilegym.ops.activation.gelu,
             self.reference,
             {"input": x, "approximate": approximate},
+            gradient=dy,
+            rtol=0.0,
+            atol=1e-2,
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+    @pytest.mark.parametrize("approximate", ["none", "tanh"])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_unaligned(self, approximate, dtype, backend):
+        # 255 * 2047 = 521985 is not a multiple of BLOCK_SIZE (1024), so this
+        # exercises the masked tail of the last tile.
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+            self.setUp()
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+        device = torch.device("cuda")
+
+        x = torch.rand((255, 2047), dtype=dtype, device=device, requires_grad=False).mul_(0.5).add_(-2.3)
+        x = x.detach().requires_grad_(True)
+
+        dy = 0.1 * torch.randn_like(x)
+
+        self.assertCorrectness(
+            tilegym.ops.activation.gelu,
+            self.reference,
+            {"input": x, "approximate": approximate},
+            gradient=dy,
             rtol=0.0,
             atol=1e-2,
         )
