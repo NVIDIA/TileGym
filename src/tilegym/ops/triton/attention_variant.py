@@ -366,7 +366,11 @@ def _early_config_prune(configs, named_args, **kwargs):
         "EVEN_N": lambda args: args["S_kv"] % args["BLOCK_N"] == 0,
     }
 )
-@triton.jit
+# `seed` is deliberately NOT specialized: it only feeds tl.rand() under
+# DO_DROPOUT, and its default is the process RNG seed, so specializing on it
+# (as a constexpr, or on the int divisibility hint) makes every process compile
+# its own kernels and the Triton cache unusable across runs.
+@triton.jit(do_not_specialize=["seed"])
 def _prefill_fmha(
     Q,
     K_desc,
@@ -382,7 +386,7 @@ def _prefill_fmha(
     S_qo: tl.constexpr,
     S_kv: tl.constexpr,
     dropout: tl.constexpr,
-    seed: tl.constexpr,
+    seed,
     BLOCK_D: tl.constexpr,
     OUT_BLOCK_D: tl.constexpr,
     STAGE: tl.constexpr,
