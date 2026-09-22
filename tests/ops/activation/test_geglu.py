@@ -24,6 +24,13 @@ class Test_GEGLU(common.PyTestCase):
         geglu = a * torch.nn.functional.gelu(b, approximate=approximate)
         return geglu
 
+    # scale atol by |a| <= 6 for fp32
+    _tolerances = {
+        torch.float32: dict(rtol=1e-6, atol=6e-6),
+        torch.float16: dict(rtol=2e-3, atol=1e-5),
+        torch.bfloat16: dict(rtol=1.6e-2, atol=1e-4),
+    }
+
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
@@ -37,45 +44,65 @@ class Test_GEGLU(common.PyTestCase):
             ((4,), 0, torch.float32, "tanh"),
             ((4,), 0, torch.float16, "none"),
             ((4,), 0, torch.float16, "tanh"),
+            ((4,), 0, torch.bfloat16, "none"),
+            ((4,), 0, torch.bfloat16, "tanh"),
             # max_dim=2, test_dim=0,1
             ((16, 4), 0, torch.float32, "none"),
             ((16, 4), 0, torch.float32, "tanh"),
             ((16, 4), 0, torch.float16, "none"),
             ((16, 4), 0, torch.float16, "tanh"),
+            ((16, 4), 0, torch.bfloat16, "none"),
+            ((16, 4), 0, torch.bfloat16, "tanh"),
             ((16, 4), 1, torch.float32, "none"),
             ((16, 4), 1, torch.float32, "tanh"),
             ((16, 4), 1, torch.float16, "none"),
             ((16, 4), 1, torch.float16, "tanh"),
+            ((16, 4), 1, torch.bfloat16, "none"),
+            ((16, 4), 1, torch.bfloat16, "tanh"),
             # max_dim=3, test_dim=0,1,2
             ((64, 16, 4), 0, torch.float32, "none"),
             ((64, 16, 4), 0, torch.float32, "tanh"),
             ((64, 16, 4), 0, torch.float16, "none"),
             ((64, 16, 4), 0, torch.float16, "tanh"),
+            ((64, 16, 4), 0, torch.bfloat16, "none"),
+            ((64, 16, 4), 0, torch.bfloat16, "tanh"),
             ((64, 16, 4), 1, torch.float32, "none"),
             ((64, 16, 4), 1, torch.float32, "tanh"),
             ((64, 16, 4), 1, torch.float16, "none"),
             ((64, 16, 4), 1, torch.float16, "tanh"),
+            ((64, 16, 4), 1, torch.bfloat16, "none"),
+            ((64, 16, 4), 1, torch.bfloat16, "tanh"),
             ((64, 16, 4), 2, torch.float32, "none"),
             ((64, 16, 4), 2, torch.float32, "tanh"),
             ((64, 16, 4), 2, torch.float16, "none"),
             ((64, 16, 4), 2, torch.float16, "tanh"),
+            ((64, 16, 4), 2, torch.bfloat16, "none"),
+            ((64, 16, 4), 2, torch.bfloat16, "tanh"),
             # max_dim=4, test_dim=0,1,2,3
             ((256, 64, 16, 4), 0, torch.float32, "none"),
             ((256, 64, 16, 4), 0, torch.float32, "tanh"),
             ((256, 64, 16, 4), 0, torch.float16, "none"),
             ((256, 64, 16, 4), 0, torch.float16, "tanh"),
+            ((256, 64, 16, 4), 0, torch.bfloat16, "none"),
+            ((256, 64, 16, 4), 0, torch.bfloat16, "tanh"),
             ((256, 64, 16, 4), 1, torch.float32, "none"),
             ((256, 64, 16, 4), 1, torch.float32, "tanh"),
             ((256, 64, 16, 4), 1, torch.float16, "none"),
             ((256, 64, 16, 4), 1, torch.float16, "tanh"),
+            ((256, 64, 16, 4), 1, torch.bfloat16, "none"),
+            ((256, 64, 16, 4), 1, torch.bfloat16, "tanh"),
             ((256, 64, 16, 4), 2, torch.float32, "none"),
             ((256, 64, 16, 4), 2, torch.float32, "tanh"),
             ((256, 64, 16, 4), 2, torch.float16, "none"),
             ((256, 64, 16, 4), 2, torch.float16, "tanh"),
+            ((256, 64, 16, 4), 2, torch.bfloat16, "none"),
+            ((256, 64, 16, 4), 2, torch.bfloat16, "tanh"),
             ((256, 64, 16, 4), 3, torch.float32, "none"),
             ((256, 64, 16, 4), 3, torch.float32, "tanh"),
             ((256, 64, 16, 4), 3, torch.float16, "none"),
             ((256, 64, 16, 4), 3, torch.float16, "tanh"),
+            ((256, 64, 16, 4), 3, torch.bfloat16, "none"),
+            ((256, 64, 16, 4), 3, torch.bfloat16, "tanh"),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
@@ -90,7 +117,7 @@ class Test_GEGLU(common.PyTestCase):
         y_shape = list(x_shape)
         y_shape[dim] = y_shape[dim] // 2
 
-        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(1.2).add_(0.6)
+        x = torch.rand(x_shape, dtype=dtype, device=device, requires_grad=False).mul_(12.0).add_(-6.0)
         x = x.detach().requires_grad_(True)
 
         dy = 0.1 * torch.randn(*y_shape, device=device)
@@ -100,8 +127,8 @@ class Test_GEGLU(common.PyTestCase):
             self.reference,
             {"input": x, "dim": dim, "approximate": approximate},
             gradient=dy,
-            rtol=1e-2,
-            atol=1e-2,
+            rtol=self._tolerances[dtype]["rtol"],
+            atol=self._tolerances[dtype]["atol"],
         )
 
     @pytest.mark.parametrize(

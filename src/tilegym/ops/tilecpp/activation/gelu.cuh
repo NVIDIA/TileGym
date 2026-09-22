@@ -24,11 +24,29 @@ __tile__ auto tanh_approx_f32(tile_t<float, BLOCK_SIZE> x) {
 }
 
 template<int BLOCK_SIZE>
+__tile__ auto erf_f32(tile_t<float, BLOCK_SIZE> x) {
+    namespace ct = cuda::tiles;
+    using f32xN = tile_t<float, BLOCK_SIZE>;
+    constexpr float p  = 0.3275911f;
+    constexpr float a1 = 0.254829592f;
+    constexpr float a2 = -0.284496736f;
+    constexpr float a3 = 1.421413741f;
+    constexpr float a4 = -1.453152027f;
+    constexpr float a5 = 1.061405429f;
+
+    auto zero = ct::zeros<f32xN>();
+    auto neg = x < zero;
+    auto ax = ct::select(neg, -x, x);
+    auto t = 1.0f / (1.0f + p * ax);
+    auto poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t;
+    auto r = 1.0f - poly * ct::exp(-ax * ax);
+    return ct::select(neg, -r, r);
+}
+
+template<int BLOCK_SIZE>
 __tile__ auto normal_cdf_f32(tile_t<float, BLOCK_SIZE> x) {
-    constexpr float sqrt_2_div_pi = 0.7978845608028654f;
-    constexpr float coeff_044715 = 0.044715f;
-    auto x3 = x * x * x;
-    return 0.5f * (1.0f + tanh_approx_f32<BLOCK_SIZE>(sqrt_2_div_pi * (x + coeff_044715 * x3)));
+    constexpr float inv_sqrt_2 = 0.7071067811865476f;
+    return 0.5f * (1.0f + erf_f32<BLOCK_SIZE>(x * inv_sqrt_2));
 }
 
 template<int BLOCK_SIZE>

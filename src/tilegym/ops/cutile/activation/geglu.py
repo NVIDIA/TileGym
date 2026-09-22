@@ -105,14 +105,18 @@ def _geglu_fwd_kernel(
     a = ct.gather(x, (left_ptr_offsets,))
     b = ct.gather(x, (right_ptr_offsets,))
 
+    # Cast to fp32 to match C++ backend
+    a_f32 = ct.astype(a, ct.float32)
+    b_f32 = ct.astype(b, ct.float32)
+
     # Compute a * GELU(b)
     if APPROXIMATE == GELU_TANH:
-        geglu_output = a * gelu_tanh_forward_ct(b, BLOCK_SIZE)
+        geglu_output = a_f32 * gelu_tanh_forward_ct(b_f32, BLOCK_SIZE)
     else:
-        geglu_output = a * gelu_forward_ct(b, BLOCK_SIZE)
+        geglu_output = a_f32 * gelu_forward_ct(b_f32, BLOCK_SIZE)
 
     # Store output using scatter
-    ct.scatter(y, (out_ptr_offsets,), geglu_output)
+    ct.scatter(y, (out_ptr_offsets,), ct.astype(geglu_output, a.dtype))
 
 
 @ct.kernel
@@ -156,22 +160,26 @@ def _geglu_bwd_kernel(
     b = ct.gather(x, (right_ptr_offsets,))
     dy_val = ct.gather(dy, (out_ptr_offsets,))
 
+    a_f32 = ct.astype(a, ct.float32)
+    b_f32 = ct.astype(b, ct.float32)
+    dy_f32 = ct.astype(dy_val, ct.float32)
+
     # Compute GELU(b) for gradient of a
     if APPROXIMATE == GELU_TANH:
-        dy_da = gelu_tanh_forward_ct(b, BLOCK_SIZE)
+        dy_da = gelu_tanh_forward_ct(b_f32, BLOCK_SIZE)
     else:
-        dy_da = gelu_forward_ct(b, BLOCK_SIZE)
+        dy_da = gelu_forward_ct(b_f32, BLOCK_SIZE)
 
     # Compute gradients. db differentiates the same GELU the forward evaluated.
-    da = dy_val * dy_da
+    da = dy_f32 * dy_da
     if APPROXIMATE == GELU_TANH:
-        db = a * _gelu_tanh_bwd_ct(b, dy_val, BLOCK_SIZE)
+        db = a_f32 * _gelu_tanh_bwd_ct(b_f32, dy_f32, BLOCK_SIZE)
     else:
-        db = a * _gelu_bwd_ct(b, dy_val, BLOCK_SIZE)
+        db = a_f32 * _gelu_bwd_ct(b_f32, dy_f32, BLOCK_SIZE)
 
     # Store gradients
-    ct.scatter(dx, (left_ptr_offsets,), da)
-    ct.scatter(dx, (right_ptr_offsets,), db)
+    ct.scatter(dx, (left_ptr_offsets,), ct.astype(da, a.dtype))
+    ct.scatter(dx, (right_ptr_offsets,), ct.astype(db, b.dtype))
 
 
 class _GEGLU(torch.autograd.Function):
