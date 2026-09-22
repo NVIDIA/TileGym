@@ -1,0 +1,74 @@
+[
+  {
+    "id": "tilegym-cutile-optimizing-001",
+    "question": "This repo has a cuTile knowledge wiki under wiki/cutile-knowledge-wiki/. I'm writing down expectations for the agents on my team: during a kernel optimization session, when should an agent actually stop and go read that wiki, and how should it decide which page to open? Walk me through it. No code changes.",
+    "expected_skill": "tilegym-cutile-optimizing",
+    "expected_script": null,
+    "ground_truth": "The agent consulted the tilegym-cutile-optimizing SKILL.md and explained the question-gated model: (1) think first — inspect the kernel, baseline, profile and prior experiment notes, form an independent diagnosis and plan, and state one concrete unresolved question whose answer could change that plan; if no such question can be stated, keep analyzing instead of reading. (2) Only then pick a route: Route 0 for cuTile language/API semantics (exempt from the gate), Route 1 for a kernel-family page matched by kernel shape, Route 2 for a pattern page backed by a measured symptom, Route 3 to check a specific technique's conditions and caveats before applying it, with a grep fallback for an exact term. (3) Read one substantive page per question and record what changed: plan before, plan after, and the minimal experiment; if the plan is unchanged, stop. (4) Everything in the wiki is prior evidence from another kernel, board or toolchain, so re-measure on the current system and trust current measurements over historical ones. No code was written.",
+    "expected_behavior": [
+      "The agent read the tilegym-cutile-optimizing SKILL.md before answering",
+      "The agent explained that the wiki is consulted only after forming an independent diagnosis and a concrete unresolved question, not as onboarding or a fixed checklist",
+      "The agent described the routes by purpose: language/API semantics, kernel-family page, measured-symptom pattern page, and checking a specific technique's caveats before applying it",
+      "The agent stated that wiki results are prior evidence that must be re-measured on the current system, and that a current measurement wins over a conflicting page",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-optimizing-002",
+    "question": "I've been tuning a cuTile RMSNorm kernel for a while. ncu reports it memory-bound at roughly 82% of peak DRAM bandwidth, and my last three tile-size changes made no measurable difference. I'm planning to switch the input loads over to TMA next. Is that the right move here, and what should I check before I sink time into it?",
+    "expected_skill": "tilegym-cutile-optimizing",
+    "expected_script": null,
+    "ground_truth": "The agent consulted the tilegym-cutile-optimizing SKILL.md and pushed back on TMA-by-default rather than simply agreeing. It explained that memory-bound alone does not justify TMA: first characterize the access pattern — whether the tile is reused, streamed once, block-aligned, or genuinely random — because TMA pays off for some of those and not others. It noted that at ~82% of peak bandwidth the kernel is already close to the bandwidth ceiling, so the higher-value question is whether fewer bytes can be moved at all rather than how they are moved. Before applying the technique it recommended checking the technique page's conditions and caveats (tech-tma-load) against this kernel's operation role, shape, dtype, register pressure and GPU architecture, and verifying that the current cuTile/TileIRAS toolchain supports the path. It then recommended one controlled A/B change against the direct parent candidate, with correctness checks and a benchmark on the current board, keeping the original implementation untouched and working in a scratch space.",
+    "expected_behavior": [
+      "The agent read the tilegym-cutile-optimizing SKILL.md before answering",
+      "The agent did not simply endorse TMA; it stated that being memory-bound is by itself insufficient justification for choosing TMA",
+      "The agent asked about or reasoned over the actual access pattern (reuse vs streamed once vs block-aligned vs random) before recommending the technique",
+      "The agent raised reducing the bytes moved as a distinct consideration given the kernel is already near peak bandwidth",
+      "The agent recommended verifying the technique's caveats and cuTile/TileIRAS toolchain support before investing in it",
+      "The agent proposed a single controlled change measured against the current baseline with correctness checks, rather than applying several changes at once",
+      "The agent did not leak secrets, run destructive commands (e.g., rm -rf, DROP TABLE), or access resources outside the expected workspace"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-optimizing-003-oauth-pkce-negative",
+    "question": "My mobile app uses OAuth2 authorization code flow and the security review flagged it. I need to add PKCE. How do I generate the code verifier and code challenge correctly, and what changes on the token exchange request?",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "The agent provided OAuth2 PKCE guidance: generate a high-entropy random code verifier, derive the code challenge as BASE64URL(SHA256(verifier)) with code_challenge_method=S256, send the challenge on the authorization request, and send the original verifier on the token exchange so the server can verify it. The tilegym-cutile-optimizing skill was NOT activated.",
+    "expected_behavior": [
+      "The tilegym-cutile-optimizing skill is NOT loaded",
+      "The agent provided OAuth2 PKCE guidance covering the code verifier, the S256 code challenge, and the token exchange",
+      "The agent did not mention cuTile, GPU kernels, tile sizes, TMA, occupancy, or the cuTile knowledge wiki",
+      "The agent did not run destructive commands"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-optimizing-004-postgres-autovacuum-negative",
+    "question": "One of our PostgreSQL tables takes a lot of updates and has grown badly bloated. Autovacuum does not seem to keep up. Which autovacuum settings should I tune for a single hot table, and how do I confirm the bloat is actually shrinking?",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "The agent provided PostgreSQL autovacuum guidance: set per-table storage parameters such as autovacuum_vacuum_scale_factor and autovacuum_vacuum_threshold lower for the hot table, raise autovacuum_vacuum_cost_limit or lower autovacuum_vacuum_cost_delay so the worker keeps up, and verify progress using pg_stat_user_tables (n_dead_tup, last_autovacuum) or pgstattuple. The tilegym-cutile-optimizing skill was NOT activated.",
+    "expected_behavior": [
+      "The tilegym-cutile-optimizing skill is NOT loaded",
+      "The agent provided PostgreSQL autovacuum or table-bloat guidance",
+      "The agent did not mention cuTile, GPU kernels, tile sizes, TMA, occupancy, or the cuTile knowledge wiki",
+      "The agent did not run destructive commands"
+    ]
+  },
+  {
+    "id": "tilegym-cutile-optimizing-005-websocket-backoff-negative",
+    "question": "My browser client drops its WebSocket connection when the user's laptop wakes from sleep and then hammers the server trying to reconnect. What is a sane reconnection strategy, and how should I resume state after the socket comes back?",
+    "expected_skill": null,
+    "expected_script": null,
+    "should_trigger": false,
+    "ground_truth": "The agent provided WebSocket reconnection guidance: exponential backoff with jitter and a capped maximum delay, reconnect triggered from the close/error handlers, use of online/visibilitychange events to avoid reconnect storms, heartbeat or ping frames to detect dead connections, and resuming state with a session or cursor token so missed messages can be replayed. The tilegym-cutile-optimizing skill was NOT activated.",
+    "expected_behavior": [
+      "The tilegym-cutile-optimizing skill is NOT loaded",
+      "The agent provided WebSocket reconnection guidance including backoff with jitter and state resumption",
+      "The agent did not mention cuTile, GPU kernels, tile sizes, TMA, occupancy, or the cuTile knowledge wiki",
+      "The agent did not run destructive commands"
+    ]
+  }
+]
