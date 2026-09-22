@@ -763,6 +763,8 @@ class Test_Mamba2_ChunkBackward(common.PyTestCase):
     @pytest.mark.parametrize("S", [64, 128, 256, 512])
     @pytest.mark.parametrize("framework", ["cutile"])
     def test_perf(self, T, S, arch, framework, record_property):
+        if torch.cuda.get_device_capability() == (10, 7) and framework == "cutile":
+            pytest.skip("SM107 compiler hang and host-memory growth")
         self.setUp()
         try:
             tilegym.set_backend(framework)
