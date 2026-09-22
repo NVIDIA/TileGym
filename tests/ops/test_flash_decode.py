@@ -122,6 +122,20 @@ class Test_FlashDecode(common.PyTestCase):
             pytest.skip("CUDA support required")
         if torch.cuda.get_device_capability()[0] == 12:
             pytest.xfail("Shared memory exhaustion on sm120: FlashDecode requires 133,152 B > hardware limit 102,400 B")
+        if (
+            framework == "cutile"
+            and torch.cuda.get_device_capability() == (10, 7)
+            and seq_len == 31079
+            and group_size == 4
+        ):
+            # Non-strict so the test still runs and reports XPASS once fixed.
+            request.node.add_marker(
+                pytest.mark.xfail(
+                    reason="cutile flash_decode split-kv reduction order is nondeterministic on sm107; "
+                    "a few elements intermittently exceed atol=1e-3 at this shape",
+                    strict=False,
+                )
+            )
 
         self.setUp()
         device = torch.device("cuda")

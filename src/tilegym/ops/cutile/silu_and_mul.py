@@ -177,6 +177,13 @@ def _silu_and_mul_forward(input_flat, output, hidden_size):
     cache_key = ("fwd", hidden_size, input_flat.dtype, str(input_flat.device))
     configs, launch_hints = _silu_autotune_settings(tile_size, input_flat.dtype, input_flat.device)
 
+    if torch.cuda.get_device_capability(input_flat.device) == (10, 7):
+        tile_bytes = tile_size * input_flat.dtype.itemsize
+        if tile_bytes <= 8192:
+            launch_hints = {"num_ctas": 1, "num_worker_warps": 4}
+        elif tile_bytes <= 16384:
+            launch_hints = {"num_ctas": 2, "num_worker_warps": 4}
+
     _launch_silu_kernel(_silu_and_mul_kernel_row_wise, args, (input_flat.shape[0],), cache_key, configs, launch_hints)
 
 
