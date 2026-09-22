@@ -769,8 +769,9 @@ def compare_tensors(
             )
 
     dtype = test.dtype
-    input = test.to(torch.float32)
-    reference = reference.to(torch.float32)
+    comparison_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+    input = test.to(comparison_dtype)
+    reference = reference.to(comparison_dtype)
     input = torch.where(torch.isnan(reference), float("nan"), input)
 
     allclose = torch.allclose(input, reference, rtol, atol, equal_nan)
