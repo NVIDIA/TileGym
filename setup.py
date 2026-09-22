@@ -42,6 +42,15 @@ setuptools.setup(
     },
     packages=setuptools.find_packages(where="src"),
     package_dir={"": "src"},
+    package_data={
+        "": [
+            "**/*.cuh",
+            "**/*.rs",
+            "**/*.toml",
+            "**/*.json",
+            "**/*.jsonl",
+        ],
+    },
     license="MIT",
     classifiers=[
         "Development Status :: 4 - Beta",
