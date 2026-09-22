@@ -45,12 +45,14 @@ DEFAULT_TILE_SIZE_K = 128
 DEFAULT_GROUP_SIZE_M = 8
 
 
-def _get_best_tile_sizes(M: int, N: int, K: int) -> tuple[int, int, int, int]:
+def _get_best_tile_sizes(M: int, N: int, K: int, dtype: torch.dtype) -> tuple[int, int, int, int]:
     """Select optimal tile sizes based on problem dimensions.
 
     Returns (tile_m, tile_n, tile_k, group_m)
 
     """
+    if dtype == torch.float64:
+        return (64, 64, 64, 8)
     return (256, 256, 64, 8)
 
 
@@ -325,6 +327,11 @@ def _launch_persistent_matmul_kernel(
     )
 
 
+_fp64_matmul_autotuner = TileCppAutotuner(
+    [Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)]
+)
+
+
 @autotune(search_space=_matmul_autotune_configs())
 def tilecpp_autotune_matmul(
     a: torch.Tensor,
@@ -338,6 +345,8 @@ def tilecpp_autotune_matmul(
     autotuner: TileCppAutotuner | None = None,
 ):
     """Autotuned matmul that searches for optimal tile sizes."""
+    if a.dtype == torch.float64:
+        autotuner = _fp64_matmul_autotuner
     key = ("tilecpp_matmul", str(a.dtype), M, N, K, transpose_a, transpose_b)
     named_args = {"M": M, "N": N, "K": K}
 
@@ -390,6 +399,8 @@ def tilecpp_autotune_persistent_matmul(
     transpose_b: bool = False,
     autotuner: TileCppAutotuner | None = None,
 ):
+    if a.dtype == torch.float64:
+        autotuner = _fp64_matmul_autotuner
     key = ("tilecpp_persistent_matmul", str(a.dtype), M, N, K, transpose_a, transpose_b)
     named_args = {"M": M, "N": N, "K": K}
 
@@ -481,7 +492,7 @@ def matmul_fn(
         tile_k = kernel_configs.get("TILE_SIZE_K", DEFAULT_TILE_SIZE_K)
         group_m = kernel_configs.get("GROUP_SIZE_M", DEFAULT_GROUP_SIZE_M)
     else:
-        tile_m, tile_n, tile_k, group_m = _get_best_tile_sizes(M, N, K)
+        tile_m, tile_n, tile_k, group_m = _get_best_tile_sizes(M, N, K, a.dtype)
 
     _launch_matmul_kernel(
         a,
@@ -604,7 +615,7 @@ def matmul(
         num_ctas = kernel_configs.get("num_ctas", 1)
         occupancy = kernel_configs.get("occupancy", 1)
     else:
-        tile_m, tile_n, tile_k, group_m = _get_best_tile_sizes(M, N, K)
+        tile_m, tile_n, tile_k, group_m = _get_best_tile_sizes(M, N, K, a.dtype)
         num_ctas = 1
         occupancy = 1
 

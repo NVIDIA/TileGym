@@ -20,6 +20,25 @@ logger = get_logger(__name__)
 
 ConstInt = ct.Constant[int]
 
+_FP64_MATMUL_CONFIGS = {
+    (8, 0): ((64, 64, 64, 1, 2),),
+    (9, 0): ((16, 16, 32, 1, 2), (128, 64, 16, 1, 2)),
+    (10, 0): ((16, 16, 32, 1, 2), (64, 64, 16, 1, 2)),
+    (10, 3): ((16, 16, 32, 1, 2),),
+    (10, 7): ((16, 16, 32, 1, 2), (64, 64, 16, 1, 2), (128, 64, 16, 1, 2)),
+    (12, 0): ((64, 64, 32, 1, 2),),
+    (12, 1): ((64, 64, 32, 1, 2),),
+}
+
+_FP64_PERSISTENT_MATMUL_CONFIGS = {
+    (9, 0): ((64, 128, 16), (32, 16, 32), (128, 64, 16)),
+    (10, 0): ((64, 128, 16), (32, 16, 32)),
+    (10, 3): ((32, 16, 32),),
+    (10, 7): ((32, 16, 32), (64, 128, 16), (128, 64, 16)),
+    (12, 0): ((64, 64, 64),),
+    (12, 1): ((64, 64, 64),),
+}
+
 
 def _swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M):
     # Get the global IDs of the current CUDA block (CTA) in a 1D grid.
@@ -44,11 +63,22 @@ def _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M):
     return bid_m, bid_n
 
 
-def _matmul_autotune_configs():
+def _matmul_autotune_configs(dtype):
     """
     Iterator of autotune configurations for matmul kernel.
     """
     gpu_capability = torch.cuda.get_device_capability()
+
+    if dtype == torch.float64 and gpu_capability in _FP64_MATMUL_CONFIGS:
+        for TILE_M, TILE_N, TILE_K, num_ctas, occupancy in _FP64_MATMUL_CONFIGS[gpu_capability]:
+            yield SimpleNamespace(
+                TILE_SIZE_M=TILE_M,
+                TILE_SIZE_N=TILE_N,
+                TILE_SIZE_K=TILE_K,
+                num_ctas=num_ctas,
+                occupancy=occupancy,
+            )
+        return
 
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
@@ -71,7 +101,7 @@ def _matmul_autotune_configs():
         yield SimpleNamespace(TILE_SIZE_M=512, TILE_SIZE_N=256, TILE_SIZE_K=64, num_ctas=2, occupancy=1)
 
 
-def _static_persistent_matmul_autotune_configs():
+def _static_persistent_matmul_autotune_configs(dtype):
     """
     Iterator of autotune configurations for static persistent matmul kernel.
     """
@@ -80,6 +110,19 @@ def _static_persistent_matmul_autotune_configs():
     # LOAD_LATENCY = ct.load cost hint (1..10, -1 = compiler-inferred). Only sm90 tunes it
     # today; all other arches pass -1 (compiler-inferred = original behavior), but every
     # config must carry the field since the kernel reads cfg.LOAD_LATENCY unconditionally.
+    if dtype == torch.float64 and gpu_capability in _FP64_PERSISTENT_MATMUL_CONFIGS:
+        for TILE_M, TILE_N, TILE_K in _FP64_PERSISTENT_MATMUL_CONFIGS[gpu_capability]:
+            yield SimpleNamespace(
+                TILE_SIZE_M=TILE_M,
+                TILE_SIZE_N=TILE_N,
+                TILE_SIZE_K=TILE_K,
+                GROUP_SIZE_M=8,
+                num_ctas=1,
+                occupancy=2,
+                LOAD_LATENCY=-1,
+            )
+        return
+
     if gpu_capability in [(12, 0), (12, 1)]:
         # sm120, sm121
         yield SimpleNamespace(
@@ -210,7 +253,8 @@ def _matmul_kernel(
     # Initialize an accumulator for the current output tile (TILE_SIZE_M x TILE_SIZE_N).
     # It's common practice to use `float32` for accumulation even with `float16` inputs
     # to maintain higher precision during the sum-reduction of the matrix multiplication.
-    accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0, dtype=ct.float32)
+    accumulator_dtype = ct.float64 if A.dtype == ct.float64 else ct.float32
+    accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0, dtype=accumulator_dtype)
     zero_pad = ct.PaddingMode.ZERO
 
     # Convert fp32 to tf32 to use tensorcore
@@ -277,7 +321,8 @@ def _static_persistent_matmul_kernel(
         bid_m, bid_n = _compute_bid(tile_id, num_bid_in_group, num_bid_m, GROUP_SIZE_M)
 
         # Initialize accumulator
-        accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=ct.float32)
+        accumulator_dtype = ct.float64 if A.dtype == ct.float64 else ct.float32
+        accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=accumulator_dtype)
 
         # K-dimension loop. LOAD_LATENCY (constexpr) in 1..10 sets the ct.load cost
         # hint on BOTH operand loads; <=0 means "compiler-inferred" (omit the kwarg,
@@ -359,7 +404,7 @@ def _cutile_autotune_matmul(stream, a, b, c):
     if cache_key not in _matmul_tune_cache:
         with ct.compiler_timeout(5):
             result = exhaustive_search(
-                list(_matmul_autotune_configs()),
+                list(_matmul_autotune_configs(a.dtype)),
                 stream,
                 lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
                 _matmul_kernel,
@@ -387,7 +432,7 @@ def _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a,
     if cache_key not in _static_persistent_matmul_tune_cache:
         with ct.compiler_timeout(5):
             result = exhaustive_search(
-                list(_static_persistent_matmul_autotune_configs()),
+                list(_static_persistent_matmul_autotune_configs(a.dtype)),
                 stream,
                 lambda cfg: (
                     min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,
