@@ -29,7 +29,7 @@ def parse_requirements(filename: str) -> list[str]:
 
 setuptools.setup(
     name="tilegym",
-    version="1.5.0",
+    version="1.5.1",
     author="NVIDIA Corporation",
     description="TileGym",
     long_description=README,
@@ -42,6 +42,15 @@ setuptools.setup(
     },
     packages=setuptools.find_packages(where="src"),
     package_dir={"": "src"},
+    package_data={
+        "": [
+            "**/*.cuh",
+            "**/*.rs",
+            "**/*.toml",
+            "**/*.json",
+            "**/*.jsonl",
+        ],
+    },
     license="MIT",
     classifiers=[
         "Development Status :: 4 - Beta",
