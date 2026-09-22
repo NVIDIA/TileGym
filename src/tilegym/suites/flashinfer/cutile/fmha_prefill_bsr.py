@@ -59,6 +59,43 @@ def _get_prefill_autotune_configs(page_size=None):
             yield cfg
 
 
+def _get_ragged_autotune_configs():
+    """Ragged search space: the shared prefill configs plus persistent-grid variants.
+
+    Persistent and KV-latency variants are only offered for occupancy-2 configs with
+    BLOCK_N >= 64: with one CTA per SM the tile loop pushes the wide BLOCK_M=256 tiles
+    into register spills. grid_mult trades per-CTA fixed cost against tail imbalance of
+    the static tile stride.
+    """
+
+    def _wants_variants(cfg):
+        return cfg.occupancy >= 2 and cfg.BLOCK_N >= 64
+
+    configs = list(_get_prefill_autotune_configs(None))
+    if torch.cuda.get_device_capability()[0] == 9:
+        # Two 128-row CTAs per SM fit in shared memory with BLOCK_N <= 64.
+        configs.extend(SimpleNamespace(BLOCK_M=128, BLOCK_N=block_n, occupancy=2, num_ctas=1) for block_n in (32, 64))
+    if torch.cuda.get_device_capability()[0] == 12:
+        # 99 KB of shared memory: a 64-row Q tile leaves room to stage K/V. The on-band
+        # loop requires BLOCK_N <= BLOCK_M.
+        configs.extend(
+            SimpleNamespace(BLOCK_M=64, BLOCK_N=block_n, occupancy=occupancy, num_ctas=1)
+            for occupancy in (1, 2)
+            for block_n in (16, 32, 64)
+        )
+    if torch.cuda.get_device_capability() == (10, 7):
+        # The 256-row tiles also profit from a deeper K/V prefetch on this part.
+        configs.extend(SimpleNamespace(**vars(cfg), kv_latency=3) for cfg in list(configs) if cfg.BLOCK_M == 256)
+    for cfg in list(configs):
+        if _wants_variants(cfg):
+            for grid_mult in (1, 2, 4):
+                configs.append(SimpleNamespace(**vars(cfg), persistent=True, grid_mult=grid_mult))
+    for cfg in list(configs):
+        if _wants_variants(cfg):
+            configs.append(SimpleNamespace(**vars(cfg), kv_latency=3))
+    return configs
+
+
 def _autotune_ragged_two_loop(cache, cache_key, stream, kernel, grid_fn, args_fn, label):
     """Tune the KV loop structure jointly with BLOCK_M/N/occupancy for ragged prefill.
 
@@ -73,7 +110,7 @@ def _autotune_ragged_two_loop(cache, cache_key, stream, kernel, grid_fn, args_fn
         for two_loop in (True, False):
             try:
                 result = exhaustive_search(
-                    list(_get_prefill_autotune_configs(None)),
+                    _get_ragged_autotune_configs(),
                     stream,
                     grid_fn,
                     kernel,
@@ -541,6 +578,7 @@ def _prefill_attention_ragged_body(
     QUERY_GROUP_SIZE: ConstInt,
     IS_CAUSAL: ConstBool,
     USE_TWO_LOOP: ConstBool,
+    KV_LATENCY: ConstInt,
 ):
     # Load sequence info
     seq_start_idx_tile = ct.gather(batch_offsets, (batch_id,), padding_value=0)
@@ -554,136 +592,73 @@ def _prefill_attention_ragged_body(
 
     start_m = BLOCK_M * seq_block_id
 
-    if start_m >= seq_len_q:
-        return
+    if start_m < seq_len_q:
+        off_kv_h = head_id // QUERY_GROUP_SIZE
+        qk_scale = k_scale * INV_LOG_2
+        PAD_ZERO = ct.PaddingMode.ZERO
 
-    off_kv_h = head_id // QUERY_GROUP_SIZE
-    qk_scale = k_scale * INV_LOG_2
-    PAD_ZERO = ct.PaddingMode.ZERO
+        q_seq = query.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
+        k_seq = key_cache.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
+        v_seq = value_cache.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
+        o_seq = output.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
 
-    # Create sliced views for ragged tensors - enables TMA with block indices
-    # Slice along axis 0 to offset base pointer by seq_start_index
-    q_seq = query.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
-    k_seq = key_cache.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
-    v_seq = value_cache.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_kv)
-    o_seq = output.slice(axis=0, start=seq_start_index, stop=seq_start_index + seq_len_q)
-
-    # Load Q tile using TMA - use seq_block_id as block index
-    # q_seq shape: [seq_len_q, num_heads, head_dim_qk + head_dim_rope]
-    q_tile = ct.load(
-        q_seq,
-        index=(seq_block_id, head_id, 0),
-        shape=(BLOCK_M, 1, BLOCK_D),
-        order=(0, 1, 2),
-        allow_tma=True,
-        latency=2,
-        padding_mode=PAD_ZERO,
-    )
-    q = ct.reshape(q_tile, (BLOCK_M, BLOCK_D))
-
-    # Load Q_PE if needed
-    q_pe = None
-    if BLOCK_R > 0:
-        q_pe_tile = ct.load(
+        q_tile = ct.load(
             q_seq,
-            index=(seq_block_id, head_id, BLOCK_D // BLOCK_R),
-            shape=(BLOCK_M, 1, BLOCK_R),
+            index=(seq_block_id, head_id, 0),
+            shape=(BLOCK_M, 1, BLOCK_D),
             order=(0, 1, 2),
             allow_tma=True,
             latency=2,
             padding_mode=PAD_ZERO,
         )
-        q_pe = ct.reshape(q_pe_tile, (BLOCK_M, BLOCK_R))
+        q = ct.reshape(q_tile, (BLOCK_M, BLOCK_D))
 
-    # Initialize accumulators
-    m_i = ct.full((BLOCK_M,), -math.inf, dtype=ct.float32)
-    l_i = ct.full((BLOCK_M,), 1.0, dtype=ct.float32)
-    acc = ct.full((BLOCK_M, BLOCK_D), 0.0, dtype=ct.float32)
-
-    # Pre-allocate zero accumulator for QK (hoisted outside loop)
-    qk_zeros = ct.full((BLOCK_M, BLOCK_N), 0.0, dtype=ct.float32)
-
-    offs_n_base = ct.arange(BLOCK_N, dtype=ct.int32)
-    offs_m = start_m + ct.arange(BLOCK_M, dtype=ct.int32)
-
-    # USE_TWO_LOOP (compile-time const) picks two-loop causal split vs single
-    # fused loop; autotune measures both and keeps the faster per problem size.
-    if USE_TWO_LOOP:
-        if IS_CAUSAL:
-            off_band_hi = ct.minimum(seq_len_kv, start_m)
-            on_band_lo = start_m
-            on_band_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
-        else:
-            off_band_hi = seq_len_kv
-            on_band_lo = 0
-            on_band_hi = 0
-
-        off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
-        for iter_idx in range(off_band_iters):
-            curr_n = iter_idx * BLOCK_N
-
-            k_tile = ct.load(
-                k_seq,
-                index=(iter_idx, off_kv_h, 0),
-                shape=(BLOCK_N, 1, BLOCK_D),
+        q_pe = None
+        if BLOCK_R > 0:
+            q_pe_tile = ct.load(
+                q_seq,
+                index=(seq_block_id, head_id, BLOCK_D // BLOCK_R),
+                shape=(BLOCK_M, 1, BLOCK_R),
                 order=(0, 1, 2),
                 allow_tma=True,
                 latency=2,
                 padding_mode=PAD_ZERO,
             )
-            k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
+            q_pe = ct.reshape(q_pe_tile, (BLOCK_M, BLOCK_R))
 
-            qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
+        m_i = ct.full((BLOCK_M,), -math.inf, dtype=ct.float32)
+        l_i = ct.full((BLOCK_M,), 1.0, dtype=ct.float32)
+        acc = ct.full((BLOCK_M, BLOCK_D), 0.0, dtype=ct.float32)
 
-            if BLOCK_R > 0:
-                k_pe_tile = ct.load(
-                    k_seq,
-                    index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
-                    shape=(BLOCK_N, 1, BLOCK_R),
-                    order=(0, 1, 2),
-                    allow_tma=True,
-                    latency=2,
-                    padding_mode=PAD_ZERO,
-                )
-                k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
-                qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
+        # Pre-allocate zero accumulator for QK (hoisted outside loop)
+        qk_zeros = ct.full((BLOCK_M, BLOCK_N), 0.0, dtype=ct.float32)
 
-            qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
-            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
+        offs_n_base = ct.arange(BLOCK_N, dtype=ct.int32)
+        offs_m = start_m + ct.arange(BLOCK_M, dtype=ct.int32)
 
-            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
-            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
-            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
+        # USE_TWO_LOOP (compile-time const) picks two-loop causal split vs single
+        # fused loop; autotune measures both and keeps the faster per problem size.
+        if USE_TWO_LOOP:
+            if IS_CAUSAL:
+                off_band_hi = ct.minimum(seq_len_kv, start_m)
+                on_band_lo = start_m
+                on_band_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
+            else:
+                off_band_hi = seq_len_kv
+                on_band_lo = 0
+                on_band_hi = 0
 
-            v_tile = ct.load(
-                v_seq,
-                index=(iter_idx, off_kv_h, 0),
-                shape=(BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-                padding_mode=PAD_ZERO,
-            )
-            v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
-
-            acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
-            m_i = m_ij
-
-        if IS_CAUSAL:
-            on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
-            on_band_block_start = on_band_lo // BLOCK_N
-            for iter_idx in range(on_band_iters):
-                curr_n = on_band_lo + iter_idx * BLOCK_N
-                block_idx = on_band_block_start + iter_idx
+            off_band_iters = (off_band_hi + BLOCK_N - 1) // BLOCK_N
+            for iter_idx in range(off_band_iters):
+                curr_n = iter_idx * BLOCK_N
 
                 k_tile = ct.load(
                     k_seq,
-                    index=(block_idx, off_kv_h, 0),
+                    index=(iter_idx, off_kv_h, 0),
                     shape=(BLOCK_N, 1, BLOCK_D),
                     order=(0, 1, 2),
                     allow_tma=True,
-                    latency=2,
+                    latency=KV_LATENCY,
                     padding_mode=PAD_ZERO,
                 )
                 k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
@@ -693,19 +668,15 @@ def _prefill_attention_ragged_body(
                 if BLOCK_R > 0:
                     k_pe_tile = ct.load(
                         k_seq,
-                        index=(block_idx, off_kv_h, BLOCK_D // BLOCK_R),
+                        index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
                         shape=(BLOCK_N, 1, BLOCK_R),
                         order=(0, 1, 2),
                         allow_tma=True,
-                        latency=2,
+                        latency=KV_LATENCY,
                         padding_mode=PAD_ZERO,
                     )
                     k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
                     qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
-
-                offs_n = curr_n + offs_n_base
-                causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
-                qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
 
                 qk_max = ct.max(qk, axis=1, keepdims=False)
                 m_ij = ct.maximum(m_i, (qk_max * qk_scale))
@@ -717,104 +688,163 @@ def _prefill_attention_ragged_body(
 
                 v_tile = ct.load(
                     v_seq,
-                    index=(block_idx, off_kv_h, 0),
+                    index=(iter_idx, off_kv_h, 0),
                     shape=(BLOCK_N, 1, BLOCK_D),
                     order=(0, 1, 2),
                     allow_tma=True,
-                    latency=2,
+                    latency=KV_LATENCY,
                     padding_mode=PAD_ZERO,
                 )
                 v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
 
                 acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
                 m_i = m_ij
-    else:
-        if IS_CAUSAL:
-            loop_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
-        else:
-            loop_hi = seq_len_kv
-
-        total_iters = (loop_hi + BLOCK_N - 1) // BLOCK_N
-        for iter_idx in range(total_iters):
-            curr_n = iter_idx * BLOCK_N
-
-            k_tile = ct.load(
-                k_seq,
-                index=(iter_idx, off_kv_h, 0),
-                shape=(BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-                padding_mode=PAD_ZERO,
-            )
-            k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
-
-            qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
-
-            if BLOCK_R > 0:
-                k_pe_tile = ct.load(
-                    k_seq,
-                    index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
-                    shape=(BLOCK_N, 1, BLOCK_R),
-                    order=(0, 1, 2),
-                    allow_tma=True,
-                    latency=2,
-                    padding_mode=PAD_ZERO,
-                )
-                k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
-                qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
 
             if IS_CAUSAL:
-                if curr_n >= start_m:
+                on_band_iters = (on_band_hi - on_band_lo + BLOCK_N - 1) // BLOCK_N
+                on_band_block_start = on_band_lo // BLOCK_N
+                for iter_idx in range(on_band_iters):
+                    curr_n = on_band_lo + iter_idx * BLOCK_N
+                    block_idx = on_band_block_start + iter_idx
+
+                    k_tile = ct.load(
+                        k_seq,
+                        index=(block_idx, off_kv_h, 0),
+                        shape=(BLOCK_N, 1, BLOCK_D),
+                        order=(0, 1, 2),
+                        allow_tma=True,
+                        latency=KV_LATENCY,
+                        padding_mode=PAD_ZERO,
+                    )
+                    k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
+
+                    qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
+
+                    if BLOCK_R > 0:
+                        k_pe_tile = ct.load(
+                            k_seq,
+                            index=(block_idx, off_kv_h, BLOCK_D // BLOCK_R),
+                            shape=(BLOCK_N, 1, BLOCK_R),
+                            order=(0, 1, 2),
+                            allow_tma=True,
+                            latency=KV_LATENCY,
+                            padding_mode=PAD_ZERO,
+                        )
+                        k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
+                        qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
+
                     offs_n = curr_n + offs_n_base
                     causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
                     qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
 
-            qk_max = ct.max(qk, axis=1, keepdims=False)
-            m_ij = ct.maximum(m_i, (qk_max * qk_scale))
-            p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
+                    qk_max = ct.max(qk, axis=1, keepdims=False)
+                    m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+                    p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
 
-            alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
-            l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
-            acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
+                    alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+                    l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+                    acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
 
-            v_tile = ct.load(
-                v_seq,
-                index=(iter_idx, off_kv_h, 0),
-                shape=(BLOCK_N, 1, BLOCK_D),
-                order=(0, 1, 2),
-                allow_tma=True,
-                latency=2,
-                padding_mode=PAD_ZERO,
-            )
-            v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
+                    v_tile = ct.load(
+                        v_seq,
+                        index=(block_idx, off_kv_h, 0),
+                        shape=(BLOCK_N, 1, BLOCK_D),
+                        order=(0, 1, 2),
+                        allow_tma=True,
+                        latency=KV_LATENCY,
+                        padding_mode=PAD_ZERO,
+                    )
+                    v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
 
-            acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
-            m_i = m_ij
+                    acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
+                    m_i = m_ij
+        else:
+            if IS_CAUSAL:
+                loop_hi = ct.minimum(seq_len_kv, start_m + BLOCK_M)
+            else:
+                loop_hi = seq_len_kv
 
-    l_i_rcp = ct.truediv(v_scale, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
-    acc = acc * ct.reshape(l_i_rcp, (BLOCK_M, 1))
-    lse = m_i + ct.log2(l_i)
+            total_iters = (loop_hi + BLOCK_N - 1) // BLOCK_N
+            for iter_idx in range(total_iters):
+                curr_n = iter_idx * BLOCK_N
 
-    acc_out = ct.astype(acc, output.dtype)
-    acc_3d = ct.reshape(acc_out, (BLOCK_M, 1, BLOCK_D))
-    ct.store(
-        o_seq,
-        index=(seq_block_id, head_id, 0),
-        tile=acc_3d,
-        order=(0, 1, 2),
-        allow_tma=True,
-        latency=2,
-    )
+                k_tile = ct.load(
+                    k_seq,
+                    index=(iter_idx, off_kv_h, 0),
+                    shape=(BLOCK_N, 1, BLOCK_D),
+                    order=(0, 1, 2),
+                    allow_tma=True,
+                    latency=KV_LATENCY,
+                    padding_mode=PAD_ZERO,
+                )
+                k = ct.reshape(k_tile, (BLOCK_N, BLOCK_D))
 
-    lse_scaled = lse * (1.0 / INV_LOG_2)
-    offs_m_store = ct.arange(BLOCK_M, dtype=ct.int32)
-    token_indices = seq_start_index + start_m + offs_m_store
-    head_indices = ct.full((BLOCK_M,), head_id, dtype=ct.int32)
-    lse_mask = offs_m_store + start_m < seq_len_q
-    token_indices_masked = ct.where(lse_mask, token_indices, ct.full((BLOCK_M,), -1, dtype=ct.int32))
-    lse_indices = (token_indices_masked, head_indices)
-    ct.scatter(lse_output, lse_indices, lse_scaled)
+                qk = ct.mma(q, ct.transpose(k), acc=qk_zeros)
+
+                if BLOCK_R > 0:
+                    k_pe_tile = ct.load(
+                        k_seq,
+                        index=(iter_idx, off_kv_h, BLOCK_D // BLOCK_R),
+                        shape=(BLOCK_N, 1, BLOCK_R),
+                        order=(0, 1, 2),
+                        allow_tma=True,
+                        latency=KV_LATENCY,
+                        padding_mode=PAD_ZERO,
+                    )
+                    k_pe = ct.reshape(k_pe_tile, (BLOCK_N, BLOCK_R))
+                    qk = ct.mma(q_pe, ct.transpose(k_pe), acc=qk)
+
+                if IS_CAUSAL:
+                    if curr_n >= start_m:
+                        offs_n = curr_n + offs_n_base
+                        causal_mask = ct.reshape(offs_m, (BLOCK_M, 1)) >= ct.reshape(offs_n, (1, BLOCK_N))
+                        qk = ct.where(causal_mask, qk, ct.full((BLOCK_M, BLOCK_N), -1.0e6, dtype=ct.float32))
+
+                qk_max = ct.max(qk, axis=1, keepdims=False)
+                m_ij = ct.maximum(m_i, (qk_max * qk_scale))
+                p = ct.exp2(qk * qk_scale - ct.reshape(m_ij, (BLOCK_M, 1)), flush_to_zero=True)
+
+                alpha = ct.exp2((m_i - m_ij), flush_to_zero=True)
+                l_i = l_i * alpha + ct.sum(p, axis=1, keepdims=False)
+                acc = acc * ct.reshape(alpha, (BLOCK_M, 1))
+
+                v_tile = ct.load(
+                    v_seq,
+                    index=(iter_idx, off_kv_h, 0),
+                    shape=(BLOCK_N, 1, BLOCK_D),
+                    order=(0, 1, 2),
+                    allow_tma=True,
+                    latency=KV_LATENCY,
+                    padding_mode=PAD_ZERO,
+                )
+                v = ct.reshape(v_tile, (BLOCK_N, BLOCK_D))
+
+                acc = ct.mma(ct.astype(p, q.dtype), v, acc=acc)
+                m_i = m_ij
+
+        l_i_rcp = ct.truediv(v_scale, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
+        acc = acc * ct.reshape(l_i_rcp, (BLOCK_M, 1))
+        lse = m_i + ct.log2(l_i)
+
+        acc_out = ct.astype(acc, output.dtype)
+        acc_3d = ct.reshape(acc_out, (BLOCK_M, 1, BLOCK_D))
+        ct.store(
+            o_seq,
+            index=(seq_block_id, head_id, 0),
+            tile=acc_3d,
+            order=(0, 1, 2),
+            allow_tma=True,
+            latency=2,
+        )
+
+        lse_scaled = lse * (1.0 / INV_LOG_2)
+        offs_m_store = ct.arange(BLOCK_M, dtype=ct.int32)
+        token_indices = seq_start_index + start_m + offs_m_store
+        head_indices = ct.full((BLOCK_M,), head_id, dtype=ct.int32)
+        lse_mask = offs_m_store + start_m < seq_len_q
+        token_indices_masked = ct.where(lse_mask, token_indices, ct.full((BLOCK_M,), -1, dtype=ct.int32))
+        lse_indices = (token_indices_masked, head_indices)
+        ct.scatter(lse_output, lse_indices, lse_scaled)
 
 
 @ct.kernel
@@ -837,6 +867,7 @@ def _prefill_attention_ragged_kernel(
     QUERY_GROUP_SIZE: ConstInt,
     IS_CAUSAL: ConstBool,
     USE_TWO_LOOP: ConstBool,
+    KV_LATENCY: ConstInt,
 ):
     """
     Prefill attention kernel with ragged (contiguous) KV cache.
@@ -870,6 +901,7 @@ def _prefill_attention_ragged_kernel(
         QUERY_GROUP_SIZE,
         IS_CAUSAL,
         USE_TWO_LOOP,
+        KV_LATENCY,
     )
 
 
@@ -893,15 +925,108 @@ def _prefill_attention_ragged_lpt_kernel(
     QUERY_GROUP_SIZE: ConstInt,
     IS_CAUSAL: ConstBool,
     USE_TWO_LOOP: ConstBool,
+    KV_LATENCY: ConstInt,
     NUM_HEADS: ConstInt,
     NUM_BATCH: ConstInt,
     MAX_SEQ_LEN: ConstInt,
     SWIZZLE: ConstInt,
     NUM_HB_QUOTIENT: ConstInt,
     NUM_HB_REMAINDER: ConstInt,
+    PERSISTENT: ConstBool,
 ):
-    tile_idx = ct.bid(0)
     NUM_BLOCKS = (MAX_SEQ_LEN + BLOCK_M - 1) // BLOCK_M
+    num_tiles = NUM_BLOCKS * NUM_HEADS * NUM_BATCH
+    if PERSISTENT:
+        # Grid-stride over tiles: tiles beyond a sequence's actual length cost a
+        # loop iteration instead of a CTA launch.
+        for tile_idx in range(ct.bid(0), num_tiles, ct.num_blocks(0)):
+            _prefill_attention_ragged_lpt_tile(
+                tile_idx,
+                query,
+                key_cache,
+                value_cache,
+                actual_seq_lens_q,
+                actual_seq_lens_kv,
+                batch_offsets,
+                output,
+                lse_output,
+                K_SCALE,
+                V_SCALE,
+                N_KV_HEADS,
+                BLOCK_M,
+                BLOCK_N,
+                BLOCK_D,
+                BLOCK_R,
+                QUERY_GROUP_SIZE,
+                IS_CAUSAL,
+                USE_TWO_LOOP,
+                KV_LATENCY,
+                NUM_HEADS,
+                NUM_BATCH,
+                NUM_BLOCKS,
+                SWIZZLE,
+                NUM_HB_QUOTIENT,
+                NUM_HB_REMAINDER,
+            )
+    else:
+        _prefill_attention_ragged_lpt_tile(
+            ct.bid(0),
+            query,
+            key_cache,
+            value_cache,
+            actual_seq_lens_q,
+            actual_seq_lens_kv,
+            batch_offsets,
+            output,
+            lse_output,
+            K_SCALE,
+            V_SCALE,
+            N_KV_HEADS,
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_D,
+            BLOCK_R,
+            QUERY_GROUP_SIZE,
+            IS_CAUSAL,
+            USE_TWO_LOOP,
+            KV_LATENCY,
+            NUM_HEADS,
+            NUM_BATCH,
+            NUM_BLOCKS,
+            SWIZZLE,
+            NUM_HB_QUOTIENT,
+            NUM_HB_REMAINDER,
+        )
+
+
+def _prefill_attention_ragged_lpt_tile(
+    tile_idx,
+    query,
+    key_cache,
+    value_cache,
+    actual_seq_lens_q,
+    actual_seq_lens_kv,
+    batch_offsets,
+    output,
+    lse_output,
+    K_SCALE: ConstFloat,
+    V_SCALE: ConstFloat,
+    N_KV_HEADS: ConstInt,
+    BLOCK_M: ConstInt,
+    BLOCK_N: ConstInt,
+    BLOCK_D: ConstInt,
+    BLOCK_R: ConstInt,
+    QUERY_GROUP_SIZE: ConstInt,
+    IS_CAUSAL: ConstBool,
+    USE_TWO_LOOP: ConstBool,
+    KV_LATENCY: ConstInt,
+    NUM_HEADS: ConstInt,
+    NUM_BATCH: ConstInt,
+    NUM_BLOCKS: ConstInt,
+    SWIZZLE: ConstInt,
+    NUM_HB_QUOTIENT: ConstInt,
+    NUM_HB_REMAINDER: ConstInt,
+):
     l2_major_blocks = SWIZZLE * NUM_BLOCKS
     bidhb = tile_idx // l2_major_blocks
     l2_mod = tile_idx % l2_major_blocks
@@ -916,32 +1041,31 @@ def _prefill_attention_ragged_lpt_kernel(
     head_id = bidhb_actual % NUM_HEADS
     seq_block_id = NUM_BLOCKS - 1 - block  # LPT: reverse order
 
-    if tile_idx >= NUM_BLOCKS * NUM_HEADS * NUM_BATCH or batch_id >= NUM_BATCH or head_id >= NUM_HEADS:
-        return
-
-    _prefill_attention_ragged_body(
-        batch_id,
-        head_id,
-        seq_block_id,
-        query,
-        key_cache,
-        value_cache,
-        actual_seq_lens_q,
-        actual_seq_lens_kv,
-        batch_offsets,
-        output,
-        lse_output,
-        K_SCALE,
-        V_SCALE,
-        N_KV_HEADS,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_D,
-        BLOCK_R,
-        QUERY_GROUP_SIZE,
-        IS_CAUSAL,
-        USE_TWO_LOOP,
-    )
+    if bidhb_actual < NUM_HEADS * NUM_BATCH:
+        _prefill_attention_ragged_body(
+            batch_id,
+            head_id,
+            seq_block_id,
+            query,
+            key_cache,
+            value_cache,
+            actual_seq_lens_q,
+            actual_seq_lens_kv,
+            batch_offsets,
+            output,
+            lse_output,
+            K_SCALE,
+            V_SCALE,
+            N_KV_HEADS,
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_D,
+            BLOCK_R,
+            QUERY_GROUP_SIZE,
+            IS_CAUSAL,
+            USE_TWO_LOOP,
+            KV_LATENCY,
+        )
 
 
 @register_impl("flashinfer.attention.prefill_attention_kv_paged", backend="cutile")
@@ -1229,7 +1353,7 @@ def prefill_attention_kv_ragged(
         else outputs
     )
     out_lse = (
-        torch.zeros([q.shape[0], num_qo_heads], dtype=torch.float32, device=q.device) if out_lse is None else out_lse
+        torch.empty([q.shape[0], num_qo_heads], dtype=torch.float32, device=q.device) if out_lse is None else out_lse
     )
 
     # Flatten tensors for kernel
@@ -1267,8 +1391,13 @@ def prefill_attention_kv_ragged(
         ragged_lpt_stream = torch.cuda.current_stream()
         ragged_lpt_cache_key = (autotune_key, swizzle, str(q.device))
 
+        num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
+
         def _lpt_grid(cfg):
-            return ((max_seq_len + cfg.BLOCK_M - 1) // cfg.BLOCK_M * num_qo_heads * num_batch, 1, 1)
+            num_tiles = (max_seq_len + cfg.BLOCK_M - 1) // cfg.BLOCK_M * num_qo_heads * num_batch
+            if getattr(cfg, "persistent", False):
+                return (min(num_tiles, num_sms * cfg.occupancy * getattr(cfg, "grid_mult", 1)), 1, 1)
+            return (num_tiles, 1, 1)
 
         def _lpt_args(cfg, two_loop):
             return (
@@ -1290,12 +1419,14 @@ def prefill_attention_kv_ragged(
                 QUERY_GROUP_SIZE,
                 is_causal,
                 two_loop,
+                getattr(cfg, "kv_latency", 2),
                 num_qo_heads,
                 num_batch,
                 max_seq_len,
                 swizzle,
                 num_hb_quotient,
                 max(num_hb_remainder, 1),
+                getattr(cfg, "persistent", False),
             )
 
         best_cfg, best_two_loop, tuned_kernel = _autotune_ragged_two_loop(
@@ -1335,6 +1466,7 @@ def prefill_attention_kv_ragged(
                 QUERY_GROUP_SIZE,
                 is_causal,
                 two_loop,
+                getattr(cfg, "kv_latency", 2),
             )
 
         best_cfg, best_two_loop, tuned_kernel = _autotune_ragged_two_loop(
