@@ -154,7 +154,7 @@ class Test_Matmul(common.PyTestCase):
         [
             (2**i, 2**i, 2**i, 0, 0, dtype)
             for i in list(range(11, 16)) + [6, 8]
-            for dtype in ([torch.float16, torch.float32, torch.float8_e4m3fn])
+            for dtype in ([torch.float16, torch.float32, torch.float8_e4m3fn, torch.float64])
         ],
         ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
@@ -184,16 +184,23 @@ class Test_Matmul(common.PyTestCase):
                 pytest.skip("cutile-rs matmul does not support transpose")
             if dtype not in (torch.float16, torch.bfloat16, torch.float32):
                 pytest.skip(f"cutile-rs matmul does not support dtype {dtype}")
-        # Enforce SM80 restrictions: use_tma=False, static_persistent=False, dtype=float16 only
+        # Enforce SM80 restrictions: use_tma=False and static_persistent=False.
         if torch.cuda.get_device_capability()[0] == 8:
-            if use_tma != False or static_persistent != False or dtype != torch.float16:
+            if use_tma != False or static_persistent != False or dtype not in (torch.float16, torch.float64):
                 pytest.skip(
-                    "SM80 restriction: use_tma must be False, static_persistent must be False, and dtype must be float16"
+                    "SM80 restriction: use_tma and static_persistent must be False; dtype must be float16 or float64"
                 )
 
         # Skip FP8 for pytorch reference (no native support)
         if dtype == torch.float8_e4m3fn and backend == "pytorch":
             pytest.skip("Skip float8_e4m3fn because pytorch reference doesn't support it")
+        if dtype == torch.float64 and m == 32768:
+            pytest.skip("Skip FP64 32768x32768 matmul due to excessive runtime")
+        if dtype == torch.float64 and torch.cuda.get_device_capability() == (12, 1):
+            if backend == "cutile" and m >= 16384:
+                pytest.skip("Skip large FP64 cuTile matmul on sm121 due to excessive runtime")
+            if backend == "tilecpp" and m >= 8192:
+                pytest.skip("Skip large FP64 TileCPP matmul on sm121 due to excessive runtime")
         # xfail on sm121 for 32768x32768 matmul due to performance
         if torch.cuda.get_device_capability() == (12, 1) and m == 32768:
             pytest.skip("32768x32768 matmul takes too long on sm121")
@@ -234,6 +241,10 @@ class Test_Matmul(common.PyTestCase):
                 # float8 doesn't support autograd, disable requires_grad for correctness check
                 a = a.detach()
                 b = b.detach()
+            elif dtype == torch.float64:
+                tolerances = common.get_dtype_tolerances(dtype)
+                atol = tolerances["atol"]
+                rtol = tolerances["rtol"]
             else:
                 atol = 1e-2
                 rtol = 1e-2
