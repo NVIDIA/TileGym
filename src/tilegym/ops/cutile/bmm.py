@@ -270,13 +270,13 @@ def _persistent_bmm_autotune_base(stream, a, b, output, batch_size, M, N, K, tra
         num_ctas = getattr(cfg, "num_ctas", 1)
 
         base_programs = NUM_SMS // num_ctas
-        grid_size = min(base_programs, total_tiles) * occupancy
+        grid_size = min(base_programs * occupancy, total_tiles)
         return (grid_size,)
 
     # Call autotuner to find the best config and execute the kernel
     cache_key = (batch_size, M, N, K, transpose_a, transpose_b, a.dtype, str(a.device))
     if cache_key not in _bmm_tune_cache:
-        with ct.compiler_timeout(15):
+        with ct.compiler_timeout(120):
             result = exhaustive_search(
                 list(_bmm_autotune_configs()),
                 stream,

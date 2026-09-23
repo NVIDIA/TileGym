@@ -257,7 +257,7 @@ class Test_Matmul(common.PyTestCase):
                 output_processor=output_processor,
             )
         try:
-            res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+            res = common.benchmark_framework(backend, backend_fn)
         except torch.OutOfMemoryError as e:
             pytest.skip(f"OOM during benchmark: {e}")
         record_property("benchmark", res)
@@ -330,7 +330,7 @@ class Test_Matmul(common.PyTestCase):
                 atol=1e-2,
                 rtol=1e-2,
             )
-        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM
@@ -567,7 +567,7 @@ class Test_W8A8BlockFp8Matmul(common.PyTestCase):
             pytest.skip(f"Backend {backend} not supported")
 
         # Run benchmarks
-        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn)
 
         # Record results for reporting
         record_property("benchmark", res)

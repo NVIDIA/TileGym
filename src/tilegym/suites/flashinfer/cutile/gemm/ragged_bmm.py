@@ -569,7 +569,7 @@ def ragged_bmm(
     # kernel always reads its grid bound from a device tensor (defense-in-depth),
     # so we keep the call sites uniform.
     if max_m_device is None:
-        max_m_device = torch.tensor([max_m], dtype=torch.int32, device=a.device)
+        max_m_device = torch.full((1,), max_m, dtype=torch.int32, device=a.device)
 
     # Check if autotune is enabled
     enable_autotune = is_autotune_enabled()

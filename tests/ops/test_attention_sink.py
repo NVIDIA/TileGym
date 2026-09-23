@@ -217,7 +217,7 @@ class Test_AttentionSink(common.PyTestCase):
             check_stride=False,
         )
 
-        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM

@@ -63,7 +63,7 @@ class Test_Transpose(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} not supported")
 
-        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM
