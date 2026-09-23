@@ -309,7 +309,7 @@ class Test_RoPE(common.PyTestCase):
             torch.testing.assert_close(ref_q, test_q, atol=1e-2, rtol=1e-2)
             torch.testing.assert_close(ref_k, test_k, atol=1e-2, rtol=1e-2)
 
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM

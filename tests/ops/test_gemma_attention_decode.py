@@ -297,7 +297,7 @@ class TestGemmaAttentionDecode(common.PyTestCase):
             )
 
         # Benchmark
-        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", result)
 
         # Cleanup

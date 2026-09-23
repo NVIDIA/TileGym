@@ -228,7 +228,7 @@ class Test_MLADecoding(common.PyTestCase):
             pytest.skip(f"Framework {framework} is not available")
 
         # Run benchmarks
-        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        res = common.benchmark_framework(framework, framework_fn)
 
         # Record results for reporting
         record_property("benchmark", res)

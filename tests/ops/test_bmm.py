@@ -2,7 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
+import importlib
 import itertools
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,6 +23,49 @@ class Test_BMM_FWD(common.PyTestCase):
         if transpose_b:
             b = torch.transpose(b, 1, 2)
         return torch.bmm(a, b)
+
+    @pytest.mark.parametrize("backend", ["cutile"])
+    @pytest.mark.parametrize("m,n,k", [(128, 256, 511), (129, 257, 65), (1024, 512, 1023)])
+    @pytest.mark.parametrize("transpose_a,transpose_b", [(False, True), (True, False)])
+    def test_op_static_persistent_cudagraph(self, backend, m, n, k, transpose_a, transpose_b, monkeypatch):
+        try:
+            tilegym.set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+        self.setUp()
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        if torch.cuda.get_device_capability()[0] != 10:
+            pytest.skip("This multi-CTA regression targets SM100-family GPUs")
+
+        module = importlib.import_module("tilegym.ops.cutile.bmm")
+        config = SimpleNamespace(TILE_M=128, TILE_N=256, TILE_K=64, GROUP_SIZE_M=8, LATENCY=3, occupancy=2, num_ctas=2)
+        a = torch.rand((4, k, m) if transpose_a else (4, m, k), dtype=torch.float16, device="cuda")
+        b = torch.rand((4, n, k) if transpose_b else (4, k, n), dtype=torch.float16, device="cuda")
+        key = (4, m, n, k, transpose_a, transpose_b, a.dtype, str(a.device))
+        kernel = module._static_persistent_bmm_kernel.replace_hints(num_ctas=2, occupancy=2)
+        monkeypatch.setattr(module, "_bmm_tune_cache", {key: (config, kernel)})
+
+        def run():
+            return tilegym.ops.bmm(a, b, transpose_a=transpose_a, transpose_b=transpose_b, static_persistent=True)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = run()
+        torch.cuda.current_stream().wait_stream(stream)
+
+        for _ in range(3):
+            a.uniform_()
+            b.uniform_()
+            expected = self.reference(a, b, transpose_a=transpose_a, transpose_b=transpose_b)
+            graph.replay()
+            torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-8)
 
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
@@ -157,7 +202,7 @@ class Test_BMM_FWD(common.PyTestCase):
                 atol=1e-8,
             )
 
-        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+        res = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM

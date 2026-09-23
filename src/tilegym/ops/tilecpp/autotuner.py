@@ -18,6 +18,7 @@ import functools
 import logging
 import os
 import random
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 from typing import Callable
@@ -26,6 +27,7 @@ from typing import Sequence
 import torch
 
 from tilegym.autotune import is_autotune_disabled
+from tilegym.benchmark import benchmark_cuda_graph
 
 logger = logging.getLogger(__name__)
 
@@ -124,53 +126,26 @@ def _time_ms(
     stream,
     warmup_ms: float = 25.0,
     rep_ms: float = 100.0,
+    setup_fn: Callable | None = None,
 ) -> float:
-    """Measure execution time in milliseconds using per-invocation CUDA events.
+    with torch.cuda.stream(stream):
+        return benchmark_cuda_graph(run_once, warmup=warmup_ms, rep=rep_ms, max_rep=96, setup_fn=setup_fn)["median"]
 
-    1. Pilot run to estimate per-call cost.
-    2. Derive warmup/repeat counts from time budgets.
-    3. Per-invocation event pairs so each run is timed independently.
-    4. Returns the **median** of a 10%-trimmed distribution for stability.
-    """
-    stream.synchronize()
 
-    # Pilot: estimate per-call cost
-    run_once()
-    stream.synchronize()
+@contextmanager
+def _restore_inputs(tensors, stream):
+    with torch.cuda.stream(stream):
+        saved = [(tensor, tensor.clone()) for tensor in tensors]
 
-    pilot_start = torch.cuda.Event(enable_timing=True)
-    pilot_end = torch.cuda.Event(enable_timing=True)
-    pilot_start.record(stream)
-    for _ in range(5):
-        run_once()
-    pilot_end.record(stream)
-    pilot_end.synchronize()
-    estimate_ms = pilot_start.elapsed_time(pilot_end) / 5
+    def restore():
+        for tensor, snapshot in saved:
+            tensor.copy_(snapshot)
 
-    n_warmup = max(1, int(warmup_ms / max(estimate_ms, 1e-3)))
-    n_repeat = max(10, int(rep_ms / max(estimate_ms, 1e-3)))
-
-    # Warmup — stabilises GPU clocks, caches, and TLBs
-    for _ in range(n_warmup):
-        run_once()
-    stream.synchronize()
-
-    # Benchmark with per-invocation events
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    for i in range(n_repeat):
-        starts[i].record(stream)
-        run_once()
-        ends[i].record(stream)
-    ends[-1].synchronize()
-
-    times = sorted(s.elapsed_time(e) for s, e in zip(starts, ends))
-
-    # Trim fastest and slowest 10%, take median of the rest
-    lo = len(times) // 10
-    hi = len(times) - lo
-    trimmed = times[lo:hi] if hi > lo else times
-    return trimmed[len(trimmed) // 2]
+    try:
+        yield restore if saved else None
+    finally:
+        with torch.cuda.stream(stream):
+            restore()
 
 
 def _default_key(
@@ -217,8 +192,9 @@ class TileCppAutotuner:
         named_args: dict[str, Any] = {},
         *,
         max_iter: int = 60,
-        seed: int | None = None,
+        seed: int = 0,
         force_retune: bool = False,
+        restore_tensors: Sequence[torch.Tensor] = (),
     ) -> TunedResult:
         """
         Run the autotuned kernel and return its result.
@@ -242,13 +218,15 @@ class TileCppAutotuner:
                 Maximum number of (valid) configurations to sample from the
                 search space.
             seed:
-                Optional seed for the random number generator used when
-                sampling configurations. If ``None``, the global random number
-                generator state is used.
+                Seed for deterministic candidate ordering and sampling.
             force_retune:
                 If ``True``, ignore any cached best config for this key and
                 re-run the search. The new best config is then written back
                 to the cache.
+            restore_tensors:
+                Inputs modified in place. Preserve their values during search;
+                reset before each candidate outside timing and the cache flush.
+                Cache hits launch directly without copying these inputs.
 
         Returns:
             TunedResult with the best configuration.
@@ -261,84 +239,93 @@ class TileCppAutotuner:
             if verbose:
                 logger.info(f"[TileCpp Autotuner] Cache hit for {key}: {best_cfg}")
         else:
-            if verbose:
-                logger.info(f"[TileCpp Autotuner] Starting autotuning for {key} with {len(self._search_space)} configs")
-            rng = random.Random(seed)
-            indices = rng.sample(range(len(self._search_space)), len(self._search_space))
+            with _restore_inputs(restore_tensors, stream) as setup_fn:
+                if verbose:
+                    logger.info(
+                        f"[TileCpp Autotuner] Starting autotuning for {key} with {len(self._search_space)} configs"
+                    )
+                rng = random.Random(seed)
+                indices = rng.sample(range(len(self._search_space)), len(self._search_space))
 
-            # Phase 1: Pre-compile all configurations to warm up the compile cache
-            # This ensures JIT compilation overhead doesn't affect timing
-            if verbose:
-                logger.info(f"[TileCpp Autotuner] Pre-compiling up to {max_iter} configurations...")
-            valid_configs = []
-            successes = 0
-            for cfg_idx in indices:
-                if successes >= max_iter:
-                    break
-                cfg = self._search_space[cfg_idx]
+                # Phase 1: Pre-compile all configurations to warm up the compile cache
+                # This ensures JIT compilation overhead doesn't affect timing
+                if verbose:
+                    logger.info(f"[TileCpp Autotuner] Pre-compiling up to {max_iter} configurations...")
+                valid_configs = []
+                successes = 0
+                for cfg_idx in indices:
+                    if successes >= max_iter:
+                        break
+                    cfg = self._search_space[cfg_idx]
 
-                # Apply filter predicate if defined
-                if not self._search_space.filter(named_args, cfg):
-                    if verbose:
-                        logger.debug(f"[TileCpp Autotuner] Config {cfg} filtered out by predicate function")
-                    continue
-
-                grid = grid_fn(named_args, cfg)
-                try:
-                    # Run once to trigger JIT compilation
-                    launch_fn(cfg)
-                    valid_configs.append((cfg_idx, cfg, grid))
-                    successes += 1
-                except Exception as e:
-                    if verbose:
-                        logger.info(f"[TileCpp Autotuner] Config {cfg} failed during pre-compile: {e}")
-                    continue
-
-            if not valid_configs:
-                raise ValueError("No valid config found")
-
-            # Synchronize to ensure all compilations are complete
-            stream.synchronize()
-            if verbose:
-                logger.info(f"[TileCpp Autotuner] Pre-compilation done. Timing {len(valid_configs)} valid configs...")
-
-            # Phase 2: Time each pre-compiled configuration
-            best_time_ms, best_idx, best_grid = float("inf"), None, None
-
-            for cfg_idx, cfg, grid in valid_configs:
-                try:
-
-                    def run_once(c=cfg):  # Capture cfg in closure
-                        launch_fn(c)
-
-                    time_ms = _time_ms(run_once, stream=stream)
-
-                    if time_ms < best_time_ms:
-                        best_time_ms = time_ms
-                        best_idx, best_grid = cfg_idx, grid
+                    # Apply filter predicate if defined
+                    if not self._search_space.filter(named_args, cfg):
                         if verbose:
-                            logger.info(f"[TileCpp Autotuner] New best: {cfg} -> {best_time_ms:.3f} ms")
-                    else:
+                            logger.debug(f"[TileCpp Autotuner] Config {cfg} filtered out by predicate function")
+                        continue
+
+                    grid = grid_fn(named_args, cfg)
+                    try:
+                        # Run once to trigger JIT compilation
+                        with torch.cuda.stream(stream):
+                            if setup_fn is not None:
+                                setup_fn()
+                            launch_fn(cfg)
+                        valid_configs.append((cfg_idx, cfg, grid))
+                        successes += 1
+                    except Exception as e:
                         if verbose:
-                            logger.info(f"[TileCpp Autotuner] Tried: {cfg} -> {time_ms:.3f} ms")
+                            logger.info(f"[TileCpp Autotuner] Config {cfg} failed during pre-compile: {e}")
+                        continue
 
-                except Exception as e:
-                    if verbose:
-                        logger.info(f"[TileCpp Autotuner] Config {cfg} failed during timing: {e}")
-                    continue
+                if not valid_configs:
+                    raise ValueError("No valid config found")
 
-            if best_idx is None:
-                raise ValueError("No valid config found after timing")
+                # Synchronize to ensure all compilations are complete
+                stream.synchronize()
+                if verbose:
+                    logger.info(
+                        f"[TileCpp Autotuner] Pre-compilation done. Timing {len(valid_configs)} valid configs..."
+                    )
 
-            best_cfg = self._search_space[best_idx]
-            if verbose:
-                logger.info(f"[TileCpp Autotuner] Tuning complete. Best: {best_cfg} -> {best_time_ms:.3f} ms")
-            self._cache[key] = (best_idx, best_grid)
+                # Phase 2: Time each pre-compiled configuration
+                best_time_ms, best_idx, best_grid = float("inf"), None, None
+
+                for cfg_idx, cfg, grid in valid_configs:
+                    try:
+
+                        def run_once(c=cfg):  # Capture cfg in closure
+                            launch_fn(c)
+
+                        time_ms = _time_ms(run_once, stream=stream, setup_fn=setup_fn)
+
+                        if time_ms < best_time_ms:
+                            best_time_ms = time_ms
+                            best_idx, best_grid = cfg_idx, grid
+                            if verbose:
+                                logger.info(f"[TileCpp Autotuner] New best: {cfg} -> {best_time_ms:.3f} ms")
+                        else:
+                            if verbose:
+                                logger.info(f"[TileCpp Autotuner] Tried: {cfg} -> {time_ms:.3f} ms")
+
+                    except Exception as e:
+                        if verbose:
+                            logger.info(f"[TileCpp Autotuner] Config {cfg} failed during timing: {e}")
+                        continue
+
+                if best_idx is None:
+                    raise ValueError("No valid config found after timing")
+
+                best_cfg = self._search_space[best_idx]
+                if verbose:
+                    logger.info(f"[TileCpp Autotuner] Tuning complete. Best: {best_cfg} -> {best_time_ms:.3f} ms")
+                self._cache[key] = (best_idx, best_grid)
 
         best_cfg = self._search_space[best_idx]
 
         # Launch with the best configuration
-        launch_fn(best_cfg)
+        with torch.cuda.stream(stream):
+            launch_fn(best_cfg)
 
         return TunedResult(
             best_cfg.kwargs,
@@ -373,14 +360,7 @@ def autotune(search_space):
 
 
 def is_autotuning_enabled() -> bool:
-    """Report whether the search should run for this call.
-
-    TILECPP_AUTOTUNE, when set, decides on its own so that this backend can be
-    pinned to its default configurations while the others keep searching.
-    Otherwise the project-wide TILEGYM_DISABLE_AUTOTUNE switch decides, which
-    leaves autotuning on by default.
-    """
-    override = os.environ.get("TILECPP_AUTOTUNE")
-    if override is not None:
-        return override != "0"
-    return not is_autotune_disabled()
+    """Honor the global fixed-config policy before the backend-specific switch."""
+    if is_autotune_disabled():
+        return False
+    return os.environ.get("TILECPP_AUTOTUNE", "1") != "0"

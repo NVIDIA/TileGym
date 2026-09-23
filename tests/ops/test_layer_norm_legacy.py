@@ -98,7 +98,7 @@ class Test_LayerNorm(common.PyTestCase):
         else:
             pytest.skip(f"Framework {framework} is not available")
         with torch.no_grad():
-            res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            res = common.benchmark_framework(framework, framework_fn)
             record_property("benchmark", res)
 
             # Explicit cleanup to prevent OOM
@@ -213,7 +213,7 @@ class Test_PersistentLayerNorm(common.PyTestCase):
             pytest.skip(f"Framework {framework} is not available")
 
         with torch.no_grad():
-            res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            res = common.benchmark_framework(framework, framework_fn)
             record_property("benchmark", res)
 
             # Explicit cleanup to prevent OOM
