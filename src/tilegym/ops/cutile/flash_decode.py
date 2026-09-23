@@ -47,6 +47,7 @@ def attention_decode_kernel_grouped_impl(
     batch_id: int,
     head_id: int,
     tile_id: int,
+    ALLOW_TMA_STORE: ct.Constant[bool],
 ):
     """
     cuTile device function for Grouped Query Attention decode with split-K parallelization.
@@ -157,13 +158,12 @@ def attention_decode_kernel_grouped_impl(
     acc_reshaped = ct.reshape(acc, (1, 1, QUERY_GROUP_TILE_SIZE, 1, HEAD_DIM))
 
     if NUM_Q_HEAD_PER_KV == QUERY_GROUP_TILE_SIZE:
-        # Use TMA store for optimal performance
         ct.store(
             Att_Out,
             index=(batch_id, head_id, 0, tile_id, 0),
             tile=acc_reshaped,
             order=(0, 1, 2, 3, 4),
-            allow_tma=True,
+            allow_tma=ALLOW_TMA_STORE,
         )
     else:
         # Use scatter with boundary checking for non-matching tile sizes
@@ -245,6 +245,7 @@ def _attention_decode_kernel_grouped(
         batch_id,
         head_id,
         tile_id,
+        True,
     )
 
 

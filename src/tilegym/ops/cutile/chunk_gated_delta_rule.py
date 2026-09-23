@@ -68,18 +68,29 @@ def _ct_solve_tril_neumann_guarded(A, CS, n_steps):
     return result
 
 
+@ct.kernel
+def _chunk_cumsum_kernel(G, G_cum, NUM_HEADS: ConstInt, CHUNK_SIZE: ConstInt):
+    pid_bh = ct.bid(0)
+    pid_chunk = ct.bid(1)
+    b = pid_bh // NUM_HEADS
+    h = pid_bh % NUM_HEADS
+    g = ct.load(G, index=(b, pid_chunk, h), shape=(1, CHUNK_SIZE, 1), padding_mode=ct.PaddingMode.ZERO)
+    g = ct.astype(ct.reshape(g, (CHUNK_SIZE,)), ct.float32)
+    g_cum = ct.cumsum(g, axis=0)
+    ct.store(G_cum, index=(b, h, pid_chunk, 0), tile=ct.reshape(g_cum, (1, 1, 1, CHUNK_SIZE)))
+
+
 @ct.kernel(occupancy=2)
 def _intra_chunk_prepare_kernel(
     Q,
     K,
     V,
     Beta,
-    G,  # raw inputs (B,T,H,D) / (B,T,H)
     Q_out,
     K_out,
     V_corr,
     K_cumdecay,
-    G_cum_out,  # 5D outputs
+    G_cum,
     seq_len: int,
     K_dim: int,
     V_dim: int,
@@ -123,16 +134,9 @@ def _intra_chunk_prepare_kernel(
         ct.float32,
     )
 
-    g_raw = ct.astype(
-        ct.load(
-            G,
-            index=(b, pid_chunk, h),
-            shape=(1, CHUNK_SIZE, 1),
-            padding_mode=_ZERO,
-        ).reshape((CHUNK_SIZE,)),
-        ct.float32,
+    g_cum = ct.load(G_cum, index=(b, h, pid_chunk, 0), shape=(1, 1, 1, CHUNK_SIZE), padding_mode=_ZERO).reshape(
+        (CHUNK_SIZE,)
     )
-    g_cum = ct.cumsum(g_raw, axis=0)
 
     offs_c = ct.arange(CHUNK_SIZE, dtype=ct.int32)
     offs_c_row = ct.expand_dims(offs_c, axis=1)
@@ -186,7 +190,6 @@ def _intra_chunk_prepare_kernel(
         )
     else:
         ct.store(K_cumdecay, index=(b, h, pid_chunk, 0, 0), tile=ct.reshape(kc_out, (1, 1, 1, CHUNK_SIZE, BLOCK_K)))
-    ct.store(G_cum_out, index=(b, h, pid_chunk, 0), tile=ct.reshape(g_cum, (1, 1, 1, CHUNK_SIZE)))
 
     q_tile = ct.astype(
         ct.load(
@@ -394,6 +397,8 @@ class _ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
         output_buf = torch.empty(B, H, num_chunks, chunk_size, V, device=device, dtype=torch.float32)
 
         grid_intra = (B * H, num_chunks, 1)
+        # Materialize the scan before consumers transform it into MMA operand layouts.
+        ct.launch(torch.cuda.current_stream(), grid_intra, _chunk_cumsum_kernel, (g, g_cum, H, chunk_size))
         ct.launch(
             torch.cuda.current_stream(),
             grid_intra,
@@ -403,7 +408,6 @@ class _ChunkGatedDeltaRuleCuTile(torch.autograd.Function):
                 key,
                 value,
                 beta,
-                g,
                 q_chunked,
                 k_chunked,
                 v_corrected,

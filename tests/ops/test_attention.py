@@ -195,7 +195,7 @@ class _FMHAPerfBase(common.PyTestCase):
                 rtol=rtol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
@@ -244,7 +244,7 @@ class _FMHAPerfBase(common.PyTestCase):
                 atol=atol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
+        result = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
