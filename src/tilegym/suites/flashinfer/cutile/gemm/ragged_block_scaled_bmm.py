@@ -710,7 +710,7 @@ def ragged_block_scaled_bmm(
     # Materialize fallback max_m_device if the caller didn't pass one. The
     # kernel always reads its grid bound from a device tensor (defense-in-depth).
     if max_m_device is None:
-        max_m_device = torch.tensor([max_m], dtype=torch.int32, device=a.device)
+        max_m_device = torch.full((1,), max_m, dtype=torch.int32, device=a.device)
 
     has_a_scale = 1 if a_scale is not None else 0
     if a_scale is None:

@@ -267,7 +267,7 @@ class Test_MOE(common.PyTestCase):
 
         # Run performance benchmark
         try:
-            result = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
+            result = common.benchmark_framework(backend, backend_fn)
             record_property("benchmark", result)
         except Exception as e:
             pytest.fail(f"Performance benchmark failed for {backend} {call_type}: {e}")

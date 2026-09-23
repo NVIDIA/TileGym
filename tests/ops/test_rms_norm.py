@@ -149,7 +149,7 @@ class Test_RMSNorm(common.PyTestCase):
                     rtol=0.0,
                     atol=5e-2,
                 )
-            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            result = common.benchmark_framework(framework, framework_fn)
             record_property("benchmark", result)
 
             # Explicit cleanup to prevent OOM

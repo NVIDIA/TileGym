@@ -163,7 +163,7 @@ class Test_GroupGemm(common.PyTestCase):
             res = backend_fn()
             return
 
-        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", res)
         if dtype == torch.float8_e5m2:
             atol = 1

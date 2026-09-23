@@ -56,6 +56,9 @@ class Config(metaclass=CacheMeta):
 
     @classmethod
     def parse(cls):
+        for removed in ("CUPTI", "CUDAGRAPH"):
+            if removed in os.environ:
+                raise ValueError(f"Remove {removed}: performance tests always use CUDA Graphs")
         parser = argparse.ArgumentParser(
             prog="TileGym Tests",
             description="TileGym Tests",
@@ -171,10 +174,7 @@ class Config(metaclass=CacheMeta):
             type=int,
             help=(
                 "set MAX_REP to specify the maximum number of measured iterations for "
-                "performance tests. REP is a time budget, so a kernel far below the "
-                "~50us launch-bound threshold would otherwise inflate the loop into tens "
-                "of thousands of profiled launches without adding signal. Set to 0 to "
-                "disable the cap"
+                "performance tests. Set to 0 to disable the cap"
             ),
         )
         parser.add_argument(
@@ -216,31 +216,13 @@ class Config(metaclass=CacheMeta):
             help=("Record to csv file"),
         )
         parser.add_argument(
-            "--cudagraph",
-            envvar="CUDAGRAPH",
-            action=FromEnvironment,
-            required=False,
-            default=False,
-            type=bool,
-            help=("Use cudagraph"),
-        )
-        parser.add_argument(
-            "--cupti",
-            envvar="CUPTI",
-            action=FromEnvironment,
-            required=False,
-            default=True,
-            type=bool,
-            help=("Use CUPTI (torch.profiler) for kernel profiling instead of CUDA Events"),
-        )
-        parser.add_argument(
             "--file",
             envvar="FILE",
             action=FromEnvironment,
             required=False,
             default="out",
             type=str,
-            help=("When use cudagraph & csv, can specify file path"),
+            help=("Output file path when recording CSV"),
         )
         parser.add_argument(
             "--config",

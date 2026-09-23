@@ -711,7 +711,7 @@ class Test_Mamba2_ChunkForward(common.PyTestCase):
                 r["init_state"],
                 chunk_size=chunk_size,
             )
-            result = common.benchmark_framework(framework, framework_fn, use_cupti=True)
+            result = common.benchmark_framework(framework, framework_fn)
             record_property("benchmark", result)
 
 
@@ -785,5 +785,5 @@ class Test_Mamba2_ChunkBackward(common.PyTestCase):
                 r["dfinal_state"],
                 chunk_size=chunk_size,
             )
-            result = common.benchmark_framework(framework, framework_fn, use_cupti=True)
+            result = common.benchmark_framework(framework, framework_fn)
             record_property("benchmark", result)

@@ -201,7 +201,7 @@ class Test_RecurrentGatedDeltaRule(common.PyTestCase):
             else:
                 pytest.skip(f"Framework {framework} is not available")
 
-            result = common.benchmark_framework(framework, framework_fn, use_cupti=True)
+            result = common.benchmark_framework(framework, framework_fn)
             record_property("benchmark", result)
 
         del q, k, v, g, beta

@@ -176,7 +176,7 @@ class Test_LinearGluactLinear(common.PyTestCase):
                     atol=1e-3 if dtype == torch.float16 else 1e-5,
                 )
 
-            res = common.benchmark_framework(backend, backend_fn, use_cudagraph=True)
+            res = common.benchmark_framework(backend, backend_fn)
             record_property("benchmark", res)
 
             # Explicit cleanup to prevent OOM
