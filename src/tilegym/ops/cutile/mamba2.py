@@ -2,7 +2,11 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Mamba-2 SSD forward and backward cuTile kernels."""
+"""
+Mamba-2 SSD forward and backward cuTile kernels.
+
+Based on an initial implementation by Jane Street.
+"""
 
 import math
 from types import SimpleNamespace
@@ -638,26 +642,33 @@ def _compute_da_db_dc_ddt_tile(
 
 
 def _chunk_cumsum_autotune_configs(num_heads):
-    for BLOCK_H in [4, 8, 16]:
-        for occupancy in [4, 5, 6, 7, 8]:
+    block_h_values = [4, 8, 16]
+    occupancies = [4, 5, 6, 7, 8]
+    for BLOCK_H in block_h_values:
+        for occupancy in occupancies:
             if num_heads % BLOCK_H == 0:
                 yield SimpleNamespace(BLOCK_H=BLOCK_H, occupancy=occupancy)
 
 
 def _fwd_pass_state_autotune_configs(state_size, head_size, chunk_size):
+    block_states = [16, 32, 64]
+    block_heads = [min(64, head_size)]
+    load_latencies = [4, 6]
+    bdd_latencies = [2, 4]
+    store_latencies = [2]
     variants = [(False, True), (True, True)]
     if chunk_size >= 128:
         variants.append((False, False))
     for SWAP, BHT in variants:
-        for BLOCK_STATE in [16, 32, 64]:
+        for BLOCK_STATE in block_states:
             if state_size % BLOCK_STATE != 0:
                 continue
-            for BLOCK_HEAD in [min(64, head_size)]:
+            for BLOCK_HEAD in block_heads:
                 if head_size % BLOCK_HEAD != 0:
                     continue
-                for LOAD_LAT in [4, 6]:
-                    for BDD_LAT in [2, 4]:
-                        for STORE_LAT in [2]:
+                for LOAD_LAT in load_latencies:
+                    for BDD_LAT in bdd_latencies:
+                        for STORE_LAT in store_latencies:
                             yield SimpleNamespace(
                                 SWAP=SWAP,
                                 BHT=BHT,
@@ -675,12 +686,16 @@ def _compute_out_configs(head_size, state_size):
     block_head = min(64, head_size)
     if head_size % block_head != 0:
         return
-    for BLOCK_STATE in [16, 32, 64, 128]:
+    block_states = [16, 32, 64, 128]
+    occupancies = [1, 2]
+    persistent_options = [True, False]
+    h_latencies = [3, 4, 5, 6]
+    for BLOCK_STATE in block_states:
         if state_size % BLOCK_STATE != 0:
             continue
-        for occupancy in [1, 2]:
-            for persistent in [True, False]:
-                for H_LAT in [3, 4, 5, 6]:
+        for occupancy in occupancies:
+            for persistent in persistent_options:
+                for H_LAT in h_latencies:
                     yield SimpleNamespace(
                         BLOCK_STATE=BLOCK_STATE,
                         BLOCK_HEAD=block_head,
@@ -694,12 +709,16 @@ def _compute_out_swap_configs(head_size, state_size):
     block_head = min(64, head_size)
     if head_size % block_head != 0:
         return
-    for BLOCK_STATE in [16, 32, 64, 128]:
+    block_states = [16, 32, 64, 128]
+    occupancies = [1, 2]
+    latencies = [3, 4, 6]
+    h_latencies = [3, 4, 5]
+    for BLOCK_STATE in block_states:
         if state_size % BLOCK_STATE != 0:
             continue
-        for occupancy in [1, 2]:
-            for LATENCY in [3, 4, 6]:
-                for H_LAT in [3, 4, 5]:
+        for occupancy in occupancies:
+            for LATENCY in latencies:
+                for H_LAT in h_latencies:
                     yield SimpleNamespace(
                         BLOCK_STATE=BLOCK_STATE,
                         BLOCK_HEAD=block_head,
@@ -711,13 +730,20 @@ def _compute_out_swap_configs(head_size, state_size):
 
 
 def _bwd_pass_state_base_configs(head_size):
-    for BLOCK_STATE in [16, 32, 64]:
-        for BLOCK_HEAD in [min(64, head_size)]:
-            for occupancy in [2]:
-                for num_ctas in [1]:
-                    for LOAD_LAT in [4, 5, 6]:
-                        for STORE_LAT in [1, 2]:
-                            for CD_LAT in [3, 5, 6]:
+    block_states = [16, 32, 64]
+    block_heads = [min(64, head_size)]
+    occupancies = [2]
+    num_ctas_values = [1]
+    load_latencies = [4, 5, 6]
+    store_latencies = [1, 2]
+    cd_latencies = [3, 5, 6]
+    for BLOCK_STATE in block_states:
+        for BLOCK_HEAD in block_heads:
+            for occupancy in occupancies:
+                for num_ctas in num_ctas_values:
+                    for LOAD_LAT in load_latencies:
+                        for STORE_LAT in store_latencies:
+                            for CD_LAT in cd_latencies:
                                 if CD_LAT > LOAD_LAT:
                                     continue
                                 yield SimpleNamespace(
@@ -732,6 +758,7 @@ def _bwd_pass_state_base_configs(head_size):
 
 
 def _bwd_pass_state_autotune_configs(state_size, head_size):
+    hid_latencies = [3, 5, 6]
     for cfg in _bwd_pass_state_base_configs(head_size):
         if (
             head_size % cfg.BLOCK_HEAD
@@ -739,7 +766,7 @@ def _bwd_pass_state_autotune_configs(state_size, head_size):
             or (cfg.BLOCK_HEAD * cfg.BLOCK_STATE) % _PARTIALS_PER_TILE
         ):
             continue
-        for hid_lat in [3, 5, 6]:
+        for hid_lat in hid_latencies:
             yield SimpleNamespace(**vars(cfg), HID_LAT=hid_lat)
 
 
@@ -754,15 +781,17 @@ _FALLBACK = ((16, 32, 64, 128), (3, 4, 5), (5, 6, 7), (5, 6, 7))
 
 
 def _compute_dd_dcb_dx_autotune_configs(state_size, head_size):
-    bs_d, load_d, dout_d, dhid_d = _PRUNED.get(state_size, _FALLBACK)
-    for occ in (1, 2):
-        for BLOCK_STATE in bs_d:
+    block_states, load_latencies, dout_latencies, dhid_latencies = _PRUNED.get(state_size, _FALLBACK)
+    occupancies = [1, 2]
+    store_latencies = [1]
+    for occ in occupancies:
+        for BLOCK_STATE in block_states:
             if state_size % BLOCK_STATE:
                 continue
-            for LOAD_LAT in load_d:
-                for DOUT_LAT in dout_d:
-                    for DHID_LAT in dhid_d:
-                        for STORE_LAT in (1,):
+            for LOAD_LAT in load_latencies:
+                for DOUT_LAT in dout_latencies:
+                    for DHID_LAT in dhid_latencies:
+                        for STORE_LAT in store_latencies:
                             yield SimpleNamespace(
                                 BLOCK_STATE=BLOCK_STATE,
                                 BLOCK_HEAD=head_size,
@@ -779,13 +808,18 @@ def _compute_da_db_dc_ddt_autotune_configs(head_size, state_size):
     BLOCK_HEAD = min(64, head_size)
     if head_size % BLOCK_HEAD:
         return
-    for BLOCK_STATE in [16, 32]:
+    block_states = [16, 32]
+    occupancies = [2, 4]
+    persistent_options = [True, False]
+    load_latencies = [3, 4, 5, 6]
+    store_latencies = [1, 2]
+    for BLOCK_STATE in block_states:
         if state_size % BLOCK_STATE:
             continue
-        for occ in [2, 4]:
-            for pers in [True, False]:
-                for LOAD_LAT in [3, 4, 5, 6]:
-                    for STORE_LAT in [1, 2]:
+        for occ in occupancies:
+            for pers in persistent_options:
+                for LOAD_LAT in load_latencies:
+                    for STORE_LAT in store_latencies:
                         yield SimpleNamespace(
                             BLOCK_STATE=BLOCK_STATE,
                             BLOCK_HEAD=BLOCK_HEAD,
