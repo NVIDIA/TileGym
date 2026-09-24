@@ -305,7 +305,6 @@ def compile_cuda_to_cubin(
 
         for inc_path in all_include_paths:
             cmd.extend(["-I", str(inc_path)])
-
         cmd.append(str(cu_file))
 
         logger.debug(f"Compiling CUDA kernel: {' '.join(cmd)}")
@@ -315,7 +314,12 @@ def compile_cuda_to_cubin(
             source_output_path.write_text(wrapper_source)
             logger.debug(f"Saved source to: {source_output_path}")
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
 
         if result.stderr:
             logger.debug(f"nvcc stderr: {result.stderr}")
