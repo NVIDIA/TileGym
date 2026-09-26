@@ -183,7 +183,7 @@ class Test_FlashDecode(common.PyTestCase):
                 rtol=rtol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM

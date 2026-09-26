@@ -167,5 +167,5 @@ class Test_GEGLU(common.PyTestCase):
                 atol=1e-2,
             )
 
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=False)
+        result = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", result)

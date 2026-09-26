@@ -354,7 +354,7 @@ class TestGemmaAttention(common.PyTestCase):
             )
 
         # Benchmark
-        result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        result = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", result)
 
         # Cleanup

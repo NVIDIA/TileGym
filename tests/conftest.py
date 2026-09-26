@@ -7,6 +7,11 @@ import pathlib
 
 import pytest
 
+from tests.autotune_cache import isolated_cutile_tune_caches
+
+_graph_cutile_autotune_caches = {}
+
+
 try:
     import torch
 except ImportError:
@@ -105,6 +110,23 @@ def quick_run(request):
 @pytest.fixture
 def framework(request):
     return request.config.getoption("--framework")
+
+
+@pytest.fixture(autouse=True)
+def _graph_cutile_autotune_in_perf_tests(request, monkeypatch):
+    if "test_perf" not in request.node.name:
+        yield
+        return
+    try:
+        from cuda.tile.tune import _tune
+    except ImportError:
+        yield
+        return
+    from tilegym.benchmark import autotune_cutile_cuda_graph
+
+    with isolated_cutile_tune_caches(_graph_cutile_autotune_caches):
+        monkeypatch.setattr(_tune, "_benchmark", autotune_cutile_cuda_graph)
+        yield
 
 
 def _has_object_repr(val):

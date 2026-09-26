@@ -101,7 +101,7 @@ class Test_LayerNormNCHW(common.PyTestCase):
         else:
             pytest.skip(f"Framework {framework} not supported")
         with torch.no_grad():
-            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            result = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
@@ -204,7 +204,7 @@ class Test_LayerNorm2D(common.PyTestCase):
         else:
             pytest.skip(f"Framework {framework} not supported")
         with torch.no_grad():
-            result = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+            result = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
