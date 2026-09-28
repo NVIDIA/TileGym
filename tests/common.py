@@ -8,6 +8,7 @@ import functools
 import gc
 import inspect
 import itertools
+import math
 import multiprocessing
 import numbers
 import os
@@ -714,6 +715,10 @@ class TestParam:
     atol: float
 
 
+_COMPARISON_CHUNK_ELEMENTS = 1_048_576
+
+
+@torch.no_grad()
 def compare_tensors(
     test,
     reference,
@@ -752,10 +757,13 @@ def compare_tensors(
         msgs = f"dtype mismatch, test: {test.dtype}, reference: {reference.dtype}"
         raise RuntimeError(msgs)
 
+    if chunk_size is None and test.ndim > 0 and test.numel() > _COMPARISON_CHUNK_ELEMENTS:
+        chunk_size = max(1, _COMPARISON_CHUNK_ELEMENTS // (test.numel() // test.shape[0]))
+
     if chunk_size is not None:
         if chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {chunk_size}")
-        if test.ndim > 0 and test.shape[0] > chunk_size:
+        if test.ndim > 0 and (test.shape[0] > chunk_size or test.numel() > _COMPARISON_CHUNK_ELEMENTS):
             return _compare_tensors_chunked(
                 test,
                 reference,
@@ -823,6 +831,18 @@ def compare_tensors(
     return allclose, msgs
 
 
+def _comparison_slices(shape, chunk_size):
+    row_elements = math.prod(shape[1:])
+    rows = min(chunk_size, max(1, _COMPARISON_CHUNK_ELEMENTS // max(1, row_elements)))
+    for start in range(0, shape[0], rows):
+        leading = (slice(start, min(start + rows, shape[0])),)
+        if row_elements > _COMPARISON_CHUNK_ELEMENTS:
+            for trailing in _comparison_slices(shape[1:], shape[1]):
+                yield leading + trailing
+        else:
+            yield leading + (slice(None),) * (len(shape) - 1)
+
+
 def _compare_tensors_chunked(
     test,
     reference,
@@ -851,11 +871,11 @@ def _compare_tensors_chunked(
     max_max_mean_change = None
     max_arith_mean_change = None
 
+    comparison_dtype = torch.float64 if test.dtype == torch.float64 else torch.float32
     with torch.no_grad():
-        for start in range(0, test.shape[0], chunk_size):
-            end = min(start + chunk_size, test.shape[0])
-            input = test[start:end].to(torch.float32)
-            ref = reference[start:end].to(torch.float32)
+        for selection in _comparison_slices(test.shape, chunk_size):
+            input = test[selection].to(comparison_dtype)
+            ref = reference[selection].to(comparison_dtype)
             input = torch.where(torch.isnan(ref), float("nan"), input)
 
             allclose = bool(torch.allclose(input, ref, rtol, atol, equal_nan)) and allclose
@@ -870,7 +890,7 @@ def _compare_tensors_chunked(
 
             chunk_mismatched_indices = not_close_mask.nonzero().cpu()
             if chunk_mismatched_indices.numel() != 0:
-                chunk_mismatched_indices[:, 0] += start
+                chunk_mismatched_indices += torch.tensor([section.start or 0 for section in selection], device="cpu")
                 mismatched_indices.append(chunk_mismatched_indices)
 
             rel_change = abs_diff / abs_ref
@@ -1029,6 +1049,7 @@ def benchmark(
         )
 
     """
+    gc.collect()
     _benchmark_fn = functools.partial(benchmark_fn_cudagraph, kernel_filter=kernel_filter)
     res = {}
     if mode in ("auto", "forward"):
@@ -1038,6 +1059,7 @@ def benchmark(
     if mode == "auto" and setup_fn is not None:
         setup_fn()
     if mode == "backward" or (mode == "auto" and any_output_requires_grad(fn)):
+        gc.collect()
         state = {}
 
         def setup_backward():
