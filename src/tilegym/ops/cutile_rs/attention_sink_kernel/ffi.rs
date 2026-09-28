@@ -18,10 +18,9 @@
 use core::ffi::c_void;
 use cuda_core::{Device, Stream};
 use cutile::half::{bf16, f16};
-use cutile::prelude::*;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, borrow_tensor, rc};
+use crate::ffi_util::{TensorDesc, borrow_tensor};
 use attention_sink_module::attention_sink_kernel;
 
 #[unsafe(no_mangle)]
@@ -99,13 +98,7 @@ pub unsafe extern "C" fn cutile_attention_sink(
             .grid((grid_x as u32, grid_y as u32, 1))
             .compile_options(opts);
 
-            match op.sync_on(&stream) {
-                Ok(_) => rc::OK,
-                Err(e) => {
-                    eprintln!("cutile_attention_sink: launch failed: {e:?}");
-                    rc::LAUNCH_FAILED
-                }
-            }
+            unsafe { crate::ffi_util::launch_on(op, &stream, "cutile_attention_sink") }
             // borrowed ManuallyDrop tensors -> never free PyTorch memory.
         }};
     }
