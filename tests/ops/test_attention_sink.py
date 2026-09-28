@@ -144,6 +144,63 @@ class Test_AttentionSink(common.PyTestCase):
             check_stride=False,
         )
 
+    @pytest.mark.parametrize("backend", _backends)
+    @pytest.mark.parametrize("sliding_window", [None, 16])
+    @pytest.mark.parametrize("start_dtype", [torch.int32, torch.int64])
+    def test_op_cuda_graph(self, backend, sliding_window, start_dtype):
+        """Check that graph replay observes updates to the query-offset tensor."""
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend {backend} is not supported: {e}")
+        self.setUp()
+        q = get_data(1, 17, 2, 2, 64, device="cuda", dtype=torch.bfloat16)
+        k = get_data(1, 128, 2, 64, device="cuda", dtype=torch.bfloat16)
+        v = get_data(1, 128, 2, 64, device="cuda", dtype=torch.bfloat16)
+        sinks = get_data(4, device="cuda", dtype=torch.bfloat16)
+        start_q = torch.zeros(1, dtype=start_dtype, device="cuda")
+
+        def run():
+            return tilegym.ops.attention_sink(q, k, v, sinks, 0.125, sliding_window, start_q)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = run()
+        for position in (0, 5, 64):
+            start_q.fill_(position)
+            graph.replay()
+            reference = self.reference(q, k, v, sinks, 0.125, sliding_window, start_q)
+            torch.testing.assert_close(output, reference, atol=5e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("backend", ["tilecpp"])
+    @pytest.mark.parametrize("start_dtype", [torch.int32, torch.int64])
+    @pytest.mark.parametrize("start_shape", [(), (1,), (1, 1), (2,), (1, 2), (0,), (1, 0)])
+    def test_op_start_q_shape(self, backend, start_dtype, start_shape):
+        """Accept single-element offsets of any rank and reject all other element counts."""
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend {backend} is not supported: {e}")
+        self.setUp()
+        q = get_data(1, 17, 2, 2, 64, device="cuda", dtype=torch.bfloat16)
+        k = get_data(1, 128, 2, 64, device="cuda", dtype=torch.bfloat16)
+        v = get_data(1, 128, 2, 64, device="cuda", dtype=torch.bfloat16)
+        sinks = get_data(4, device="cuda", dtype=torch.bfloat16)
+        start_q = torch.full(start_shape, 5, dtype=start_dtype, device="cuda")
+
+        if start_shape in ((2,), (1, 2), (0,), (1, 0)):
+            with pytest.raises(AssertionError, match="start_q must contain exactly one element"):
+                tilegym.ops.attention_sink(q, k, v, sinks, start_q=start_q)
+        else:
+            output = tilegym.ops.attention_sink(q, k, v, sinks, start_q=start_q)
+            reference = self.reference(q, k, v, sinks, start_q=start_q.reshape(()))
+            torch.testing.assert_close(output, reference, atol=5e-2, rtol=1e-2)
+
     @pytest.mark.parametrize(
         "batch_size, num_queries, num_keys, num_key_value_heads, num_key_value_groups, head_dim, sliding_window",
         [
