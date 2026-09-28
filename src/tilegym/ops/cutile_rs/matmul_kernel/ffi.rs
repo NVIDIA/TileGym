@@ -20,10 +20,9 @@
 use core::ffi::c_void;
 use cuda_core::{Device, Stream};
 use cutile::half::{bf16, f16};
-use cutile::prelude::*;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, borrow_tensor, cast_tf32, rc};
+use crate::ffi_util::{TensorDesc, borrow_tensor, cast_tf32};
 use matmul_module::{non_persistent_matmul_kernel, static_persistent_matmul_kernel};
 
 #[unsafe(no_mangle)]
@@ -82,12 +81,8 @@ pub unsafe extern "C" fn cutile_matmul(
                     .generics(generics)
                     .grid((num_programs as u32, 1, 1))
                     .compile_options(opts);
-                match op.sync_on(&stream) {
-                    Ok(_) => rc::OK,
-                    Err(e) => {
-                        eprintln!("cutile_matmul static_persistent launch failed: {e:?}");
-                        rc::LAUNCH_FAILED
-                    }
+                unsafe {
+                    crate::ffi_util::launch_on(op, &stream, "cutile_matmul static_persistent")
                 }
             } else {
                 // generics: <E, BM, BN, BK, CAST_TF32>
@@ -102,13 +97,7 @@ pub unsafe extern "C" fn cutile_matmul(
                     .generics(generics)
                     .grid((num_programs as u32, 1, 1))
                     .compile_options(opts);
-                match op.sync_on(&stream) {
-                    Ok(_) => rc::OK,
-                    Err(e) => {
-                        eprintln!("cutile_matmul non_persistent launch failed: {e:?}");
-                        rc::LAUNCH_FAILED
-                    }
-                }
+                unsafe { crate::ffi_util::launch_on(op, &stream, "cutile_matmul non_persistent") }
             }
             // a_t/b_t/c_t are ManuallyDrop<Tensor> -> dropped here as no-ops,
             // so PyTorch memory is never freed.
