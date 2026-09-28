@@ -1021,7 +1021,7 @@ def benchmark(
         rep: duration of benchmark phase, specified in milliseconds
         min_rep: minimal number of benchmark iterations, specified as an
             integer
-        initial_rep: number of initial iterations to establish approximate
+        initial_rep: maximum number of initial iterations to establish approximate
             runtime and to compute number of warmup and benchmark iterations
             given a budged expressed in milliseconds
         grad_to_none: list of tensors for which gradients are set to None after

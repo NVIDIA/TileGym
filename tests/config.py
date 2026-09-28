@@ -184,7 +184,7 @@ class Config(metaclass=CacheMeta):
             default=5,
             type=int,
             help=(
-                "set INITIAL_REP to specify number of initial iterations for "
+                "set INITIAL_REP to specify the maximum number of initial iterations for "
                 "performance tests, initial iterations are to establish "
                 "approximate runtime and to compute number of warmup and "
                 "benchmark iterations given a budget expressed in milliseconds"

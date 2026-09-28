@@ -200,6 +200,8 @@ def benchmark_cuda_graph(
 ):
     """Measure cold-cache device spans with balanced samples across graphs.
 
+    Calibration uses at most initial_rep samples and stops once their combined
+    GPU duration reaches the larger of the warmup and measurement budgets.
     Compilation and tuning finish before capture. An optional setup graph runs
     before the flush and timed graph, including when recreating backward inputs.
     Capture errors propagate; this function never switches to eager execution.
@@ -220,7 +222,12 @@ def benchmark_cuda_graph(
         call = captures.enter_context(
             _CapturedCall(fn, setup_fn, grad_to_none, fast_flush, input_context=input_context)
         )
-        estimate = sum(call.sample() for _ in range(initial_rep)) / initial_rep
+        calibration_ms = 0.0
+        for calibration_count in range(1, initial_rep + 1):
+            calibration_ms += call.sample()
+            if calibration_ms >= max(warmup, rep):
+                break
+        estimate = calibration_ms / calibration_count
         n_warmup, n_repeat = iteration_counts(estimate, warmup, rep, min_rep, max_rep)
         n_graphs = min(graph_repeats, n_repeat)
         while True:
