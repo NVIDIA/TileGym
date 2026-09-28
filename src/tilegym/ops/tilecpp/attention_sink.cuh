@@ -40,7 +40,7 @@ __tile_global__ void attention_sink_fwd_kernel(
     float sm_scale,      // Softmax scale
     float* __restrict__ M_out_ptr,    // Max values output [Z, H, N_Q_CTX]
     T* __restrict__ Out_ptr,          // Output [Z, H, N_Q_CTX, HEAD_DIM]
-    int start_q,         // Starting position for queries
+    const int* __restrict__ Start_q_ptr,
     int Z,               // Batch size
     int H,               // Number of heads
     int N_Q_CTX,         // Query context length (padded)
@@ -70,6 +70,7 @@ __tile_global__ void attention_sink_fwd_kernel(
 
     static_assert(BLOCK_N <= HEAD_DIM, "BLOCK_N must be <= HEAD_DIM");
 
+    int start_q = Start_q_ptr[0];
     int start_m = ct::bid().x;
     int off_hz = ct::bid().y;
     int off_z = off_hz / H;

@@ -39,7 +39,7 @@ def _launch_attn_fwd_kernel(
     sm_scale: float,
     m: torch.Tensor,
     out: torch.Tensor,
-    start_q: int,
+    start_q: torch.Tensor,
     Z: int,
     H: int,
     N_Q_CTX: int,
@@ -58,7 +58,7 @@ def _launch_attn_fwd_kernel(
     kernel, _, _ = _attn_fwd_kernel.get_kernel(
         dtype=dtype,
         template_params=[HEAD_DIM, BLOCK_M, BLOCK_N, has_bandwidth],
-        signature="{T}*, {T}*, {T}*, {T}*, float, float*, {T}*, int, int, int, int, int, int",
+        signature="{T}*, {T}*, {T}*, {T}*, float, float*, {T}*, const int*, int, int, int, int, int",
     )
 
     grid = (_cdiv(N_Q_CTX, BLOCK_M), Z * H, 1)
@@ -77,7 +77,7 @@ def _launch_attn_fwd_kernel(
             np.float32(sm_scale),
             np.uint64(m.data_ptr()),
             np.uint64(out.data_ptr()),
-            np.int32(start_q),
+            np.uint64(start_q.data_ptr()),
             np.int32(Z),
             np.int32(H),
             np.int32(N_Q_CTX),
@@ -90,7 +90,8 @@ def _launch_attn_fwd_kernel(
 class _Attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, sinks, sm_scale, bandwidth, start_q):
-        assert len(start_q) == 1
+        """Compute attention using a single query offset stored on the input device."""
+        assert start_q.numel() == 1, "start_q must contain exactly one element"
         bs, n_ctx, n_kv_heads, repeat_kv, HEAD_DIM_Q = q.shape
         bs, n_kv_ctx, n_kv_heads, HEAD_DIM_K = k.shape
         bs, n_kv_ctx, n_kv_heads, HEAD_DIM_V = v.shape
@@ -121,8 +122,6 @@ class _Attention(torch.autograd.Function):
         o = torch.empty_like(q)
         M = torch.empty((bs, n_heads, n_ctx + m_pad_size), device=q.device, dtype=torch.float32)
 
-        start_q_val = start_q.item() if isinstance(start_q, torch.Tensor) else int(start_q)
-
         _launch_attn_fwd_kernel(
             q,
             k,
@@ -131,7 +130,7 @@ class _Attention(torch.autograd.Function):
             sm_scale,
             M,
             o,
-            start_q_val,
+            start_q,
             bs,
             n_heads,
             n_ctx + m_pad_size,
@@ -182,16 +181,14 @@ def attention_sink(
         sinks: Attention sinks per head [H]
         sm_scale: Softmax scale
         sliding_window: Sliding window bandwidth (None for full attention)
-        start_q: Starting position for queries
+        start_q: Starting position for queries, as an integer or a single-element tensor
 
     Returns:
         Output tensor [bs, n_ctx, n_heads * HEAD_DIM]
     """
     # Coerce a Python int default into a 1-element int32 tensor on the input device.
     if isinstance(start_q, torch.Tensor):
-        start_q_tensor = start_q.to(torch.int32).contiguous()
-        if start_q_tensor.device.type != "cuda":
-            start_q_tensor = start_q_tensor.cuda()
+        start_q_tensor = start_q.to(device=query.device, dtype=torch.int32).contiguous()
     else:
         start_q_tensor = torch.tensor([int(start_q)], dtype=torch.int32, device=query.device)
 
