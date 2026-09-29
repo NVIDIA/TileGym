@@ -201,6 +201,9 @@ class Test_Matmul(common.PyTestCase):
                 pytest.skip("Skip large FP64 cuTile matmul on sm121 due to excessive runtime")
             if backend == "tilecpp" and m >= 8192:
                 pytest.skip("Skip large FP64 TileCPP matmul on sm121 due to excessive runtime")
+        if dtype == torch.float64 and torch.cuda.get_device_capability() == (12, 0):
+            if m >= 16384:
+                pytest.skip("Skip large FP64 matmul on B20X (sm120) due to OOM: exceeds 32 GiB VRAM")
         # xfail on sm121 for 32768x32768 matmul due to performance
         if torch.cuda.get_device_capability() == (12, 1) and m == 32768:
             pytest.skip("32768x32768 matmul takes too long on sm121")
