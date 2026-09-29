@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -269,7 +270,15 @@ def compile_cuda_to_cubin(
 
     Raises:
         RuntimeError: If compilation fails
+        subprocess.TimeoutExpired: If TILECPP_COMPILE_TIMEOUT_S expires
+        ValueError: If TILECPP_COMPILE_TIMEOUT_S is not positive and finite
     """
+    compile_timeout = os.environ.get("TILECPP_COMPILE_TIMEOUT_S")
+    if compile_timeout is not None:
+        compile_timeout = float(compile_timeout)
+        if not 0 < compile_timeout < float("inf"):
+            raise ValueError("TILECPP_COMPILE_TIMEOUT_S must be a positive finite number")
+
     # Generate wrapper .cu file content that includes the header
     header_name = header_path.name
     wrapper_source = f"// Auto-generated wrapper for {header_name}\n"
@@ -314,15 +323,27 @@ def compile_cuda_to_cubin(
             source_output_path.write_text(wrapper_source)
             logger.debug(f"Saved source to: {source_output_path}")
 
-        result = subprocess.run(
+        with subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=True,
-        )
+            start_new_session=True,
+        ) as compiler:
+            try:
+                stdout, stderr = compiler.communicate(timeout=compile_timeout)
+                if compiler.returncode:
+                    raise subprocess.CalledProcessError(compiler.returncode, cmd, stdout, stderr)
+            except BaseException:
+                try:
+                    os.killpg(compiler.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                compiler.wait()
+                raise
 
-        if result.stderr:
-            logger.debug(f"nvcc stderr: {result.stderr}")
+        if stderr:
+            logger.debug(f"nvcc stderr: {stderr}")
 
         logger.debug(f"Compiled cubin to: {output_path}")
 
