@@ -10,6 +10,8 @@ from cuda.tile import RoundingMode as RMd
 
 from tilegym.backend import register_impl
 
+from .mla_tile_config import plan_split_kv
+from .mla_tile_config import select_tile_h
 from .splitk_reduce import splitk_reduce
 from .utils import next_power_of_2
 
@@ -171,7 +173,7 @@ def _naive_absorb_mla_transpose_kernel(
 
 class _MlaDecodingSplitKvFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q, QPE, KV, KPE, sm_scale, kv_len_per_split=None):
+    def forward(ctx, Q, QPE, KV, KPE, sm_scale, kv_len_per_split=None, kernel_configs=None):
         """
         MLA Decoding with Split-KV forward pass
 
@@ -182,6 +184,7 @@ class _MlaDecodingSplitKvFunction(torch.autograd.Function):
             KPE: Key positional embedding [B, S_kv, TILE_KPE]
             sm_scale: Softmax scale factor
             kv_len_per_split: kv_len_per_split
+            kernel_configs: optional overrides, currently ``TILE_H``
 
         Returns:
             O: Output tensor [B, S_qo, TILE_D]
@@ -194,19 +197,44 @@ class _MlaDecodingSplitKvFunction(torch.autograd.Function):
         assert TILE_D == next_power_of_2(TILE_D)
         assert TILE_KPE == next_power_of_2(TILE_KPE)
 
-        TILE_H = 16
         TILE_N = 128
 
+        NUM_SMS = torch.cuda.get_device_properties(Q.device).multi_processor_count
+        CC_MAJOR = torch.cuda.get_device_capability(Q.device)[0]
+
+        # A TILE_H override has to reach the planner, not just the launch: the
+        # split length is sized for a specific tile.
+        override_tile_h = None if kernel_configs is None else kernel_configs.get("TILE_H")
+
         if kv_len_per_split is None:
-            # We want each SM to have at least one split kv
-            NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-            num_split_kv_estimated = max(1, NUM_SMS // B)
-            kv_len_per_split = next_power_of_2(S_kv // num_split_kv_estimated)
-            kv_len_per_split = max(kv_len_per_split, TILE_N)
+            # Tile and split length are chosen together: the grid is
+            # ceil(H / TILE_H) * B * NUM_KV_SPLITS.
+            tile_h, kv_len_per_split = plan_split_kv(
+                NUM_HEADS, S_kv, B, TILE_N, NUM_SMS, CC_MAJOR, force_tile_h=override_tile_h
+            )
+        else:
+            tile_h = select_tile_h(
+                NUM_HEADS,
+                S_kv,
+                B,
+                (S_kv + kv_len_per_split - 1) // kv_len_per_split,
+                NUM_SMS,
+                CC_MAJOR,
+            )
 
         assert kv_len_per_split == next_power_of_2(kv_len_per_split)
         assert kv_len_per_split >= TILE_N
         NUM_KV_SPLITS = (S_kv + kv_len_per_split - 1) // kv_len_per_split
+
+        # TILE_N is deliberately not overridable: it is baked into the
+        # kv_len_per_split floor and the assert above, so an override would sail
+        # past a stale check and read into the next split's KV range.
+        default_configs = {"TILE_H": tile_h}
+        if kernel_configs is None:
+            kernel_configs = default_configs
+        else:
+            kernel_configs = {**default_configs, **kernel_configs}
+        TILE_H = kernel_configs.get("TILE_H")
 
         # Allocate intermediate results
         device = Q.device
@@ -277,7 +305,8 @@ def mla_decoding_split_kv(q, qpe, kv, kpe, sm_scale=None, kv_len_per_split=None,
         kv: Key-Value tensor [batch_size, kv_seq_len, head_dim]
         kpe: Key positional embedding [batch_size, kv_seq_len, kpe_dim]
         sm_scale: Softmax scale (defaults to 1/sqrt(head_dim + kpe_dim))
-        **kwargs: Additional arguments for backend-specific configurations
+        **kwargs: Additional arguments for backend-specific configurations,
+            including kernel_configs if needed (TILE_H)
         kv_len_per_split: kv_len_per_split
 
     Returns:
@@ -286,5 +315,7 @@ def mla_decoding_split_kv(q, qpe, kv, kpe, sm_scale=None, kv_len_per_split=None,
     if sm_scale is None:
         sm_scale = 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
-    o = _MlaDecodingSplitKvFunction.apply(q, qpe, kv, kpe, sm_scale, kv_len_per_split)
+    o = _MlaDecodingSplitKvFunction.apply(
+        q, qpe, kv, kpe, sm_scale, kv_len_per_split, kwargs.get("kernel_configs", None)
+    )
     return o
