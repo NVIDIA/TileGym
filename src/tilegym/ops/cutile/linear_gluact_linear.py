@@ -12,6 +12,7 @@ import torch
 from cuda.tile import RoundingMode as RMd
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
 
@@ -197,8 +198,11 @@ def _cutile_autotune_linear_gluact(
     """
     cache_key = (M, N1, K, act_type_id, input_flat.dtype, str(input_flat.device))
     if cache_key not in _linear_gluact_tune_cache:
+        configs = list(_linear_gluact_autotune_configs())
+        if is_autotune_disabled():
+            configs = configs[:1]
         result = exhaustive_search(
-            list(_linear_gluact_autotune_configs()),
+            configs,
             stream,
             lambda cfg: (ceil(M / cfg.BLOCK_M) * ceil(N1 / cfg.BLOCK_N), 1, 1),
             _linear_gluact_fwd_kernel,

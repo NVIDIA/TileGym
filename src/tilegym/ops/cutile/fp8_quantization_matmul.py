@@ -9,6 +9,7 @@ import cuda.tile as ct
 import torch
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
 
@@ -246,6 +247,8 @@ def _cutile_autotune_w8a8(
         ),
         use_tma,
     )
+    if is_autotune_disabled():
+        configs = configs[:1]
 
     def grid_fn(cfg):
         grid_m = (M + cfg.BLOCK_SIZE_M - 1) // cfg.BLOCK_SIZE_M
