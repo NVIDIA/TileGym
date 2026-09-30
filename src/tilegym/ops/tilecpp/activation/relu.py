@@ -68,7 +68,29 @@ class _ActivationFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        raise NotImplementedError("Backward pass is not implemented")
+        (x,) = ctx.saved_tensors
+        dy_flat = dy.contiguous().view(-1)
+        dx = torch.empty_like(dy_flat)
+        kernel, _, _ = _bwd_kernel.get_kernel(
+            dtype=dy.dtype,
+            template_params=[_BLOCK_SIZE, ctx.op_id],
+            signature="const {T}*, const {T}*, {T}*, int, float, float, float, bool",
+        )
+        _bwd_kernel.launch(
+            grid=(math.ceil(dy_flat.numel() / _BLOCK_SIZE),),
+            kernel=kernel,
+            args=[
+                np.uint64(dy_flat.data_ptr()),
+                np.uint64(x.data_ptr()),
+                np.uint64(dx.data_ptr()),
+                np.int32(dy_flat.numel()),
+                np.float32(ctx.alpha),
+                np.float32(ctx.lower),
+                np.float32(ctx.upper),
+                np.bool_(ctx.training),
+            ],
+        )
+        return dx.view(ctx.shape), None, None, None, None, None
 
 
 @register_impl("relu", backend="tilecpp")
