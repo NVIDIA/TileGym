@@ -252,6 +252,7 @@ class TileCppAutotuner:
                 if verbose:
                     logger.info(f"[TileCpp Autotuner] Pre-compiling up to {max_iter} configurations...")
                 valid_configs = []
+                last_failure = ""
                 successes = 0
                 for cfg_idx in indices:
                     if successes >= max_iter:
@@ -274,12 +275,13 @@ class TileCppAutotuner:
                         valid_configs.append((cfg_idx, cfg, grid))
                         successes += 1
                     except Exception as e:
+                        last_failure = f"; last failure: {type(e).__name__}: {e}"
                         if verbose:
                             logger.info(f"[TileCpp Autotuner] Config {cfg} failed during pre-compile: {e}")
                         continue
 
                 if not valid_configs:
-                    raise ValueError("No valid config found")
+                    raise ValueError(f"No valid config found{last_failure}")
 
                 # Synchronize to ensure all compilations are complete
                 stream.synchronize()
@@ -290,6 +292,7 @@ class TileCppAutotuner:
 
                 # Phase 2: Time each pre-compiled configuration
                 best_time_ms, best_idx, best_grid = float("inf"), None, None
+                last_failure = ""
 
                 for cfg_idx, cfg, grid in valid_configs:
                     try:
@@ -309,12 +312,13 @@ class TileCppAutotuner:
                                 logger.info(f"[TileCpp Autotuner] Tried: {cfg} -> {time_ms:.3f} ms")
 
                     except Exception as e:
+                        last_failure = f"; last failure: {type(e).__name__}: {e}"
                         if verbose:
                             logger.info(f"[TileCpp Autotuner] Config {cfg} failed during timing: {e}")
                         continue
 
                 if best_idx is None:
-                    raise ValueError("No valid config found after timing")
+                    raise ValueError(f"No valid config found after timing{last_failure}")
 
                 best_cfg = self._search_space[best_idx]
                 if verbose:
