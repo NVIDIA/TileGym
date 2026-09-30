@@ -44,7 +44,7 @@ _DTYPES = [
 
 
 # fmt: off
-# Reference implementations copied verbatim from HuggingFace transformers v4.57.6:
+# Reference implementations adapted from HuggingFace transformers v4.57.6:
 # https://github.com/huggingface/transformers/blob/753d61104116eefc8ffc977327b441ee0c8d599f/src/transformers/models/qwen3_next/modeling_qwen3_next.py#L436-L439
 def _l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
     """This function is intended to align with the l2norm implementation in the FLA library."""
@@ -64,6 +64,7 @@ def _torch_chunk_gated_delta_rule(
     output_final_state=False,
     use_qk_l2norm_in_kernel=False,
 ):
+    """Compute chunked gated-delta outputs and an optional final recurrent state."""
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
         query = _l2norm(query, dim=-1, eps=1e-6)
@@ -105,7 +106,7 @@ def _torch_chunk_gated_delta_rule(
     value = attn @ v_beta
     k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
     last_recurrent_state = (
-        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
+        value.new_zeros((batch_size, num_heads, k_head_dim, v_head_dim))
         if initial_state is None
         else initial_state.to(value)
     )
@@ -147,6 +148,7 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
         output_final_state=False,
         use_qk_l2norm_in_kernel=False,
     ):
+        """Evaluate the PyTorch reference with float32 recurrent-state accumulation."""
         return _torch_chunk_gated_delta_rule(
             query,
             key,
@@ -158,6 +160,38 @@ class Test_ChunkGatedDeltaRule(common.PyTestCase):
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
+
+    @pytest.mark.parametrize("dtype", _DTYPES)
+    @pytest.mark.parametrize("use_initial_state", [False, True])
+    def test_reference_cuda_graph(self, dtype, use_initial_state):
+        """Check that graph replay updates outputs and recurrent state for changed values."""
+        self.setUp()
+        query = torch.randn(1, 37, 2, 16, device="cuda", dtype=dtype) * 0.1
+        key = torch.randn_like(query) * 0.1
+        value = torch.randn(1, 37, 2, 32, device="cuda", dtype=dtype) * 0.1
+        g = -torch.rand(1, 37, 2, device="cuda", dtype=dtype)
+        beta = torch.rand_like(g)
+        initial_state = torch.randn(1, 2, 16, 32, device="cuda") * 0.01 if use_initial_state else None
+
+        def run():
+            return self.reference(
+                query, key, value, g, beta, chunk_size=16, initial_state=initial_state, output_final_state=True
+            )
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output, state = run()
+        for _ in range(2):
+            value.add_(0.01)
+            expected_output, expected_state = run()
+            graph.replay()
+            torch.testing.assert_close(output, expected_output, rtol=1e-5, atol=1e-6)
+            torch.testing.assert_close(state, expected_state, rtol=1e-5, atol=1e-6)
 
     @pytest.mark.parametrize("dtype", _DTYPES)
     @pytest.mark.parametrize(
