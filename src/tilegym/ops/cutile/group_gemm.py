@@ -128,7 +128,7 @@ def _cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, 
     group_shapes = tuple((tuple(A.shape), tuple(B.shape)) for A, B in zip(group_A, group_B))
     cache_key = (group_shapes, transpose_b, group_A[0].dtype, str(group_A[0].device))
     if cache_key not in _group_gemm_tune_cache:
-        with ct.compiler_timeout(30):
+        with ct.compiler_timeout(120 if torch.cuda.get_device_capability(device) == (8, 0) else 30):
             result = exhaustive_search(
                 list(_group_gemm_autotune_configs()),
                 stream,
