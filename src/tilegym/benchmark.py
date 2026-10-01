@@ -222,6 +222,12 @@ def benchmark_cuda_graph(
         call = captures.enter_context(
             _CapturedCall(fn, setup_fn, grad_to_none, fast_flush, input_context=input_context)
         )
+        graph_pool = call.graph.pool()
+        graph_pool_reserved_bytes = sum(
+            segment["total_size"]
+            for segment in torch.cuda.memory_snapshot()
+            if segment.get("segment_pool_id") == graph_pool
+        )
         calibration_ms = 0.0
         for calibration_count in range(1, initial_rep + 1):
             calibration_ms += call.sample()
@@ -230,6 +236,11 @@ def benchmark_cuda_graph(
         estimate = calibration_ms / calibration_count
         n_warmup, n_repeat = iteration_counts(estimate, warmup, rep, min_rep, max_rep)
         n_graphs = min(graph_repeats, n_repeat)
+        requested_graph_count = n_graphs
+        if graph_pool_reserved_bytes:
+            free_bytes, _ = torch.cuda.mem_get_info()
+            n_graphs = min(n_graphs, 1 + free_bytes // graph_pool_reserved_bytes)
+        graph_memory_limited = n_graphs < requested_graph_count
         while True:
             per_graph = math.ceil(n_repeat / n_graphs)
             if max_rep:
@@ -284,6 +295,9 @@ def benchmark_cuda_graph(
             "cache_flush_bytes": FLUSH_BYTES,
             "samples_ms": samples,
             "graph_count": n_graphs,
+            "requested_graph_count": requested_graph_count,
+            "graph_memory_limited": graph_memory_limited,
+            "graph_pool_reserved_bytes": graph_pool_reserved_bytes,
             "samples_per_graph": per_graph,
             "graph_means_ms": graph_means.tolist(),
             "graph_mean_std_ms": graph_std,
