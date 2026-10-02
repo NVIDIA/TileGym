@@ -36,10 +36,14 @@ __tile__ auto erf_f32(tile_t<float, BLOCK_SIZE> x) {
 
     auto zero = ct::zeros<f32xN>();
     auto neg = x < zero;
-    auto ax = ct::select(neg, -x, x);
+    auto ax = ct::abs(x);
     auto t = 1.0f / (1.0f + p * ax);
     auto poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t;
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+    auto r = 1.0f - poly * ct::exp(-ax * ax, ct::round_approximate_t{});
+#else
     auto r = 1.0f - poly * ct::exp(-ax * ax);
+#endif
     return ct::select(neg, -r, r);
 }
 
@@ -53,7 +57,11 @@ template<int BLOCK_SIZE>
 __tile__ auto normal_pdf_f32(tile_t<float, BLOCK_SIZE> x) {
     namespace ct = cuda::tiles;
     constexpr float inv_sqrt_2pi = 0.3989422804014327f;
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+    return inv_sqrt_2pi * ct::exp(-0.5f * x * x, ct::round_approximate_t{});
+#else
     return inv_sqrt_2pi * ct::exp(-0.5f * x * x);
+#endif
 }
 
 template<int BLOCK_SIZE>
@@ -74,11 +82,15 @@ __tile__ auto tanh_gelu_grad_f32(tile_t<float, BLOCK_SIZE> x) {
     return 0.5f * (1.0f + th) + 0.5f * x * (1.0f - th * th) * du;
 }
 
-template<typename T, int BLOCK_SIZE, int OP>
+template<typename T, int BLOCK_SIZE, int OP, bool VECTORIZABLE>
 __tile_global__ void gelu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y, int n_elements) {
     namespace ct = cuda::tiles;
-    x = ct::assume_aligned<16>(x);
-    y = ct::assume_aligned<16>(y);
+    if constexpr (VECTORIZABLE) {
+        constexpr int ALIGN_ELEMENTS = 16 / sizeof(T);
+        n_elements = ct::assume_divisible<ALIGN_ELEMENTS>(n_elements);
+        x = ct::assume_aligned<16>(x);
+        y = ct::assume_aligned<16>(y);
+    }
     using TxN = tile_t<T, BLOCK_SIZE>;
     using f32xN = tile_t<float, BLOCK_SIZE>;
     using i32xN = tile_t<int32_t, BLOCK_SIZE>;
@@ -102,12 +114,16 @@ __tile_global__ void gelu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y,
     ct::store_masked(y + offsets, ct::element_cast<T>(out), mask);
 }
 
-template<typename T, int BLOCK_SIZE, int OP>
+template<typename T, int BLOCK_SIZE, int OP, bool VECTORIZABLE>
 __tile_global__ void gelu_bwd_kernel(const T* __restrict__ dy, const T* __restrict__ x, T* __restrict__ dx, int n_elements) {
     namespace ct = cuda::tiles;
-    dy = ct::assume_aligned<16>(dy);
-    x = ct::assume_aligned<16>(x);
-    dx = ct::assume_aligned<16>(dx);
+    if constexpr (VECTORIZABLE) {
+        constexpr int ALIGN_ELEMENTS = 16 / sizeof(T);
+        n_elements = ct::assume_divisible<ALIGN_ELEMENTS>(n_elements);
+        dy = ct::assume_aligned<16>(dy);
+        x = ct::assume_aligned<16>(x);
+        dx = ct::assume_aligned<16>(dx);
+    }
     using TxN = tile_t<T, BLOCK_SIZE>;
     using f32xN = tile_t<float, BLOCK_SIZE>;
     using i32xN = tile_t<int32_t, BLOCK_SIZE>;

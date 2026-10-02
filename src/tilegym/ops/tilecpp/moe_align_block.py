@@ -78,9 +78,16 @@ def _launch_stage1(
     # Template params: T, BLOCK_SIZE (dummy), NUM_EXPERTS
     # NUMEL and TOKENS_PER_THREAD are runtime parameters (variable per batch)
     kernel, _, _ = _stage1_kernel.get_kernel(
-        dtype=torch.int32,
-        template_params=[1, num_experts],
-        signature="const int*, int*, int, int",
+        dtype=topk_ids.dtype,
+        template_params=[
+            1,
+            num_experts,
+            min(_next_power_of_2(tokens_per_thread), 256),
+            _next_power_of_2(num_experts),
+            numel,
+            tokens_per_thread,
+        ],
+        signature="const {T}*, int*, int, int",
     )
 
     _stage1_kernel.launch(
@@ -180,9 +187,16 @@ def _launch_stage4(
     # Template params: T, NUM_EXPERTS, BLOCK_SIZE
     # NUMEL and TOKENS_PER_THREAD are runtime parameters (variable per batch)
     kernel, _, _ = _stage4_kernel.get_kernel(
-        dtype=torch.int32,
-        template_params=[num_experts, block_size],
-        signature="const int*, int*, int*, int*, const int*, int, int",
+        dtype=topk_ids.dtype,
+        template_params=[
+            num_experts,
+            block_size,
+            min(_next_power_of_2(tokens_per_thread), 256),
+            _next_power_of_2(num_experts),
+            numel,
+            tokens_per_thread,
+        ],
+        signature="const {T}*, int*, int*, int*, const int*, int, int",
     )
 
     _stage4_kernel.launch(
@@ -321,9 +335,11 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    # Ensure topk_ids is int32 (kernel expects const int*)
-    if topk_ids.dtype != torch.int32:
+    if topk_ids.dtype not in (torch.int32, torch.int64):
         topk_ids = topk_ids.to(torch.int32)
+    topk_ids = topk_ids.contiguous()
+    if topk_ids.data_ptr() % 16:
+        topk_ids = topk_ids.clone()
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())

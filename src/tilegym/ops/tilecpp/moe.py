@@ -66,6 +66,7 @@ def _get_moe_kernel(
     stride_bsk: int,
     stride_bsn: int,
     EM: int,
+    weight_dtype: torch.dtype = torch.float32,
 ):
     """Get compiled kernel for specific configuration."""
     bool_to_str = lambda b: "true" if b else "false"
@@ -83,11 +84,13 @@ def _get_moe_kernel(
 
     input_type = dtype_to_cpp(input_dtype)
     output_type = dtype_to_cpp(output_dtype)
+    weight_type = dtype_to_cpp(weight_dtype)
 
     kernel, mangled_name, _ = _fused_moe_kernel.get_kernel(
         dtype=output_dtype,  # Use output dtype for {T} placeholder
         template_params=[
             input_type,  # IN_T - explicit input type
+            weight_type,
             block_m,
             block_n,
             block_k,
@@ -114,7 +117,7 @@ def _get_moe_kernel(
             EM,
         ],
         signature=(
-            f"const {input_type}*, const {input_type}*, {{T}}*, const float*, const float*, const float*, "
+            f"const {input_type}*, const {input_type}*, {{T}}*, const float*, const float*, const {weight_type}*, "
             "const int*, const int*, const int*, "
             "int"  # Only num_valid_tokens remains as runtime param
         ),
@@ -147,8 +150,8 @@ def _launch_fused_moe_kernel(
     input_dtype = A.dtype
     output_dtype = C.dtype
 
-    # Ensure topk_weights is float32 for the kernel
-    if topk_weights.dtype != torch.float32:
+    topk_weights = topk_weights.contiguous()
+    if topk_weights.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         topk_weights = topk_weights.to(torch.float32)
 
     # Ensure scales are float32
@@ -208,6 +211,7 @@ def _launch_fused_moe_kernel(
         stride_bsk,
         stride_bsn,
         EM,
+        weight_dtype=topk_weights.dtype,
     )
 
     # Grid dimensions

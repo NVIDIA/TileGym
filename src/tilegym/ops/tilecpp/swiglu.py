@@ -141,7 +141,11 @@ def _launch_swiglu_forward_gather_kernel(
 
     kernel, _, _ = _swiglu_forward_gather_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size],
+        template_params=[
+            block_size,
+            n_cols != block_size,
+            a.stride(0) % (16 // a.element_size()) == 0 and all(t.data_ptr() % 16 == 0 for t in (a, b, c)),
+        ],
         signature="const {T}*, const {T}*, {T}*, int, int",
     )
 

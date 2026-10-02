@@ -12,11 +12,17 @@
 template<typename T, int BLOCK_SIZE>
 using tile_t = cuda::tiles::tile<T, cuda::tiles::shape<BLOCK_SIZE>>;
 
-template<typename T, int BLOCK_SIZE, int OP>
+template<typename T, int BLOCK_SIZE, int OP, bool VECTORIZABLE>
 __tile_global__ void relu_activation_fwd_kernel(const T* __restrict__ x, T* __restrict__ y, int n_elements, float alpha, float lower, float upper, bool training) {
     namespace ct = cuda::tiles;
-    x = ct::assume_aligned<16>(x);
-    y = ct::assume_aligned<16>(y);
+    if constexpr (OP == 0 && VECTORIZABLE) {
+        constexpr int ALIGN_ELEMENTS = 16 / sizeof(T);
+        n_elements = ct::assume_divisible<ALIGN_ELEMENTS>(n_elements);
+    }
+    if constexpr (OP != 0 || VECTORIZABLE) {
+        x = ct::assume_aligned<16>(x);
+        y = ct::assume_aligned<16>(y);
+    }
     using TxN = tile_t<T, BLOCK_SIZE>;
     using f32xN = tile_t<float, BLOCK_SIZE>;
     using i32xN = tile_t<int32_t, BLOCK_SIZE>;
@@ -48,12 +54,18 @@ __tile_global__ void relu_activation_fwd_kernel(const T* __restrict__ x, T* __re
     ct::store_masked(y + offsets, ct::element_cast<T>(out), mask);
 }
 
-template<typename T, int BLOCK_SIZE, int OP>
+template<typename T, int BLOCK_SIZE, int OP, bool VECTORIZABLE>
 __tile_global__ void relu_activation_bwd_kernel(const T* __restrict__ dy, const T* __restrict__ x, T* __restrict__ dx, int n_elements, float alpha, float lower, float upper, bool training) {
     namespace ct = cuda::tiles;
-    dy = ct::assume_aligned<16>(dy);
-    x = ct::assume_aligned<16>(x);
-    dx = ct::assume_aligned<16>(dx);
+    if constexpr (OP == 0 && VECTORIZABLE) {
+        constexpr int ALIGN_ELEMENTS = 16 / sizeof(T);
+        n_elements = ct::assume_divisible<ALIGN_ELEMENTS>(n_elements);
+    }
+    if constexpr (OP != 0 || VECTORIZABLE) {
+        dy = ct::assume_aligned<16>(dy);
+        x = ct::assume_aligned<16>(x);
+        dx = ct::assume_aligned<16>(dx);
+    }
     using TxN = tile_t<T, BLOCK_SIZE>;
     using f32xN = tile_t<float, BLOCK_SIZE>;
     using i32xN = tile_t<int32_t, BLOCK_SIZE>;

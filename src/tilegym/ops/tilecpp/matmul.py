@@ -130,6 +130,17 @@ def _persistent_matmul_autotune_configs():
     else:
         # sm100+ (Blackwell)
         configs = [
+            Config(TILE_SIZE_M=256, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
+            Config(
+                TILE_SIZE_M=256,
+                TILE_SIZE_N=256,
+                TILE_SIZE_K=64,
+                GROUP_SIZE_M=8,
+                num_ctas=2,
+                occupancy=1,
+                LOAD_LATENCY=4,
+            ),
+            Config(TILE_SIZE_M=256, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
             Config(TILE_SIZE_M=128, TILE_SIZE_N=512, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=4, occupancy=1),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=2, occupancy=1),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
@@ -138,6 +149,8 @@ def _persistent_matmul_autotune_configs():
             # the persistent grid at 16-32 tile-jobs and strand most SMs.
             Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
         ]
+    for cfg in configs:
+        cfg.kwargs.setdefault("LOAD_LATENCY", -1)
     return configs
 
 
@@ -244,15 +257,9 @@ def _get_persistent_kernel(
     transpose_b: bool,
     num_ctas: int,
     occupancy: int,
+    load_latency: int = -1,
 ):
-    """Compile/retrieve the static_persistent_matmul_kernel for a config.
-
-    Template params (kernel source order):
-      T, M, N, K, TILE_SIZE_M, TILE_SIZE_N, TILE_SIZE_K, GROUP_SIZE_M,
-      TRANSPOSE_A, TRANSPOSE_B, num_ctas, occupancy
-    Signature:
-      const T*, const T*, T*   (M/N/K baked into the template)
-    """
+    """Compile/retrieve the static_persistent_matmul_kernel for a config."""
     bool_to_str = lambda b: "true" if b else "false"
     kernel, _, _ = _persistent_matmul_kernel.get_kernel(
         dtype=dtype,
@@ -268,8 +275,9 @@ def _get_persistent_kernel(
             bool_to_str(transpose_b),
             num_ctas,
             occupancy,
+            load_latency,
         ],
-        signature="const {T}*, const {T}*, {T}*",
+        signature="const {T}*, const {T}*, {T}*, int",
     )
     return kernel
 
@@ -299,6 +307,7 @@ def _launch_persistent_matmul_kernel(
     group_m: int = DEFAULT_GROUP_SIZE_M,
     num_ctas: int = 1,
     occupancy: int = 1,
+    load_latency: int = -1,
 ):
     dump_kernel_types("static_persistent_matmul_kernel", a, b, c)
     kernel = _get_persistent_kernel(
@@ -314,6 +323,7 @@ def _launch_persistent_matmul_kernel(
         transpose_b,
         num_ctas,
         occupancy,
+        load_latency,
     )
     grid = _persistent_grid(M, N, tile_m, tile_n, num_ctas, occupancy)
     _persistent_matmul_kernel.launch(
@@ -323,13 +333,23 @@ def _launch_persistent_matmul_kernel(
             np.uint64(a.data_ptr()),
             np.uint64(b.data_ptr()),
             np.uint64(c.data_ptr()),
+            np.int32(K),
         ],
     )
 
 
-_fp64_matmul_autotuner = TileCppAutotuner(
-    [Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)]
-)
+def _fp64_matmul_configs(persistent: bool = False):
+    if torch.cuda.get_device_capability() == (10, 0):
+        tiles = ((64, 128, 16), (32, 16, 32)) if persistent else ((16, 16, 32), (64, 64, 16))
+        return [
+            Config(TILE_SIZE_M=m, TILE_SIZE_N=n, TILE_SIZE_K=k, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
+            for m, n, k in tiles
+        ]
+    return [Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)]
+
+
+_fp64_matmul_autotuner = TileCppAutotuner(_fp64_matmul_configs())
+_fp64_persistent_matmul_autotuner = TileCppAutotuner(_fp64_matmul_configs(persistent=True))
 
 
 @autotune(search_space=_matmul_autotune_configs())
@@ -400,7 +420,7 @@ def tilecpp_autotune_persistent_matmul(
     autotuner: TileCppAutotuner | None = None,
 ):
     if a.dtype == torch.float64:
-        autotuner = _fp64_matmul_autotuner
+        autotuner = _fp64_persistent_matmul_autotuner
     key = ("tilecpp_persistent_matmul", str(a.dtype), M, N, K, transpose_a, transpose_b)
     named_args = {"M": M, "N": N, "K": K}
 
@@ -423,6 +443,7 @@ def tilecpp_autotune_persistent_matmul(
             group_m=group_m,
             num_ctas=num_ctas,
             occupancy=occupancy,
+            load_latency=cfg.kwargs.get("LOAD_LATENCY", -1),
         )
 
     def grid_fn(args: dict, cfg: Config) -> tuple[int, ...]:

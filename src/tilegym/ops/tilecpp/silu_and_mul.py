@@ -70,6 +70,15 @@ def _next_power_of_2(n):
     return n + 1
 
 
+def _silu_worker_hints(tile_size, tensor):
+    tile_bytes = tile_size * tensor.element_size()
+    if tile_bytes <= 2048:
+        return 4, 1
+    if tile_bytes <= 8192 or torch.cuda.get_device_capability(tensor.device)[0] < 9:
+        return 8, 1
+    return 8, 2
+
+
 def calculate_settings(n):
     """Choose appropriate block size based on hidden_size."""
     MAX_FUSED_SIZE = 65536
@@ -135,7 +144,15 @@ def _launch_silu_and_mul_kernel_row_wise(
 
     kernel, _, _ = _silu_and_mul_kernel_row_wise.get_kernel(
         dtype=dtype,
-        template_params=[N, hidden_size, tile_size, INPUT_STRIDE, OUTPUT_STRIDE],
+        template_params=[
+            N,
+            hidden_size,
+            tile_size,
+            INPUT_STRIDE,
+            OUTPUT_STRIDE,
+            all(t.data_ptr() % 16 == 0 for t in (input_tensor, output_tensor)),
+            *_silu_worker_hints(tile_size, input_tensor),
+        ],
         signature="{T}*, {T}*",
     )
 
@@ -168,7 +185,13 @@ def _launch_silu_and_mul_backward_kernel(
 
     kernel, _, _ = _silu_and_mul_backward_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size],
+        template_params=[
+            block_size,
+            hidden_size,
+            stride,
+            all(t.data_ptr() % 16 == 0 for t in (grad_output, input_tensor, grad_input)),
+            *_silu_worker_hints(block_size, input_tensor),
+        ],
         signature="const {T}*, const {T}*, {T}*, int, int",
     )
 

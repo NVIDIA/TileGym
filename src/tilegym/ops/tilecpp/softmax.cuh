@@ -14,116 +14,103 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-/**
- * Softmax forward kernel.
- *
- * Computes softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
- *
- * Template Parameters:
- *   T: Element type (float, __half, __nv_bfloat16)
- *   BLOCK_SIZE: Tile size (power of 2, must equal n_cols)
- *
- * Parameters:
- *   output: Pointer to output tensor (n_rows, n_cols)
- *   input: Pointer to input tensor (n_rows, n_cols)
- *   input_row_stride: Stride for input rows
- *   output_row_stride: Stride for output rows
- *   n_rows: Number of rows
- *   n_cols: Number of columns (power of 2, must equal BLOCK_SIZE)
- *   num_programs: Total number of CTA programs for persistent scheduling
- */
-template<typename T, int BLOCK_SIZE, int TMA_ROWS>
-[[ using cutile : hint(0, occupancy=(TMA_ROWS ? 2 : 4)) ]]
-__tile_global__ void softmax_kernel(
-    T* __restrict__ _output,
-    const T* __restrict__ _input,
-    int input_row_stride,
-    int output_row_stride,
-    int n_rows,
-    int n_cols,
+template<typename T, int BLOCK_SIZE, int TMA_ROWS, int ALIGNED_ROWS, int ROWS, int COLS>
+__tile__ void softmax_body(
+    T* __restrict__ _output, const T* __restrict__ _input,
+    int input_row_stride, int output_row_stride, int n_rows, int n_cols,
     int num_programs
 ) {
     namespace ct = cuda::tiles;
     using namespace ct::literals;
-
-    // Apply alignment hints for better memory access
-    const T* input = ct::assume_aligned<16>(_input);
-    T* output = ct::assume_aligned<16>(_output);
-
     using f32xN = ct::tile<float, ct::shape<BLOCK_SIZE>>;
     using TxN = ct::tile<T, ct::shape<BLOCK_SIZE>>;
     using i32xN = ct::tile<int, ct::shape<BLOCK_SIZE>>;
-
-    // Persistent scheduling: each program handles multiple rows
-    int row_start = ct::bid().x;
-    int row_step = num_programs;
-
-    if constexpr (TMA_ROWS) {
-        constexpr int TMA_ELEMS = static_cast<int>(16 / sizeof(T));
-        using tma_elems_t = ct::integral_constant<TMA_ELEMS>;
-        input_row_stride = ct::assume_divisible(input_row_stride, tma_elems_t{});
-        output_row_stride = ct::assume_divisible(output_row_stride, tma_elems_t{});
-
-        for (auto row_idx : ct::irange(row_start, n_rows, row_step)) {
-            auto pIn = ct::partition_view{
-                ct::tensor_span{input + row_idx * input_row_stride,
-                                ct::extents{ct::integral_constant<BLOCK_SIZE>{}}},
-                ct::shape<BLOCK_SIZE>{}};
-            auto pOut = ct::partition_view{
-                ct::tensor_span{output + row_idx * output_row_stride,
-                                ct::extents{ct::integral_constant<BLOCK_SIZE>{}}},
-                ct::shape<BLOCK_SIZE>{}};
-
-            auto row = ct::element_cast<float>(pIn.load(0));
-            float row_max = static_cast<float>(ct::reduce_max(row, 0_ic));
-            auto numerator = ct::exp(row - row_max);
-            float denominator = static_cast<float>(ct::sum(numerator, 0_ic));
-            auto softmax_output = ct::div(numerator, ct::full<f32xN>(denominator),
-                                         ct::round_approximate_t{},
-                                         ct::round_subnormals_to_zero_t{});
-            pOut.store(ct::element_cast<T>(softmax_output), 0);
-        }
-        return;
+    const T* input = ct::assume_aligned<16>(_input);
+    T* output = ct::assume_aligned<16>(_output);
+    n_rows = ct::assume_bounded_below<0>(n_rows);
+    n_cols = ct::assume_bounded_below<0>(n_cols);
+    input_row_stride = ct::assume_bounded_below<0>(input_row_stride);
+    output_row_stride = ct::assume_bounded_below<0>(output_row_stride);
+    if constexpr (ALIGNED_ROWS) {
+        using alignment = ct::integral_constant<16 / sizeof(T)>;
+        input_row_stride = ct::assume_divisible(input_row_stride, alignment{});
+        output_row_stride = ct::assume_divisible(output_row_stride, alignment{});
+        n_cols = ct::assume_divisible(n_cols, alignment{});
     }
-
-    for (auto row_idx : ct::irange(row_start, n_rows, row_step)) {
-        // row_start_ptr = input + row_idx * input_row_stride
-        const T* row_start_ptr = input + row_idx * input_row_stride;
-
-        auto col_offsets = ct::iota<i32xN>();
-
-        // Create mask for valid columns (handles non-power-of-2 n_cols)
-        auto mask = col_offsets < n_cols;
-
-        // input_ptrs = row_start_ptr + col_offsets
-        auto input_ptrs = row_start_ptr + col_offsets;
-
-        // Load with mask, padding invalid elements with -infinity
-        // so they don't affect max/sum calculations
-        auto neg_inf_pad = ct::full<TxN>(T(-INFINITY));
-        auto row_T = ct::load_masked(input_ptrs, mask, neg_inf_pad);
-        auto row = ct::element_cast<float>(row_T);
-
-        float row_max = static_cast<float>(ct::reduce_max(row, 0_ic));
-
-        // row_minus_max = row - row_max
-        auto row_minus_max = row - row_max;
-
-        // exp(-inf - max) = 0, so masked elements contribute 0
-        auto numerator = ct::exp(row_minus_max);
-
-        float denominator = static_cast<float>(ct::sum(numerator, 0_ic));
-
-        auto softmax_output = ct::div(numerator, ct::full<f32xN>(denominator),
-                                     ct::round_approximate_t{},
-                                     ct::round_subnormals_to_zero_t{});
-
-        // Convert back to output type and store (only valid columns)
-        auto softmax_output_T = ct::element_cast<T>(softmax_output);
-        auto output_ptrs = output + row_idx * output_row_stride + col_offsets;
-        ct::store_masked(output_ptrs, softmax_output_T, mask);
+    int row_start = ct::bid().x;
+    if constexpr (TMA_ROWS) {
+        auto in_layout = ct::layout_strided_mapping{
+            ct::extents{n_rows, n_cols}, ct::extents{input_row_stride, ct::integral_constant<1>{}}};
+        auto out_layout = ct::layout_strided_mapping{
+            ct::extents{n_rows, n_cols}, ct::extents{output_row_stride, ct::integral_constant<1>{}}};
+        auto pIn = ct::partition_view{ct::tensor_span{input, in_layout}, ct::shape<1, BLOCK_SIZE>{}};
+        auto pOut = ct::partition_view{ct::tensor_span{output, out_layout}, ct::shape<1, BLOCK_SIZE>{}};
+        for (auto row_idx : ct::irange(row_start, ROWS, num_programs)) {
+            auto row = ct::element_cast<float>(ct::reshape(
+                pIn.template load_masked<ct::view_padding::negative_inf>(row_idx, 0),
+                ct::shape<BLOCK_SIZE>{}));
+            auto maximum = ct::reduce_max(row, 0_ic);
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+            auto numerator = ct::exp(row - maximum, ct::round_approximate_t{});
+#else
+            auto numerator = ct::exp(row - maximum);
+#endif
+            auto denominator = ct::sum(numerator, 0_ic);
+            auto result = ct::div(numerator, denominator,
+                                  ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+            pOut.store_masked(ct::reshape(ct::element_cast<T>(result), ct::shape<1, BLOCK_SIZE>{}),
+                              row_idx, 0);
+        }
+    } else {
+        for (auto row_idx : ct::irange(row_start, ROWS, num_programs)) {
+            const T* row_ptr = input + row_idx * input_row_stride;
+            T* out_ptr = output + row_idx * output_row_stride;
+            if constexpr (ALIGNED_ROWS) {
+                row_ptr = ct::assume_aligned<16>(row_ptr);
+                out_ptr = ct::assume_aligned<16>(out_ptr);
+            }
+            auto offsets = ct::iota<i32xN>();
+            auto mask = offsets < n_cols;
+            auto row = ct::element_cast<float>(ct::load_masked(
+                row_ptr + offsets, mask, ct::full<TxN>(T(-INFINITY))));
+            auto maximum = ct::reduce_max(row, 0_ic);
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+            auto numerator = ct::exp(row - maximum, ct::round_approximate_t{});
+#else
+            auto numerator = ct::exp(row - maximum);
+#endif
+            auto denominator = ct::sum(numerator, 0_ic);
+            auto result = ct::div(numerator, denominator,
+                                  ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+            ct::store_masked(out_ptr + offsets, ct::element_cast<T>(result), mask);
+        }
     }
 }
+
+template<typename T, int BLOCK_SIZE, int TMA_ROWS, int ALIGNED_ROWS, int OCCUPANCY, int ROWS, int COLS>
+[[cutile::hint(0, occupancy=OCCUPANCY)]]
+__tile_global__ void softmax_kernel(
+    T* __restrict__ output, const T* __restrict__ input,
+    int input_row_stride, int output_row_stride, int n_rows, int n_cols, int num_programs
+) {
+    softmax_body<T, BLOCK_SIZE, TMA_ROWS, ALIGNED_ROWS, ROWS, COLS>(
+        output, input, input_row_stride, output_row_stride, n_rows, n_cols, num_programs);
+}
+
+template<typename T, int BLOCK_SIZE, int TMA_ROWS, int ALIGNED_ROWS, int OCCUPANCY, int WORKER_WARPS, int ROWS, int COLS>
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+[[cutile::hint(0, occupancy=OCCUPANCY, num_worker_warps_per_cta=WORKER_WARPS)]]
+#else
+[[cutile::hint(0, occupancy=OCCUPANCY)]]
+#endif
+__tile_global__ void softmax_kernel_warps(
+    T* __restrict__ output, const T* __restrict__ input,
+    int input_row_stride, int output_row_stride, int n_rows, int n_cols, int num_programs
+) {
+    softmax_body<T, BLOCK_SIZE, TMA_ROWS, ALIGNED_ROWS, ROWS, COLS>(
+        output, input, input_row_stride, output_row_stride, n_rows, n_cols, num_programs);
+}
+
 
 /**
  * Online softmax forward kernel.
@@ -137,8 +124,12 @@ __tile_global__ void softmax_kernel(
  * and masking the tail block's loads with -INFINITY (so exp(...) = 0 contribution)
  * and stores so out-of-bounds lanes are not written.
  */
-template<typename T, int BLOCK_SIZE>
+template<typename T, int BLOCK_SIZE, int ALIGNED_ROWS, int COLS>
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+[[ using cutile : hint(0, occupancy=2, num_worker_warps_per_cta=8) ]]
+#else
 [[ using cutile : hint(0, occupancy=2) ]]
+#endif
 __tile_global__ void online_softmax_kernel(
     T* __restrict__ output,
     const T* __restrict__ input,
@@ -159,19 +150,24 @@ __tile_global__ void online_softmax_kernel(
 
     auto row_ptr = input_aligned + row_idx * input_row_stride;
     auto output_row_ptr = output_aligned + row_idx * output_row_stride;
+    if constexpr (ALIGNED_ROWS) {
+        row_ptr = ct::assume_aligned<16>(row_ptr);
+        output_row_ptr = ct::assume_aligned<16>(output_row_ptr);
+        n_cols = ct::assume_divisible(n_cols, ct::integral_constant<16 / sizeof(T)>{});
+    }
 
     auto neg_inf_pad = ct::full<TxN>(static_cast<T>(-INFINITY));
 
     float m_prev = -INFINITY;
     float l_prev = 0.0f;
 
-    int num_blocks = (n_cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int num_blocks = (COLS + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     for (auto block_idx : ct::irange(0, num_blocks)) {
         int start_col = block_idx * BLOCK_SIZE;
 
         auto col_offsets = ct::full<i32xN>(start_col) + ct::iota<i32xN>();
-        auto mask = col_offsets < n_cols;
+        auto mask = col_offsets < COLS;
 
         auto row_T = ct::load_masked(row_ptr + col_offsets, mask, neg_inf_pad);
         auto row = ct::element_cast<float>(row_T);
@@ -179,9 +175,17 @@ __tile_global__ void online_softmax_kernel(
         float block_max = static_cast<float>(ct::reduce_max(row, 0_ic));
         float m_curr = (block_max > m_prev) ? block_max : m_prev;
 
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+        l_prev *= ct::exp(m_prev - m_curr, ct::round_approximate_t{});
+#else
         l_prev *= ct::exp(m_prev - m_curr);
+#endif
 
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+        auto p = ct::exp(row - m_curr, ct::round_approximate_t{});
+#else
         auto p = ct::exp(row - m_curr);
+#endif
 
         float l_block = static_cast<float>(ct::sum(p, 0_ic));
 
@@ -189,18 +193,25 @@ __tile_global__ void online_softmax_kernel(
         m_prev = m_curr;
     }
 
+    float inv_denominator = ct::div(1.0f, l_prev, ct::round_approximate_t{},
+                                      ct::round_subnormals_to_zero_t{});
+
     for (auto block_idx : ct::irange(0, num_blocks)) {
-        int start_col = block_idx * BLOCK_SIZE;
+        int start_col = (num_blocks - 1 - block_idx) * BLOCK_SIZE;
 
         auto col_offsets = ct::full<i32xN>(start_col) + ct::iota<i32xN>();
-        auto mask = col_offsets < n_cols;
+        auto mask = col_offsets < COLS;
 
         auto row_T = ct::load_masked(row_ptr + col_offsets, mask, neg_inf_pad);
         auto row = ct::element_cast<float>(row_T);
 
         auto row_minus_max = row - m_prev;
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+        auto numerator = ct::exp(row_minus_max, ct::round_approximate_t{});
+#else
         auto numerator = ct::exp(row_minus_max);
-        auto softmax_output = numerator / l_prev;
+#endif
+        auto softmax_output = numerator * inv_denominator;
 
         auto softmax_output_T = ct::element_cast<T>(softmax_output);
         ct::store_masked(output_row_ptr + col_offsets, softmax_output_T, mask);

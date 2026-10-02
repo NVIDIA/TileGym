@@ -34,13 +34,19 @@ class _GeluFunction(torch.autograd.Function):
         y = torch.empty_like(x)
         x_flat = x.view(-1)
         y_flat = y.view(-1)
+        block_size = 4096 if x_flat.numel() >= (1 << 24) else _BLOCK_SIZE
         kernel, _, _ = _fwd_kernel.get_kernel(
             dtype=x.dtype,
-            template_params=[_BLOCK_SIZE, op_id],
+            template_params=[
+                block_size,
+                op_id,
+                x_flat.numel() % (16 // x.element_size()) == 0
+                and all(t.data_ptr() % 16 == 0 for t in (x_flat, y_flat)),
+            ],
             signature="const {T}*, {T}*, int",
         )
         _fwd_kernel.launch(
-            grid=(math.ceil(x_flat.numel() / _BLOCK_SIZE),),
+            grid=(math.ceil(x_flat.numel() / block_size),),
             kernel=kernel,
             args=[np.uint64(x_flat.data_ptr()), np.uint64(y_flat.data_ptr()), np.int32(x_flat.numel())],
         )
@@ -56,7 +62,12 @@ class _GeluFunction(torch.autograd.Function):
         dx = torch.empty_like(dy_flat)
         kernel, _, _ = _bwd_kernel.get_kernel(
             dtype=dy.dtype,
-            template_params=[_BLOCK_SIZE, ctx.op_id],
+            template_params=[
+                _BLOCK_SIZE,
+                ctx.op_id,
+                dy_flat.numel() % (16 // dy.element_size()) == 0
+                and all(t.data_ptr() % 16 == 0 for t in (dy_flat, x, dx)),
+            ],
             signature="const {T}*, const {T}*, {T}*, int",
         )
         _bwd_kernel.launch(

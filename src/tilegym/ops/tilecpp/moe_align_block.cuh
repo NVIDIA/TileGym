@@ -26,14 +26,16 @@
  * determines the write location - a scatter pattern.
  */
 // Constants (num_experts) as NTTPs; numel and tokens_per_thread are runtime parameters.
-template<typename T, int BLOCK_SIZE, int NUM_EXPERTS>
+template<typename T, int BLOCK_SIZE, int NUM_EXPERTS, int SUB_CHUNK, int EXPERTS_POW2, int STATIC_NUMEL, int STATIC_TOKENS_PER_THREAD>
 __tile_global__ void moe_align_block_size_stage1(
-    const int* __restrict__ topk_ids,
+    const T* __restrict__ topk_ids,
     int* __restrict__ tokens_cnts,
     int NUMEL,
     int TOKENS_PER_THREAD
 ) {
     namespace ct = cuda::tiles;
+    NUMEL = STATIC_NUMEL;
+    TOKENS_PER_THREAD = STATIC_TOKENS_PER_THREAD;
 
     topk_ids = ct::assume_aligned<16>(topk_ids);
     tokens_cnts = ct::assume_aligned<16>(tokens_cnts);
@@ -42,16 +44,23 @@ __tile_global__ void moe_align_block_size_stage1(
     int start_idx = pid * TOKENS_PER_THREAD;
     int off_c = (pid + 1) * NUM_EXPERTS;
 
-    int limit = ct::max(0, ct::min(TOKENS_PER_THREAD, NUMEL - start_idx));
-
-    for (auto i : ct::irange(0, limit)) {
-        int current_idx = start_idx + i;
-        auto idx_tile = ct::load(topk_ids + current_idx);
-        int idx = static_cast<int>(idx_tile);
-        auto token_cnt_tile = ct::load(tokens_cnts + (off_c + idx));
-        auto new_cnt_tile = token_cnt_tile + 1;
-        ct::store(tokens_cnts + (off_c + idx), new_cnt_tile);
+    using Experts = ct::tile<int, ct::shape<EXPERTS_POW2>>;
+    using Tokens = ct::tile<int, ct::shape<SUB_CHUNK>>;
+    auto experts = ct::iota<Experts>();
+    auto offsets = ct::iota<Tokens>();
+    auto counts = ct::zeros<Experts>();
+    for (auto sub : ct::irange(0, TOKENS_PER_THREAD, SUB_CHUNK)) {
+        auto positions = start_idx + sub + offsets;
+        auto valid = (positions < NUMEL) & (sub + offsets < TOKENS_PER_THREAD);
+        auto ids = ct::element_cast<int>(ct::load_masked(topk_ids + positions, valid, T(NUM_EXPERTS)));
+        auto matches = ct::element_cast<int>(
+            ct::reshape(ids, ct::shape<SUB_CHUNK, 1>{}) ==
+            ct::reshape(experts, ct::shape<1, EXPERTS_POW2>{}));
+        counts = counts + ct::reshape(ct::sum(matches, ct::integral_constant<0>{}),
+                                      ct::shape<EXPERTS_POW2>{});
     }
+    ct::store_masked(tokens_cnts + off_c + experts, counts, experts < NUM_EXPERTS);
+
 }
 
 /**
@@ -148,9 +157,9 @@ __tile_global__ void moe_align_block_size_stage3(
  * Uses scalar operations due to data-dependent indexing.
  */
 // Constants (num_experts, block_size) as NTTPs; numel and tokens_per_thread are runtime parameters.
-template<typename T, int NUM_EXPERTS, int BLOCK_SIZE>
+template<typename T, int NUM_EXPERTS, int BLOCK_SIZE, int SUB_CHUNK, int EXPERTS_POW2, int STATIC_NUMEL, int STATIC_TOKENS_PER_THREAD>
 __tile_global__ void moe_align_block_size_stage4(
-    const int* __restrict__ topk_ids,
+    const T* __restrict__ topk_ids,
     int* __restrict__ sorted_token_ids,
     int* __restrict__ expert_ids,
     int* __restrict__ tokens_cnts,
@@ -159,6 +168,8 @@ __tile_global__ void moe_align_block_size_stage4(
     int TOKENS_PER_THREAD
 ) {
     namespace ct = cuda::tiles;
+    NUMEL = STATIC_NUMEL;
+    TOKENS_PER_THREAD = STATIC_TOKENS_PER_THREAD;
 
     using i32x1 = ct::tile<int32_t, ct::shape<1>>;
 
@@ -193,36 +204,31 @@ __tile_global__ void moe_align_block_size_stage4(
         ct::store(expert_ids + block_idx_tile, bid_tile);
     }
 
+    using Experts = ct::tile<int, ct::shape<EXPERTS_POW2>>;
+    using Tokens = ct::tile<int, ct::shape<SUB_CHUNK>>;
+    auto experts = ct::iota<Experts>();
+    auto expert_valid = experts < NUM_EXPERTS;
+    auto before = ct::load_masked(tokens_cnts + off_t + experts, expert_valid, 0);
+    auto bases = ct::load_masked(cumsum + experts, expert_valid, 0);
+    auto running = before + bases;
+    auto offsets = ct::iota<Tokens>();
     int start_idx_tokens = bid * TOKENS_PER_THREAD;
-
-    int limit = ct::max(0, ct::min(TOKENS_PER_THREAD, NUMEL - start_idx_tokens));
-    for (auto i : ct::irange(0, limit)) {
-        int current_idx = start_idx_tokens + i;
-
-        // Load expert_id for current token
-        auto current_idx_tile = ct::full<i32x1>(current_idx);
-        auto expert_id_tile = ct::load(topk_ids + current_idx_tile);
-        int expert_id = static_cast<int>(expert_id_tile);
-
-        // Load token count
-        auto off_t_tile = ct::full<i32x1>(off_t);
-        auto cnt_offset_tile = off_t_tile + expert_id_tile;
-        auto token_cnt_tile = ct::load(tokens_cnts + cnt_offset_tile);
-        int token_cnt = static_cast<int>(token_cnt_tile);
-
-        // Load cumsum value
-        auto cumsum_val_tile = ct::load(cumsum + expert_id_tile);
-        int cumsum_val = static_cast<int>(cumsum_val_tile);
-
-        int rank_post_pad = token_cnt + cumsum_val;
-
-        // Store token ID at sorted position
-        auto rank_post_pad_tile = ct::full<i32x1>(rank_post_pad);
-        auto current_idx_store_tile = ct::full<i32x1>(current_idx);
-        ct::store(sorted_token_ids + rank_post_pad_tile, current_idx_store_tile);
-
-        // Increment token count for this expert
-        auto new_cnt_tile = token_cnt_tile + 1;
-        ct::store(tokens_cnts + cnt_offset_tile, new_cnt_tile);
+    for (auto sub : ct::irange(0, TOKENS_PER_THREAD, SUB_CHUNK)) {
+        auto positions = start_idx_tokens + sub + offsets;
+        auto valid = (positions < NUMEL) & (sub + offsets < TOKENS_PER_THREAD);
+        auto ids = ct::element_cast<int>(ct::load_masked(topk_ids + positions, valid, T(NUM_EXPERTS)));
+        auto matches = ct::element_cast<int>(
+            ct::reshape(ids, ct::shape<SUB_CHUNK, 1>{}) ==
+            ct::reshape(experts, ct::shape<1, EXPERTS_POW2>{}));
+        auto ranks = ct::partial_sum(matches, ct::integral_constant<0>{}) - matches;
+        auto per_token = ct::reshape(ct::sum(ranks * matches, ct::integral_constant<1>{}),
+                                     ct::shape<SUB_CHUNK>{});
+        auto base = ct::reshape(ct::sum(
+            ct::reshape(running, ct::shape<1, EXPERTS_POW2>{}) * matches,
+            ct::integral_constant<1>{}), ct::shape<SUB_CHUNK>{});
+        ct::store_masked(sorted_token_ids + base + per_token, positions, valid);
+        running = running + ct::reshape(ct::sum(matches, ct::integral_constant<0>{}),
+                                        ct::shape<EXPERTS_POW2>{});
     }
+
 }
