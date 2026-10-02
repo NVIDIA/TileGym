@@ -167,7 +167,12 @@ __tile_global__ void swiglu_forward_kernel_pv(
  *
  * Grid: (n_rows,).  TILE_SIZE = next_power_of_2(n_cols).
  */
-template<typename T, int BLOCK_SIZE>
+template<typename T, int BLOCK_SIZE, bool CHECK_BOUNDS, bool ALIGNED_ROWS>
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+[[cutile::hint(0, occupancy=1, num_worker_warps_per_cta=8)]]
+#else
+[[cutile::hint(0, occupancy=1)]]
+#endif
 __tile_global__ void swiglu_forward_kernel_gather(
     const T* __restrict__ a_ptr,
     const T* __restrict__ b_ptr,
@@ -181,14 +186,18 @@ __tile_global__ void swiglu_forward_kernel_gather(
     using f32xN = ct::tile<float, ct::shape<BLOCK_SIZE>>;
     using i32xN = ct::tile<int, ct::shape<BLOCK_SIZE>>;
 
-    a_ptr = ct::assume_aligned<16>(a_ptr);
-    b_ptr = ct::assume_aligned<16>(b_ptr);
-    c_ptr = ct::assume_aligned<16>(c_ptr);
+    if constexpr (ALIGNED_ROWS) {
+        a_ptr = ct::assume_aligned<16>(a_ptr);
+        b_ptr = ct::assume_aligned<16>(b_ptr);
+        c_ptr = ct::assume_aligned<16>(c_ptr);
+        constexpr int ALIGN_ELEMENTS = 16 / sizeof(T);
+        row_stride = ct::assume_divisible<ALIGN_ELEMENTS>(row_stride);
+    }
 
     n_cols     = ct::assume_bounded_below(n_cols,     ct::integral_constant<0>{});
     row_stride = ct::assume_bounded_below(row_stride, ct::integral_constant<0>{});
 
-    int row = ct::bid().x;
+    int64_t row = ct::bid().x;
 
     const T* a_row = a_ptr + row * row_stride;
     const T* b_row = b_ptr + row * row_stride;
@@ -198,27 +207,32 @@ __tile_global__ void swiglu_forward_kernel_gather(
     auto mask     = col_offs < n_cols;
 
     TxN a_val, b_val;
-    [[ using cutile : hint(0, latency=1) ]]
-    a_val = ct::load_masked(a_row + col_offs, mask, T(0));
-    [[ using cutile : hint(0, latency=1) ]]
-    b_val = ct::load_masked(b_row + col_offs, mask, T(0));
+    if constexpr (CHECK_BOUNDS) {
+        a_val = ct::load_masked(a_row + col_offs, mask, T(0));
+        b_val = ct::load_masked(b_row + col_offs, mask, T(0));
+    } else {
+        a_val = ct::load(a_row + col_offs);
+        b_val = ct::load(b_row + col_offs);
+    }
 
     auto a_f32 = ct::element_cast<float>(a_val);
 
-    auto one       = ct::full<f32xN>(1.0f);
-    auto denom     = ct::add(one, ct::exp(-a_f32),
-                             ct::round_ties_to_even_t{},
+    auto one = ct::full<f32xN>(1.0f);
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+    auto denom = one + ct::exp(-a_f32, ct::round_approximate_t{});
+#else
+    auto denom = one + ct::exp(-a_f32);
+#endif
+    auto sigmoid_a = ct::div(one, denom, ct::round_approximate_t{},
                              ct::round_subnormals_to_zero_t{});
-    auto sigmoid_a = ct::div(one, denom,
-                             ct::round_approximate_t{},
-                             ct::round_subnormals_to_zero_t{});
-    auto silu_f32  = ct::mul(a_f32, sigmoid_a,
-                             ct::round_ties_to_even_t{},
-                             ct::round_subnormals_to_zero_t{});
+    auto silu_f32 = a_f32 * sigmoid_a;
 
     auto silu_T = ct::element_cast<T>(silu_f32);
     auto c_val  = silu_T * b_val;
 
-    [[ using cutile : hint(0, latency=1) ]]
-    ct::store_masked(c_row + col_offs, c_val, mask);
+    if constexpr (CHECK_BOUNDS) {
+        ct::store_masked(c_row + col_offs, c_val, mask);
+    } else {
+        ct::store(c_row + col_offs, c_val);
+    }
 }

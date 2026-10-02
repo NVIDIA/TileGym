@@ -18,6 +18,11 @@ from tilegym.backend import register_impl
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
+from .autotuner import Config
+from .autotuner import SearchSpace
+from .autotuner import TileCppAutotuner
+from .autotuner import is_autotuning_enabled
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -25,10 +30,11 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Threshold for using online algorithm (large column counts)
-COL_THRESHOLD = 16384 * 2
+COL_THRESHOLD = 16384
 
 # Block size for online algorithm
 ONLINE_BLOCK_SIZE = 8192
+ONLINE_FORWARD_BLOCK_SIZE = 16384
 
 # =============================================================================
 # Kernel Definitions
@@ -84,50 +90,75 @@ def _get_num_sm():
 # =============================================================================
 
 
-def _launch_softmax_forward(
-    input_tensor: torch.Tensor,
-    output_tensor: torch.Tensor,
-    n_rows: int,
-    n_cols: int,
-    block_size: int,
-):
+_softmax_warp_kernel = TileCppKernel(
+    source_path=Path(__file__).parent / "softmax.cuh", kernel_name="softmax_kernel_warps"
+)
+_softmax_gather_tuner = TileCppAutotuner(
+    SearchSpace(
+        [Config(WORKER_WARPS=warps, occupancy=4, num_ctas=1) for warps in (0, 4, 8)]
+        + [Config(WORKER_WARPS=8, occupancy=2, num_ctas=1)],
+        predicate_fn=lambda args, cfg: cfg.occupancy == 4 or args["n_cols"] >= 8192,
+    )
+)
+_softmax_tma_tuner = TileCppAutotuner(
+    [Config(WORKER_WARPS=0, occupancy=occupancy, num_ctas=1) for occupancy in (2, 4, 6, 8)]
+)
+
+
+def _launch_softmax_forward(input_tensor, output_tensor, n_rows, n_cols, block_size, use_tma):
     """Launch the softmax forward kernel."""
     dump_kernel_types("softmax_kernel", input_tensor, output_tensor)
-    dtype = input_tensor.dtype
-
-    TMA_MIN_ROW_BYTES = 32768
-    tma_elems = 16 // input_tensor.element_size()
-    tma_rows = int(
-        n_cols == block_size
-        and n_cols * input_tensor.element_size() >= TMA_MIN_ROW_BYTES
-        and input_tensor.stride(0) % tma_elems == 0
-        and output_tensor.stride(0) % tma_elems == 0
+    element_alignment = 16 // input_tensor.element_size()
+    aligned_rows = int(
+        all(value % element_alignment == 0 for value in (n_cols, input_tensor.stride(0), output_tensor.stride(0)))
     )
-
-    kernel, _, _ = _softmax_kernel.get_kernel(
-        dtype=dtype,
-        template_params=[block_size, tma_rows],
-        signature="{T}*, const {T}*, int, int, int, int, int",
-    )
-
     num_sm = _get_num_sm()
-    occupancy = 4
-    num_programs = min(num_sm * occupancy, n_rows)
 
-    grid = (num_programs,)
+    def launch(cfg):
+        worker_warps = cfg.WORKER_WARPS
+        implementation = _softmax_warp_kernel if worker_warps else _softmax_kernel
+        parameters = [block_size, int(use_tma), aligned_rows, cfg.occupancy]
+        if worker_warps:
+            parameters.append(worker_warps)
+        parameters.extend([n_rows, n_cols])
+        kernel, _, _ = implementation.get_kernel(
+            dtype=input_tensor.dtype,
+            template_params=parameters,
+            signature="{T}*, const {T}*, int, int, int, int, int",
+        )
+        programs = min(num_sm * cfg.occupancy, n_rows)
+        implementation.launch(
+            grid=(programs,),
+            kernel=kernel,
+            args=[
+                np.uint64(output_tensor.data_ptr()),
+                np.uint64(input_tensor.data_ptr()),
+                np.int32(input_tensor.stride(0)),
+                np.int32(output_tensor.stride(0)),
+                np.int32(n_rows),
+                np.int32(n_cols),
+                np.int32(programs),
+            ],
+        )
 
-    _softmax_kernel.launch(
-        grid=grid,
-        kernel=kernel,
-        args=[
-            np.uint64(output_tensor.data_ptr()),
-            np.uint64(input_tensor.data_ptr()),
-            np.int32(input_tensor.stride(0)),
-            np.int32(output_tensor.stride(0)),
-            np.int32(n_rows),
-            np.int32(n_cols),
-            np.int32(num_programs),
-        ],
+    if not is_autotuning_enabled():
+        launch(Config(WORKER_WARPS=0, occupancy=2 if use_tma else 4, num_ctas=1))
+        return
+    tuner = _softmax_tma_tuner if use_tma else _softmax_gather_tuner
+    tuner(
+        torch.cuda.current_stream(),
+        key=(
+            str(input_tensor.device),
+            str(input_tensor.dtype),
+            n_rows,
+            n_cols,
+            input_tensor.stride(0),
+            output_tensor.stride(0),
+            bool(use_tma),
+        ),
+        launch_fn=launch,
+        grid_fn=lambda args, cfg: (min(num_sm * cfg.occupancy, n_rows), 1, 1),
+        named_args={"n_rows": n_rows, "n_cols": n_cols},
     )
 
 
@@ -144,7 +175,16 @@ def _launch_online_softmax_forward(
 
     kernel, _, _ = _online_softmax_kernel.get_kernel(
         dtype=dtype,
-        template_params=[block_size],
+        template_params=[
+            block_size,
+            int(
+                all(
+                    value % (16 // input_tensor.element_size()) == 0
+                    for value in (n_cols, input_tensor.stride(0), output_tensor.stride(0))
+                )
+            ),
+            n_cols,
+        ],
         signature="{T}*, const {T}*, int, int, int",
     )
 
@@ -240,12 +280,12 @@ def _launch_online_softmax_backward(
 
 class Softmax(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x):
+    def forward(ctx, x, use_tma):
         n_rows, n_cols = x.shape
         BLOCK_SIZE = _next_power_of_2(n_cols)
 
         y = torch.empty_like(x)
-        _launch_softmax_forward(x, y, n_rows, n_cols, BLOCK_SIZE)
+        _launch_softmax_forward(x, y, n_rows, n_cols, BLOCK_SIZE, use_tma)
 
         ctx.save_for_backward(y)
         return y
@@ -259,14 +299,14 @@ class Softmax(torch.autograd.Function):
         dx = torch.empty_like(dy)
         _launch_softmax_backward(dx, y, dy, n_rows, n_cols, BLOCK_SIZE)
 
-        return dx
+        return dx, None
 
 
 class OnlineSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
         n_rows, n_cols = x.shape
-        BLOCK_SIZE = ONLINE_BLOCK_SIZE
+        BLOCK_SIZE = ONLINE_FORWARD_BLOCK_SIZE
 
         y = torch.empty_like(x)
         _launch_online_softmax_forward(x, y, n_rows, n_cols, BLOCK_SIZE)
@@ -316,4 +356,4 @@ def softmax(
     if use_online:
         return OnlineSoftmax.apply(x)
     else:
-        return Softmax.apply(x)
+        return Softmax.apply(x, use_tma)

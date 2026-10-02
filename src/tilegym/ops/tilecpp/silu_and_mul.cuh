@@ -17,6 +17,15 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
+template<typename Tile>
+__tile__ inline auto silu_reference_sigmoid(Tile a) {
+    namespace ct = cuda::tiles;
+    auto scaled = ct::mul(-a, 1.4426950408889634f,
+                          ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
+    auto denom = 1.0f + ct::exp2(scaled, ct::round_subnormals_to_zero_t{});
+    return ct::div(1.0f, denom, ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+}
+
 /**
  * Fused SiLU and multiplication kernel.
  *
@@ -94,7 +103,12 @@ __tile_global__ void silu_and_mul_kernel(
  *   stride:      Input row stride (2 * hidden_size for row-major)
  *   hidden_size: Size of each half
  */
-template<typename T, int BLOCK_SIZE>
+template<typename T, int BLOCK_SIZE, int HIDDEN_SIZE, int INPUT_STRIDE, bool ALIGNED_BASES, int NUM_WARPS, int NUM_CTAS>
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+[[cutile::hint(0, num_worker_warps_per_cta=NUM_WARPS, num_cta_in_cga=NUM_CTAS)]]
+#else
+[[cutile::hint(0, num_cta_in_cga=NUM_CTAS)]]
+#endif
 __tile_global__ void silu_and_mul_backward_kernel(
     const T* __restrict__ grad_output,
     const T* __restrict__ input,
@@ -103,15 +117,22 @@ __tile_global__ void silu_and_mul_backward_kernel(
     int hidden_size
 ) {
     namespace ct = cuda::tiles;
+    stride = INPUT_STRIDE;
+    hidden_size = HIDDEN_SIZE;
 
     using TxN = ct::tile<T, ct::shape<BLOCK_SIZE>>;
     using i64xN = ct::tile<int64_t, ct::shape<BLOCK_SIZE>>;
 
     int64_t pid = ct::bid().x;
 
-    auto grad_output_aligned = ct::assume_aligned<16>(grad_output);
-    auto input_aligned = ct::assume_aligned<16>(input);
-    auto grad_input_aligned = ct::assume_aligned<16>(grad_input);
+    auto grad_output_aligned = grad_output;
+    auto input_aligned = input;
+    auto grad_input_aligned = grad_input;
+    if constexpr (ALIGNED_BASES) {
+        grad_output_aligned = ct::assume_aligned<16>(grad_output);
+        input_aligned = ct::assume_aligned<16>(input);
+        grad_input_aligned = ct::assume_aligned<16>(grad_input);
+    }
 
     auto input_row = input_aligned + pid * stride;
     auto grad_input_row = grad_input_aligned + pid * stride;
@@ -130,15 +151,12 @@ __tile_global__ void silu_and_mul_backward_kernel(
     auto b_T = ct::load_masked(input_row + hidden_size + col_offsets, mask, zero_pad);
     auto b = ct::element_cast<float>(b_T);
 
-    auto denom = ct::add(1.0f, ct::exp(-a), ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
-    auto sigmoid_a = ct::div(1.0f, denom, ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+    auto sigmoid_a = silu_reference_sigmoid(a);
     auto silu_a = a * sigmoid_a;
 
     auto db = dc * silu_a;
-    auto silu_grad = sigmoid_a + silu_a * ct::sub(1.0f, sigmoid_a,
-                                                  ct::round_ties_to_even_t{},
-                                                  ct::round_subnormals_to_zero_t{});
-    auto da = dc * b * silu_grad;
+    auto silu_grad = sigmoid_a + silu_a * (1.0f + -sigmoid_a);
+    auto da = dc * (b * silu_grad);
 
     ct::store_masked(grad_input_row + col_offsets, ct::element_cast<T>(da), mask);
     ct::store_masked(grad_input_row + hidden_size + col_offsets, ct::element_cast<T>(db), mask);
@@ -158,7 +176,12 @@ __tile_global__ void silu_and_mul_backward_kernel(
  *   input: Pointer to input data (M, N) where N = 2 * HIDDEN_SIZE
  *   output: Pointer to output data (M, HIDDEN_SIZE)
  */
-template<typename T, int N, int HIDDEN_SIZE, int TILE_SIZE, int INPUT_STRIDE, int OUTPUT_STRIDE>
+template<typename T, int N, int HIDDEN_SIZE, int TILE_SIZE, int INPUT_STRIDE, int OUTPUT_STRIDE, bool ALIGNED_BASES, int NUM_WARPS, int NUM_CTAS>
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+[[cutile::hint(0, num_worker_warps_per_cta=NUM_WARPS, num_cta_in_cga=NUM_CTAS)]]
+#else
+[[cutile::hint(0, num_cta_in_cga=NUM_CTAS)]]
+#endif
 __tile_global__ void silu_and_mul_kernel_row_wise(
     T* __restrict__ input,
     T* __restrict__ output
@@ -171,8 +194,10 @@ __tile_global__ void silu_and_mul_kernel_row_wise(
     using i64xTS = ct::tile<int64_t, ct::shape<TILE_SIZE>>;
 
     // Alignment hints for pointers
-    input = ct::assume_aligned<16>(input);
-    output = ct::assume_aligned<16>(output);
+    if constexpr (ALIGNED_BASES) {
+        input = ct::assume_aligned<16>(input);
+        output = ct::assume_aligned<16>(output);
+    }
 
     // Each block handles one row
     int32_t row_i32 = ct::bid().x;
@@ -218,15 +243,13 @@ __tile_global__ void silu_and_mul_kernel_row_wise(
 
         // Compute sigmoid for SiLU: sigmoid(x) = 1 / (1 + exp(-x))
         // Use optimized operations with flush_to_zero and rounding<approx> flags
-        auto exp_neg_a = ct::exp(-a);
-        auto denom = ct::add(1.0f, exp_neg_a, ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
-        auto sigmoid_a = ct::div(1.0f, denom, ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+        auto sigmoid_a = silu_reference_sigmoid(a);
 
         // Compute SiLU(a) = a * sigmoid(a)
-        auto silu_a = ct::mul(a, sigmoid_a, ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
+        auto silu_a = a * sigmoid_a;
 
         // Multiply: result = silu(a) * b
-        auto result_f32 = ct::mul(silu_a, b, ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
+        auto result_f32 = silu_a * b;
 
         // Convert back to output type
         auto result = ct::element_cast<T>(result_f32);
@@ -272,15 +295,13 @@ __tile_global__ void silu_and_mul_kernel_row_wise(
 
         // Compute sigmoid for SiLU: sigmoid(x) = 1 / (1 + exp(-x))
         // Use optimized operations with flush_to_zero and rounding<approx> flags
-        auto exp_neg_a = ct::exp(-a);
-        auto denom = ct::add(1.0f, exp_neg_a, ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
-        auto sigmoid_a = ct::div(1.0f, denom, ct::round_approximate_t{}, ct::round_subnormals_to_zero_t{});
+        auto sigmoid_a = silu_reference_sigmoid(a);
 
         // Compute SiLU(a) = a * sigmoid(a)
-        auto silu_a = ct::mul(a, sigmoid_a, ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
+        auto silu_a = a * sigmoid_a;
 
         // Multiply: result = silu(a) * b
-        auto result_f32 = ct::mul(silu_a, b, ct::round_ties_to_even_t{}, ct::round_subnormals_to_zero_t{});
+        auto result_f32 = silu_a * b;
 
         // Convert back to output type
         auto result = ct::element_cast<T>(result_f32);
