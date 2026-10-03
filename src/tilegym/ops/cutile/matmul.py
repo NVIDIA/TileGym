@@ -9,6 +9,7 @@ import cuda.tile as ct
 import torch
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_disabled
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
 
@@ -402,9 +403,12 @@ def _cutile_autotune_matmul(stream, a, b, c):
     K = a.shape[1]
     cache_key = (M, N, K, a.dtype, str(a.device))
     if cache_key not in _matmul_tune_cache:
+        configs = list(_matmul_autotune_configs(a.dtype))
+        if is_autotune_disabled():
+            configs = configs[:1]
         with ct.compiler_timeout(5):
             result = exhaustive_search(
-                list(_matmul_autotune_configs(a.dtype)),
+                configs,
                 stream,
                 lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
                 _matmul_kernel,
@@ -430,9 +434,12 @@ def _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a,
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     cache_key = (M, N, K, trans_a, trans_b, a.dtype, str(a.device))
     if cache_key not in _static_persistent_matmul_tune_cache:
+        configs = list(_static_persistent_matmul_autotune_configs(a.dtype))
+        if is_autotune_disabled():
+            configs = configs[:1]
         with ct.compiler_timeout(5):
             result = exhaustive_search(
-                list(_static_persistent_matmul_autotune_configs(a.dtype)),
+                configs,
                 stream,
                 lambda cfg: (
                     min(NUM_SMS // cfg.num_ctas, ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N)) * cfg.occupancy,

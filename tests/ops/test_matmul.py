@@ -201,6 +201,9 @@ class Test_Matmul(common.PyTestCase):
                 pytest.skip("Skip large FP64 cuTile matmul on sm121 due to excessive runtime")
             if backend == "tilecpp" and m >= 8192:
                 pytest.skip("Skip large FP64 TileCPP matmul on sm121 due to excessive runtime")
+        if dtype == torch.float64 and torch.cuda.get_device_capability() == (12, 0):
+            if m >= 16384:
+                pytest.skip("Skip large FP64 matmul on B20X (sm120) due to OOM: exceeds 32 GiB VRAM")
         # xfail on sm121 for 32768x32768 matmul due to performance
         if torch.cuda.get_device_capability() == (12, 1) and m == 32768:
             pytest.skip("32768x32768 matmul takes too long on sm121")
@@ -257,7 +260,7 @@ class Test_Matmul(common.PyTestCase):
                 output_processor=output_processor,
             )
         try:
-            res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+            res = common.benchmark_framework(backend, backend_fn)
         except torch.OutOfMemoryError as e:
             pytest.skip(f"OOM during benchmark: {e}")
         record_property("benchmark", res)
@@ -330,7 +333,7 @@ class Test_Matmul(common.PyTestCase):
                 atol=1e-2,
                 rtol=1e-2,
             )
-        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM
@@ -567,7 +570,7 @@ class Test_W8A8BlockFp8Matmul(common.PyTestCase):
             pytest.skip(f"Backend {backend} not supported")
 
         # Run benchmarks
-        res = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+        res = common.benchmark_framework(backend, backend_fn)
 
         # Record results for reporting
         record_property("benchmark", res)

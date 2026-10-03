@@ -121,7 +121,7 @@ class Test_Dropout(common.PyTestCase):
         else:
             pytest.skip(f"Framework {framework} is not available")
 
-        res = common.benchmark_framework(framework, framework_fn, use_cudagraph=True)
+        res = common.benchmark_framework(framework, framework_fn)
         record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM

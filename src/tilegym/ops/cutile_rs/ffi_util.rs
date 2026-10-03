@@ -14,7 +14,10 @@
 // `make_tensor_desc`.
 
 use core::mem::ManuallyDrop;
+use cuda_core::Stream;
 use cutile::prelude::*;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 /// Max tensor rank carried by a [`TensorDesc`]. Bump (here + in the Python cdef)
 /// if an op needs higher-rank tensors.
@@ -106,11 +109,11 @@ pub fn cast_tf32(code: i32) -> i32 {
 /// default" sentinel for the `num_cta_in_cga` / `occupancy` inputs
 /// (`_AUTO_COMPILE_OPTION` in the Python wrappers), so it must not be overloaded.
 pub mod rc {
-    /// Kernel launched and synced successfully.
+    /// Kernel enqueued successfully.
     pub const OK: i32 = 0;
     /// A `TensorDesc.dtype` code has no cutile element type (see `dtype_str`).
     pub const UNSUPPORTED_DTYPE: i32 = -2;
-    /// The kernel launch / stream sync returned an error.
+    /// The kernel launch returned an error.
     pub const LAUNCH_FAILED: i32 = -3;
     /// `Device::new(device_id)` failed.
     pub const DEVICE_INIT_FAILED: i32 = -4;
@@ -230,9 +233,32 @@ macro_rules! compile_options {
 /// # Safety
 /// `d.ptr` must point to a live device allocation of at least `d.nbytes()` bytes,
 /// holding elements of type `E` laid out per `d.shape`/`d.strides`, and must stay
-/// valid for the duration of the kernel launch.
+/// valid until queued work and all captured graph replays finish.
 pub unsafe fn borrow_tensor<E: DType>(d: &TensorDesc) -> ManuallyDrop<Tensor<E>> {
     ManuallyDrop::new(unsafe {
         Tensor::<E>::from_raw_parts(d.ptr, d.nbytes(), 0, d.shape_i32(), d.strides_i32())
     })
+}
+
+/// # Safety
+/// The caller must keep device allocations alive until all queued work and graph
+/// replays finish. Launch arguments are copied by CUDA; cutile's cache retains
+/// the compiled module. Borrowed tensor wrappers never own the device buffers.
+pub unsafe fn launch_on<O: DeviceOp>(op: O, stream: &Arc<Stream>, name: &str) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| unsafe { op.async_on(stream) })) {
+        Ok(Ok(_)) => rc::OK,
+        Ok(Err(error)) => {
+            eprintln!("{name}: launch failed: {error:?}");
+            rc::LAUNCH_FAILED
+        }
+        Err(error) => {
+            let message = error
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| error.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("{name}: launch panicked: {message}");
+            rc::LAUNCH_FAILED
+        }
+    }
 }

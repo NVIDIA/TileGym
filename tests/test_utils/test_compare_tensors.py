@@ -2,6 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
+import math
+
+import pytest
 import torch
 
 from tests import common
@@ -45,3 +48,32 @@ def test_chunked_compare_rejects_nonpositive_chunk_size():
             assert str(error) == f"chunk_size must be positive, got {chunk_size}"
         else:
             raise AssertionError("compare_tensors accepted a nonpositive chunk size")
+
+
+@pytest.mark.parametrize("shape", [(1, 19), (2, 19), (1, 1, 19), (2, 3, 19), (7, 3)])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("chunk_size", [None, 1, 3])
+def test_comparison_splits_wide_rows_with_original_diagnostics(monkeypatch, shape, strided, chunk_size):
+    storage = torch.arange(math.prod(shape) * 2, dtype=torch.float64).reshape(*shape, 2) - 5
+    reference = storage[..., 0] if strided else storage[..., 0].contiguous()
+    test_storage = storage.clone()
+    test = test_storage[..., 0] if strided else test_storage[..., 0].contiguous()
+    test[(0,) * len(shape)] += 0.25
+    test[(-1,) * len(shape)] += 1e-9
+    expected = common.compare_tensors(test, reference, rtol=0, atol=1e-10, msg_prefix=None)
+    allclose = torch.allclose
+    chunk_elements = []
+
+    def bounded_allclose(actual, expected, *args, **kwargs):
+        chunk_elements.append(actual.numel())
+        assert actual.numel() <= 8
+        return allclose(actual, expected, *args, **kwargs)
+
+    monkeypatch.setattr(common, "_COMPARISON_CHUNK_ELEMENTS", 8)
+    monkeypatch.setattr(torch, "allclose", bounded_allclose)
+    actual = common.compare_tensors(test, reference, rtol=0, atol=1e-10, msg_prefix=None, chunk_size=chunk_size)
+    assert not actual[0]
+    assert sum(chunk_elements) == test.numel()
+    assert actual[1][:-2] == expected[1][:-2]
+    assert actual[1][-1] == expected[1][-1]
+    assert actual[1][-2] == f"shape: {test.shape} stride: {test.stride()} dtype: {test.dtype}"

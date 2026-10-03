@@ -233,7 +233,7 @@ class Test_SwiGLU(common.PyTestCase):
                     pytest.skip(f"Cutile backend not available: {e}")
 
             # Run benchmarks
-            result = common.benchmark_framework(backend, backend_fn, use_cudagraph=False)
+            result = common.benchmark_framework(backend, backend_fn)
 
         # Log results
         record_property("benchmark", result)

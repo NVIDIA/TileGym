@@ -8,6 +8,7 @@ import cuda.tile as ct
 import torch
 from cuda.tile.tune import exhaustive_search
 
+from tilegym.autotune import is_autotune_enabled
 from tilegym.backend import register_impl
 from tilegym.kernel_utils import get_kernel_configs
 from tilegym.ops.cutile.utils import cached_replace_hints
@@ -385,7 +386,7 @@ def gemm_alpha_beta(
     transpose_b_int = 1 if trans_b else 0
 
     # Check if autotune is requested
-    use_autotune = kwargs.get("use_autotune", True)
+    use_autotune = kwargs.get("use_autotune", True) and is_autotune_enabled()
 
     if num_sms is not None and num_sms <= 1:
         use_autotune = False

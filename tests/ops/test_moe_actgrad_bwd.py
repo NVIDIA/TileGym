@@ -590,8 +590,6 @@ class Test_MoEActgradBwd(common.PyTestCase):
                 framework,
                 framework_fn,
                 mode="forward",
-                use_cudagraph=True,
-                use_cupti=False,
             )
         except Exception as e:
             if _is_cutile_unsupported_error(e):

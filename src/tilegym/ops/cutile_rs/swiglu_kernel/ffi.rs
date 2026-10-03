@@ -15,10 +15,9 @@ use core::ffi::c_void;
 use cuda_async::device_buffer::DevicePointer;
 use cuda_core::{Device, Stream};
 use cutile::half::{bf16, f16};
-use cutile::prelude::*;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, rc};
+use crate::ffi_util::TensorDesc;
 use swiglu_module::swiglu_forward_kernel;
 
 #[unsafe(no_mangle)]
@@ -77,13 +76,7 @@ pub unsafe extern "C" fn cutile_swiglu(
             .grid((n_rows as u32, 1, 1))
             .compile_options(opts);
 
-            match op.sync_on(&stream) {
-                Ok(_) => rc::OK,
-                Err(e) => {
-                    eprintln!("cutile_swiglu error: {e:?}");
-                    rc::LAUNCH_FAILED
-                }
-            }
+            unsafe { crate::ffi_util::launch_on(op, &stream, "cutile_swiglu") }
         }};
     }
 

@@ -54,7 +54,12 @@ register_impl("mla_decoding", "torch")(reference_mla_decoding)
 register_impl("mla_decoding_split_kv", "torch")(reference_mla_decoding)
 
 
-def create_benchmark_config(head_dim, use_split_kv, dtype):
+# (batch_size, num_heads). The second is a DeepSeek-V3 decode shape: head counts
+# that are a multiple of 64 take a wider head tile, which the first never does.
+BATCH_HEADS = [(1, 16), (4, 128)]
+
+
+def create_benchmark_config(head_dim, use_split_kv, dtype, batch_size, num_heads):
     """Create a benchmark configuration for MLA decoding scenarios"""
     available_backends = get_supported_backends()
     if not available_backends:
@@ -71,11 +76,14 @@ def create_benchmark_config(head_dim, use_split_kv, dtype):
         line_names=list(names),
         styles=list(styles),
         ylabel="GB/s",
-        plot_name=f"mla-decoding-performance-{dtype_name}-head_dim={head_dim}-split_kv={use_split_kv}-GBps",
+        plot_name=(
+            f"mla-decoding-performance-{dtype_name}-head_dim={head_dim}"
+            f"-batch={batch_size}-heads={num_heads}-split_kv={use_split_kv}-GBps"
+        ),
         args={
             "dtype": dtype,
-            "batch_size": 1,
-            "num_heads": 16,
+            "batch_size": batch_size,
+            "num_heads": num_heads,
             "head_dim": head_dim,
             "d_pe": 64,
             "use_split_kv": use_split_kv,
@@ -85,10 +93,11 @@ def create_benchmark_config(head_dim, use_split_kv, dtype):
 
 @triton.testing.perf_report(
     [
-        create_benchmark_config(head_dim, use_split_kv, dtype)
+        create_benchmark_config(head_dim, use_split_kv, dtype, batch_size, num_heads)
         for head_dim in [128, 512]
         for use_split_kv in [True]
         for dtype in [torch.float16]
+        for batch_size, num_heads in BATCH_HEADS
     ]
 )
 def bench_mla_decoding(

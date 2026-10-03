@@ -64,7 +64,7 @@ class Test_MLA(common.PyTestCase):
         if is_causal:
             if q.size(-2) > 1:
                 rows, cols = torch.triu_indices(qk.shape[-2], qk.shape[-1], offset=1, device=qk.device)
-                qk[..., rows, cols] = float("-inf")
+                qk[..., rows, cols] = qk.new_full((), float("-inf"))
 
         # Calculate attention weights
         m = torch.max(qk, dim=-1)[0]
@@ -244,12 +244,7 @@ class Test_MLA(common.PyTestCase):
         else:
             pytest.skip(f"Backend {backend} is not available")
 
-        # pytorch reference uses dynamic tensor creation (torch.triu_indices) which is
-        # incompatible with CUDA graph capture — disabling cudagraph for that backend
-        # to prevent capture_epilogue() being skipped on failure, which would leave the
-        # default CUDA generator in capturing_=True state and corrupt subsequent tests.
-        use_cudagraph = backend != "pytorch"
-        result = common.benchmark_framework(backend, backend_fn, use_cudagraph=use_cudagraph)
+        result = common.benchmark_framework(backend, backend_fn)
         record_property("benchmark", result)
 
         if dtype == torch.bfloat16:
