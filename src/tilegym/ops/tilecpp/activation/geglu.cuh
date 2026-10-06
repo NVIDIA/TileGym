@@ -13,17 +13,6 @@ template<typename T, int BLOCK_SIZE>
 using tile_t = cuda::tiles::tile<T, cuda::tiles::shape<BLOCK_SIZE>>;
 
 template<int BLOCK_SIZE>
-__tile__ auto sigmoid_f32(tile_t<float, BLOCK_SIZE> x) {
-    namespace ct = cuda::tiles;
-    return 1.0f / (1.0f + ct::exp(-x));
-}
-
-template<int BLOCK_SIZE>
-__tile__ auto tanh_approx_f32(tile_t<float, BLOCK_SIZE> x) {
-    return 2.0f * sigmoid_f32<BLOCK_SIZE>(2.0f * x) - 1.0f;
-}
-
-template<int BLOCK_SIZE>
 __tile__ auto erf_f32(tile_t<float, BLOCK_SIZE> x) {
     namespace ct = cuda::tiles;
     using f32xN = tile_t<float, BLOCK_SIZE>;
@@ -36,10 +25,14 @@ __tile__ auto erf_f32(tile_t<float, BLOCK_SIZE> x) {
 
     auto zero = ct::zeros<f32xN>();
     auto neg = x < zero;
-    auto ax = ct::select(neg, -x, x);
+    auto ax = ct::abs(x);
     auto t = 1.0f / (1.0f + p * ax);
     auto poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t;
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+    auto r = 1.0f - poly * ct::exp(-ax * ax, ct::round_approximate_t{});
+#else
     auto r = 1.0f - poly * ct::exp(-ax * ax);
+#endif
     return ct::select(neg, -r, r);
 }
 
@@ -53,7 +46,13 @@ template<int BLOCK_SIZE>
 __tile__ auto normal_pdf_f32(tile_t<float, BLOCK_SIZE> x) {
     namespace ct = cuda::tiles;
     constexpr float inv_sqrt_2pi = 0.3989422804014327f;
-    return inv_sqrt_2pi * ct::exp(-0.5f * x * x);
+    auto x_squared = x * x;
+    auto neg_half_x_squared = -(0.5f * x_squared);
+#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+    return inv_sqrt_2pi * ct::exp(neg_half_x_squared, ct::round_approximate_t{});
+#else
+    return inv_sqrt_2pi * ct::exp(neg_half_x_squared);
+#endif
 }
 
 template<int BLOCK_SIZE>
@@ -66,16 +65,17 @@ template<int BLOCK_SIZE>
 __tile__ auto tanh_gelu_grad_f32(tile_t<float, BLOCK_SIZE> x) {
     // d/dx [0.5 * x * (1 + tanh(u))] = 0.5 * (1 + t) + 0.5 * x * (1 - t^2) * u'
     // with t = tanh(u), u = sqrt(2/pi) * (x + 0.044715 * x^3)
+    namespace ct = cuda::tiles;
     constexpr float sqrt_2_div_pi = 0.7978845608028654f;
     constexpr float coeff_044715 = 0.044715f;
     auto u = sqrt_2_div_pi * (x + coeff_044715 * x * x * x);
-    auto th = tanh_approx_f32<BLOCK_SIZE>(u);
+    auto th = ct::tanh(u);
     auto du = sqrt_2_div_pi * (1.0f + 3.0f * coeff_044715 * x * x);
     return 0.5f * (1.0f + th) + 0.5f * x * (1.0f - th * th) * du;
 }
 
-template<typename T, int BLOCK_SIZE, int APPROXIMATE>
-__tile_global__ void geglu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y, int N, int m_stride, int my_stride, int n_elements) {
+template<typename T, int N, int M_STRIDE, int MY_STRIDE, int BLOCK_SIZE, int APPROXIMATE>
+__tile_global__ void geglu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y, int n_elements) {
     namespace ct = cuda::tiles;
     x = ct::assume_aligned<16>(x);
     y = ct::assume_aligned<16>(y);
@@ -86,10 +86,10 @@ __tile_global__ void geglu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y
     auto gid = ct::full<i32xN>(base) + ct::iota<i32xN>();
     auto mask = gid < ct::full<i32xN>(n_elements);
     auto m_id = gid / ct::full<i32xN>(N);
-    auto n_offs = gid - m_id * ct::full<i32xN>(N);
-    auto left_offsets = m_id * ct::full<i32xN>(m_stride) + n_offs;
+    auto n_offs = gid % ct::full<i32xN>(N);
+    auto left_offsets = m_id * ct::full<i32xN>(M_STRIDE) + n_offs;
     auto right_offsets = left_offsets + ct::full<i32xN>(N);
-    auto out_offsets = m_id * ct::full<i32xN>(my_stride) + n_offs;
+    auto out_offsets = m_id * ct::full<i32xN>(MY_STRIDE) + n_offs;
     auto zero_T = ct::zeros<TxN>();
     auto a_T = ct::load_masked(x + left_offsets, mask, zero_T);
     auto b_T = ct::load_masked(x + right_offsets, mask, zero_T);
@@ -97,13 +97,13 @@ __tile_global__ void geglu_fwd_kernel(const T* __restrict__ x, T* __restrict__ y
     auto b = ct::element_cast<float>(b_T);
     auto gelu_b = b * normal_cdf_f32<BLOCK_SIZE>(b);
     if constexpr (APPROXIMATE == 1) {
-        gelu_b = 0.5f * b * (1.0f + tanh_approx_f32<BLOCK_SIZE>(0.7978845608028654f * (b + 0.044715f * b * b * b)));
+        gelu_b = 0.5f * b * (1.0f + ct::tanh(0.7978845608028654f * (b + 0.044715f * b * b * b)));
     }
     ct::store_masked(y + out_offsets, ct::element_cast<T>(a * gelu_b), mask);
 }
 
-template<typename T, int BLOCK_SIZE, int APPROXIMATE>
-__tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ dy, const T* __restrict__ x, int N, int m_stride, int my_stride, int n_elements) {
+template<typename T, int N, int M_STRIDE, int MY_STRIDE, int BLOCK_SIZE, int APPROXIMATE>
+__tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ dy, const T* __restrict__ x, int n_elements) {
     namespace ct = cuda::tiles;
     dx = ct::assume_aligned<16>(dx);
     dy = ct::assume_aligned<16>(dy);
@@ -116,10 +116,10 @@ __tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ 
     auto gid = ct::full<i32xN>(base) + ct::iota<i32xN>();
     auto mask = gid < ct::full<i32xN>(n_elements);
     auto m_id = gid / ct::full<i32xN>(N);
-    auto n_offs = gid - m_id * ct::full<i32xN>(N);
-    auto left_offsets = m_id * ct::full<i32xN>(m_stride) + n_offs;
+    auto n_offs = gid % ct::full<i32xN>(N);
+    auto left_offsets = m_id * ct::full<i32xN>(M_STRIDE) + n_offs;
     auto right_offsets = left_offsets + ct::full<i32xN>(N);
-    auto out_offsets = m_id * ct::full<i32xN>(my_stride) + n_offs;
+    auto out_offsets = m_id * ct::full<i32xN>(MY_STRIDE) + n_offs;
     auto zero_T = ct::zeros<TxN>();
     auto a_T = ct::load_masked(x + left_offsets, mask, zero_T);
     auto b_T = ct::load_masked(x + right_offsets, mask, zero_T);
@@ -129,7 +129,7 @@ __tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ 
     auto dyf = ct::element_cast<float>(dy_T);
     auto gelu_b = b * normal_cdf_f32<BLOCK_SIZE>(b);
     if constexpr (APPROXIMATE == 1) {
-        gelu_b = 0.5f * b * (1.0f + tanh_approx_f32<BLOCK_SIZE>(0.7978845608028654f * (b + 0.044715f * b * b * b)));
+        gelu_b = 0.5f * b * (1.0f + ct::tanh(0.7978845608028654f * (b + 0.044715f * b * b * b)));
     }
     auto da = dyf * gelu_b;
     // Differentiate the same GELU geglu_fwd_kernel evaluated for this APPROXIMATE
@@ -139,7 +139,7 @@ __tile_global__ void geglu_bwd_kernel(T* __restrict__ dx, const T* __restrict__ 
     } else {
         dgelu_b = gelu_grad_f32<BLOCK_SIZE>(b);
     }
-    auto db = dyf * a * dgelu_b;
+    auto db = a * (dyf * dgelu_b);
     ct::store_masked(dx + left_offsets, ct::element_cast<T>(da), mask);
     ct::store_masked(dx + right_offsets, ct::element_cast<T>(db), mask);
 }

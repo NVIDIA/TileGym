@@ -223,6 +223,7 @@ def _get_bmm_static_persistent_kernel(
             K,
             num_ctas,
             occupancy,
+            torch.cuda.get_device_capability()[0] == 12,
         ],
         signature=("const {T}*, const {T}*, {T}*"),
     )
