@@ -47,8 +47,8 @@ class GegluTileCpp(torch.autograd.Function):
         approximate_mode = 1 if approximate == "tanh" else 0
         kernel, _, _ = _fwd_kernel.get_kernel(
             dtype=input.dtype,
-            template_params=[_BLOCK_SIZE, approximate_mode],
-            signature="const {T}*, {T}*, int, int, int, int",
+            template_params=[N, m_stride, my_stride, _BLOCK_SIZE, approximate_mode],
+            signature="const {T}*, {T}*, int",
         )
         _fwd_kernel.launch(
             grid=(math.ceil(n_elements / _BLOCK_SIZE),),
@@ -56,9 +56,6 @@ class GegluTileCpp(torch.autograd.Function):
             args=[
                 np.uint64(x_flat.data_ptr()),
                 np.uint64(y_flat.data_ptr()),
-                np.int32(N),
-                np.int32(m_stride),
-                np.int32(my_stride),
                 np.int32(n_elements),
             ],
         )
@@ -79,8 +76,8 @@ class GegluTileCpp(torch.autograd.Function):
         dx_flat = torch.empty_like(input.view(-1))
         kernel, _, _ = _bwd_kernel.get_kernel(
             dtype=dy.dtype,
-            template_params=[_BLOCK_SIZE, ctx.approximate_mode],
-            signature="{T}*, const {T}*, const {T}*, int, int, int, int",
+            template_params=[ctx.N, ctx.m_stride, ctx.my_stride, _BLOCK_SIZE, ctx.approximate_mode],
+            signature="{T}*, const {T}*, const {T}*, int",
         )
         _bwd_kernel.launch(
             grid=(math.ceil(ctx.n_elements / _BLOCK_SIZE),),
@@ -89,9 +86,6 @@ class GegluTileCpp(torch.autograd.Function):
                 np.uint64(dx_flat.data_ptr()),
                 np.uint64(dy.view(-1).data_ptr()),
                 np.uint64(input.view(-1).data_ptr()),
-                np.int32(ctx.N),
-                np.int32(ctx.m_stride),
-                np.int32(ctx.my_stride),
                 np.int32(ctx.n_elements),
             ],
         )

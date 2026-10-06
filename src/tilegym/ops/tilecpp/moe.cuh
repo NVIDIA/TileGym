@@ -77,6 +77,9 @@ template<typename OUT_T, typename IN_T, typename WEIGHT_T,
          int STRIDE_CM, int STRIDE_CN,
          int STRIDE_ASM, int STRIDE_ASK, int STRIDE_BSE, int STRIDE_BSK, int STRIDE_BSN,
          int EM>
+#if (__CUDACC_VER_MAJOR__ > 13) || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 4)
+[[cutile::hint(1200, num_worker_warps_per_cta=(K >= 512 ? 8 : 4))]]
+#endif
 __tile_global__ void fused_moe_kernel(
     const IN_T* __restrict__ a_ptr,      // Input tokens (M, K)
     const IN_T* __restrict__ b_ptr,      // Expert weights (E, N, K)

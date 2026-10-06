@@ -135,7 +135,7 @@ __tile_global__ void bmm_kernel(
  *   Q: Batch size
  *   M, N, K: Matrix dimensions
  */
-template<typename T, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int GROUP_SIZE_M, bool TRANSPOSE_A, bool TRANSPOSE_B, int Q, int M, int N, int K, int num_ctas, int occupancy>
+template<typename T, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int GROUP_SIZE_M, bool TRANSPOSE_A, bool TRANSPOSE_B, int Q, int M, int N, int K, int num_ctas, int occupancy, bool PERMUTE_3D = false>
 [[ using cutile :
     hint(0, num_cta_in_cga=num_ctas),
     hint(0, occupancy=occupancy)
@@ -191,8 +191,12 @@ __tile_global__ void bmm_static_persistent_kernel(
                 auto pA = ct::partition_view{ct::tensor_span{a_ptr, a_layout}, ct::shape<1, BLOCK_SIZE_K, BLOCK_SIZE_M>{}};
                 auto a_tile_3d = pA.load_masked(bid_q, k_tile, bid_m);
                 // Reshape and transpose to get (TILE_M, TILE_K)
-                auto a_raw = ct::reshape(a_tile_3d, ct::shape<BLOCK_SIZE_K, BLOCK_SIZE_M>{});
-                a_tile = ct::transpose(a_raw);
+                if constexpr (PERMUTE_3D) {
+                    a_tile = ct::reshape(ct::permute(a_tile_3d, ct::dimension_map<0, 2, 1>{}), ct::shape<BLOCK_SIZE_M, BLOCK_SIZE_K>{});
+                } else {
+                    auto a_raw = ct::reshape(a_tile_3d, ct::shape<BLOCK_SIZE_K, BLOCK_SIZE_M>{});
+                    a_tile = ct::transpose(a_raw);
+                }
             } else {
                 // A is normal: physical layout (Q, M, K)
                 auto a_layout = ct::layout_right_mapping{ct::extents{Q, M, K}};
@@ -209,8 +213,12 @@ __tile_global__ void bmm_static_persistent_kernel(
                 auto pB = ct::partition_view{ct::tensor_span{b_ptr, b_layout}, ct::shape<1, BLOCK_SIZE_N, BLOCK_SIZE_K>{}};
                 auto b_tile_3d = pB.load_masked(bid_q, bid_n, k_tile);
                 // Reshape and transpose to get (TILE_K, TILE_N)
-                auto b_raw = ct::reshape(b_tile_3d, ct::shape<BLOCK_SIZE_N, BLOCK_SIZE_K>{});
-                b_tile = ct::transpose(b_raw);
+                if constexpr (PERMUTE_3D) {
+                    b_tile = ct::reshape(ct::permute(b_tile_3d, ct::dimension_map<0, 2, 1>{}), ct::shape<BLOCK_SIZE_K, BLOCK_SIZE_N>{});
+                } else {
+                    auto b_raw = ct::reshape(b_tile_3d, ct::shape<BLOCK_SIZE_N, BLOCK_SIZE_K>{});
+                    b_tile = ct::transpose(b_raw);
+                }
             } else {
                 // B is normal: physical layout (Q, K, N)
                 auto b_layout = ct::layout_right_mapping{ct::extents{Q, K, N}};

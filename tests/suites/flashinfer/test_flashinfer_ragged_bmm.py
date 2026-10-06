@@ -89,9 +89,9 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
     def prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend="cutile"):
         device = torch.device("cuda")
 
-        # For cuTile, we need segments aligned to BLOCK_M (128)
+        # For cuTile and TileCpp, we need segments aligned to BLOCK_M (128)
         # This ensures segment offsets are multiples of the tile size
-        align_to = 128 if backend == "cutile" else None
+        align_to = 128 if backend in ("cutile", "tilecpp") else None
 
         max_m, segment_offsets, actual_total_m = create_ragged_m_segments(
             num_groups=num_groups,

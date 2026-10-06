@@ -117,6 +117,10 @@ def _persistent_matmul_autotune_configs():
             Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
             Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=4),
             Config(TILE_SIZE_M=256, TILE_SIZE_N=256, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
+            Config(TILE_SIZE_M=64, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=64, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=2),
+            Config(TILE_SIZE_M=128, TILE_SIZE_N=128, TILE_SIZE_K=32, GROUP_SIZE_M=8, num_ctas=1, occupancy=1),
         ]
     elif gpu_capability[0] < 9:
         # sm80 (A100)
@@ -338,14 +342,38 @@ def _launch_persistent_matmul_kernel(
     )
 
 
+_FP64_MATMUL_CONFIGS = {
+    (8, 0): ((64, 64, 64, 1, 2),),
+    (9, 0): ((16, 16, 32, 1, 2), (128, 64, 16, 1, 2)),
+    (10, 0): ((16, 16, 32, 1, 2), (64, 64, 16, 1, 2)),
+    (10, 3): ((16, 16, 32, 1, 2),),
+    (10, 7): ((16, 16, 32, 1, 2), (64, 64, 16, 1, 2), (128, 64, 16, 1, 2)),
+    (12, 0): ((64, 64, 32, 1, 2),),
+    (12, 1): ((64, 64, 32, 1, 2),),
+}
+
+_FP64_PERSISTENT_MATMUL_CONFIGS = {
+    (9, 0): ((64, 128, 16), (32, 16, 32), (128, 64, 16)),
+    (10, 0): ((64, 128, 16), (32, 16, 32)),
+    (10, 3): ((32, 16, 32),),
+    (10, 7): ((32, 16, 32), (64, 128, 16), (128, 64, 16)),
+    (12, 0): ((64, 64, 64),),
+    (12, 1): ((64, 64, 64),),
+}
+
+
 def _fp64_matmul_configs(persistent: bool = False):
-    if torch.cuda.get_device_capability() == (10, 0):
-        tiles = ((64, 128, 16), (32, 16, 32)) if persistent else ((16, 16, 32), (64, 64, 16))
-        return [
-            Config(TILE_SIZE_M=m, TILE_SIZE_N=n, TILE_SIZE_K=k, GROUP_SIZE_M=8, num_ctas=1, occupancy=2)
-            for m, n, k in tiles
-        ]
-    return [Config(TILE_SIZE_M=64, TILE_SIZE_N=64, TILE_SIZE_K=64, GROUP_SIZE_M=8, num_ctas=1, occupancy=1)]
+    cap = torch.cuda.get_device_capability()
+    if persistent and cap in _FP64_PERSISTENT_MATMUL_CONFIGS:
+        tiles = ((*tile, 1, 2) for tile in _FP64_PERSISTENT_MATMUL_CONFIGS[cap])
+    elif not persistent and cap in _FP64_MATMUL_CONFIGS:
+        tiles = _FP64_MATMUL_CONFIGS[cap]
+    else:
+        tiles = ((64, 64, 64, 1, 1),)
+    return [
+        Config(TILE_SIZE_M=m, TILE_SIZE_N=n, TILE_SIZE_K=k, GROUP_SIZE_M=8, num_ctas=ctas, occupancy=occ)
+        for m, n, k, ctas, occ in tiles
+    ]
 
 
 _fp64_matmul_autotuner = TileCppAutotuner(_fp64_matmul_configs())
