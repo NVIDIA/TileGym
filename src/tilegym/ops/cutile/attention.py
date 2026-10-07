@@ -754,6 +754,7 @@ def _cutile_autotune_fmha(
     is_causal,
     EVEN_K,
 ):
+    """Launch forward attention with matching configuration and kernel hints, reusing tuned winners."""
     batch_size, _, q_len, _ = q.shape
 
     if is_autotune_disabled():
@@ -816,9 +817,10 @@ def _cutile_autotune_fmha(
                         is_causal,
                         EVEN_K,
                     ),
+                    lambda cfg: _kernel_hints(cfg),
                 )
             best_cfg = result.best.config
-            tuned_kernel = _fmha_kernel.replace_hints(occupancy=2)
+            tuned_kernel = _fmha_kernel.replace_hints(**_kernel_hints(best_cfg))
             _fmha_fwd_tune_cache[fwd_cache_key] = (best_cfg, tuned_kernel)
         best_cfg, tuned_kernel = _fmha_fwd_tune_cache[fwd_cache_key]
         ct.launch(
