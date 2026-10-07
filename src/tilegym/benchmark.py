@@ -16,6 +16,15 @@ FLUSH_BYTES = 256_000_000
 GRAPH_REPEATS = 8
 
 
+def _available_graph_memory():
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    fraction = torch.cuda.get_per_process_memory_fraction()
+    if fraction < 1:
+        allocator_free = max(0, int(total_bytes * fraction) - torch.cuda.memory_reserved())
+        free_bytes = min(free_bytes, allocator_free)
+    return free_bytes
+
+
 def iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep):
     if not math.isfinite(estimate_ms) or estimate_ms <= 0:
         raise ValueError(f"Invalid GPU duration: {estimate_ms}")
@@ -238,8 +247,7 @@ def benchmark_cuda_graph(
         n_graphs = min(graph_repeats, n_repeat)
         requested_graph_count = n_graphs
         if graph_pool_reserved_bytes:
-            free_bytes, _ = torch.cuda.mem_get_info()
-            n_graphs = min(n_graphs, 1 + free_bytes // graph_pool_reserved_bytes)
+            n_graphs = min(n_graphs, 1 + _available_graph_memory() // graph_pool_reserved_bytes)
         graph_memory_limited = n_graphs < requested_graph_count
         while True:
             per_graph = math.ceil(n_repeat / n_graphs)
