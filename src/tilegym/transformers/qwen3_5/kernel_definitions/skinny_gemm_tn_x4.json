@@ -1,0 +1,121 @@
+{
+  "name": "skinny_gemm_tn_x4",
+  "op_type": "skinny_gemm_tn_x4",
+  "description": "Four-way grouped skinny TN GEMM sharing one activation: Ci[M,Ni] = A[M,K] @ Bi[Ni,K]^T for i in 0..3 (nn.Linear TN weight layout, bias-free). Motivation: hybrid-LLM decode runs groups of parallel skinny projections on the same input every token \u2014 Qwen3.8-27B's Gated DeltaNet block projects hidden states through in_proj_qkv / in_proj_z / in_proj_b / in_proj_a (N = 10240 / 6144 / 48 / 48 at K = 5120) 48 times per step. At M=1..32 each member is GEMV-like and weight-bandwidth-bound. A fused group kernel should issue one launch, load A once, and co-schedule the four B operands so tail tiles fill the GPU. The bar to beat is four independent cuBLAS calls (reference).",
+  "axes": {
+    "M": {
+      "type": "var",
+      "description": "Token/row count. Decode is M=1; MTP/small-batch decode up to 32."
+    },
+    "K": {
+      "type": "var",
+      "description": "Shared reduction (input) features."
+    },
+    "N0": {
+      "type": "var",
+      "description": "Output features of member 0."
+    },
+    "N1": {
+      "type": "var",
+      "description": "Output features of member 1."
+    },
+    "N2": {
+      "type": "var",
+      "description": "Output features of member 2."
+    },
+    "N3": {
+      "type": "var",
+      "description": "Output features of member 3."
+    }
+  },
+  "inputs": {
+    "a": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Shared activations, row-major contiguous."
+    },
+    "b0": {
+      "shape": [
+        "N0",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-0 weight in nn.Linear layout (N0, K); compute a @ b0.T without materializing the transpose."
+    },
+    "b1": {
+      "shape": [
+        "N1",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-1 weight in nn.Linear layout (N1, K)."
+    },
+    "b2": {
+      "shape": [
+        "N2",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-2 weight in nn.Linear layout (N2, K)."
+    },
+    "b3": {
+      "shape": [
+        "N3",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-3 weight in nn.Linear layout (N3, K)."
+    }
+  },
+  "outputs": {
+    "c0": {
+      "shape": [
+        "M",
+        "N0"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-0 projection output."
+    },
+    "c1": {
+      "shape": [
+        "M",
+        "N1"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-1 projection output."
+    },
+    "c2": {
+      "shape": [
+        "M",
+        "N2"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-2 projection output."
+    },
+    "c3": {
+      "shape": [
+        "M",
+        "N3"
+      ],
+      "dtype": "bfloat16",
+      "description": "Member-3 projection output."
+    }
+  },
+  "reference": "# Source: https://github.com/pytorch/pytorch/blob/d38164a545b4a4e4e0cf73ce67173f70574890b6/torch/nn/functional.py#L2302-L2305\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L460-L467\nimport torch\nimport torch.nn.functional as F\n\ndef run(a, b0, b1, b2, b3):\n    return F.linear(a, b0), F.linear(a, b1), F.linear(a, b2), F.linear(a, b3)",
+  "constraints": [
+    "1 <= M <= 64",
+    "K % 8 == 0",
+    "N0 % 8 == 0 and N1 % 8 == 0 and N2 % 8 == 0 and N3 % 8 == 0",
+    "a.is_contiguous()",
+    "b0.is_contiguous() and b1.is_contiguous() and b2.is_contiguous() and b3.is_contiguous()"
+  ],
+  "tags": [
+    "stage:decode",
+    "model:qwen3.8",
+    "status:verified",
+    "xfail-host:aarch64"
+  ]
+}

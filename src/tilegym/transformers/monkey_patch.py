@@ -162,6 +162,8 @@ def apply_tilegym_kernel_to_qwen3(
     swiglu: bool = True,
     attn: bool = True,
     gated_delta_rule: bool = True,
+    decode_gemv: bool = False,
+    group_gemm: bool = False,
     model: PreTrainedModel = None,
     use_cutile: bool = False,
 ) -> None:
@@ -178,6 +180,12 @@ def apply_tilegym_kernel_to_qwen3(
         attn (bool): Whether to apply TileGym's attention for full attention layers. Default is True.
         gated_delta_rule (bool): Whether to apply TileGym's gated delta rule kernels
             for linear attention layers. Default is True.
+        decode_gemv (bool): Whether to route decode-time skinny Linear projections (M == 1)
+            with measured winning shapes to the cuTile skinny_gemm_tn kernel; non-winning
+            shapes keep cuBLAS via a guarded nn.Linear replacement. Default is False.
+        group_gemm (bool): Whether to fuse the parallel decode projection groups — the Gated
+            DeltaNet in-projections (x4 mixed-N group kernel) and the attention k/v projection
+            pair (stacked group kernel) — into one launch each. Default is False.
         model (PreTrainedModel): The model instance to apply TileGym kernels to, if the model has already been
         loaded. Default is None.
         use_cutile (bool): Whether to apply using cutile. Default is False.
@@ -189,6 +197,23 @@ def apply_tilegym_kernel_to_qwen3(
 
     if use_cutile:
         set_backend("cutile")
+
+    if decode_gemv:
+        import torch.nn as nn
+
+        from tilegym.transformers.qwen3_5.modeling_qwen3_5 import Qwen3_5SkinnyLinearTileGym
+
+        nn.Linear = Qwen3_5SkinnyLinearTileGym
+        modeling_qwen3_5.nn.Linear = Qwen3_5SkinnyLinearTileGym
+        logger.info("Replaced nn.Linear with guarded skinny-GEMV decode Linear")
+
+    # Always propagate the flag: repeated calls with group_gemm=False must turn the
+    # grouped path back off (the module-level switch otherwise leaks across calls).
+    from tilegym.transformers.qwen3_5.modeling_qwen3_5 import set_group_gemm_enabled
+
+    set_group_gemm_enabled(group_gemm)
+    if group_gemm:
+        logger.info("Enabled grouped skinny-GEMM projections (x4 GDN in-proj + stacked kv)")
 
     if rope:
         from tilegym.ops import get_apply_rope_func

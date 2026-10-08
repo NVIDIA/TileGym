@@ -202,6 +202,31 @@ def test_legacy_cutile_rs_solution_coordinate_and_pairing(tmp_path):
     assert list(solution_paths_for_definition(definition)) == [solution]
 
 
+def test_legacy_variant_solutions_pair_with_shared_definition(tmp_path):
+    """``<definition>__<variant>.json`` Solutions share the legacy Definition.
+
+    One contract (Definition + Workload) may have several hardware/tuning
+    variants; each variant Solution is enumerated separately and gated by its
+    own ``spec.target_hardware``.
+    """
+    inventory = tmp_path / "src/tilegym/transformers/example"
+    definition = _touch(inventory / "kernel_definitions/op.json")
+    flat = _touch(inventory / "kernel_solutions/op.json")
+    variant = _touch(inventory / "kernel_solutions/op__sm120.json")
+    variant2 = _touch(inventory / "kernel_solutions/op__sm100.json")
+    # Names containing underscores must not confuse the variant split: this
+    # belongs to a DIFFERENT definition (op_x4.json), not to op.
+    other_definition_variant = _touch(inventory / "kernel_solutions/op_x4__sm120.json")
+
+    solutions = list(solution_paths_for_definition(definition))
+    assert flat in solutions
+    assert variant in solutions
+    assert variant2 in solutions
+    assert other_definition_variant not in solutions
+    # Flat pairs first, then variants in sorted order.
+    assert solutions == [flat, variant2, variant]
+
+
 def test_hierarchical_operation_topology_requires_public_local_and_leaf_pairs(tmp_path):
     inventory = tmp_path / "src/tilegym/suites/example"
     public = _touch(inventory / "kernel_definitions/op/op.json")

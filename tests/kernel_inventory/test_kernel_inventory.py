@@ -564,7 +564,14 @@ def test_all_current_kernel_definitions_validate():
 def test_all_current_kernel_solutions_validate():
     for path in iter_kernel_solution_paths(REPO_ROOT):
         solution = load_json(path)
-        assert path.stem == solution["definition"], f"{path}: Solution filename must match Solution.definition"
+        # Sibling variant Solutions (``<definition>__<variant>.json``) at the
+        # legacy (flat) level share the Definition named before the ``__``
+        # separator. In hierarchical scopes ``__`` is an ordinary name
+        # character (leaf filenames carry their own full Definition name).
+        stem = path.stem
+        if inventory_coordinate(path).level == "legacy":
+            stem = stem.partition("__")[0]
+        assert stem == solution["definition"], f"{path}: Solution filename must match Solution.definition"
         assert solution["name"].startswith(f"{solution['definition']}_"), (
             f"{path}: Solution.name must be derived from Solution.definition"
         )

@@ -27,9 +27,18 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
         apply_tilegym_kernel_to_gpt_oss(rope=True, rms_norm=True, swiglu=False, attn=use_attn, use_cutile=use_cutile)
     elif "mistral" in model_name:
         apply_tilegym_kernel_to_mistral(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
-    elif "qwen3.5" in model_name or "qwen3_5" in model_name:
+    elif any(tag in model_name for tag in ("qwen3.5", "qwen3_5", "qwen3.8", "qwen3_8")):
+        # Qwen3.5 / Qwen3.8 share the qwen3_5 hybrid architecture (Gated DeltaNet
+        # linear attention + gated full attention), so both use the qwen3_5 patch.
         apply_tilegym_kernel_to_qwen3(
-            rope=True, rms_norm=True, swiglu=True, attn=use_attn, gated_delta_rule=True, use_cutile=use_cutile
+            rope=True,
+            rms_norm=True,
+            swiglu=True,
+            attn=use_attn,
+            gated_delta_rule=True,
+            decode_gemv=use_cutile,
+            group_gemm=use_cutile,
+            use_cutile=use_cutile,
         )
     elif "qwen" in model_name:
         apply_tilegym_kernel_to_qwen2(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)

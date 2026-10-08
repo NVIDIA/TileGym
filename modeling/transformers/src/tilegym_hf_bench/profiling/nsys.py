@@ -33,6 +33,10 @@ class NsysKernelCoverageReporter:
 
         env = os.environ.copy()
         env["TMPDIR"] = self.log_dir
+        # Tell the inner run to skip the kineto/torch.profiler pass: its CUPTI
+        # client conflicts with the nsys-injected CUPTI (hang/crash). The coverage
+        # measurement only needs the cudaProfilerApi capture window.
+        env["TILEGYM_HF_BENCH_UNDER_NSIGHT"] = "1"
         proc = subprocess.Popen(nsys_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         for line in proc.stdout:
             print(line, end="")
