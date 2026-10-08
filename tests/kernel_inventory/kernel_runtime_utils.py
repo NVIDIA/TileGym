@@ -106,9 +106,14 @@ def _runtime_case_id(record: WorkloadRecord, definition_path: str | Path, soluti
     backend = solution_coordinate.backend
     if backend is None:
         backend = load_json(solution_path)["spec"]["language"]
+    # Sibling variant Solutions (``<definition>__<variant>.json``) share one
+    # Definition/Workload pair, so disambiguate their case ids by file stem.
+    variant = ""
+    if solution_coordinate.local_name != definition_coordinate.local_name:
+        variant = f"::variant={solution_coordinate.local_name}"
     return (
         f"{definition_coordinate.canonical_id}::line={record.line_number}::"
-        f"uuid={record.workload.uuid}::backend={backend}"
+        f"uuid={record.workload.uuid}::backend={backend}{variant}"
     )
 
 
@@ -213,6 +218,11 @@ def _run_definition_solution_workload_runtime(
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for kernel inventory runtime checks")
     _skip_if_solution_does_not_target_current_compute_capability(solution, torch)
+    # The host-arch xfail marks rows that fail to COMPILE/RUN on this host; it
+    # must only fire for cases that would otherwise execute here. Sibling
+    # variant Solutions for other architectures (spec.target_hardware) skip
+    # above and must not be xfail-marked by a shared Definition's tag.
+    _xfail_if_host_arch_tagged(definition)
 
     with installed_reference_modules(definition, definition_path):
         reference_fn = _load_reference(definition, definition_path)
@@ -337,7 +347,19 @@ def _run_runtime_branch(
     # references that consume torch RNG (for example random centroid
     # initialization) draw identical values on each side.
     torch.manual_seed(2026)
-    reference_result = _call_entry_strictly(reference_fn, reference_inputs, "Definition.reference")
+    # The reference must be hardware-independent. PyTorch defaults
+    # `allow_bf16_reduced_precision_reduction=True`, which lets cuBLAS use
+    # reduced-precision split-K reductions on some GPUs (observed on small-SM
+    # sm_120 parts): the bf16 F.linear reference itself then deviates from fp64
+    # ground truth beyond row tolerances, and fp32-accumulating Solutions fail
+    # spuriously against the noisy reference. Pin the reference to
+    # full-precision accumulation; the Solution side is left untouched.
+    _ref_reduced = torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    try:
+        reference_result = _call_entry_strictly(reference_fn, reference_inputs, "Definition.reference")
+    finally:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = _ref_reduced
     if solution.get("launch") is None:
         torch.manual_seed(2026)
         solution_result = _call_entry_strictly(solution_fn, solution_inputs, "Solution entry point")
@@ -736,6 +758,29 @@ def _skip_if_solution_does_not_target_current_compute_capability(solution: dict[
             f"Solution targets {target_hardware}; current compute capability is {current_hardware} "
             f"({torch.cuda.get_device_name(0)})"
         )
+
+
+def _xfail_if_host_arch_tagged(definition: dict[str, Any]) -> None:
+    """Xfail rows whose Definition carries an ``xfail-host:<machine>`` tag.
+
+    For known host-toolchain failures that depend on the machine running the
+    compile (e.g. a tileiras build that fails on aarch64 while the identical
+    bytecode compiles on x86_64); GPU-level exclusions belong in
+    ``spec.target_hardware`` instead. The tracking ticket reference lives in the
+    commit/MR that adds the tag, not in the tag itself.
+    """
+    import platform
+
+    machine = platform.machine()
+    for tag in definition.get("tags", []):
+        if not isinstance(tag, str) or not tag.startswith("xfail-host:"):
+            continue
+        _, tagged_machine, *tracker = tag.split(":")
+        if machine == tagged_machine:
+            pytest.xfail(
+                f"{definition.get('name')}: known host-toolchain failure on {tagged_machine} "
+                f"(tracked by {' '.join(tracker) or 'the referencing change'})"
+            )
 
 
 def _skip_if_solution_does_not_target_current_triton_backend(solution: dict[str, Any]) -> None:

@@ -149,6 +149,11 @@ def solution_paths_for_definition(definition_path: str | Path) -> Iterator[Path]
         transformer_solution = solution_root / definition.name
         if transformer_solution.is_file():
             yield transformer_solution
+        # Hardware/tuning variants of the same contract live as sibling files
+        # ``<definition>__<variant>.json`` (e.g. ``op__sm120.json``): one shared
+        # Definition and Workload, one Solution per variant, with per-Solution
+        # ``spec.target_hardware`` selecting where each runs.
+        yield from sorted(solution_root.glob(f"{definition.stem}__*.json"))
         for backend in ("triton", "cutile", "cutile_rs"):
             suite_solution = solution_root / backend / definition.name
             if suite_solution.is_file():

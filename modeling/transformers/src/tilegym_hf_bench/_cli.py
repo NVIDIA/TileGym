@@ -119,7 +119,7 @@ def main(argv=None):
 
     print(f"Loading model {args.model_id}...")
     tokenizer_kwargs = {}
-    if "qwen3.5" in args.model_id.lower() or "qwen3_5" in args.model_id.lower():
+    if any(tag in args.model_id.lower() for tag in ("qwen3.5", "qwen3_5", "qwen3.8", "qwen3_8")):
         tokenizer_kwargs["use_fast"] = True
     tokenizer = load_tokenizer_with_cache(args.model_id, **tokenizer_kwargs)
 
