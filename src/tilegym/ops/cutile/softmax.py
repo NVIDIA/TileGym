@@ -372,8 +372,8 @@ class _Softmax(torch.autograd.Function):
         TILE_SIZE = next_power_of_2(n_cols)
         MAX_TILE_SIZE = 8192
 
-        # Create output tensor
-        y = torch.empty_like(x)
+        # Create output tensor; kernels write in place, so it must be contiguous even if x is not
+        y = torch.empty_like(x, memory_format=torch.contiguous_format)
 
         if use_multi_wave:
             _launch_softmax_kernel_multi_wave_full_row_reg_cached_ldg(x, y, TILE_SIZE=TILE_SIZE)
@@ -413,9 +413,11 @@ def softmax(
     """
     use_chunked = kwargs.get("use_chunked", False)
     use_multi_wave = kwargs.get("use_multi_wave", False)
-    return _Softmax.apply(
-        x,
-        use_tma,
-        use_chunked,
-        use_multi_wave,
-    )
+    # Launch on x's device: the launchers use the current device's stream.
+    with torch.cuda.device(x.device):
+        return _Softmax.apply(
+            x,
+            use_tma,
+            use_chunked,
+            use_multi_wave,
+        )
