@@ -141,6 +141,13 @@ def _launch_silu_and_mul_kernel_row_wise(
     N = input_tensor.shape[1]  # 2 * hidden_size
     INPUT_STRIDE = input_tensor.stride(0)
     OUTPUT_STRIDE = output_tensor.stride(0)
+    worker_warps, num_ctas = _silu_worker_hints(tile_size, input_tensor)
+    if torch.cuda.get_device_capability(input_tensor.device) == (10, 7):
+        tile_bytes = tile_size * dtype.itemsize
+        if tile_bytes <= 8192:
+            worker_warps, num_ctas = 4, 1
+        elif tile_bytes <= 16384:
+            worker_warps, num_ctas = 4, 2
 
     kernel, _, _ = _silu_and_mul_kernel_row_wise.get_kernel(
         dtype=dtype,
@@ -151,7 +158,8 @@ def _launch_silu_and_mul_kernel_row_wise(
             INPUT_STRIDE,
             OUTPUT_STRIDE,
             all(t.data_ptr() % 16 == 0 for t in (input_tensor, output_tensor)),
-            *_silu_worker_hints(tile_size, input_tensor),
+            worker_warps,
+            num_ctas,
         ],
         signature="{T}*, {T}*",
     )
