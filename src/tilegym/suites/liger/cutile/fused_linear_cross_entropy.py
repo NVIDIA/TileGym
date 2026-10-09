@@ -21,7 +21,7 @@ Chunked + backward-in-forward (BT * V * sizeof > 4 GB):
     1. logits_chunk = input_chunk @ weight.T            (efficient GEMM)
     2. CE kernel writes d_logit_chunk in-place.
     3. grad_input[start:end] = d_logit_chunk @ weight   (accumulated, large K)
-    4. grad_weight_f32      += d_logit_chunk.float().T @ input_chunk.float()
+    4. grad_weight_f32      += d_logit_chunk.T @ input_chunk   (bf16 operands, fp32 accumulate, in the GEMM)
     5. discard logits_chunk — peak logit memory is O(chunk_size × V), not O(BT × V).
   Save grad_input (BT×H) + grad_weight (V×H) instead of d_logits.
   Backward: just element-wise scale by grad_output — nearly free.
@@ -56,6 +56,23 @@ def _chunk_size_for(V: int, element_size: int) -> int:
         return 1
     # floor to power of 2
     return 1 << (max_rows.bit_length() - 1)
+
+
+def _addmm_f32_(acc, a, b):
+    """acc += a @ b on an fp32 accumulator, accumulating inside the GEMM (beta=1).
+
+    bf16/fp16 operands stay on tensor cores with fp32 accumulate and output, the same
+    choice the single-pass backward makes below. Upcasting both operands instead runs
+    an fp32 SIMT GEMM and materializes fp32 copies of the chunk. Falls back to the
+    upcast product for mixed dtypes or torch builds without ``out_dtype``.
+    """
+    if a.dtype == b.dtype and a.dtype in (torch.bfloat16, torch.float16):
+        try:
+            torch.addmm(acc, a, b, out_dtype=torch.float32, out=acc)
+            return acc
+        except (TypeError, RuntimeError):
+            pass
+    return acc.add_(a.float() @ b.float())
 
 
 def _launch_ce(
@@ -307,7 +324,7 @@ def _fused_linear_ce_forward_ct(
             if grad_input_saved is not None:
                 grad_input_saved[start_idx:end_idx] = grad_logits_chunk.to(_input.dtype) @ weight
             if grad_weight_f32 is not None:
-                grad_weight_f32 += grad_logits_chunk.float().t() @ _input_chunk.float()
+                _addmm_f32_(grad_weight_f32, grad_logits_chunk.t(), _input_chunk)
             if grad_bias_saved is not None:
                 grad_bias_saved += grad_logits_chunk.sum(dim=0).to(grad_bias_saved.dtype)
 
