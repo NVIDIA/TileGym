@@ -175,6 +175,40 @@ class Test_Liger_CrossEntropy(common.PyTestCase):
         "BT, V, dtype",
         [
             (8, 512, torch.float32),
+            (4, 128, torch.float16),
+            (4, 128, torch.bfloat16),
+            (63, 41, torch.float32),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_reduction_none_backward(self, BT, V, dtype, backend, monkeypatch):
+        """Test reduction='none' backward scales each row by its own (non-uniform) upstream grad."""
+        self.setUp()
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+
+        device = torch.device("cuda")
+        x_data = torch.randn(BT, V, dtype=dtype, device=device)
+        target = torch.randint(0, V, (BT,), device=device)
+        target[: BT // 4] = -100
+        row_weight = torch.rand(BT, dtype=torch.float32, device=device) * 2.0 + 0.1
+
+        x_test = x_data.clone().requires_grad_(True)
+        loss_test = cross_entropy(x_test, target, ignore_index=-100, reduction="none")
+        (loss_test.float() * row_weight).sum().backward()
+
+        x_ref = x_data.clone().float().requires_grad_(True)
+        loss_ref = F.cross_entropy(x_ref, target, ignore_index=-100, reduction="none")
+        (loss_ref * row_weight).sum().backward()
+
+        torch.testing.assert_close(x_test.grad.float(), x_ref.grad, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize(
+        "BT, V, dtype",
+        [
+            (8, 512, torch.float32),
             (4, 128, torch.bfloat16),
         ],
     )
