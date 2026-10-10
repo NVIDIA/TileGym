@@ -16,6 +16,16 @@ from tilegym_hf_bench.kernel_filters import KernelFilter
 
 def run_torch_profiler(forward_wrapper, args, case_id, avg_time, summary_line):
     print("Profile the model...")
+    if os.environ.get("TILEGYM_HF_BENCH_UNDER_NSIGHT") == "1":
+        # Under `nsys profile --capture-range=cudaProfilerApi`: skip the kineto
+        # (torch.profiler) pass. Its CUPTI client conflicts with the CUPTI that
+        # nsys injects into the same process; only emit the cudaProfilerStart/Stop
+        # window that nsys captures.
+        with torch.no_grad():
+            torch.cuda.cudart().cudaProfilerStart()
+            _ = forward_wrapper.forward()
+            torch.cuda.cudart().cudaProfilerStop()
+        return
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         with_stack=False,

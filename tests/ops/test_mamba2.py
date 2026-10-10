@@ -759,6 +759,35 @@ class Test_Mamba2_ChunkBackward(common.PyTestCase):
                 torch.testing.assert_close(actual.float(), expected, atol=atol, rtol=4e-2)
 
     @pytest.mark.timeout(1200)
+    @pytest.mark.parametrize("chunk_size", [64, 128])
+    @pytest.mark.parametrize("backend", ["cutile"])
+    def test_op_grouped_state_gradients(self, chunk_size, arch, backend):
+        """Check scan-derived gradients for grouped S128 and multi-chunk inputs."""
+        self.setUp()
+        try:
+            tilegym.set_backend(backend)
+        except Exception as exc:
+            pytest.skip(f"Backend is not supported: {exc}")
+        torch.manual_seed(42)
+        spec = Mamba2ProblemSpec(4, 256, 1, 8, 128, 64, chunk_size, torch.bfloat16, torch.float32)
+        with torch.no_grad():
+            ref = spec.get_sample_inputs()
+            _, da, _, _, _, ddt, _ = tilegym.ops.mamba2_chunk_backward(
+                ref["x"],
+                ref["a"],
+                ref["b"],
+                ref["c"],
+                ref["d"],
+                ref["dt"],
+                ref["init_state"],
+                ref["dout"],
+                ref["dfinal_state"],
+                chunk_size=chunk_size,
+            )
+            torch.testing.assert_close(da.float(), ref["da"].float(), atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(ddt.float(), ref["ddt"].float(), atol=8e-2, rtol=8e-2)
+
+    @pytest.mark.timeout(1200)
     @pytest.mark.parametrize("T", [2**i for i in range(10, 19)])
     @pytest.mark.parametrize("S", [64, 128, 256, 512])
     @pytest.mark.parametrize("framework", ["cutile"])

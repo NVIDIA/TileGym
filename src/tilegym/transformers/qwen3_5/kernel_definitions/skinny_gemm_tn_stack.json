@@ -1,0 +1,68 @@
+{
+  "name": "skinny_gemm_tn_stack",
+  "op_type": "skinny_gemm_tn_stack",
+  "description": "Stacked G-way skinny TN GEMM group with uniform member width sharing one activation: C[g,M,N] = A[M,K] @ B[g,N,K]^T for g in 0..G-1 (nn.Linear TN weight layout, bias-free, all members same N). Motivation: LLM decode runs pairs of identical-shape skinny projections on the same input every token \u2014 Qwen3.8-27B's SwiGLU gate_proj/up_proj (5120->17408, 64 layers) and attention k_proj/v_proj (5120->1024, 16 layers). At M=1..32 each member is GEMV-like and weight-bandwidth-bound. A fused kernel should issue one launch for the whole group, load A once, and co-schedule both members' tiles so tail waves fill the GPU; it also halves kernel-launch count, which matters because batch-1 decode is partially CPU-launch-bound. The bar to beat is G separate cuBLAS calls (the reference loop).",
+  "axes": {
+    "G": {
+      "type": "var",
+      "description": "Group size (number of stacked members). Model groups are G=2."
+    },
+    "M": {
+      "type": "var",
+      "description": "Token/row count. Decode is M=1; MTP/small-batch decode up to 32."
+    },
+    "N": {
+      "type": "var",
+      "description": "Per-member output features (uniform across the group)."
+    },
+    "K": {
+      "type": "var",
+      "description": "Shared reduction (input) features."
+    }
+  },
+  "inputs": {
+    "a": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Shared activations, row-major contiguous."
+    },
+    "b": {
+      "shape": [
+        "G",
+        "N",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Stacked member weights in nn.Linear layout (G, N, K); compute a @ b[g].T per member without materializing transposes."
+    }
+  },
+  "outputs": {
+    "c": {
+      "shape": [
+        "G",
+        "M",
+        "N"
+      ],
+      "dtype": "bfloat16",
+      "description": "Stacked member outputs; c[g] = a @ b[g].T."
+    }
+  },
+  "reference": "# Source: https://github.com/pytorch/pytorch/blob/d38164a545b4a4e4e0cf73ce67173f70574890b6/torch/nn/functional.py#L2302-L2305\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L727-L734\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L661-L665\nimport torch\nimport torch.nn.functional as F\n\ndef run(a, b):\n    return torch.stack([F.linear(a, b[g]) for g in range(b.shape[0])])",
+  "constraints": [
+    "1 <= G <= 8",
+    "1 <= M <= 64",
+    "K % 8 == 0",
+    "N % 8 == 0",
+    "a.is_contiguous()",
+    "b.is_contiguous()"
+  ],
+  "tags": [
+    "stage:decode",
+    "model:qwen3.8",
+    "status:verified",
+    "xfail-host:aarch64"
+  ]
+}

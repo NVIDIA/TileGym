@@ -105,6 +105,90 @@ def test_runtime_derives_target_label_from_cuda_compute_capability():
     assert _current_compute_capability_label(_FakeTorch) == "SM103"
 
 
+def test_runtime_case_id_disambiguates_shared_definition_variant_solutions(tmp_path):
+    """Sibling variant Solutions share one Definition/Workload; case ids must differ."""
+    from tests.kernel_inventory.kernel_runtime_utils import _runtime_case_id
+
+    record = _workload_record(tmp_path)
+    inventory = tmp_path / "src/tilegym/transformers/example"
+    definition_path = inventory / "kernel_definitions/op.json"
+    flat_path = inventory / "kernel_solutions/op.json"
+    variant_path = inventory / "kernel_solutions/op__sm120.json"
+    for path in (definition_path, flat_path, variant_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    definition_path.write_text(json.dumps({"name": "op"}), encoding="utf-8")
+    for path in (flat_path, variant_path):
+        path.write_text(json.dumps({"spec": {"language": "cuda-tile"}}), encoding="utf-8")
+
+    flat_id = _runtime_case_id(record, definition_path, flat_path)
+    variant_id = _runtime_case_id(record, definition_path, variant_path)
+
+    assert flat_id != variant_id
+    assert "::variant=" not in flat_id
+    assert "::variant=op__sm120" in variant_id
+
+
+def test_host_arch_xfail_yields_to_target_hardware_skip(tmp_path, monkeypatch):
+    """A shared Definition's xfail-host tag must not mark hardware-skipped variants.
+
+    With several variant Solutions sharing one Definition, the host-arch xfail
+    (known host-toolchain compile failures) only applies to cases that would
+    otherwise execute on this host; a variant excluded by spec.target_hardware
+    must skip, not xfail.
+    """
+    workload_record = _workload_record(tmp_path, inputs={"value": {"type": "scalar", "value": 4}})
+    definition_path = tmp_path / "definition.json"
+    solution_path = tmp_path / "solution.json"
+    definition_path.write_text(
+        json.dumps(
+            {
+                "name": "leaf",
+                "reference": "def run(value):\n    return value\n",
+                "tags": ["xfail-host:aarch64"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    solution_path.write_text(
+        json.dumps(
+            {
+                "spec": {
+                    "language": "triton",
+                    "entry_point": "solution.py::entry",
+                    "target_hardware": ["SM120"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tests.kernel_inventory.kernel_runtime_utils.validate_definition", lambda *_: None)
+    monkeypatch.setattr("tests.kernel_inventory.kernel_runtime_utils.validate_solution", lambda *_, **__: None)
+    monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils.validate_solution_entry_point",
+        lambda *_, **__: None,
+    )
+    monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils.validate_workload_against_definition",
+        lambda *_, **__: None,
+    )
+    monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils._assert_matching_entry_signatures_static",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils._require_solution_runtime_dependencies",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(pytest, "importorskip", lambda name: _AvailableFakeTorch)
+    # Host matches the xfail tag, but the fake device (SM103) is outside the
+    # variant's target_hardware: the hardware skip must fire, not the xfail.
+    monkeypatch.setattr("platform.machine", lambda: "aarch64")
+
+    with pytest.raises(pytest.skip.Exception, match="current compute capability is SM103") as excinfo:
+        _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
+    assert type(excinfo.value) is pytest.skip.Exception  # not the XFailed subclass
+
+
 def test_runtime_skips_solutions_that_do_not_target_current_compute_capability():
     solution = {
         "spec": {
@@ -573,10 +657,20 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
     solution_path.write_text(json.dumps(solution), encoding="utf-8")
 
     order.clear()
+    # The execute path installs synthetic ``tilegym*`` parent packages pointing at
+    # tmp_path (via the monkeypatched REPO_ROOT). Snapshot and restore the full
+    # tilegym* module state so later runtime imports in this process are not
+    # pinned to the deleted tmp tree.
+    saved_tilegym_modules = {
+        name: module for name, module in sys.modules.items() if name == "tilegym" or name.startswith("tilegym.")
+    }
     try:
         _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
     finally:
-        sys.modules.pop(module_name, None)
+        for name in tuple(sys.modules):
+            if name == "tilegym" or name.startswith("tilegym."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved_tilegym_modules)
     assert order == [
         "definition",
         "solution",

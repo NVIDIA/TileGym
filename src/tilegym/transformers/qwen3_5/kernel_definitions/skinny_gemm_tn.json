@@ -1,0 +1,61 @@
+{
+  "name": "skinny_gemm_tn",
+  "op_type": "skinny_gemm_tn",
+  "description": "Bias-free linear projection at decode-time skinny M: C[M,N] = A[M,K] @ B[N,K]^T (nn.Linear TN weight layout). This is the per-token projection workhorse of hybrid LLM decode (Qwen3.8-27B: every Gated DeltaNet in/out projection, every attention Q/K/V/O projection, every SwiGLU gate/up/down projection, and the LM head). At M=1..32 it is GEMV-like and purely weight-bandwidth-bound; the incumbent cuBLAS answer is a narrow-tile split-K kernel plus a separate reduce. The optimization target is to beat cuBLAS on Blackwell (sm100/sm103/sm120) with a cuTile kernel, e.g. via split-K over K with fp32 accumulation followed by a deterministic reduction, L2-aware N-swizzling, and wide TMA vectorized B loads.",
+  "axes": {
+    "M": {
+      "type": "var",
+      "description": "Token/row count. Decode is M=1; MTP/speculative or small-chunk prefill uses small M (<= 32)."
+    },
+    "N": {
+      "type": "var",
+      "description": "Output features (nn.Linear out_features)."
+    },
+    "K": {
+      "type": "var",
+      "description": "Reduction features (nn.Linear in_features)."
+    }
+  },
+  "inputs": {
+    "a": {
+      "shape": [
+        "M",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Activations, row-major contiguous."
+    },
+    "b": {
+      "shape": [
+        "N",
+        "K"
+      ],
+      "dtype": "bfloat16",
+      "description": "Projection weight in nn.Linear layout (out_features=N, in_features=K), row-major contiguous; the op computes a @ b.T without materializing the transpose."
+    }
+  },
+  "outputs": {
+    "c": {
+      "shape": [
+        "M",
+        "N"
+      ],
+      "dtype": "bfloat16",
+      "description": "Projection output."
+    }
+  },
+  "reference": "# Source: https://github.com/pytorch/pytorch/blob/d38164a545b4a4e4e0cf73ce67173f70574890b6/torch/nn/functional.py#L2302-L2305\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L432-L435\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L658-L670\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L727-L729\nimport torch\nimport torch.nn.functional as F\n\ndef run(a, b):\n    return F.linear(a, b)",
+  "constraints": [
+    "1 <= M <= 64",
+    "a.is_contiguous()",
+    "b.is_contiguous()",
+    "K % 8 == 0",
+    "N % 8 == 0"
+  ],
+  "tags": [
+    "stage:decode",
+    "model:qwen3.8",
+    "status:verified",
+    "xfail-host:aarch64"
+  ]
+}
