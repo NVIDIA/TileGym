@@ -182,6 +182,10 @@ class _attention_decode(torch.autograd.Function):
         else:
             NUM_KV_SPLITS = cdiv(seq_len, kv_len_per_split)
             BLOCK_SIZE = kv_len_per_split
+            # The kernel walks whole BLOCK_N blocks starting at start_idx / BLOCK_N, so
+            # a block must not be larger than a split, or neighbouring splits would
+            # process (and double-count) the same KV rows.
+            BLOCK_N = min(BLOCK_N, BLOCK_SIZE)
 
         assert BLOCK_SIZE == next_power_of_2(BLOCK_SIZE)
 

@@ -108,17 +108,21 @@ __tile_global__ void attention_decode_kernel_optimized(
         // Compute qk = K @ Q -> [BLOCK_N, QUERY_GROUP_BLOCK_SIZE]
         // Use MMA with float32 accumulation for best tensor core utilization
         auto qk = ct::mma(k, q_native, ct::zeros<f32_NxQG>());
+        auto qk_scaled = qk * qk_scale;
 
-        // Apply boundary mask ONLY when necessary
+        // Apply boundary mask ONLY when necessary.
+        // Padded rows get a -inf logit (after scaling, so for any softmax_scale) and
+        // thus zero weight, even when every real score is very negative. Every block
+        // visited here holds a real row (num_blocks stops at end_idx), so m_ij is
+        // always finite.
         if (curr_n + BLOCK_N > S_KV) {
             auto n_indices = ct::full<i32_N>(curr_n) + offs_n;
             auto n_mask = n_indices < S_KV;
             auto n_mask_2d = ct::reshape(n_mask, ct::shape<BLOCK_N, 1>{});
-            qk = ct::select(n_mask_2d, qk, ct::full<f32_NxQG>(-1.0e6f));
+            qk_scaled = ct::select(n_mask_2d, qk_scaled, ct::full<f32_NxQG>(-INFINITY));
         }
 
         // Softmax computation
-        auto qk_scaled = qk * qk_scale;
         auto qk_max_reduced = ct::reduce_max(qk_scaled, ct::integral_constant<0>{});
         auto m_ij = ct::max(m_i, ct::reshape(qk_max_reduced, ct::shape<QUERY_GROUP_BLOCK_SIZE>{}));
 

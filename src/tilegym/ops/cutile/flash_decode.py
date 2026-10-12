@@ -111,14 +111,18 @@ def attention_decode_kernel_grouped_impl(
             # Result: (TILE_N, QUERY_GROUP_TILE_SIZE)
             qk = ct.full((TILE_N, QUERY_GROUP_TILE_SIZE), 0.0, dtype=ct.float32)
             qk = ct.mma(k, q, qk)
+            qk_scaled = qk * qk_scale
 
-            # Process boundary case (non-causal) - apply mask to result only
+            # Process boundary case (non-causal) - apply mask to result only.
+            # Padded rows get a -inf logit (after scaling, so for any softmax_scale) and
+            # thus zero weight, even when every real score is very negative. The first
+            # tile of a non-empty split always holds a real row, so the running max is
+            # finite from then on.
             if curr_n + TILE_N > S_kv:
                 mask = curr_n + offs_n[:, None] < S_kv
-                qk = ct.where(mask, qk, -1.0e6)
+                qk_scaled = ct.where(mask, qk_scaled, -math.inf)
 
             # Compute softmax statistics
-            qk_scaled = qk * qk_scale
             m_ij = ct.maximum(m_i, ct.max(qk_scaled, 0))
             qk = qk_scaled - m_ij[None, :]
             p = ct.exp2(qk)
@@ -290,6 +294,10 @@ class _AttentionDecodeFunction(torch.autograd.Function):
         else:
             NUM_KV_SPLITS = (seq_len + kv_len_per_split - 1) // kv_len_per_split
             TILE_SIZE = kv_len_per_split
+            # The kernel walks whole TILE_N tiles starting at start_idx // TILE_N, so a
+            # tile must not be larger than a split, or neighbouring splits would
+            # process (and double-count) the same KV rows.
+            TILE_N = min(TILE_N, TILE_SIZE)
 
         assert TILE_SIZE == next_power_of_2(TILE_SIZE)
 
