@@ -11,7 +11,7 @@ from tilegym.experimental import experimental_kernel
 
 from .utils import next_power_of_2
 
-_bwd_cfg: dict = {}  # (M, N) → (tile_m, tile_n, grid, N)
+_bwd_cfg: dict = {}  # (M, N) → (tile_m, tile_n, grid, occupancy)
 
 
 @ct.kernel
@@ -187,13 +187,13 @@ def _rms_norm_kernel_static_persistent(
 
 
 @experimental_kernel
-@ct.kernel(occupancy=1)
-def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
+@ct.kernel
+def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
     """
     Persistent RMSNorm backward — grid-stride loop with fused dw accumulation.
 
-    Each block accumulates its dw contribution into a (grid, TILE_N) partial
-    sum buffer, avoiding the old M×N temp_buffer allocation.
+    Each block keeps its dw contribution in registers and adds it once, at the end,
+    into the zero-filled fp32 dw with relaxed atomics (no partial buffer, no second kernel).
 
     Only supports offset=0 (Gemma3 backward is not supported).
     """
@@ -226,30 +226,34 @@ def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ct.Constant[int
         ct.store(dx, index=(i, 0), tile=ct.astype((wdy - xhat * c) * r, dx.dtype), allow_tma=False, latency=3)
         dw_acc = dw_acc + ct.sum(dyt * xhat, axis=0, keepdims=True)
 
-    ct.store(dw_partial, index=(bid, 0), tile=dw_acc, allow_tma=False)
+    # dw has exactly TILE_N lanes; the host slices the first N.
+    ct.atomic_add(
+        dw,
+        ct.arange(TILE_N, dtype=ct.int32),
+        ct.reshape(dw_acc, (TILE_N,)),
+        check_bounds=False,
+        memory_order=ct.MemoryOrder.RELAXED,
+    )
+
+
+# replace_hints returns a new kernel object, so the experimental marker is re-applied.
+_rms_bwd_kernel_occ2 = experimental_kernel(_rms_bwd_kernel.replace_hints(occupancy=2))
 
 
 def _bwd_tiles(M, N):
-    """Heuristic tile configuration for backward kernel."""
+    """Tile configuration for the backward kernel: 16 KB row tiles, two blocks per SM for 2048..4096-wide rows."""
     T = next_power_of_2(N)
-    if T > 4096:
-        tm = 1
-    elif T <= 2048 or (M >= 8192 and T <= 4096):
-        tm = 4
-    else:
-        tm = 1
+    tm = max(1, 8192 // T)
+    occ = 2 if 2048 <= T <= 4096 else 1
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    tiles = (M + tm - 1) // tm
-    g = min(NUM_SMS, tiles)
-    if tiles <= 64:
-        g = min(g, 32)
-    return (tm, T, g, N)
+    g = min(NUM_SMS * occ, (M + tm - 1) // tm)
+    return (tm, T, g, occ)
 
 
 def rms_norm_backward_workspace_bytes(M: int, N: int) -> int:
-    """Return temporary workspace traffic for the standalone backward benchmark."""
-    _, tile_n, grid, _ = _bwd_tiles(M, N)
-    return grid * tile_n * 4 * 2
+    """Return temporary workspace traffic for the standalone backward benchmark (the zero-filled dw accumulator)."""
+    _, tile_n, _, _ = _bwd_tiles(M, N)
+    return tile_n * 4
 
 
 def compute_rms_norm_rstd_torch(x: torch.Tensor, eps: float) -> torch.Tensor:
@@ -288,17 +292,17 @@ def _rms_norm_backward(
     if cfg is None:
         cfg = _bwd_tiles(M, N)
         _bwd_cfg[(M, N)] = cfg
-    tm, T, g, No = cfg
+    tm, T, g, occ = cfg
 
     stream = torch.cuda.current_stream()
 
     dx = torch.empty_like(x)
-    dwp = torch.empty((g, T), device=x.device, dtype=torch.float32)
-    ct.launch(stream, (g,), _rms_bwd_kernel, (dx, dy, x, weight, rstd, dwp, tm, T))
+    dw = torch.zeros((T,), device=x.device, dtype=torch.float32)
+    kernel = _rms_bwd_kernel_occ2 if occ == 2 else _rms_bwd_kernel
+    ct.launch(stream, (g,), kernel, (dx, dy, x, weight, rstd, dw, tm, T))
 
-    dw = dwp.sum(0)
-    if T != No:
-        dw = dw[:No]
+    if T != N:
+        dw = dw[:N]
 
     return dx.view(*x_shape), dw.to(weight.dtype)
 
