@@ -90,7 +90,8 @@ def _launch_mla_decoding_kernel(
         "long long, int, int, int"
     )
     if transpose:
-        template_params.extend([int(even_strides), S_kv, int(S_kv % BLOCK_N == 0)])
+        reuse_kv = torch.cuda.get_device_capability() == (8, 0)
+        template_params.extend([int(even_strides), S_kv, int(S_kv % BLOCK_N == 0), int(reuse_kv)])
     else:
         signature += ", int"
 
