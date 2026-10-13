@@ -114,6 +114,7 @@ class Test_GroupGemm(common.PyTestCase):
         ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
     )
     @pytest.mark.parametrize("backend", _perf_backends)
+    @pytest.mark.disable_cudagraph
     def test_perf(
         self,
         num_groups,
