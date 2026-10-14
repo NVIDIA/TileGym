@@ -123,12 +123,16 @@ def _ragged_attention_reference(q, k_cache, v_cache, actual_seq_lens, actual_seq
         K_exp = K_b.repeat_interleave(group_size, dim=0)
         V_exp = V_b.repeat_interleave(group_size, dim=0)
 
-        scores = torch.bmm(Q_b, K_exp.transpose(1, 2)) * scale
-        if causal:
-            mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
-            scores = scores.masked_fill(mask, float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        out[start:end] = torch.bmm(attn, V_exp).transpose(0, 1)
+        key_positions = torch.arange(seq_len, device=device)
+        for query_start in range(0, seq_len, 128):
+            query_end = min(query_start + 128, seq_len)
+            scores = torch.bmm(Q_b[:, query_start:query_end], K_exp.transpose(1, 2)) * scale
+            if causal:
+                query_positions = torch.arange(query_start, query_end, device=device)
+                mask = key_positions[None, :] > query_positions[:, None]
+                scores = scores.masked_fill(mask, float("-inf"))
+            attn = torch.softmax(scores, dim=-1)
+            out[start + query_start : start + query_end] = torch.bmm(attn, V_exp).transpose(0, 1)
 
     return out
 

@@ -80,9 +80,39 @@ class Test_AttentionSink(common.PyTestCase):
         )
         return output
 
+    @staticmethod
+    def reference_chunked(query, key, value, sinks, sm_scale=0.125, sliding_window=None, start_q=0):
+        outputs = []
+        for query_start in range(0, query.shape[1], 128):
+            outputs.append(
+                Test_AttentionSink.reference(
+                    query[:, query_start : query_start + 128],
+                    key,
+                    value,
+                    sinks,
+                    sm_scale,
+                    sliding_window,
+                    start_q + query_start,
+                )
+            )
+        return torch.cat(outputs, dim=1)
+
+    @pytest.mark.parametrize("num_queries", [1, 128, 257])
+    @pytest.mark.parametrize("sliding_window", [None, 16])
+    @pytest.mark.parametrize("start_q", [0, 5])
+    def test_reference_chunked(self, num_queries, sliding_window, start_q):
+        torch.manual_seed(1234)
+        q = torch.randn(2, num_queries, 2, 2, 8)
+        k = torch.randn(2, 269, 2, 8)
+        v = torch.randn_like(k)
+        sinks = torch.randn(4)
+        expected = self.reference(q, k, v, sinks, 0.125, sliding_window, start_q)
+        actual = self.reference_chunked(q, k, v, sinks, 0.125, sliding_window, start_q)
+        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+
     @pytest.mark.parametrize("batch_size", [1, 2])
-    @pytest.mark.parametrize("num_queries", [1, 128])
-    @pytest.mark.parametrize("num_keys", [128, 32])
+    @pytest.mark.parametrize("num_queries", [1, 128, 257])
+    @pytest.mark.parametrize("num_keys", [128, 32, 263])
     @pytest.mark.parametrize("num_key_value_heads", [8])
     @pytest.mark.parametrize("num_key_value_groups", [8])
     @pytest.mark.parametrize("head_dim", [64])
@@ -133,7 +163,7 @@ class Test_AttentionSink(common.PyTestCase):
         # Test implementation
         test_fn = lambda: tilegym.ops.attention_sink(q, k, v, sinks, sm_scale, sliding_window, start_q_tensor)
         # Reference implementation
-        ref_fn = lambda: self.reference(q, k, v, sinks, sm_scale, sliding_window, start_q_tensor)
+        ref_fn = lambda: self.reference_chunked(q, k, v, sinks, sm_scale, sliding_window, start_q_tensor)
 
         self.assertCorrectness(
             test_fn,
@@ -234,6 +264,13 @@ class Test_AttentionSink(common.PyTestCase):
         """Test performance of attention_sink implementation."""
         if not torch.cuda.is_available():
             pytest.skip("CUDA support required")
+        if (
+            backend == "pytorch"
+            and torch.cuda.get_device_capability() == (12, 1)
+            and num_queries >= 10000
+            and num_keys >= 10000
+        ):
+            pytest.skip("Unchunked PyTorch AttentionSink baseline exceeds GB10 memory for long prefill")
         if torch.cuda.get_device_capability() == (12, 0) and num_keys >= 10820:
             pytest.skip("Skip OOM on B20X (sm120): attention sink with seqlen=10820 exceeds 32 GiB VRAM")
         self.setUp()
@@ -262,7 +299,7 @@ class Test_AttentionSink(common.PyTestCase):
         )
 
         # Reference implementation
-        ref_fn = lambda: self.reference(q, k, v, sinks, sm_scale, sliding_window, start_q_tensor)
+        ref_fn = lambda: self.reference_chunked(q, k, v, sinks, sm_scale, sliding_window, start_q_tensor)
 
         # Verify correctness before benchmarking
         self.assertCorrectness(
