@@ -236,8 +236,8 @@ def apply_tilegym_kernel_to_qwen3(
         from tilegym.ops import chunk_gated_delta_rule as tilegym_chunk_gated_delta_rule
         from tilegym.ops import recurrent_gated_delta_rule as tilegym_recurrent_gated_delta_rule
 
-        modeling_qwen3_5.chunk_gated_delta_rule = tilegym_chunk_gated_delta_rule
-        modeling_qwen3_5.fused_recurrent_gated_delta_rule = tilegym_recurrent_gated_delta_rule
+        modeling_qwen3_5.torch_chunk_gated_delta_rule = tilegym_chunk_gated_delta_rule
+        modeling_qwen3_5.torch_recurrent_gated_delta_rule = tilegym_recurrent_gated_delta_rule
 
     if use_cutile:
         from tilegym.transformers.qwen3_5.modeling_qwen3_5 import Qwen3_5RMSNormGatedTileGym
