@@ -19,6 +19,7 @@ if is_backend_available("cutile"):
     from . import attention_variant
     from . import attention_varlen
     from . import bmm
+    from . import cat
     from . import dropout
     from . import flash_decode
     from . import fp8_quantization_matmul
@@ -49,6 +50,7 @@ if is_backend_available("cutile"):
     from .attention_sink_decode import attention_sink_decode
     from .attention_variant import fmha_variant_cutile
     from .attention_varlen import tile_fmha_varlen
+    from .cat import cat as cat_cutile
     from .chunk_gated_delta_rule import chunk_gated_delta_rule
     from .experimental import mhc
     from .experimental import sparse_mla
@@ -106,6 +108,8 @@ if is_backend_available("cutile"):
         "dropout",
         "softmax",
         "mla_decoding_split_kv",
+        "cat",
+        "cat_cutile",
         "layer_norm",
         "moe",
         "moe_actgrad_bwd",

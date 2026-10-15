@@ -61,7 +61,7 @@ their own namespace (`tilegym.suites.*`) and are tracked in §1.3 instead.
 | Mixture of Experts | MoE Align Block | ✅ Available | N/A |
 | Positional Encoding | Rotary Position Embedding (RoPE) | ✅ Available | ✅ Available |
 | Quantization | NVFP4 Quantize | 🧪 Experimental | N/A |
-| Tensor Manipulation | Concatenation | 🚧 WIP (Internal) | N/A |
+| Tensor Manipulation | Concatenation | ✅ Available | N/A |
 | Tensor Manipulation | Transpose | ✅ Available | ✅ Available |
 | Pointwise | Squares | 📅 Planned | N/A |
 | Signal Processing | Fast Fourier Transform (FFT) | 🚧 WIP (Internal) | N/A |
