@@ -124,6 +124,32 @@ class Test_SiLUAndMul(common.PyTestCase):
             atol=1e-2,
         )
 
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_large_magnitude_inputs(self, dtype, backend, arch):
+        try:
+            tilegym.set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+
+        self.setUp()
+        device = torch.device("cuda")
+        values = [-1e4, -100.0, -90.0, -88.0, -20.0, -1.0, 0.0, 1.0, 20.0, 88.0, 90.0, 100.0, 1e4]
+        if dtype != torch.float16:
+            values += [-1e30, 1e30]
+        hidden_size = 1024
+        torch.manual_seed(0)
+        a = torch.tensor(values, dtype=torch.float32, device=device).repeat(hidden_size // len(values) + 1)
+        a = a[:hidden_size].expand(4, hidden_size)
+        b = torch.empty((4, hidden_size), dtype=torch.float32, device=device).uniform_(-1.0, 1.0)
+        x = torch.cat([a, b], dim=-1).to(dtype).contiguous()
+
+        out = tilegym.ops.silu_and_mul(x)
+        ref = self.reference(x.float())
+        assert not torch.isnan(out).any(), "silu_and_mul produced NaN for large-magnitude inputs"
+        tol = 1e-5 if dtype == torch.float32 else 2e-2
+        torch.testing.assert_close(out.float(), ref, rtol=tol, atol=tol)
+
     @pytest.mark.parametrize(
         "batch_size, seq_len, hidden_size, dtype",
         [
