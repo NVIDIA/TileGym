@@ -42,6 +42,13 @@ def parse_args(argv=None):
         help="Directory to save profiler logs (default: /logs)",
     )
     parser.add_argument("--precision", type=str, default="bfloat16", help="Precision")
+    parser.add_argument(
+        "--experts_implementation",
+        type=str,
+        default=None,
+        help="HF experts implementation override for MoE models (e.g. 'eager'). "
+        "Workaround for platforms where the default grouped_mm path is broken.",
+    )
     parser.add_argument("--sentence_file", type=str, default=None)
     parser.add_argument("--output_length", type=int, default=100, help="Output length")
     parser.add_argument("--mock_input_len", type=int, default=0, help="Mock input length")
@@ -118,10 +125,7 @@ def main(argv=None):
     )
 
     print(f"Loading model {args.model_id}...")
-    tokenizer_kwargs = {}
-    if any(tag in args.model_id.lower() for tag in ("qwen3.5", "qwen3_5", "qwen3.8", "qwen3_8")):
-        tokenizer_kwargs["use_fast"] = True
-    tokenizer = load_tokenizer_with_cache(args.model_id, **tokenizer_kwargs)
+    tokenizer = load_tokenizer_with_cache(args.model_id)
 
     backend = _detect_backend(args)
     if args.use_tilegym:
@@ -135,6 +139,8 @@ def main(argv=None):
         "device_map": "cuda",
         "torch_dtype": torch.bfloat16 if args.precision == "bfloat16" else torch.float32,
     }
+    if args.experts_implementation is not None:
+        model_kwargs["experts_implementation"] = args.experts_implementation
 
     model = load_model_with_cache(args.model_id, **model_kwargs)
 

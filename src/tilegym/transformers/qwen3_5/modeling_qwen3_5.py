@@ -65,18 +65,18 @@ class Qwen3_5RMSNormGatedTileGym(nn.Module):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cache_position=None, attention_mask=None):
+def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
     """Patched forward for Qwen3_5GatedDeltaNet with fused cuTile preprocessing."""
+    from transformers.models.qwen3_5 import modeling_qwen3_5
     from transformers.models.qwen3_5.modeling_qwen3_5 import apply_mask_to_padding_states
 
     hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
     batch_size, seq_len, _ = hidden_states.shape
 
-    use_precomputed_states = cache_params is not None and cache_params.has_previous_state(self.layer_idx)
+    use_precomputed_states = cache_params is not None and cache_params.has_previous_state(self.layer_idx, state_idx=0)
 
     if use_precomputed_states:
-        conv_state = cache_params.layers[self.layer_idx].conv_states
-        recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
+        recurrent_state = cache_params.layers[self.layer_idx].recurrent_states[0]
 
     if (
         _GROUP_GEMM_ENABLED
@@ -109,37 +109,56 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
 
-    if use_precomputed_states and seq_len == 1:
-        mixed_qkv = self.causal_conv1d_update(
-            mixed_qkv,
-            conv_state,
-            self.conv1d.weight.squeeze(1),
-            self.conv1d.bias,
-            self.activation,
-        )
-    else:
-        if use_precomputed_states:
-            mixed_qkv = torch.cat([conv_state, mixed_qkv], dim=-1)
-        if cache_params is not None:
-            new_conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
-            cache_params.update_conv_state(new_conv_state, self.layer_idx)
-        if self.causal_conv1d_fn is not None:
-            mixed_qkv = self.causal_conv1d_fn(
-                x=mixed_qkv,
-                weight=self.conv1d.weight.squeeze(1),
-                bias=self.conv1d.bias,
-                activation=self.activation,
-                seq_idx=None,
+    if use_precomputed_states and seq_len == 1 and not cache_params.layers[self.layer_idx].record_past:
+        conv_state = cache_params.layers[self.layer_idx].conv_states[0]
+        if batch_size == 1:
+            mixed_qkv = modeling_qwen3_5.causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                self.activation,
             )
         else:
-            # Fused cuTile causal conv1d + SiLU for prefill
+            mixed_qkv = torch.cat(
+                [
+                    modeling_qwen3_5.causal_conv1d_update(
+                        mixed_qkv[i : i + 1],
+                        conv_state[i : i + 1],
+                        self.conv1d.weight.squeeze(1),
+                        self.conv1d.bias,
+                        self.activation,
+                    )
+                    for i in range(batch_size)
+                ],
+                dim=0,
+            )
+    else:
+        if cache_params is not None:
+            mixed_qkv = cache_params.update_conv_state(
+                mixed_qkv, self.layer_idx, conv_kernel_size=self.conv_kernel_size
+            )
+        if batch_size == 1:
             padded = F.pad(mixed_qkv, (self.conv_kernel_size - 1, 0))
             mixed_qkv = causal_conv1d_prefill_silu_cutile(
                 padded,
                 self.conv1d.weight.squeeze(1),
                 mixed_qkv.shape[-1],
             )
-        if use_precomputed_states:
+        else:
+            mixed_qkv = torch.cat(
+                [
+                    causal_conv1d_prefill_silu_cutile(
+                        F.pad(mixed_qkv[i : i + 1], (self.conv_kernel_size - 1, 0)),
+                        self.conv1d.weight.squeeze(1),
+                        mixed_qkv.shape[-1],
+                    )
+                    for i in range(batch_size)
+                ],
+                dim=0,
+            )
+        if cache_params is not None:
+            # Drop the additional previous states
             mixed_qkv = mixed_qkv[:, :, -seq_len:]
 
     mixed_qkv = mixed_qkv.transpose(1, 2)
@@ -166,7 +185,7 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
     if use_precomputed_states and seq_len == 1:
-        core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+        core_attn_out, last_recurrent_state = modeling_qwen3_5.torch_recurrent_gated_delta_rule(
             query,
             key,
             value,
@@ -175,9 +194,10 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
             initial_state=recurrent_state,
             output_final_state=cache_params is not None,
             use_qk_l2norm_in_kernel=True,
+            cu_seqlens=kwargs.pop("cu_seq_lens_q", None),
         )
     else:
-        core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+        core_attn_out, last_recurrent_state = modeling_qwen3_5.torch_chunk_gated_delta_rule(
             query,
             key,
             value,
@@ -186,6 +206,7 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
             initial_state=recurrent_state if use_precomputed_states else None,
             output_final_state=cache_params is not None,
             use_qk_l2norm_in_kernel=True,
+            cu_seqlens=kwargs.pop("cu_seq_lens_q", None),
         )
 
     if cache_params is not None:
@@ -431,20 +452,19 @@ def _decoder_layer_forward_tilegym(
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
 
-    if self.layer_type == "linear_attention":
+    if self.block_type == "linear_attention":
         hidden_states = self.linear_attn(
             hidden_states=hidden_states,
             cache_params=past_key_values,
-            cache_position=cache_position,
             attention_mask=attention_mask,
+            **kwargs,
         )
-    elif self.layer_type == "full_attention":
+    elif self.block_type == "full_attention":
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
