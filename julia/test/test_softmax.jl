@@ -11,18 +11,12 @@ const KERNEL_DIR = joinpath(@__DIR__, "..", "kernels")
 include(joinpath(KERNEL_DIR, "softmax.jl"))
 
 """
-CPU reference softmax. Input is (M, N) col-major; softmax over dim 2 (columns).
+CPU reference softmax. Input is (N, M) col-major; softmax over dim 1 (each column).
 """
 function reference_softmax(x::Matrix{Float32})
-    M, N = size(x)
-    out = similar(x)
-    for i in 1:M
-        row = x[i, :]
-        row_max = maximum(row)
-        exps = exp.(row .- row_max)
-        out[i, :] = exps ./ sum(exps)
-    end
-    return out
+    col_max = maximum(x; dims=1)
+    exps = exp.(x .- col_max)
+    return exps ./ sum(exps; dims=1)
 end
 
 function next_power_of_2(n::Int)
@@ -47,7 +41,7 @@ end
         ]
         for (M, N) in test_cases
             TILE_SIZE = next_power_of_2(N)
-            x_cpu = randn(Float32, M, N)
+            x_cpu = randn(Float32, N, M)
             x_gpu = CuArray(x_cpu)
             out_gpu = similar(x_gpu)
 
@@ -65,7 +59,7 @@ end
             (M=2,  N=8192,  TILE_SIZE=1024),
         ]
         for (M, N, TILE_SIZE) in test_cases
-            x_cpu = randn(Float32, M, N)
+            x_cpu = randn(Float32, N, M)
             x_gpu = CuArray(x_cpu)
             out_gpu = similar(x_gpu)
 
@@ -83,7 +77,7 @@ end
             (M=2,  N=1000,  TILE_SIZE=512),
         ]
         for (M, N, TILE_SIZE) in test_cases
-            x_cpu = randn(Float32, M, N)
+            x_cpu = randn(Float32, N, M)
             x_gpu = CuArray(x_cpu)
             out_gpu = similar(x_gpu)
 
@@ -97,7 +91,7 @@ end
     @testset "Numerical stability (large values)" begin
         M, N = 4, 128
         TILE_SIZE = 128
-        x_cpu = randn(Float32, M, N) .* 100f0
+        x_cpu = randn(Float32, N, M) .* 100f0
         x_gpu = CuArray(x_cpu)
         out_gpu = similar(x_gpu)
 
@@ -106,18 +100,18 @@ end
         result = Array(out_gpu)
         @test all(isfinite, result)
         @test all(x -> x >= 0, result)
-        for i in 1:M
-            @test sum(result[i, :]) ≈ 1.0f0 atol=1e-4
+        for j in 1:M
+            @test sum(result[:, j]) ≈ 1.0f0 atol=1e-4
         end
 
         expected = reference_softmax(x_cpu)
         @test result ≈ expected atol=1e-5 rtol=1e-4
     end
 
-    @testset "Single row" begin
+    @testset "Single column" begin
         M, N = 1, 512
         TILE_SIZE = 512
-        x_cpu = randn(Float32, M, N)
+        x_cpu = randn(Float32, N, M)
         x_gpu = CuArray(x_cpu)
         out_gpu = similar(x_gpu)
 
