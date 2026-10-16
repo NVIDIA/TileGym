@@ -45,7 +45,7 @@ their own namespace (`tilegym.suites.*`) and are tracked in §1.3 instead.
 | Normalization | Layer Normalization | ✅ Available | 📅 Planned |
 | Normalization | Layer Normalization Legacy | ✅ Available | 📅 Planned |
 | Normalization | RMS Normalization | ✅ Available | 🧪 Experimental |
-| Activation | Dropout | ✅ Available | 📅 Planned |
+| Activation | Dropout | ✅ Available | ✅ Available |
 | Activation | GeGLU | ✅ Available | ✅ Available |
 | Activation | GeLU | ✅ Available | ✅ Available |
 | Activation | ReLU | ✅ Available | ✅ Available |
