@@ -19,6 +19,7 @@ if is_backend_available("cutile"):
 
 # Import unified interface
 from .ops import cross_entropy
+from .ops import dpo_loss
 from .ops import dyt
 from .ops import fused_add_rms_norm
 from .ops import fused_linear_cross_entropy
@@ -60,6 +61,7 @@ __all__ = [
     "rope",
     "sparsemax",
     "tiled_mlp",
+    "dpo_loss",
     "dyt",
     "fused_add_rms_norm",
     "fused_linear_cross_entropy",
