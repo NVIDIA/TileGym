@@ -10,6 +10,7 @@
 # Uses ct.load/ct.store TMA pattern for contiguous 1D element-wise ops.
 
 using CUDA
+using cuTile: cuTile
 import cuTile as ct
 
 #=============================================================================
@@ -58,9 +59,7 @@ function add!(output::CuVector{T}, x::CuVector{T}, y::CuVector{T};
               alpha::Float32=1.0f0, block_size::Int=1024) where {T}
     n = length(x)
     grid = cld(n, block_size)
-    ct.launch(add_kernel, grid, x, y, output,
-              ct.Constant(alpha), ct.Constant(block_size))
-    CUDA.synchronize()
+    @cuda backend=cuTile blocks=grid add_kernel(x, y, output, ct.Constant(alpha), ct.Constant(block_size))
     return
 end
 
@@ -68,8 +67,6 @@ function add_scalar!(output::CuVector{T}, x::CuVector{T}, scalar_val::Float32;
                      alpha::Float32=1.0f0, block_size::Int=1024) where {T}
     n = length(x)
     grid = cld(n, block_size)
-    ct.launch(add_scalar_kernel, grid, x, output,
-              ct.Constant(scalar_val), ct.Constant(alpha), ct.Constant(block_size))
-    CUDA.synchronize()
+    @cuda backend=cuTile blocks=grid add_scalar_kernel(x, output, ct.Constant(scalar_val), ct.Constant(alpha), ct.Constant(block_size))
     return
 end
