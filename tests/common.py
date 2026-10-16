@@ -15,6 +15,7 @@ import os
 import pathlib
 import random
 import re
+import time
 from functools import wraps
 
 import pytest
@@ -1158,18 +1159,24 @@ def benchmark_fn_cudagraph(
     return result
 
 
-def benchmark_framework(framework_name, framework_fn, **benchmark_kwargs):
+def benchmark_framework(framework_name, framework_fn, cooldown_s=0.0, **benchmark_kwargs):
     """
     Benchmark a specific framework function and return results with the framework name.
 
     Args:
         framework_name: Name of the framework (e.g., 'pytorch', 'cutile')
         framework_fn: Function to benchmark
+        cooldown_s: Seconds to leave the GPU idle before benchmark warmup
         **benchmark_kwargs: Additional arguments to pass to benchmark function
 
     Returns:
         Dictionary with benchmark results keyed by framework name
     """
+    if cooldown_s < 0:
+        raise ValueError(f"cooldown_s must be non-negative, got {cooldown_s}")
+    if cooldown_s:
+        torch.cuda.synchronize()
+        time.sleep(cooldown_s)
     result = benchmark(framework_fn, **benchmark_kwargs)
     return {framework_name: result}
 
