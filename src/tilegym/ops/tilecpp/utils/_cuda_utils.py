@@ -66,6 +66,12 @@ def _get_current_device_arch_flag() -> str:
     return f"sm_{_get_current_device_arch()}"
 
 
+def _format_template_params(cpp_type, template_params):
+    return [cpp_type] + [
+        ("true" if value else "false") if isinstance(value, bool) else str(value) for value in template_params
+    ]
+
+
 # Cache directory for compiled cubins
 # Use TILECPP_CACHE_DIR env var if set, otherwise use ~/.cache/tilecpp (matching XDG convention)
 def _get_cache_dir() -> Path:
@@ -122,6 +128,11 @@ class _FileLock:
             fcntl.flock(self._fd, fcntl.LOCK_UN)
             os.close(self._fd)
             self._fd = -1
+
+
+def _read_cached_cubin(path: Path) -> Optional[bytes]:
+    """Return the on-disk cached cubin at *path*, or None if there is none."""
+    return path.read_bytes() if path.exists() else None
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -252,6 +263,7 @@ def compile_cuda_to_cubin(
     output_path: Path,
     template_instantiations: Optional[List[str]] = None,
     include_paths: Optional[List[Path]] = None,
+    gpu_arch: Optional[str] = None,
 ) -> Path:
     """
     Compile CUDA header to a cubin file using nvcc.
@@ -296,7 +308,7 @@ def compile_cuda_to_cubin(
 
     try:
         # Build nvcc command
-        gpu_arch = _get_current_device_arch_flag()
+        gpu_arch = gpu_arch or _get_current_device_arch_flag()
         cmd = [
             NVCC_PATH,
             "-tilecubin",
@@ -482,6 +494,7 @@ class TileCppKernel:
         all_params: List[str],
         signature: str,
         cpp_type: str,
+        arch: int,
     ) -> bytes:
         """Compile the kernel and atomically write the cubin to *cubin_path*.
 
@@ -500,6 +513,7 @@ class TileCppKernel:
                 tmp_cubin,
                 template_instantiations=[template_inst],
                 include_paths=self.include_paths,
+                gpu_arch=f"sm_{arch}",
             )
             cubin_bytes = tmp_cubin.read_bytes()
             _atomic_write_bytes(cubin_path, cubin_bytes)
@@ -507,6 +521,20 @@ class TileCppKernel:
             tmp_cubin.unlink(missing_ok=True)
 
         return cubin_bytes
+
+    def compile_artifact(self, dtype, template_params, signature, arch):
+        cpp_type, _ = get_dtype_info(dtype)
+        all_params = _format_template_params(cpp_type, template_params)
+        template_key = "_".join(all_params)
+        source_hash = get_source_hash(self.source_hash + template_key)
+        cubin_path = self._make_cubin_path(template_key, arch, source_hash)
+        if is_cache_disabled():
+            return self._compile_kernel(cubin_path, all_params, signature, cpp_type, arch), cubin_path
+        with _FileLock(cubin_path):
+            cubin_bytes = _read_cached_cubin(cubin_path)
+            if cubin_bytes is not None:
+                return cubin_bytes, cubin_path
+            return self._compile_kernel(cubin_path, all_params, signature, cpp_type, arch), cubin_path
 
     def get_kernel(
         self,
@@ -527,14 +555,7 @@ class TileCppKernel:
         """
         cpp_type, scalar_converter = get_dtype_info(dtype)
 
-        # Build template key for caching
-        # Handle boolean parameters specially (Python True/False -> C++ true/false)
-        def to_cpp_param(p):
-            if isinstance(p, bool):
-                return "true" if p else "false"
-            return str(p)
-
-        all_params = [cpp_type] + [to_cpp_param(p) for p in template_params]
+        all_params = _format_template_params(cpp_type, template_params)
         template_key = "_".join(all_params)
 
         # Get device architecture
@@ -579,26 +600,7 @@ class TileCppKernel:
                 if verbose:
                     logger.info(f"[TileCpp] Reloading kernel from in-memory cubin for new context: {cache_key}")
             else:
-                source_hash = get_source_hash(self.source_hash + template_key)
-                cubin_path = self._make_cubin_path(template_key, arch, source_hash)
-
-                if cache_disabled:
-                    if verbose:
-                        logger.info(f"[TileCpp] Cache disabled, recompiling: {cache_key}")
-                    cubin_bytes = self._compile_kernel(cubin_path, all_params, signature, cpp_type)
-                else:
-                    # Use a file lock so only one process compiles a given
-                    # kernel while others wait and reuse the result.
-                    with _FileLock(cubin_path):
-                        if cubin_path.exists():
-                            if verbose:
-                                logger.info(f"[TileCpp] Using on-disk cached cubin: {cache_key}")
-                            cubin_bytes = cubin_path.read_bytes()
-                        else:
-                            if verbose:
-                                logger.info(f"[TileCpp] Compiling kernel: {cache_key}")
-                            cubin_bytes = self._compile_kernel(cubin_path, all_params, signature, cpp_type)
-
+                cubin_bytes, cubin_path = self.compile_artifact(dtype, template_params, signature, arch)
                 mangled_name = get_kernel_name_from_cubin(cubin_bytes, self.kernel_name, cubin_path=str(cubin_path))
 
             # Load kernel from in-memory cubin bytes
