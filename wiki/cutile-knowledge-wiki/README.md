@@ -70,7 +70,7 @@ writes `staging/<id>.review.md`, a human approves with `python3 run.py approve <
 ## Tooling
 
 ```
-python3 run.py lint      # contracts, evidence rules, index freshness — must be 0 errors, 0 warnings
+python3 run.py lint      # errors fail; warnings are advisory and require review
 python3 run.py index     # regenerate index.md
 python3 run.py new <kind> <id>   # scaffold a staging candidate
 python3 run.py approve <id>      # move staged page into the corpus (human step)

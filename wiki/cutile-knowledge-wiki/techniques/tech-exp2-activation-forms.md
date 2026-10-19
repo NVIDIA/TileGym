@@ -22,8 +22,8 @@ reciprocal away from closed forms, and the reciprocal can be removed, weakened, 
 - **Sigmoid**: `sigma(z) = 1 / (1 + exp2(z * -LOG2E))`. Division-weakening options, in order:
   approx-divide flag (`tech-ftz-approx`), reciprocal-multiply replication when matching a reference,
   or the rsqrt-of-square respelling
-  `sigma = rsqrt(u*u)` with `u = 1 + exp2(-z*LOG2E)` — two rsqrt-class ops replacing the full divide,
-  exact to ~1-2 ulp.
+  `sigma = rsqrt(u*u)` with `u = 1 + exp2(-z*LOG2E)`, replacing the full divide.
+  Validate accuracy over the intended input range; `u*u` may overflow for large negative inputs.
 - **SiLU / gated MLP**: keep the product form `x * sigma(z)` and share ONE sigmoid across gate uses;
   in `p * sigma` epilogues the sigmoid rides an existing multiply slot.
 - **GELU (tanh approximation)**: `x * sigma(1.702*x)`-class forms restructure as
