@@ -32,6 +32,10 @@ eliminated launches and round trips — with instruction overlap left to the com
 **GEMM + fused tail**: after the K loop, every epilogue stage operates on the accumulator tile,
 guarded by compile-time `ct.Constant` flags so unused stages compile out.
 
+The GLU case is described in `kernel-fused-linear-epilogue`: two input projections share
+one kernel, then activation and gating run before the output stores. The output projection
+remains a separate matmul, and saved intermediates still contribute memory traffic.
+
 Variants of the same move:
 
 - **Fuse adjacent elementwise ops even without a GEMM producer**: `silu_and_mul` computes

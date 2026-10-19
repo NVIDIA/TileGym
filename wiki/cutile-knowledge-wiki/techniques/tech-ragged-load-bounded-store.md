@@ -20,6 +20,10 @@ are discarded. This removes per-chunk input views; a device-built output
 descriptor may still be needed. The optimization applies when the compiler builds
 per-chunk input descriptors; the source transformation alone implies no speedup.
 
+Existing [ragged GEMM coverage](../kernels/kernel-block-scaled-gemm.md) describes
+sliced views and tile geometry; [scale-load coverage](../reference/ragged-bmm-scale-load.md)
+addresses scalar loads. This page adds the input-view transformation.
+
 See `tech-ragged-tma-fixed-descriptor` when input boundaries must also be enforced.
 
 ## Pattern
