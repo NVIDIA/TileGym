@@ -10,7 +10,6 @@ from . import layer_norm_legacy
 from . import rms_norm
 from . import rope
 
-# Non-DL operations
 # Import specific functions for direct access
 from .attention_variant import fmha_variant_triton
 from .dropout import dropout
