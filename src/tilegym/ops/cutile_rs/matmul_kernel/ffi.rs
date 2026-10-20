@@ -22,7 +22,7 @@ use cuda_core::{Device, Stream};
 use cutile::half::{bf16, f16};
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 
-use crate::ffi_util::{TensorDesc, borrow_tensor, cast_tf32};
+use crate::ffi_util::{AlignedKernelInput, TensorDesc, borrow_tensor, cast_tf32};
 use matmul_module::{non_persistent_matmul_kernel, static_persistent_matmul_kernel};
 
 #[unsafe(no_mangle)]
@@ -65,6 +65,10 @@ pub unsafe extern "C" fn cutile_matmul(
             let b_t = unsafe { borrow_tensor::<$E>(b_d) };
             let c_t = unsafe { borrow_tensor::<$E>(c_d) };
 
+            let a_input = AlignedKernelInput::new(&a_t);
+            let b_input = AlignedKernelInput::new(&b_t);
+            let c_input = AlignedKernelInput::new(&c_t);
+
             let opts = crate::compile_options!(occupancy, num_cta_in_cga);
 
             if persistent != 0 {
@@ -77,10 +81,12 @@ pub unsafe extern "C" fn cutile_matmul(
                     group_size_m.to_string(),
                     cast.to_string(),
                 ];
-                let op = unsafe { static_persistent_matmul_kernel(&*a_t, &*b_t, &*c_t, m, n, k) }
-                    .generics(generics)
-                    .grid((num_programs as u32, 1, 1))
-                    .compile_options(opts);
+                let op = unsafe {
+                    static_persistent_matmul_kernel(&a_input, &b_input, &c_input, m, n, k)
+                }
+                .generics(generics)
+                .grid((num_programs as u32, 1, 1))
+                .compile_options(opts);
                 unsafe {
                     crate::ffi_util::launch_on(op, &stream, "cutile_matmul static_persistent")
                 }
@@ -93,7 +99,7 @@ pub unsafe extern "C" fn cutile_matmul(
                     bk.to_string(),
                     cast.to_string(),
                 ];
-                let op = unsafe { non_persistent_matmul_kernel(&*a_t, &*b_t, &*c_t) }
+                let op = unsafe { non_persistent_matmul_kernel(&a_input, &b_input, &c_input) }
                     .generics(generics)
                     .grid((num_programs as u32, 1, 1))
                     .compile_options(opts);

@@ -14,6 +14,7 @@
 // `make_tensor_desc`.
 
 use core::mem::ManuallyDrop;
+use cuda_async::launch::AsyncKernelLaunch;
 use cuda_core::Stream;
 use cutile::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -238,6 +239,90 @@ pub unsafe fn borrow_tensor<E: DType>(d: &TensorDesc) -> ManuallyDrop<Tensor<E>>
     ManuallyDrop::new(unsafe {
         Tensor::<E>::from_raw_parts(d.ptr, d.nbytes(), 0, d.shape_i32(), d.strides_i32())
     })
+}
+
+/// A borrowed kernel argument with pointer alignment computed without signed truncation.
+/// The underlying tensor retains its shape, strides, arguments, and ownership.
+pub struct AlignedKernelInput<'a, E: DType> {
+    tensor: &'a Tensor<E>,
+    spec: SpecializationBits,
+}
+
+/// Actual pointer alignment, capped at the existing frontend limit of 16 bytes.
+/// Works for arbitrary nonzero device addresses; it preserves lower alignments.
+fn pointer_divisibility(ptr: u64) -> i32 {
+    1_i32 << ptr.trailing_zeros().min(4)
+}
+
+impl<'a, E: DType> AlignedKernelInput<'a, E> {
+    pub fn new(tensor: &'a Tensor<E>) -> Self {
+        let ptr = tensor.device_pointer().cu_deviceptr();
+        let mut spec = tensor.spec().clone();
+        spec.base_ptr_div.divisor = pointer_divisibility(ptr).min(spec.base_ptr_div.max);
+        Self { tensor, spec }
+    }
+}
+
+impl<'a, 'b, E: DType + Sync> KernelInputStored for &'b AlignedKernelInput<'a, E> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        KernelInputStored::push_kernel_args(&self.tensor, launcher);
+    }
+    fn shape(&self) -> &[i32] {
+        self.tensor.shape()
+    }
+    fn strides(&self) -> &[i32] {
+        self.tensor.strides()
+    }
+    fn spec(&self) -> &SpecializationBits {
+        &self.spec
+    }
+    fn dtype_str(&self) -> &'static str {
+        E::DTYPE.as_str()
+    }
+}
+
+impl<'a, 'b, E: DType + Sync> KernelInput<E> for &'b AlignedKernelInput<'a, E> {
+    type Stored = Self;
+    type Returned = Self;
+    fn prepare(self) -> Self {
+        self
+    }
+    fn recover(stored: Self) -> Self {
+        stored
+    }
+}
+
+impl<'a, 'b, E: DType + Sync> IntoDeviceOp<&'b AlignedKernelInput<'a, E>>
+    for &'b AlignedKernelInput<'a, E>
+{
+    type Op = Value<Self>;
+    fn into_op(self) -> Self::Op {
+        value(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pointer_divisibility;
+
+    #[test]
+    fn alignment_from_actual_address_preserves_low_bits() {
+        for high in [0, 1_u64 << 32, 0x7f12_u64 << 32] {
+            for (low, expected) in [
+                (0_u64, 16),
+                (0x80000000, 16),
+                (0x80000200, 16),
+                (0x7fffffff, 1),
+                (0x80000001, 1),
+                (0x80000002, 2),
+                (0x80000004, 4),
+                (0x80000008, 8),
+                (0x80000010, 16),
+            ] {
+                assert_eq!(pointer_divisibility(high | low), expected);
+            }
+        }
+    }
 }
 
 /// # Safety
