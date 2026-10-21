@@ -99,18 +99,21 @@ pub mod silu_and_mul_module {
         let a_f32: Tile<f32, { [BLOCK_SIZE] }> = convert_tile(a_tile);
         let b_f32: Tile<f32, { [BLOCK_SIZE] }> = convert_tile(b_tile);
 
-        // silu(a) = a * (e / (1 + e)), e = exp2(a * log2e). All FTZ enabled.
-        let log2e: Tile<f32, { [BLOCK_SIZE] }> = constant(1.44269502f32, const_shape![BLOCK_SIZE]);
+        // silu(a) = a * (1 / (1 + e)), e = exp2(-a * log2e). All FTZ enabled.
+        // e overflows to inf only for large negative a, where 1 / inf = 0 is the
+        // correct limit; e / (1 + e) with e = exp2(a * log2e) gave inf / inf = NaN.
+        let neg_log2e: Tile<f32, { [BLOCK_SIZE] }> =
+            constant(-1.44269502f32, const_shape![BLOCK_SIZE]);
         let scaled: Tile<f32, { [BLOCK_SIZE] }> =
-            mulf(a_f32, log2e, rounding::NearestEven, ftz::Enabled);
+            mulf(a_f32, neg_log2e, rounding::NearestEven, ftz::Enabled);
         let e: Tile<f32, { [BLOCK_SIZE] }> = exp2(scaled, ftz::Enabled);
         let one: Tile<f32, { [BLOCK_SIZE] }> = constant(1.0f32, const_shape![BLOCK_SIZE]);
         let one_plus_e: Tile<f32, { [BLOCK_SIZE] }> =
             addf(e, one, rounding::NearestEven, ftz::Enabled);
-        // Reference uses `divf rounding<approx> flush_to_zero` for e/(1+e). cutile-rs
+        // Reference uses `divf rounding<approx> flush_to_zero` for the sigmoid. cutile-rs
         // `divf(.., rounding::Approx, ..)` mis-encodes to `rounding<full>`;
         // `true_div` lowers to the matching `rounding<approx> flush_to_zero`.
-        let sig: Tile<f32, { [BLOCK_SIZE] }> = true_div(e, one_plus_e);
+        let sig: Tile<f32, { [BLOCK_SIZE] }> = true_div(one, one_plus_e);
         let silu: Tile<f32, { [BLOCK_SIZE] }> =
             mulf(a_f32, sig, rounding::NearestEven, ftz::Enabled);
         let result_f32: Tile<f32, { [BLOCK_SIZE] }> =

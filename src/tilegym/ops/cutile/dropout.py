@@ -97,6 +97,43 @@ def _mix_seed(seed: int) -> int:
     return mixed
 
 
+def _launch_dropout(x, output, p, seed):
+    """Apply the same stateless mask to forward values or upstream gradients.
+
+    Keep seed mixing and element indexing shared so backward reconstructs
+    exactly the mask used by forward. This lets autograd save only the seed
+    and probability instead of retaining the full mask tensor. Centralizing
+    the launch also avoids duplicating empty-tensor handling and grid/kernel
+    argument setup.
+    """
+    n_elements = x.numel()
+    if n_elements == 0:
+        return
+
+    TILE_SIZE = 1024
+    grid = (math.ceil(n_elements / TILE_SIZE), 1, 1)
+    x_flat = x.view(-1)
+    output_flat = output.view(-1)
+
+    # Pre-mix seed into a well-spread int32 so small seed deltas produce
+    # large bit-level perturbations before the kernel's XOR-shift hash.
+    seed_int32 = _mix_seed(seed)
+
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        _dropout_kernel,
+        (
+            x_flat,
+            output_flat,
+            p,
+            seed_int32,
+            TILE_SIZE,
+            True,
+        ),
+    )
+
+
 class _DropoutCuTileFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, seed, p=0.5, training=True, inplace=False):
@@ -113,10 +150,6 @@ class _DropoutCuTileFunction(torch.autograd.Function):
         Returns:
             Output tensor with dropout applied
         """
-        if not training:
-            ctx.mark_dirty(x)
-            return x
-
         if inplace:
             ctx.mark_dirty(x)
             output = x
@@ -125,37 +158,27 @@ class _DropoutCuTileFunction(torch.autograd.Function):
 
         assert x.is_contiguous()
 
-        n_elements = x.numel()
-        TILE_SIZE = 1024
-        grid = (math.ceil(n_elements / TILE_SIZE), 1, 1)
-        x_flat = x.view(-1)
-        output_flat = output.view(-1)
+        _launch_dropout(x, output, p, seed)
 
-        # Pre-mix seed into a well-spread int32 so small seed deltas produce
-        # large bit-level perturbations before the kernel's XOR-shift hash.
-        seed_int32 = _mix_seed(seed)
-
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            _dropout_kernel,
-            (
-                x_flat,
-                output_flat,
-                p,
-                seed_int32,
-                TILE_SIZE,
-                training,
-            ),
-        )
-
+        # Backward needs the same mask, but not a saved mask tensor: the
+        # stateless kernel reconstructs it from this seed and probability
+        # using the same element indexing as forward.
         ctx.p = p
         ctx.seed = seed
         return output
 
     @staticmethod
     def backward(ctx, dy):
-        raise NotImplementedError("Backward pass for dropout is not implemented")
+        # Autograd can provide expanded (zero-stride) or transposed gradients.
+        # Materialize only when needed; never modify the caller's gradient.
+        dy = dy.contiguous()
+        if torch.is_grad_enabled():
+            # Record the same linear operation for create_graph=True.
+            dx = _DropoutCuTileFunction.apply(dy, ctx.seed, ctx.p, True, False)
+        else:
+            dx = torch.empty_like(dy)
+            _launch_dropout(dy, dx, ctx.p, ctx.seed)
+        return dx, None, None, None, None
 
 
 @register_impl("dropout", backend="cutile")
@@ -176,4 +199,23 @@ def dropout(x, seed, p=0.5, training=True, inplace=False, **kwargs):
     Returns:
         Tensor with dropout applied
     """
-    return _DropoutCuTileFunction.apply(x, seed, p, training, inplace)
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"dropout probability must be between 0 and 1, got {p}")
+    # Keep the identity path outside the custom Function: it neither mutates
+    # leaf tensors nor needs saved context, and preserves autograd directly.
+    if not training or p == 0.0:
+        return x
+    if inplace and torch.is_grad_enabled() and x.requires_grad:
+        base = x._base
+        if base is not None:
+            # mark_dirty checks these view restrictions only after forward.
+            # Check first so rejected calls cannot corrupt shared storage.
+            creation_meta = torch._C._autograd._get_creation_meta(x)
+            if creation_meta != torch._C._autograd.CreationMeta.DEFAULT:
+                raise RuntimeError("a view created in a restricted autograd context cannot be modified in-place")
+        if x.is_leaf or (base is not None and base.is_leaf and base.requires_grad):
+            raise RuntimeError("a leaf Variable that requires grad is being used in an in-place operation")
+    output = _DropoutCuTileFunction.apply(x, seed, p, training, inplace)
+    # Under no_grad, apply may wrap a requires-grad input in a detached alias.
+    # Inplace dropout must return the original tensor, as native PyTorch does.
+    return x if inplace else output

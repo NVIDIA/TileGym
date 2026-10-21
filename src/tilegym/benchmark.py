@@ -12,6 +12,7 @@ from contextlib import nullcontext
 import torch
 
 GRAPH_PROTOCOL = "cuda-graph-cold-span-v3"
+EAGER_PROTOCOL = "cuda-eager-cold-span-v1"
 FLUSH_BYTES = 256_000_000
 GRAPH_REPEATS = 8
 
@@ -120,7 +121,10 @@ class _CapturedCall:
         return _profile_graph_samples(prof.profiler.kineto_results.events(), count, len(calls))
 
 
-def _profile_graph_samples(events, count, graph_count):
+_GRAPH_LAUNCHES = ("cudaGraphLaunch", "cudaGraphLaunch_ptsz", "cuGraphLaunch", "cuGraphLaunch_ptsz")
+
+
+def _profile_samples(events, count, scope_name, is_launch, kind):
     scopes, launches = [], []
     device_events = {}
     names = {}
@@ -129,9 +133,9 @@ def _profile_graph_samples(events, count, graph_count):
             continue
         device = event.device_type()
         if device == torch.autograd.DeviceType.CPU:
-            if event.name() == "tilegym.graph.sample":
+            if event.name() == scope_name:
                 scopes.append((event.start_ns(), event.end_ns()))
-            elif event.name() in ("cudaGraphLaunch", "cudaGraphLaunch_ptsz", "cuGraphLaunch", "cuGraphLaunch_ptsz"):
+            elif is_launch(event.name()):
                 launches.append((event.start_ns(), event.end_ns(), event.correlation_id()))
         elif device == torch.autograd.DeviceType.CUDA and not event.is_user_annotation():
             name = event.name()
@@ -144,26 +148,35 @@ def _profile_graph_samples(events, count, graph_count):
         raise RuntimeError(f"Expected {count} profiler scopes, found {len(scopes)}")
     samples = []
     index = 0
-    for sample_index, (scope_start, scope_end) in enumerate(scopes):
+    for scope_start, scope_end in scopes:
         while index < len(launches) and launches[index][0] < scope_start:
             index += 1
         selected = []
+        correlations = set()
         while index < len(launches) and launches[index][0] < scope_end:
             launch_start, launch_end, correlation = launches[index]
             if launch_end > scope_end:
-                raise RuntimeError("CUDA Graph launch crosses a synchronized sample boundary")
-            selected.extend(device_events.get(correlation, []))
+                raise RuntimeError(f"{kind} launch crosses a synchronized sample boundary")
+            if correlation not in correlations:
+                correlations.add(correlation)
+                selected.extend(device_events.get(correlation, []))
             index += 1
         if not selected:
-            raise RuntimeError("CUDA Graph replay produced no profiled GPU activities")
+            raise RuntimeError(f"{kind} sample produced no profiled GPU activities")
         selected.sort()
         samples.append(
             {
-                "graph_index": sample_index % graph_count,
                 "span_ms": (max(event[1] for event in selected) - selected[0][0]) / 1_000_000,
                 "activities": [{"name": name, "duration_us": (end - start) / 1000} for start, end, name in selected],
             }
         )
+    return samples
+
+
+def _profile_graph_samples(events, count, graph_count):
+    samples = _profile_samples(events, count, "tilegym.graph.sample", _GRAPH_LAUNCHES.__contains__, "CUDA Graph")
+    for index, sample in enumerate(samples):
+        sample["graph_index"] = index % graph_count
     return samples
 
 
@@ -189,6 +202,50 @@ def _sample_kernel_records(samples):
         key=lambda record: record["self_time_us"],
         reverse=True,
     )
+
+
+def _check_budget(warmup, rep, min_rep, initial_rep, max_rep):
+    if warmup < 0 or rep <= 0 or min_rep < 1 or initial_rep < 1 or max_rep < 0:
+        raise ValueError("Invalid benchmark iteration budget")
+    if max_rep and max_rep < min_rep:
+        raise ValueError("max_rep must be zero or at least min_rep")
+
+
+def _summarize(profiled, kernel_filter, protocol, collect_kernel_times, kind):
+    patterns = None
+    if kernel_filter is not None:
+        patterns = [re.compile(p) for p in ([kernel_filter] if isinstance(kernel_filter, str) else kernel_filter)]
+    samples = []
+    for sample in profiled:
+        if patterns is None:
+            samples.append(sample["span_ms"])
+        else:
+            matched = [k for k in sample["activities"] if any(p.search(k["name"]) for p in patterns)]
+            if not matched:
+                raise RuntimeError(f"No {kind} kernels matched {kernel_filter!r}")
+            samples.append(sum(k["duration_us"] for k in matched) / 1000)
+    times = torch.tensor(samples, dtype=torch.float64)
+    mean = times.mean().item()
+    std = times.std(correction=0).item()
+    result = {
+        "mean": mean,
+        "std": std,
+        "rel_std": 100 * std / mean if mean else 0,
+        "median": times.median().item(),
+        "min": times.min().item(),
+        "max": times.max().item(),
+        "nrep": len(samples),
+        "peak_mem_mb": torch.cuda.max_memory_allocated() // (1024 * 1024),
+        "measurement_protocol": protocol + ("-filtered" if patterns is not None else ""),
+        "cache_flush_bytes": FLUSH_BYTES,
+        "samples_ms": samples,
+    }
+    if collect_kernel_times or patterns is not None:
+        kernel_times = _sample_kernel_records(profiled)
+        result["kernel_times"] = kernel_times
+        result["kernel_metadata_status"] = "recorded" if kernel_times else "unavailable"
+        result["kernel_metadata_source"] = "timed_samples"
+    return result, times
 
 
 def benchmark_cuda_graph(
@@ -223,10 +280,9 @@ def benchmark_cuda_graph(
     An optional input context wraps every warmup, capture, and replay. Its entry
     runs before the cache flush and its exit after timing, outside graph capture.
     """
-    if warmup < 0 or rep <= 0 or min_rep < 1 or initial_rep < 1 or max_rep < 0 or graph_repeats < 1:
+    _check_budget(warmup, rep, min_rep, initial_rep, max_rep)
+    if graph_repeats < 1:
         raise ValueError("Invalid benchmark iteration budget")
-    if max_rep and max_rep < min_rep:
-        raise ValueError("max_rep must be zero or at least min_rep")
     with ExitStack() as captures:
         call = captures.enter_context(
             _CapturedCall(fn, setup_fn, grad_to_none, fast_flush, input_context=input_context)
@@ -271,52 +327,98 @@ def benchmark_cuda_graph(
                     captured.graph.replay()
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
-        patterns = None
-        if kernel_filter is not None:
-            patterns = [re.compile(p) for p in ([kernel_filter] if isinstance(kernel_filter, str) else kernel_filter)]
         profiled = call.profile_samples(n_repeat, calls=calls)
-        samples = []
-        kernel_times = []
-        for sample in profiled:
-            if patterns is None:
-                samples.append(sample["span_ms"])
-            else:
-                matched = [k for k in sample["activities"] if any(p.search(k["name"]) for p in patterns)]
-                if not matched:
-                    raise RuntimeError(f"No CUDA Graph kernels matched {kernel_filter!r}")
-                samples.append(sum(k["duration_us"] for k in matched) / 1000)
-        times = torch.tensor(samples, dtype=torch.float64)
-        mean = times.mean().item()
-        std = times.std(correction=0).item()
+        result, times = _summarize(profiled, kernel_filter, GRAPH_PROTOCOL, collect_kernel_times, "CUDA Graph")
         graph_means = torch.stack([times[index::n_graphs].mean() for index in range(n_graphs)])
         graph_std = graph_means.std(correction=0).item()
-        result = {
-            "mean": mean,
-            "std": std,
-            "rel_std": 100 * std / mean if mean else 0,
-            "median": times.median().item(),
-            "min": times.min().item(),
-            "max": times.max().item(),
-            "nrep": n_repeat,
-            "peak_mem_mb": torch.cuda.max_memory_allocated() // (1024 * 1024),
-            "measurement_protocol": GRAPH_PROTOCOL + ("-filtered" if patterns is not None else ""),
-            "cache_flush_bytes": FLUSH_BYTES,
-            "samples_ms": samples,
-            "graph_count": n_graphs,
-            "requested_graph_count": requested_graph_count,
-            "graph_memory_limited": graph_memory_limited,
-            "graph_pool_reserved_bytes": graph_pool_reserved_bytes,
-            "samples_per_graph": per_graph,
-            "graph_means_ms": graph_means.tolist(),
-            "graph_mean_std_ms": graph_std,
-            "graph_mean_rel_std": 100 * graph_std / mean if mean else 0,
-        }
-        if collect_kernel_times or patterns is not None:
-            kernel_times = _sample_kernel_records(profiled)
-            result["kernel_times"] = kernel_times
-            result["kernel_metadata_status"] = "recorded" if kernel_times else "unavailable"
-            result["kernel_metadata_source"] = "timed_samples"
+        mean = result["mean"]
+        result.update(
+            {
+                "graph_count": n_graphs,
+                "requested_graph_count": requested_graph_count,
+                "graph_memory_limited": graph_memory_limited,
+                "graph_pool_reserved_bytes": graph_pool_reserved_bytes,
+                "samples_per_graph": per_graph,
+                "graph_means_ms": graph_means.tolist(),
+                "graph_mean_std_ms": graph_std,
+                "graph_mean_rel_std": 100 * graph_std / mean if mean else 0,
+            }
+        )
         return result
+
+
+def benchmark_eager(
+    fn,
+    warmup=100.0,
+    rep=50.0,
+    min_rep=2,
+    initial_rep=5,
+    grad_to_none=None,
+    fast_flush=True,
+    *,
+    max_rep=1000,
+    setup_fn=None,
+    kernel_filter=None,
+    collect_kernel_times=False,
+):
+    """Measure cold-cache device spans of direct launches, for work that cannot be captured.
+
+    Samples follow benchmark_cuda_graph: setup and the cache flush run before
+    each sample, and a sample spans its first to last GPU activity, including
+    the host-staged copies its launches issue.
+    """
+    _check_budget(warmup, rep, min_rep, initial_rep, max_rep)
+    dtype = torch.int32 if fast_flush else torch.int8
+    cache = torch.empty(FLUSH_BYTES // dtype.itemsize, dtype=dtype, device="cuda")
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    def prepare():
+        if setup_fn is not None:
+            setup_fn()
+        if grad_to_none is not None:
+            for x in grad_to_none:
+                x.grad = None
+        cache.zero_()
+
+    def sample():
+        prepare()
+        start.record()
+        fn()
+        end.record()
+        end.synchronize()
+        return start.elapsed_time(end)
+
+    sample()
+    calibration_ms = 0.0
+    for calibration_count in range(1, initial_rep + 1):
+        calibration_ms += sample()
+        if calibration_ms >= max(warmup, rep):
+            break
+    n_warmup, n_repeat = iteration_counts(calibration_ms / calibration_count, warmup, rep, min_rep, max_rep)
+    for _ in range(n_warmup):
+        prepare()
+        fn()
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    ) as prof:
+        for _ in range(n_repeat):
+            prepare()
+            torch.cuda.synchronize()
+            with torch.profiler.record_function("tilegym.eager.sample"):
+                fn()
+                torch.cuda.synchronize()
+    # Only CUDA runtime and driver calls share correlation IDs with device activities.
+    profiled = _profile_samples(
+        prof.profiler.kineto_results.events(),
+        n_repeat,
+        "tilegym.eager.sample",
+        lambda name: name.startswith("cu"),
+        "Eager",
+    )
+    return _summarize(profiled, kernel_filter, EAGER_PROTOCOL, collect_kernel_times, "eager")[0]
 
 
 def autotune_cutile_cuda_graph(stream, grid, kernel, args):

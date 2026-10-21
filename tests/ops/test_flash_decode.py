@@ -82,6 +82,108 @@ class Test_FlashDecode(common.PyTestCase):
         )
 
     @pytest.mark.parametrize(
+        "seq_len, kv_len_per_split",
+        [
+            (300, 32),
+            (129, 64),
+            (200, 16),
+            (1000, 16),
+            (257, 1),
+            (256, 64),
+            (1024, 8),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_small_kv_len_per_split(self, seq_len, kv_len_per_split, backend):
+        """Explicit kv_len_per_split smaller than the kernel's KV tile.
+
+        Every split must cover exactly its own KV rows. If a split instead walks
+        the whole KV tile that contains its start, neighbouring splits count the
+        same rows again, which changes the softmax weights whenever seq_len is
+        not a multiple of the tile.
+        """
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available, skipping FMHA test")
+        self.setUp()
+
+        batch_size = 2
+        num_heads = 32
+        group_size = 4
+        head_dim = 64
+        dtype = torch.float16
+
+        torch.manual_seed(42)
+        q = torch.randn(batch_size, num_heads, 1, head_dim, device="cuda").to(dtype)
+        k = torch.randn(batch_size, num_heads // group_size, seq_len, head_dim, device="cuda").to(dtype)
+        v = torch.randn(batch_size, num_heads // group_size, seq_len, head_dim, device="cuda").to(dtype)
+        sm_scale = 1.0 / math.sqrt(head_dim)
+
+        self.assertCorrectness(
+            tilegym.ops.fmha_decode,
+            self.reference,
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "sm_scale": sm_scale,
+            },
+            extra_test_kwargs={"kv_len_per_split": kv_len_per_split},
+            atol=1e-2,
+            rtol=1e-2,
+            check_stride=False,
+        )
+
+    @pytest.mark.parametrize("seq_len", [1, 2, 3, 129])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_very_negative_scores(self, seq_len, backend):
+        """Padded KV rows must get zero weight even if every real score is very negative.
+
+        q >= 0 and k <= 0 elementwise with magnitude ~300, so every raw q.k score
+        is about -3.7e6, far below any finite mask value such as -1e6. The
+        reference runs in float32 because these scores do not fit in float16.
+        """
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available, skipping FMHA test")
+        self.setUp()
+
+        batch_size = 2
+        num_heads = 32
+        group_size = 4
+        head_dim = 64
+        dtype = torch.float16
+
+        torch.manual_seed(42)
+        q = (torch.randn(batch_size, num_heads, 1, head_dim, device="cuda").abs() * 300).to(dtype)
+        k = (-torch.randn(batch_size, num_heads // group_size, seq_len, head_dim, device="cuda").abs() * 300).to(dtype)
+        v = torch.randn(batch_size, num_heads // group_size, seq_len, head_dim, device="cuda").to(dtype)
+        sm_scale = 1.0 / math.sqrt(head_dim)
+
+        def reference_fp32(q, k, v, sm_scale):
+            return self.reference(q.float(), k.float(), v.float(), sm_scale).to(q.dtype)
+
+        self.assertCorrectness(
+            tilegym.ops.fmha_decode,
+            reference_fp32,
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "sm_scale": sm_scale,
+            },
+            atol=1e-2,
+            rtol=1e-2,
+            check_stride=False,
+        )
+
+    @pytest.mark.parametrize(
         "batch_size, num_heads, seq_len, head_dim, group_size, dtype",
         [
             (batch_size, num_heads, seq_len, head_dim, group_size, dtype)

@@ -30,8 +30,6 @@ def _group_gemm_autotune_configs():
         yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=64, num_ctas=1, occupancy=1)
     elif gpu_capability[0] < 9:
         yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
-        if gpu_capability == (8, 0):
-            yield SimpleNamespace(TILE_M=64, TILE_N=64, TILE_K=64, num_ctas=1, occupancy=1)
     else:
         yield SimpleNamespace(TILE_M=128, TILE_N=128, TILE_K=128, num_ctas=1, occupancy=1)
         yield SimpleNamespace(TILE_M=256, TILE_N=256, TILE_K=64, num_ctas=2, occupancy=1)
@@ -39,9 +37,9 @@ def _group_gemm_autotune_configs():
 
 @ct.kernel
 def _group_gemm_kernel(
-    As,
-    Bs,
-    Cs,
+    As,  # List of A matrices
+    Bs,  # List of B matrices
+    Cs,  # List of C matrices
     TILE_M: ConstInt,
     TILE_N: ConstInt,
     TILE_K: ConstInt,
@@ -53,7 +51,7 @@ def _group_gemm_kernel(
     group_size = len(As)
     zero_pad = ct.PaddingMode.ZERO
 
-    for g in ct.static_iter(range(group_size)):
+    for g in range(group_size):
         Ai = As[g]
         Bi = Bs[g]
         Ci = Cs[g]
@@ -123,12 +121,11 @@ def _group_gemm_kernel(
 
 def _cutile_autotune_group_gemm(stream, group_A, group_B, group_C, transpose_b, device):
     """Autotune group GEMM kernel."""
-    group_A, group_B, group_C = tuple(group_A), tuple(group_B), tuple(group_C)
     NUM_SMS = torch.cuda.get_device_properties(device).multi_processor_count
     group_shapes = tuple((tuple(A.shape), tuple(B.shape)) for A, B in zip(group_A, group_B))
     cache_key = (group_shapes, transpose_b, group_A[0].dtype, str(group_A[0].device))
     if cache_key not in _group_gemm_tune_cache:
-        with ct.compiler_timeout(120 if torch.cuda.get_device_capability(device) == (8, 0) else 30):
+        with ct.compiler_timeout(30):
             result = exhaustive_search(
                 list(_group_gemm_autotune_configs()),
                 stream,

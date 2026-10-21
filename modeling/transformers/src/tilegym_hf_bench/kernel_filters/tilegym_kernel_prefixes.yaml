@@ -35,6 +35,7 @@ prefixes:
   - "_causal_conv1d_prefill_kernel"
   - "_causal_conv1d_prefill_silu_kernel"
   - "_residual_add_rms_norm_kernel"
+  - "_skinny_gemm"
   - "_rms_norm_residual_add_kernel"
   - "_dual_rms_norm_kernel"
   - "_olmoe_residual_add_rms_norm_kernel"

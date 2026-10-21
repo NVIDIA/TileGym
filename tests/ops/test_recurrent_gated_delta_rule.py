@@ -36,7 +36,7 @@ _DTYPES = [
 
 
 # fmt: off
-# Reference implementations copied verbatim from HuggingFace transformers v4.57.6:
+# Reference implementations copied from HuggingFace transformers v4.57.6 (one change, noted below):
 # https://github.com/huggingface/transformers/blob/753d61104116eefc8ffc977327b441ee0c8d599f/src/transformers/models/qwen3_next/modeling_qwen3_next.py#L436-L439
 def _l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
     """This function is intended to align with the l2norm implementation in the FLA library."""
@@ -45,6 +45,9 @@ def _l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
 
 
 # https://github.com/huggingface/transformers/blob/753d61104116eefc8ffc977327b441ee0c8d599f/src/transformers/models/qwen3_next/modeling_qwen3_next.py#L522-L561
+# Changed from upstream: the zero tensors are allocated on the input's device and dtype instead of
+# torch.zeros(...).to(value). test_perf times this reference inside a CUDA graph, and a CPU-to-GPU
+# copy is not allowed during graph capture.
 def _torch_recurrent_gated_delta_rule(
     query, key, value, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel=False
 ):
@@ -61,9 +64,11 @@ def _torch_recurrent_gated_delta_rule(
     scale = 1 / (query.shape[-1] ** 0.5)
     query = query * scale
 
-    core_attn_out = torch.zeros(batch_size, num_heads, sequence_length, v_head_dim).to(value)
+    core_attn_out = torch.zeros(
+        batch_size, num_heads, sequence_length, v_head_dim, device=value.device, dtype=value.dtype
+    )
     last_recurrent_state = (
-        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
+        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim, device=value.device, dtype=value.dtype)
         if initial_state is None
         else initial_state.to(value)
     )

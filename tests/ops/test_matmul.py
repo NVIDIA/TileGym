@@ -213,8 +213,8 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip("Skip 32768x32768 matmul on A100 (sm80) due to OOM")
         if dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip due to sm80 not support fp8 type")
-        if backend == "cutile" and not static_persistent and transpose_a:
-            pytest.skip("Cutile transpose_a is not supported when static_persistent is False")
+        if backend == "cutile" and not static_persistent and (transpose_a or transpose_b):
+            pytest.skip("cuTile transpose is not supported when static_persistent is False")
 
         a, b = self.prepare_data(m, n, k, transpose_a, transpose_b, offset_a, offset_b, dtype)
         kernel_kwargs = {
@@ -230,8 +230,6 @@ class Test_Matmul(common.PyTestCase):
             backend_fn = lambda: self.reference(_a, _b, transpose_a, transpose_b)
         elif tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
-            if backend == "cutile" and transpose_b:
-                pytest.skip("[matmul] cutile transpose_b is not supported")
             backend_fn = lambda: tilegym.ops.matmul(a, b, **kernel_kwargs)
         else:
             pytest.skip(f"Backend {backend} is not available")

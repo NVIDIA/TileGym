@@ -514,6 +514,75 @@ def grpo_loss(
 
 
 @dispatch(
+    "liger.dpo_loss",
+)
+def dpo_loss(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    ref_input: Optional[torch.Tensor] = None,
+    ref_weight: Optional[torch.Tensor] = None,
+    ref_bias: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    beta: float = 0.1,
+    alpha: float = 1.0,
+    compute_nll_loss: bool = False,
+    use_ref_model: bool = True,
+    average_log_prob: bool = False,
+    loss_type: str = "sigmoid",
+    chunk_size: Optional[int] = None,
+) -> Tuple[torch.Tensor, ...]:
+    """
+    Fused linear + DPO preference loss (chunked to avoid materializing logits).
+
+    Computes the Direct Preference Optimization loss over paired sequences
+    without materializing the full (B, T, V) logit tensor. The batch dimension
+    stacks the chosen sequences first and the rejected sequences second, so
+    B = 2 * n_pairs and row i is paired with row i + n_pairs.
+
+    Reference: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/chunked_loss/dpo_loss.py
+
+    Args:
+        input: Hidden states of shape (B, T, H).
+        weight: Vocabulary projection weight of shape (V, H).
+        target: Target token ids of shape (B, T). Prompt positions are masked
+            with ignore_index and do not contribute to the sequence log-prob.
+        bias: Optional projection bias of shape (V,). Default: None
+        ref_input: Reference model hidden states of shape (B, T, H). Required
+            when use_ref_model=True. Default: None
+        ref_weight: Reference model weight of shape (V, H). Default: None
+        ref_bias: Optional reference model bias of shape (V,). Default: None
+        ignore_index: Target index to ignore. Default: -100
+        beta: Temperature of the preference loss. Default: 0.1
+        alpha: Weight of the auxiliary NLL term. Default: 1.0
+        compute_nll_loss: Also add alpha * NLL over the chosen half. Default: False
+        use_ref_model: Compute reference log-probs from ref_input/ref_weight;
+            when False the reference log-probs are treated as zero. Default: True
+        average_log_prob: Average the per-token log-probs over unmasked tokens
+            instead of summing them. Default: False
+        loss_type: Preference loss variant. Only "sigmoid" (the original DPO
+            loss) is supported for now. Default: "sigmoid"
+        chunk_size: Pairs per chunk. None selects a single pass when the full
+            logits fit in memory and a power-of-2 chunk count otherwise.
+            Chunking never changes results. Default: None
+
+    Returns:
+        Tuple (loss, chosen_logps, rejected_logps, chosen_logits_mean,
+        rejected_logits_mean, nll_loss, chosen_rewards, rejected_rewards):
+            loss: Scalar total loss (alpha * NLL + preference loss).
+            chosen_logps: Per-sequence log-probs of the chosen half, shape (n_pairs,).
+            rejected_logps: Per-sequence log-probs of the rejected half, shape (n_pairs,).
+            chosen_logits_mean: Mean of the chosen-half logits, scalar.
+            rejected_logits_mean: Mean of the rejected-half logits, scalar.
+            nll_loss: Normalized NLL over the chosen half, scalar (0 when disabled).
+            chosen_rewards: beta * (chosen_logps - ref_chosen_logps), shape (n_pairs,).
+            rejected_rewards: beta * (rejected_logps - ref_rejected_logps), shape (n_pairs,).
+    """
+    raise NotImplementedError(f"dpo_loss is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "liger.modulated_rms_norm",
 )
 def modulated_rms_norm(

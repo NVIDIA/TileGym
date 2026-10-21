@@ -21,8 +21,12 @@ import pytest
 import torch
 
 from tilegym.benchmark import benchmark_cuda_graph
+from tilegym.benchmark import benchmark_eager
 
 from .config import Config
+
+# Cleared by the disable_cudagraph marker for work that cannot be captured.
+USE_CUDA_GRAPH = True
 
 current_process = multiprocessing.current_process()
 if current_process.name == "MainProcess" and not Config.quiet:
@@ -1050,7 +1054,11 @@ def benchmark(
 
     """
     gc.collect()
-    _benchmark_fn = functools.partial(benchmark_fn_cudagraph, kernel_filter=kernel_filter)
+    _benchmark_fn = functools.partial(
+        benchmark_fn_cudagraph,
+        kernel_filter=kernel_filter,
+        timer=benchmark_cuda_graph if USE_CUDA_GRAPH else benchmark_eager,
+    )
     res = {}
     if mode in ("auto", "forward"):
         res["forward"] = _benchmark_fn(
@@ -1128,8 +1136,9 @@ def benchmark_fn_cudagraph(
     max_rep=Config.max_rep,
     setup_fn=None,
     kernel_filter=None,
+    timer=benchmark_cuda_graph,
 ):
-    result = benchmark_cuda_graph(
+    result = timer(
         fn,
         warmup,
         rep,

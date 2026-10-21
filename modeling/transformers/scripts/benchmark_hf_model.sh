@@ -22,7 +22,7 @@ usage() {
     cat <<EOF
 Usage: $0 --model-key KEY [options]
 
-Model keys: llama, deepseek, qwen, qwen3_5, gemma3, gpt_oss, mistral, phi3, olmo3, olmoe, lfm2_moe
+Model keys: llama, deepseek, qwen, qwen3_5, qwen3_8, gemma3, gpt_oss, mistral, phi3, olmo3, olmoe, lfm2_moe
 
 Options:
   --model-id ID           Override Hugging Face model id or local model path
@@ -93,6 +93,17 @@ case "${MODEL_KEY}" in
         DEFAULT_BATCH_SIZE=1
         DEFAULT_SUMMARY_FILE="qwen3_5_benchmark_summary.txt"
         TITLE="Qwen3.5-0.8B"
+        if [ "${LOG_DIR}" = "/logs" ]; then
+            LOG_DIR="${TMPDIR:-/tmp}/tilegym_bench"
+        fi
+        ;;
+    qwen3_8)
+        DEFAULT_MODEL_ID="Qwen/Qwen3.8-27B"
+        DEFAULT_INPUT_FILE="${PROJECT_DIR}/sample_inputs/input_prompt_small.txt"
+        DEFAULT_OUTPUT_LENGTH=50
+        DEFAULT_BATCH_SIZE=1
+        DEFAULT_SUMMARY_FILE="qwen3_8_benchmark_summary.txt"
+        TITLE="Qwen3.8-27B"
         if [ "${LOG_DIR}" = "/logs" ]; then
             LOG_DIR="${TMPDIR:-/tmp}/tilegym_bench"
         fi

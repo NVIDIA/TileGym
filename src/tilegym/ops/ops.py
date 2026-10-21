@@ -13,6 +13,7 @@ from typing import Any
 from typing import List
 from typing import Optional
 from typing import Tuple
+from typing import Union
 
 import torch
 
@@ -308,6 +309,24 @@ def persistent_layer_norm(
         Tuple of (output, mean, rstd, BLOCK_D, num_warps)
     """
     raise NotImplementedError(f"persistent_layer_norm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
+    "cat",
+)
+def cat(tensors: Union[Tuple[torch.Tensor, ...], List[torch.Tensor]], dim: int = 0, **kwargs: Any):
+    """
+    Concatenate tensors along a given dimension.
+
+    Args:
+        tensors: Sequence of tensors to concatenate
+        dim: Dimension along which to concatenate
+        **kwargs: Additional arguments for backend-specific configurations
+
+    Returns:
+        Concatenated tensor
+    """
+    raise NotImplementedError(f"cat is not implemented for {get_current_backend()}")
 
 
 @dispatch("fmha_variant", fallback_backend="triton")

@@ -61,6 +61,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: indicate whether the test is in slow CI pipeline")
     config.addinivalue_line("markers", "serial: indicate whether the test is in single thread pipeline")
     config.addinivalue_line("markers", "fast: indicate whether the test is in fast CI pipeline")
+    config.addinivalue_line("markers", "disable_cudagraph: time and autotune this test without CUDA Graph capture")
 
 
 def _detect_arch_default() -> str:
@@ -113,8 +114,16 @@ def framework(request):
 
 
 @pytest.fixture(autouse=True)
+def _eager_timing_without_cuda_graph(request, monkeypatch):
+    if request.node.get_closest_marker("disable_cudagraph"):
+        from tests import common
+
+        monkeypatch.setattr(common, "USE_CUDA_GRAPH", False)
+
+
+@pytest.fixture(autouse=True)
 def _graph_cutile_autotune_in_perf_tests(request, monkeypatch):
-    if "test_perf" not in request.node.name:
+    if "test_perf" not in request.node.name or request.node.get_closest_marker("disable_cudagraph"):
         yield
         return
     try:

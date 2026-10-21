@@ -1,0 +1,4 @@
+/goal Optimize the CUDA Tile paged-KV decode attention kernel at decode_cutile.py
+for the NVIDIA B200 on this machine. Use `pytest test_decode.py` to validate changes and `python bench_decode.py` to measure performance across its workload set, compare its performance with PyTorch SDPA. Preserve the interface and numerical tolerances. Establish the baseline, investigate the bottleneck, and use the CUDA Tile wiki when you have a specific optimization question. Continue investigating, optimizing, validating, and benchmarking autonomously. Keep the best correct implementation found. Stop when further exploration appears unlikely to yield worthwhile gains or the optimization budget is reached.
+
+Optimization budget: 90 minutes.

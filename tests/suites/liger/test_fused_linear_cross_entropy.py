@@ -118,6 +118,65 @@ class Test_Liger_FusedLinearCrossEntropy(common.PyTestCase):
     @pytest.mark.parametrize(
         "BT, H, V, dtype",
         [
+            (200, 64, 256, torch.float32),
+            (200, 64, 256, torch.bfloat16),
+            (200, 64, 256, torch.float16),
+            (97, 48, 300, torch.bfloat16),  # chunk count does not divide BT
+        ],
+    )
+    @pytest.mark.parametrize("with_bias", [False, True])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_chunked(self, BT, H, V, dtype, with_bias, backend, monkeypatch):
+        """The chunked backward-in-forward path (normally taken only when BT * V logits exceed 4 GB),
+        forced on small shapes: loss and the input, weight and bias gradients match the reference."""
+        self.setUp()
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+        import tilegym.suites.liger.cutile.fused_linear_cross_entropy as flce
+
+        elsize = torch.empty((), dtype=dtype).element_size()
+        monkeypatch.setattr(flce, "_MAX_LOGIT_MEMORY_BYTES", 0)  # never single-pass
+        monkeypatch.setattr(flce, "_MAX_CHUNK_LOGIT_BYTES", 32 * V * elsize)  # 32-row chunks
+
+        device = torch.device("cuda")
+        gen = torch.Generator(device="cpu").manual_seed(0)
+        input_data = (torch.randn(BT, H, generator=gen) * 0.5).to(device=device, dtype=dtype)
+        weight = (torch.randn(V, H, generator=gen) * 0.1).to(device=device, dtype=dtype)
+        bias = (torch.randn(V, generator=gen) * 0.1).to(device=device, dtype=dtype) if with_bias else None
+        target = torch.randint(0, V, (BT,), generator=gen).to(device)
+        target[: BT // 4] = -100
+
+        x_test = input_data.clone().requires_grad_(True)
+        w_test = weight.clone().requires_grad_(True)
+        b_test = bias.clone().requires_grad_(True) if with_bias else None
+        loss_test = fused_linear_cross_entropy(x_test, w_test, target, bias=b_test, ignore_index=-100)
+        loss_test.backward()
+
+        x_ref = input_data.clone().float().requires_grad_(True)
+        w_ref = weight.clone().float().requires_grad_(True)
+        b_ref = bias.clone().float().requires_grad_(True) if with_bias else None
+        loss_ref = self.reference(x_ref, w_ref, target, bias=b_ref, ignore_index=-100)
+        loss_ref.backward()
+
+        tol = 5e-3 if dtype == torch.float32 else 2e-2
+        pairs = [
+            ("loss", loss_test, loss_ref),
+            ("dInput", x_test.grad, x_ref.grad),
+            ("dWeight", w_test.grad, w_ref.grad),
+        ]
+        if with_bias:
+            pairs.append(("dBias", b_test.grad, b_ref.grad))
+        for name, t, r in pairs:
+            assert t is not None, f"{name} is None"
+            assert torch.allclose(t.float(), r.float(), atol=tol, rtol=tol), (
+                f"{name} mismatch: max_diff={(t.float() - r.float()).abs().max().item():.6f}"
+            )
+
+    @pytest.mark.parametrize(
+        "BT, H, V, dtype",
+        [
             (4, 64, 128, torch.float32),
             (4, 64, 128, torch.float16),
         ],

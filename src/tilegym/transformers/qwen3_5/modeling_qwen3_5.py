@@ -31,6 +31,17 @@ from tilegym.transformers.qwen3_5.kernels.residual_add_rms_norm import residual_
 from tilegym.transformers.qwen3_5.kernels.rms_norm_gated import rms_norm_gated_cutile
 from tilegym.transformers.qwen3_5.kernels.sigmoid_mul import sigmoid_mul_cutile
 from tilegym.transformers.qwen3_5.kernels.silu_and_mul_separate import silu_and_mul_separate_cutile
+from tilegym.transformers.qwen3_5.kernels.skinny_gemm_tn_sm120 import skinny_gemm_tn_sm120_cutile
+from tilegym.transformers.qwen3_5.kernels.skinny_gemm_tn_stack_sm120 import skinny_gemm_tn_stack_sm120_cutile
+from tilegym.transformers.qwen3_5.kernels.skinny_gemm_tn_x4_sm120 import skinny_gemm_tn_x4_sm120_cutile
+
+_GROUP_GEMM_ENABLED = False
+
+
+def set_group_gemm_enabled(enabled: bool) -> None:
+    global _GROUP_GEMM_ENABLED
+    _GROUP_GEMM_ENABLED = enabled
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Replacement Qwen3_5RMSNormGated using cuTile
@@ -67,14 +78,36 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
         conv_state = cache_params.layers[self.layer_idx].conv_states
         recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
 
-    mixed_qkv = self.in_proj_qkv(hidden_states)
-    mixed_qkv = mixed_qkv.transpose(1, 2)
+    if (
+        _GROUP_GEMM_ENABLED
+        and hidden_states.is_cuda
+        and hidden_states.dtype == torch.bfloat16
+        and batch_size * seq_len <= 32
+        and self.in_proj_qkv.bias is None
+    ):
+        # One launch for all four GDN in-projections (cuTile x4 group kernel)
+        hs2d = hidden_states.reshape(batch_size * seq_len, -1)
+        _x4 = skinny_gemm_tn_x4_sm120_cutile
+        mixed_qkv, z, b, a = _x4(
+            hs2d,
+            self.in_proj_qkv.weight,
+            self.in_proj_z.weight,
+            self.in_proj_b.weight,
+            self.in_proj_a.weight,
+        )
+        mixed_qkv = mixed_qkv.view(batch_size, seq_len, -1).transpose(1, 2)
+        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        b = b.view(batch_size, seq_len, -1)
+        a = a.view(batch_size, seq_len, -1)
+    else:
+        mixed_qkv = self.in_proj_qkv(hidden_states)
+        mixed_qkv = mixed_qkv.transpose(1, 2)
 
-    z = self.in_proj_z(hidden_states)
-    z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        z = self.in_proj_z(hidden_states)
+        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
 
-    b = self.in_proj_b(hidden_states)
-    a = self.in_proj_a(hidden_states)
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
 
     if use_precomputed_states and seq_len == 1:
         mixed_qkv = self.causal_conv1d_update(
@@ -119,9 +152,18 @@ def _gated_delta_net_forward_tilegym(self, hidden_states, cache_params=None, cac
     # Fused gate preprocessing (cuTile)
     beta, g = gdr_preprocess_cutile(b, a, self.A_log, self.dt_bias)
 
-    if self.num_v_heads // self.num_k_heads > 1:
-        query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-        key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+    # The cuTile recurrent (decode) kernel maps value heads to q/k heads in-kernel
+    # (idx_h = idx_hv // (HV // H)), so the physical head expansion is only needed
+    # for the chunked prefill path and for the Triton recurrent fallback. Skipping
+    # it at decode removes 2 copies + 2 kernel launches per GDN layer per token.
+    need_repeat = self.num_v_heads // self.num_k_heads > 1
+    if need_repeat:
+        from tilegym.backend import get_current_backend
+
+        decode_without_repeat = use_precomputed_states and seq_len == 1 and get_current_backend() == "cutile"
+        if not decode_without_repeat:
+            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
     if use_precomputed_states and seq_len == 1:
         core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
@@ -176,8 +218,27 @@ def _attention_forward_tilegym(
     gate = gate.reshape(*input_shape, -1)
 
     query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
-    key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+    if (
+        _GROUP_GEMM_ENABLED
+        and hidden_states.is_cuda
+        and hidden_states.dtype == torch.bfloat16
+        and math.prod(hidden_states.shape[:-1]) <= 32
+        and self.k_proj.bias is None
+    ):
+        # One launch for the k/v projection pair (cuTile stacked group kernel).
+        # The stacked weight is cached on the module; inference-only (weights frozen).
+        kv_w = getattr(self, "_kv_weight_stacked", None)
+        if kv_w is None:
+            kv_w = torch.stack((self.k_proj.weight, self.v_proj.weight)).contiguous()
+            self._kv_weight_stacked = kv_w
+        m = math.prod(hidden_states.shape[:-1])
+        _stack = skinny_gemm_tn_stack_sm120_cutile
+        kv = _stack(hidden_states.reshape(m, -1), kv_w)
+        key_states = self.k_norm(kv[0].view(hidden_shape)).transpose(1, 2)
+        value_states = kv[1].view(hidden_shape).transpose(1, 2)
+    else:
+        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
     cos, sin = position_embeddings
     from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
@@ -302,6 +363,53 @@ def get_fmha_qwen3_5_interface(backend=None, kernel_configs=None):
         return o.transpose(1, 2).contiguous(), None
 
     return fmha_interface_wrapper
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Guarded decode Linear: route measured skinny-GEMV win shapes to cuTile
+# ──────────────────────────────────────────────────────────────────────
+
+# Projection shapes where the skinny_gemm_tn kernel measured faster than cuBLAS at M == 1.
+_SKINNY_GEMM_WIN_SHAPES = frozenset(
+    {
+        (5120, 10240),
+        (5120, 6144),
+        (5120, 48),
+        (6144, 5120),
+        (5120, 12288),
+        (5120, 1024),
+    }
+)
+
+
+class Qwen3_5SkinnyLinearTileGym(nn.Linear):
+    """nn.Linear drop-in routing measured decode-GEMV win shapes to cuTile.
+
+    Decode (B*S == 1) projections whose (in_features, out_features) pair was
+    measured faster than cuBLAS at M == 1 go to the cuTile split-K/GEMV kernel;
+    everything else keeps the stock F.linear (cuBLAS) path, so installing this
+    as the qwen3_5 module-global nn.Linear is inert for non-winning shapes and
+    for prefill.
+
+    Tuning targets: the wired kernels are tuned for SM120 (RTX PRO Blackwell).
+    On other architectures they stay numerically correct (the inventory
+    contract validates every workload row) but are not guaranteed to beat
+    cuBLAS; treat the speedups as RTX PRO Blackwell-class results.
+    """
+
+    def forward(self, input):
+        if (
+            self.bias is None
+            and input.is_cuda
+            and input.dtype == torch.bfloat16
+            and (self.in_features, self.out_features) in _SKINNY_GEMM_WIN_SHAPES
+            and input.numel() == self.in_features  # decode: B*S == 1
+        ):
+            a = input.reshape(1, self.in_features)
+            _gemv = skinny_gemm_tn_sm120_cutile
+            out = _gemv(a, self.weight)
+            return out.view(*input.shape[:-1], self.out_features)
+        return F.linear(input, self.weight, self.bias)
 
 
 # ──────────────────────────────────────────────────────────────────────

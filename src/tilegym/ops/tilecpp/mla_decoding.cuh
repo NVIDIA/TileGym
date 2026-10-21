@@ -181,7 +181,7 @@ __tile_global__ void naive_absorb_mla(
  * Then transposes back for final output.
  */
 template<typename T, int BLOCK_D, int BLOCK_H, int BLOCK_N, int BLOCK_KPE,
-         int EVEN_STRIDES, int S_KV, bool EVEN_N>
+         int EVEN_STRIDES, int S_KV, bool EVEN_N, bool REUSE_KV>
 __tile_global__ void naive_absorb_mla_transpose(
     T* __restrict__ Q, T* __restrict__ QPE,
     T* __restrict__ KV, T* __restrict__ KPE_in,
@@ -328,12 +328,15 @@ __tile_global__ void naive_absorb_mla_transpose(
         // Scale accumulator [BLOCK_D, BLOCK_H]
         acc = acc * alpha_bcast;
 
-        // Load V: [BLOCK_N, BLOCK_D] and transpose to [BLOCK_D, BLOCK_N]
         typename decltype(kv_view)::view_tile_type v_3d;
-        [[ using cutile : hint(0, allow_tma=true, latency=2) ]]
-        v_3d = kv_view.load_masked(batch_idx, block_idx, 0);
+        if constexpr (REUSE_KV) {
+            v_3d = k_3d;
+        } else {
+            [[ using cutile : hint(0, allow_tma=true, latency=2) ]]
+            v_3d = kv_view.load_masked(batch_idx, block_idx, 0);
+        }
         auto v = ct::reshape(v_3d, ct::shape<BLOCK_N, BLOCK_D>{});
-        auto v_trans = ct::transpose(v);  // [BLOCK_D, BLOCK_N]
+        auto v_trans = ct::transpose(v);
 
         acc = ct::mma(v_trans, ct::element_cast<T>(p), acc);
 
