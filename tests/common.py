@@ -723,6 +723,12 @@ class TestParam:
 _COMPARISON_CHUNK_ELEMENTS = 1_048_576
 
 
+def _comparison_dtype(dtype):
+    if dtype.is_complex:
+        return torch.complex128 if dtype == torch.complex128 else torch.complex64
+    return torch.float64 if dtype == torch.float64 else torch.float32
+
+
 @torch.no_grad()
 def compare_tensors(
     test,
@@ -780,7 +786,7 @@ def compare_tensors(
             )
 
     dtype = test.dtype
-    comparison_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+    comparison_dtype = _comparison_dtype(dtype)
     input = test.to(comparison_dtype)
     reference = reference.to(comparison_dtype)
     input = torch.where(torch.isnan(reference), float("nan"), input)
@@ -816,11 +822,12 @@ def compare_tensors(
     abs_ref = reference.abs()
     abs_input = input.abs()
 
+    range_label = "real range" if input.is_complex() else "range"
     msgs = [
         f"allclose: {allclose}",
         f"matched: {close_count} / {total_count} [{close_percent:.2f}%]",
-        f"ref range:    {reference.min():11.4e} : {reference.max():11.4e}",
-        f"test range:   {input.min():11.4e} : {input.max():11.4e}",
+        f"ref {range_label}:  {reference.real.min():11.4e} : {reference.real.max():11.4e}",
+        f"test {range_label}: {input.real.min():11.4e} : {input.real.max():11.4e}",
         f"|ref| range:  {abs_ref.min():11.4e} : {abs_ref.max():11.4e}",
         f"|test| range: {abs_input.min():11.4e} : {abs_input.max():11.4e}",
         f"max absolute difference: {max_abs_diff:11.4e}",
@@ -876,7 +883,7 @@ def _compare_tensors_chunked(
     max_max_mean_change = None
     max_arith_mean_change = None
 
-    comparison_dtype = torch.float64 if test.dtype == torch.float64 else torch.float32
+    comparison_dtype = _comparison_dtype(test.dtype)
     with torch.no_grad():
         for selection in _comparison_slices(test.shape, chunk_size):
             input = test[selection].to(comparison_dtype)
@@ -909,10 +916,10 @@ def _compare_tensors_chunked(
             arith_mean_change = abs_diff / arith_mean_change_denom
             arith_mean_change[arith_mean_change_denom == 0] = 0
 
-            chunk_ref_min = ref.min()
-            chunk_ref_max = ref.max()
-            chunk_test_min = input.min()
-            chunk_test_max = input.max()
+            chunk_ref_min = ref.real.min()
+            chunk_ref_max = ref.real.max()
+            chunk_test_min = input.real.min()
+            chunk_test_max = input.real.max()
             chunk_abs_ref_min = abs_ref.min()
             chunk_abs_ref_max = abs_ref.max()
             chunk_abs_test_min = abs_input.min()
@@ -958,11 +965,12 @@ def _compare_tensors_chunked(
 
     total_count = test.numel()
     close_percent = close_count / total_count * 100
+    range_label = "real range" if test.is_complex() else "range"
     msgs = [
         f"allclose: {allclose}",
         f"matched: {close_count} / {total_count} [{close_percent:.2f}%]",
-        f"ref range:    {ref_min:11.4e} : {ref_max:11.4e}",
-        f"test range:   {test_min:11.4e} : {test_max:11.4e}",
+        f"ref {range_label}:  {ref_min:11.4e} : {ref_max:11.4e}",
+        f"test {range_label}: {test_min:11.4e} : {test_max:11.4e}",
         f"|ref| range:  {abs_ref_min:11.4e} : {abs_ref_max:11.4e}",
         f"|test| range: {abs_test_min:11.4e} : {abs_test_max:11.4e}",
         f"max absolute difference: {max_abs_diff:11.4e}",
