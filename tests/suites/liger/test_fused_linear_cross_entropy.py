@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import gc
+import importlib
 
 import pytest
 import torch
@@ -134,7 +135,7 @@ class Test_Liger_FusedLinearCrossEntropy(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
-        import tilegym.suites.liger.cutile.fused_linear_cross_entropy as flce
+        flce = importlib.import_module(f"tilegym.suites.liger.{backend}.fused_linear_cross_entropy")
 
         elsize = torch.empty((), dtype=dtype).element_size()
         monkeypatch.setattr(flce, "_MAX_LOGIT_MEMORY_BYTES", 0)  # never single-pass
