@@ -23,7 +23,22 @@ _DEFAULT_TMA_OCCUPANCY = 2
 _TMA_FWD_OCCUPANCY_CANDIDATES = (2, 4, 6, 8)
 # None keeps the compiler default; worker warps above 8 can hang the gather kernels.
 _GATHER_WORKER_WARP_CANDIDATES = (None, 4, 8)
+_BWD_TMA_HINT_CANDIDATES = (
+    SimpleNamespace(occupancy=2, num_worker_warps=None),
+    SimpleNamespace(occupancy=4, num_worker_warps=None),
+    SimpleNamespace(occupancy=6, num_worker_warps=None),
+    SimpleNamespace(occupancy=8, num_worker_warps=None),
+    SimpleNamespace(occupancy=1, num_worker_warps=8),
+)
 _softmax_tune_cache: dict = {}
+# Online softmax tile width is fixed so a wide row never becomes one whole-row
+# register tile.
+_ONLINE_FWD_TILE_SIZE = 16384
+_ONLINE_BWD_TILE_SIZE = 16384
+# Backward re-reads (y, dy) in its second pass; bounding the rows resident per SM
+# keeps that working set inside L2.
+_ONLINE_BWD_ROWS_PER_SM = 2
+_ONLINE_BWD_HINTS_BY_ARCH = {(10, 7): dict(occupancy=2, num_worker_warps=4)}
 
 
 @ct.kernel(occupancy=4)
@@ -86,6 +101,125 @@ def _softmax_kernel_multi_wave_full_row_reg_cached_ldg(
     softmax_output = ct.truediv(numerator, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
     softmax_output = ct.astype(softmax_output, input.dtype)
     ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=check_bound)
+
+
+@ct.kernel
+def _softmax_kernel_backward(
+    output,
+    input,
+    do_tensor,
+    TILE_SIZE: ConstInt,
+    N_COLS: ConstInt,
+):
+    """One block per row; the whole row is a single tile (TILE_SIZE >= N_COLS)."""
+    row_idx = ct.bid(0)
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+    # Bounds checks compile out when the row exactly fills the tile.
+    check_bounds = TILE_SIZE != N_COLS
+
+    # Load the probability and gradient rows; out-of-range columns read as zero
+    probs_tile = ct.gather(input, (row_idx, offsets), check_bounds=check_bounds, padding_value=0.0)
+    do_tile = ct.gather(do_tensor, (row_idx, offsets), check_bounds=check_bounds, padding_value=0.0)
+
+    # Convert to float32 for computation
+    probs_tile = ct.astype(probs_tile, ct.float32)
+    do_tile = ct.astype(do_tile, ct.float32)
+
+    # Compute dxhat = probs * do
+    dxhat = probs_tile * do_tile
+
+    # Compute the full-row sum of dxhat
+    dxhat_sum = ct.sum(dxhat, axis=0, keepdims=True)
+
+    # Compute softmax gradient: dxhat - probs * sum(dxhat)
+    probs_times_sum = probs_tile * dxhat_sum
+    softmax_grad_output = dxhat - probs_times_sum
+
+    # Convert back to original dtype and store
+    softmax_grad_output = ct.astype(softmax_grad_output, input.dtype)
+    ct.scatter(output, (row_idx, offsets), softmax_grad_output, check_bounds=check_bounds)
+
+
+@ct.kernel(occupancy=2, num_worker_warps=8)
+def _online_softmax_kernel(
+    output,
+    input,
+    N_COLS: ConstInt,
+    TILE_SIZE: ConstInt,
+    NUM_TILES: ConstInt,
+):
+    """Online softmax forward: one block per row, walked in NUM_TILES fixed tiles.
+
+    Pass 1 keeps a running max and a running sum rescaled onto it; pass 2 normalizes."""
+    row_idx = ct.bid(0)
+    # Bounds checks compile out when the row divides evenly into tiles.
+    check_bounds = (N_COLS % TILE_SIZE) != 0
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+
+    row_max = ct.full((1,), -math.inf, dtype=ct.float32)
+    denominator = ct.full((1,), 0.0, dtype=ct.float32)
+
+    for tile_idx in range(NUM_TILES):
+        cols = offsets + tile_idx * TILE_SIZE
+        chunk = ct.gather(input, (row_idx, cols), check_bounds=check_bounds, padding_value=-math.inf)
+        chunk = ct.astype(chunk, ct.float32)
+        new_max = ct.maximum(row_max, ct.max(chunk, 0, keepdims=True))
+        denominator = denominator * ct.exp(row_max - new_max, rounding_mode=RMd.APPROX)
+        denominator = denominator + ct.sum(ct.exp(chunk - new_max, rounding_mode=RMd.APPROX), 0, keepdims=True)
+        row_max = new_max
+
+    inv_denominator = ct.truediv(1.0, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
+
+    # Walk pass 2 from the last tile back: the most recently read tiles are the
+    # ones most likely still resident in L2.
+    for rev_idx in range(NUM_TILES):
+        cols = offsets + (NUM_TILES - 1 - rev_idx) * TILE_SIZE
+        chunk = ct.gather(input, (row_idx, cols), check_bounds=check_bounds, padding_value=-math.inf)
+        chunk = ct.astype(chunk, ct.float32)
+        softmax_output = ct.exp(chunk - row_max, rounding_mode=RMd.APPROX) * inv_denominator
+        softmax_output = ct.astype(softmax_output, input.dtype)
+        ct.scatter(output, (row_idx, cols), softmax_output, check_bounds=check_bounds)
+
+
+@ct.kernel(occupancy=2, num_worker_warps=8)
+def _online_softmax_kernel_backward(
+    output,
+    input,
+    do_tensor,
+    N_ROWS: ConstInt,
+    N_COLS: ConstInt,
+    TILE_SIZE: ConstInt,
+    NUM_TILES: ConstInt,
+):
+    """Online softmax backward with a persistent grid-stride row loop.
+
+    Pass 1 accumulates the full-row sum(y * dy) over all tiles; pass 2 emits
+    y * (dy - sum)."""
+    pid = ct.bid(0)
+    num_programs = ct.num_blocks(0)
+    check_bounds = (N_COLS % TILE_SIZE) != 0
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+
+    for row_idx in range(pid, N_ROWS, num_programs):
+        dxhat_row_sum = ct.full((1,), 0.0, dtype=ct.float32)
+
+        for tile_idx in range(NUM_TILES):
+            cols = offsets + tile_idx * TILE_SIZE
+            probs_tile = ct.gather(input, (row_idx, cols), check_bounds=check_bounds, padding_value=0.0)
+            do_tile = ct.gather(do_tensor, (row_idx, cols), check_bounds=check_bounds, padding_value=0.0)
+            probs_tile = ct.astype(probs_tile, ct.float32)
+            do_tile = ct.astype(do_tile, ct.float32)
+            dxhat_row_sum = dxhat_row_sum + ct.sum(probs_tile * do_tile, 0, keepdims=True)
+
+        for rev_idx in range(NUM_TILES):
+            cols = offsets + (NUM_TILES - 1 - rev_idx) * TILE_SIZE
+            probs_tile = ct.gather(input, (row_idx, cols), check_bounds=check_bounds, padding_value=0.0)
+            do_tile = ct.gather(do_tensor, (row_idx, cols), check_bounds=check_bounds, padding_value=0.0)
+            probs_tile = ct.astype(probs_tile, ct.float32)
+            do_tile = ct.astype(do_tile, ct.float32)
+            softmax_grad_output = probs_tile * (do_tile - dxhat_row_sum)
+            softmax_grad_output = ct.astype(softmax_grad_output, input.dtype)
+            ct.scatter(output, (row_idx, cols), softmax_grad_output, check_bounds=check_bounds)
 
 
 # TMA version with static persistent scheduling
@@ -184,6 +318,41 @@ def _softmax_kernel_chunked(
             ct.scatter(output, (row_idx, col_indices), softmax_output, check_bounds=True)
 
 
+@ct.kernel(occupancy=2)
+def _softmax_kernel_backward_tma(
+    output,
+    input,
+    do_tensor,
+    TILE_SIZE: ConstInt,
+):
+    """One block per row; the whole row is a single tile (TILE_SIZE >= n_cols).
+
+    Out-of-range columns load as zero and are dropped by the store."""
+    row_idx = ct.bid(0)
+
+    # Load the probability and gradient rows
+    probs_tile = ct.load(input, index=(row_idx, 0), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.ZERO)
+    do_tile = ct.load(do_tensor, index=(row_idx, 0), shape=(1, TILE_SIZE), padding_mode=ct.PaddingMode.ZERO)
+
+    # Convert to float32 for computation
+    probs_tile = ct.astype(probs_tile, ct.float32)
+    do_tile = ct.astype(do_tile, ct.float32)
+
+    # Compute dxhat = probs * do
+    dxhat = probs_tile * do_tile
+
+    # Compute the full-row sum of dxhat along axis 1
+    dxhat_sum = ct.sum(dxhat, axis=1, keepdims=True)
+
+    # Compute softmax gradient: dxhat - probs * sum(dxhat)
+    probs_times_sum = probs_tile * dxhat_sum
+    softmax_grad_output = dxhat - probs_times_sum
+
+    # Convert back to original dtype and store
+    softmax_grad_output = ct.astype(softmax_grad_output, input.dtype)
+    ct.store(output, index=(row_idx, 0), tile=softmax_grad_output)
+
+
 # Launch patterns for the kernels:
 def _cfg_hints(cfg):
     """Map a tuning-config namespace to a cuTile launch-hint dict."""
@@ -252,9 +421,46 @@ def _launch_softmax_kernel_multi_wave_full_row_reg_cached_ldg(input, output, TIL
     )
 
 
+def _launch_online_softmax_kernel(input, output, TILE_SIZE=_ONLINE_FWD_TILE_SIZE):
+    """Launch the online softmax forward kernel: one block per row, bounded tiles."""
+    n_rows, n_cols = input.shape
+    input = input.contiguous()
+    output = output.contiguous()
+    num_tiles = (n_cols + TILE_SIZE - 1) // TILE_SIZE
+    grid = (n_rows, 1, 1)
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        _online_softmax_kernel,
+        (output, input, n_cols, TILE_SIZE, num_tiles),
+    )
+
+
+def _launch_online_softmax_backward_kernel(input, do, output, TILE_SIZE=_ONLINE_BWD_TILE_SIZE):
+    """Launch the online softmax backward kernel: persistent grid, bounded tiles."""
+    n_rows, n_cols = input.shape
+    input = input.contiguous()
+    do = do.contiguous()
+    output = output.contiguous()
+    num_tiles = (n_cols + TILE_SIZE - 1) // TILE_SIZE
+    num_sm = torch.cuda.get_device_properties(input.device).multi_processor_count
+    grid = (min(num_sm * _ONLINE_BWD_ROWS_PER_SM, n_rows), 1, 1)
+    kernel = _online_softmax_kernel_backward
+    arch_hints = _ONLINE_BWD_HINTS_BY_ARCH.get(torch.cuda.get_device_capability(input.device))
+    if arch_hints:
+        kernel = cached_replace_hints(kernel, **arch_hints)
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        kernel,
+        (output, input, do, n_rows, n_cols, TILE_SIZE, num_tiles),
+    )
+
+
 def _launch_softmax_kernel_tma(
     input,
     output,
+    use_online=None,
 ):
     """
     Launch the TMA cuTile softmax kernel
@@ -262,7 +468,9 @@ def _launch_softmax_kernel_tma(
     Args:
         input: Input tensor of shape (n_rows, n_cols)
         output: Output tensor of shape (n_rows, n_cols)
+        use_online: Whether to use online algorithm
     """
+    COL_THRESHOLD = 32768
     # Ensure input is 2D
     if input.dim() == 1:
         input = input.unsqueeze(0)
@@ -275,6 +483,13 @@ def _launch_softmax_kernel_tma(
 
     TILE_SIZE = next_power_of_2(n_cols)
     original_n_cols = n_cols
+
+    if use_online is None:
+        use_online = n_cols >= COL_THRESHOLD
+
+    if use_online:
+        _launch_online_softmax_kernel(input, output)
+        return
 
     # Regular TMA path (single tile per row, persistent scheduling)
     # Ensure tensors are contiguous
@@ -344,6 +559,147 @@ def _launch_softmax_kernel_chunked(
     )
 
 
+# Launch functions for backward kernels
+
+
+def _ensure_cuda_context(device):
+    """Make ``device``'s primary CUDA driver context current on the calling thread.
+
+    Backward runs on an autograd worker thread whose driver context stack can be
+    empty when no torch kernel has run on it yet, or hold another GPU's context;
+    exhaustive_search times configs through the driver API and fails there."""
+    try:
+        from cuda.bindings import driver as _drv
+
+        err, cur = _drv.cuCtxGetCurrent()
+        if err == _drv.CUresult.CUDA_SUCCESS and int(cur) != 0:
+            err, cur_device = _drv.cuCtxGetDevice()
+            if err == _drv.CUresult.CUDA_SUCCESS and int(cur_device) == device.index:
+                return
+        err, primary_ctx = _drv.cuDevicePrimaryCtxRetain(device.index)
+        if err == _drv.CUresult.CUDA_SUCCESS:
+            _drv.cuCtxSetCurrent(primary_ctx)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _launch_softmax_backward_kernel(input, do, output, TILE_SIZE=None):
+    """
+    Launch the basic cuTile softmax backward kernel
+
+    Args:
+        input: Softmax probabilities tensor of shape (n_rows, n_cols)
+        do: Gradient from upstream of shape (n_rows, n_cols)
+        output: Contiguous output gradient tensor of shape (n_rows, n_cols)
+        TILE_SIZE: Row tile width; must cover the whole row (default: next_power_of_2(n_cols))
+    """
+    n_rows, n_cols = input.shape
+    original_n_cols = n_cols
+    if TILE_SIZE is None:
+        TILE_SIZE = next_power_of_2(n_cols)
+    assert TILE_SIZE >= n_cols, f"TILE_SIZE ({TILE_SIZE}) must cover n_cols ({n_cols})"
+    # The kernel writes into output in place, so it must already be contiguous.
+    assert output.is_contiguous(), "softmax backward output must be contiguous"
+
+    # Ensure inputs are contiguous; gather bounds checks handle the tail past n_cols
+    input = input.contiguous()
+    do = do.contiguous()
+
+    # Calculate grid - single block per row
+    grid = (n_rows, 1, 1)
+    args = (output, input, do, TILE_SIZE, original_n_cols)
+
+    candidates = [SimpleNamespace(num_worker_warps=w) for w in _GATHER_WORKER_WARP_CANDIDATES]
+    if is_autotune_disabled():
+        cfg = candidates[0]
+    else:
+        cache_key = ("gather_bwd", str(input.device), input.dtype, n_rows, original_n_cols)
+        cfg = _softmax_tune_cache.get(cache_key)
+        if cfg is None:
+            result = exhaustive_search(
+                candidates,
+                torch.cuda.current_stream(),
+                lambda _: grid,
+                _softmax_kernel_backward,
+                lambda _: args,
+                _cfg_hints,
+            )
+            cfg = _softmax_tune_cache[cache_key] = result.best.config
+    hints = _cfg_hints(cfg)
+    softmax_kernel_backward = (
+        cached_replace_hints(_softmax_kernel_backward, **hints) if hints else _softmax_kernel_backward
+    )
+
+    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_backward, args)
+
+
+def _launch_softmax_backward_kernel_tma(
+    input,
+    do,
+    output,
+    use_online=None,
+):
+    """
+    Launch the TMA cuTile softmax backward kernel
+
+    Args:
+        input: Softmax probabilities tensor of shape (n_rows, n_cols)
+        do: Gradient from upstream of shape (n_rows, n_cols)
+        output: Output gradient tensor of shape (n_rows, n_cols)
+        use_online: Whether to use online algorithm
+    """
+    COL_THRESHOLD = 32768
+
+    # Ensure inputs are 2D
+    if input.dim() == 1:
+        input = input.unsqueeze(0)
+        do = do.unsqueeze(0)
+        output = output.unsqueeze(0)
+    elif input.dim() > 2:
+        input = input.view(-1, input.shape[-1])
+        do = do.view(-1, do.shape[-1])
+        output = output.view(-1, output.shape[-1])
+
+    n_rows, n_cols = input.shape
+
+    # Determine block size and kernel type
+    if use_online is None:
+        use_online = n_cols >= COL_THRESHOLD
+
+    if use_online:
+        _launch_online_softmax_backward_kernel(input, do, output)
+        return
+
+    TILE_SIZE = next_power_of_2(n_cols)
+
+    # The whole row is one tile; TMA zero-pads the load and clips the store past n_cols.
+    # The kernel writes into output in place, so it must already be contiguous.
+    assert output.is_contiguous(), "softmax backward output must be contiguous"
+    input = input.contiguous()
+    do = do.contiguous()
+    grid = (n_rows, 1, 1)
+    args = (output, input, do, TILE_SIZE)
+
+    if is_autotune_disabled():
+        cfg = _BWD_TMA_HINT_CANDIDATES[0]
+    else:
+        cache_key = ("tma_bwd", str(input.device), input.dtype, n_rows, n_cols)
+        cfg = _softmax_tune_cache.get(cache_key)
+        if cfg is None:
+            result = exhaustive_search(
+                list(_BWD_TMA_HINT_CANDIDATES),
+                torch.cuda.current_stream(),
+                lambda _: grid,
+                _softmax_kernel_backward_tma,
+                lambda _: args,
+                _cfg_hints,
+            )
+            cfg = _softmax_tune_cache[cache_key] = result.best.config
+    softmax_kernel_backward_func = cached_replace_hints(_softmax_kernel_backward_tma, **_cfg_hints(cfg))
+
+    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_backward_func, args)
+
+
 # Autograd Function Classes
 
 
@@ -353,6 +709,7 @@ class _Softmax(torch.autograd.Function):
         ctx,
         x,
         use_tma=False,
+        use_online=None,
         use_chunked=False,
         use_multi_wave=False,
     ):
@@ -368,9 +725,14 @@ class _Softmax(torch.autograd.Function):
                 stacklevel=3,
             )
             use_tma = False
+        COL_THRESHOLD = 16384
         n_rows, n_cols = x.shape
         TILE_SIZE = next_power_of_2(n_cols)
         MAX_TILE_SIZE = 8192
+
+        # Automatically choose between regular and online algorithms
+        if use_online is None:
+            use_online = n_cols >= COL_THRESHOLD
 
         # Create output tensor; kernels write in place, so it must be contiguous even if x is not
         y = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -384,17 +746,52 @@ class _Softmax(torch.autograd.Function):
             _launch_softmax_kernel_chunked(x, y, TILE_SIZE=min(TILE_SIZE, MAX_TILE_SIZE))
         elif use_tma:
             # Use TMA implementation
-            _launch_softmax_kernel_tma(x, y)
+            _launch_softmax_kernel_tma(x, y, use_online=use_online)
+        elif use_online:
+            _launch_online_softmax_kernel(x, y)
         else:
             # Use grid-based implementation
             _launch_softmax_kernel(x, y, TILE_SIZE=TILE_SIZE)
+        # Save for backward
+        ctx.save_for_backward(y)
+        ctx.use_tma = use_tma
+        ctx.use_online = use_online
         return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (y,) = ctx.saved_tensors
+
+        # Launch on y's device: the stream, SM count and driver context below all
+        # follow the current device, which the autograd worker need not have set.
+        with torch.cuda.device(y.device):
+            _ensure_cuda_context(y.device)
+
+            # Create gradient input tensor; kernels write in place, so it must be contiguous
+            grad_input = torch.empty_like(grad_output, memory_format=torch.contiguous_format)
+
+            if ctx.use_tma:
+                # Use TMA backward implementation
+                _launch_softmax_backward_kernel_tma(
+                    y,
+                    grad_output,
+                    grad_input,
+                    ctx.use_online,
+                )
+            elif ctx.use_online:
+                _launch_online_softmax_backward_kernel(y, grad_output, grad_input)
+            else:
+                # Use grid-based backward implementation
+                _launch_softmax_backward_kernel(y, grad_output, grad_input)
+
+        return grad_input, None, None, None, None
 
 
 @register_impl("softmax", backend="cutile")
 def softmax(
     x,
     use_tma=False,
+    use_online=None,
     **kwargs,
 ):
     """
@@ -402,6 +799,7 @@ def softmax(
 
     Args:
         x: Input tensor of shape (M, N)
+        use_online: Whether to use online algorithm. If None, auto-choose based on size
         use_tma: Whether to use TMA (Tensor Memory Accelerator) implementation.
                 Requires H100+ GPU (compute capability >= 9.0)
         **kwargs: Additional arguments for backend-specific configurations
@@ -418,6 +816,7 @@ def softmax(
         return _Softmax.apply(
             x,
             use_tma,
+            use_online,
             use_chunked,
             use_multi_wave,
         )

@@ -229,6 +229,7 @@ def dropout(
 def softmax(
     x: torch.Tensor,
     use_tma: bool = False,
+    use_online: Optional[bool] = None,
     **kwargs: Any,
 ):
     """
@@ -237,6 +238,7 @@ def softmax(
     Args:
         x: Input tensor of shape (M, N). Softmax is computed over the last dimension (N)
         use_tma: Whether to use TMA (Tensor Memory Accelerator) implementation
+        use_online: Backend hint for using online softmax accumulation (if supported)
         **kwargs: Additional arguments for backend-specific configurations
 
     Returns:
