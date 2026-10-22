@@ -50,7 +50,7 @@ their own namespace (`tilegym.suites.*`) and are tracked in §1.3 instead.
 | Activation | GeLU | ✅ Available | ✅ Available |
 | Activation | ReLU | ✅ Available | ✅ Available |
 | Activation | SiLU and Mul | ✅ Available | 🧪 Experimental |
-| Activation | Softmax | ✅ Available | 🚧 WIP (Internal) |
+| Activation | Softmax | ✅ Available | ✅ Available |
 | Activation | SwiGLU | ✅ Available | 🧪 Experimental |
 | Fused Operations | Linear + Activation + Linear | 🚧 WIP (Internal) | 🚧 WIP (Internal) |
 | Fused Operations | Linear + Bias + Activation | 🚧 WIP (Internal) | 🚧 WIP (Internal) |
