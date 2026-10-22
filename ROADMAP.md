@@ -102,6 +102,7 @@ The following table tracks the support status for various kernel libraries.
 | fla | ✅ Available | 7 cuTile ops, 2 standalone helper modules, 1 support module |
 | FlashInfer | ✅ Available | 8 cuTile kernels |
 | Unsloth | ✅ Available | 8 cuTile kernels |
+| Torch ATen | 🚧 WIP (Internal) |  |
 | FlagGems | 🚧 WIP (Internal) |  |
 | Tokamax | 🚧 WIP (Internal) |  |
 | Other Libraries | 📅 Planned | We welcome suggestions on which repositories you'd like to see cuTile performance in |
