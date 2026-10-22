@@ -99,6 +99,7 @@ The following table tracks the support status for various kernel libraries.
 | Library | Status | Notes |
 |---|---|---|
 | Liger-Kernel | ✅ Available | 25 cuTile kernels |
+| fla | ✅ Available | 7 cuTile ops, 2 standalone helper modules, 1 support module |
 | FlashInfer | ✅ Available | 8 cuTile kernels |
 | Unsloth | ✅ Available | 8 cuTile kernels |
 | FlagGems | 🚧 WIP (Internal) |  |

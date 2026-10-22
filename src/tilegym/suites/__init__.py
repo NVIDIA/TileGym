@@ -22,10 +22,12 @@ def list_available() -> List[str]:
     """List all available suites"""
     available = []
     try:
+        from . import fla
         from . import flashinfer
         from . import liger
         from . import unsloth
 
+        available.append("fla")
         available.append("flashinfer")
         available.append("liger")
         available.append("unsloth")
