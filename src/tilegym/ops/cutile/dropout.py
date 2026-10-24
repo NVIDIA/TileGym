@@ -12,8 +12,8 @@ from tilegym.backend import register_impl
 
 @ct.kernel
 def _dropout_kernel(
-    x,
-    output,
+    x: ct.IndexedWithInt64,
+    output: ct.IndexedWithInt64,
     P: ct.Constant[float],
     SEED: ct.Constant[int],
     TILE_SIZE: ct.Constant[int],
@@ -31,8 +31,8 @@ def _dropout_kernel(
         training: Whether in training mode
     """
     bid = ct.bid(0)
-    tile_start = bid * TILE_SIZE
-    offsets = ct.arange(TILE_SIZE, dtype=ct.int32) + tile_start
+    tile_start = ct.astype(bid, ct.int64) * TILE_SIZE
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int64) + tile_start
     # For 1D arrays, indices are passed directly (not as tuple)
     # Use padding_value=0 (int) to avoid dtype mismatch with float16
     x_tile = ct.gather(x, offsets, padding_value=0)
@@ -45,9 +45,16 @@ def _dropout_kernel(
         # Generate pseudo-random numbers using a simple hash function
         # This is a deterministic approximation since cuTile doesn't have tl.rand
         # Use a simple hash based on offsets and seed
+        # The low 32 bits of each offset are hashed with a multiplier picked by
+        # the high 32 bits, so each 2^32-element block draws its own mask.
+        # TILE_SIZE divides 2^32, so the high bits are the same across the tile.
+        offsets_lo = ct.arange(TILE_SIZE, dtype=ct.int32) + ct.astype(tile_start, ct.int32)
+        offsets_hi = ct.astype(ct.bitwise_rshift(tile_start, 32), ct.int32)
+        # 1103515245 is the LCG multiplier used for deterministic hashing; the
+        # high bits only flip its even bits (1013904242 is even), so it stays odd.
+        multiplier = ct.bitwise_xor(offsets_hi * 1013904242, 1103515245)
         # Combine seed and offsets with a simple formula
-        # 1103515245 is the LCG multiplier used for deterministic hashing.
-        combined = offsets * 1103515245 + ct.full((TILE_SIZE,), SEED, dtype=ct.int32)
+        combined = offsets_lo * multiplier + ct.full((TILE_SIZE,), SEED, dtype=ct.int32)
 
         # Apply a simple hash function using available bitwise operations
         hash_val = ct.bitwise_xor(combined, ct.bitwise_rshift(combined, 16))
@@ -56,7 +63,7 @@ def _dropout_kernel(
 
         # Convert to float and normalize to [0, 1)
         # 2147483647.0 is 2^31 - 1, matching the masked positive hash range.
-        hash_float = ct.astype(ct.bitwise_and(hash_val, 0x7FFFFFFF), ct.float32) / 2147483647.0
+        hash_float = ct.astype(ct.bitwise_and(hash_val, 0x7FFFFFFF), ct.float32) * (1.0 / 2147483647.0)
 
         # Create mask for elements to keep
         keep_mask = hash_float > P

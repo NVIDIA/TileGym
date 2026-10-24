@@ -87,7 +87,6 @@ def act_quant_kernel_ct(
     Each program processes one block of BLOCK_SIZE elements.
     FP8 range: max representable value is 448.0 for e4m3fn.
 
-    Pattern reference: flag_gems/cutile/per_token_group_quant_fp8.py
     """
     FP8_MAX = 448.0
 

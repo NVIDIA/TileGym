@@ -115,7 +115,6 @@
   "tags": [
     "stage:decode",
     "model:qwen3.8",
-    "status:verified",
-    "xfail-host:aarch64"
+    "status:verified"
   ]
 }

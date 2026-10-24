@@ -32,8 +32,9 @@ tile shape fixed after the branch; on the host, pack entries per launch up to a 
 with a valid dummy view, and sweep the slot count over {2, 4, 8}.
 
 **Token batching**: process TOKENS_PER_BLOCK tokens per block and make that factor an autotune dimension
-(rope_quantize_fp8). **Page-level gather**: load paged KV with `ct.load_advanced_indexing`
-(sparse_dim=0) so the copy issues one transaction per page instead of one per token.
+(rope_quantize_fp8). **Page-level gather**: load paged KV with `ct.load_advanced_indexing`;
+the 1D integer Tile in `indices` selects the sparse dimension, and the other entries are
+`ct.Slice` objects. Batch page indices instead of gathering individual tokens.
 
 **Host-side deletions**:
 

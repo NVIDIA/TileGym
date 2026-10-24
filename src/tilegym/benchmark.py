@@ -6,15 +6,20 @@
 
 import math
 import re
+import time
 from contextlib import ExitStack
 from contextlib import nullcontext
 
 import torch
 
-GRAPH_PROTOCOL = "cuda-graph-cold-span-v3"
-EAGER_PROTOCOL = "cuda-eager-cold-span-v1"
+GRAPH_PROTOCOL = "cuda-graph-cold-span-v4"
+EAGER_PROTOCOL = "cuda-eager-cold-span-v2"
 FLUSH_BYTES = 256_000_000
 GRAPH_REPEATS = 8
+# Power capping lowers clocks after about 40 ms of continuous load on B200, and a
+# saturated GPU needs about 100 ms idle to recover.
+POWER_BURST_MS = 30.0
+POWER_REST_MS = 100.0
 
 
 def _available_graph_memory():
@@ -37,11 +42,28 @@ def iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep):
     return n_warmup, n_repeat
 
 
+class _PowerPacer:
+    """Rests the GPU before continuous work would outlast POWER_BURST_MS."""
+
+    def __init__(self):
+        self.busy_ms = 0.0
+        self.rests = 0
+
+    def admit(self, duration_ms):
+        if self.busy_ms and self.busy_ms + duration_ms > POWER_BURST_MS:
+            torch.cuda.synchronize()
+            time.sleep(POWER_REST_MS / 1000)
+            self.busy_ms = 0.0
+            self.rests += 1
+        self.busy_ms += duration_ms
+
+
 class _CapturedCall:
     def __init__(self, fn, setup_fn, grad_to_none, fast_flush, *, cache=None, warmup=True, input_context=nullcontext):
         self.graph = torch.cuda.CUDAGraph()
         self.setup_graph = None
         self.input_context = input_context
+        self.begin = torch.cuda.Event(enable_timing=True, external=True)
         self.start = torch.cuda.Event(enable_timing=True, external=True)
         self.end = torch.cuda.Event(enable_timing=True, external=True)
         dtype = torch.int32 if fast_flush else torch.int8
@@ -97,21 +119,25 @@ class _CapturedCall:
         self.cache.zero_()
 
     def sample(self):
+        """Return the timed replay and the preparation span before it."""
         with self.input_context():
+            self.begin.record()
             self.prepare()
             self.start.record()
             self.graph.replay()
             self.end.record()
             self.end.synchronize()
-        return self.start.elapsed_time(self.end)
+        return self.start.elapsed_time(self.end), self.begin.elapsed_time(self.start)
 
-    def profile_samples(self, count, calls=None):
+    def profile_samples(self, count, calls=None, pacer=None, sample_ms=0.0):
         calls = [self] if calls is None else calls
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
         ) as prof:
             for index in range(count):
                 call = calls[index % len(calls)]
+                if pacer is not None:
+                    pacer.admit(sample_ms)
                 with call.input_context():
                     call.prepare()
                     torch.cuda.synchronize()
@@ -263,6 +289,7 @@ def benchmark_cuda_graph(
     collect_kernel_times=False,
     graph_repeats=GRAPH_REPEATS,
     input_context=nullcontext,
+    pacer=None,
 ):
     """Measure cold-cache device spans with balanced samples across graphs.
 
@@ -279,6 +306,12 @@ def benchmark_cuda_graph(
     the same number of samples; no graph or sample is selected for being faster.
     An optional input context wraps every warmup, capture, and replay. Its entry
     runs before the cache flush and its exit after timing, outside graph capture.
+    Calibration, warmup, and timed replays run in bursts of at most POWER_BURST_MS
+    of estimated GPU time, preparation included, separated by POWER_REST_MS idle,
+    so power capping does not lower clocks during timing. A replay longer than
+    POWER_BURST_MS still runs whole after a rest, so its time includes any capping
+    the kernel itself triggers. A caller timing several functions in a row passes
+    one pacer so that bursts continue across calls.
     """
     _check_budget(warmup, rep, min_rep, initial_rep, max_rep)
     if graph_repeats < 1:
@@ -293,12 +326,22 @@ def benchmark_cuda_graph(
             for segment in torch.cuda.memory_snapshot()
             if segment.get("segment_pool_id") == graph_pool
         )
-        calibration_ms = 0.0
+        pacer = pacer if pacer is not None else _PowerPacer()
+        initial_rests = pacer.rests
+        # The first preparation also pays one-time host work such as lazy module
+        # loading, and any span can include host stalls that leave the GPU idle,
+        # so the shortest span after the first is closest to its GPU work. A
+        # single calibration sample already fills the budget, so it has none.
+        calibration_ms, prepare_ms = 0.0, []
         for calibration_count in range(1, initial_rep + 1):
-            calibration_ms += call.sample()
+            pacer.admit(calibration_ms / max(1, calibration_count - 1) + min(prepare_ms[1:], default=0.0))
+            timed_ms, span_ms = call.sample()
+            calibration_ms += timed_ms
+            prepare_ms.append(span_ms)
             if calibration_ms >= max(warmup, rep):
                 break
         estimate = calibration_ms / calibration_count
+        sample_ms = estimate + min(prepare_ms[1:], default=0.0)
         n_warmup, n_repeat = iteration_counts(estimate, warmup, rep, min_rep, max_rep)
         n_graphs = min(graph_repeats, n_repeat)
         requested_graph_count = n_graphs
@@ -322,12 +365,13 @@ def benchmark_cuda_graph(
             )
         for _ in range(math.ceil(n_warmup / n_graphs)):
             for captured in calls:
+                pacer.admit(sample_ms)
                 with captured.input_context():
                     captured.prepare()
                     captured.graph.replay()
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
-        profiled = call.profile_samples(n_repeat, calls=calls)
+        profiled = call.profile_samples(n_repeat, calls=calls, pacer=pacer, sample_ms=sample_ms)
         result, times = _summarize(profiled, kernel_filter, GRAPH_PROTOCOL, collect_kernel_times, "CUDA Graph")
         graph_means = torch.stack([times[index::n_graphs].mean() for index in range(n_graphs)])
         graph_std = graph_means.std(correction=0).item()
@@ -342,6 +386,7 @@ def benchmark_cuda_graph(
                 "graph_means_ms": graph_means.tolist(),
                 "graph_mean_std_ms": graph_std,
                 "graph_mean_rel_std": 100 * graph_std / mean if mean else 0,
+                "power_rests": pacer.rests - initial_rests,
             }
         )
         return result
@@ -364,12 +409,13 @@ def benchmark_eager(
     """Measure cold-cache device spans of direct launches, for work that cannot be captured.
 
     Samples follow benchmark_cuda_graph: setup and the cache flush run before
-    each sample, and a sample spans its first to last GPU activity, including
-    the host-staged copies its launches issue.
+    each sample, a sample spans its first to last GPU activity, including the
+    host-staged copies its launches issue, and work is paced the same way.
     """
     _check_budget(warmup, rep, min_rep, initial_rep, max_rep)
     dtype = torch.int32 if fast_flush else torch.int8
     cache = torch.empty(FLUSH_BYTES // dtype.itemsize, dtype=dtype, device="cuda")
+    begin = torch.cuda.Event(enable_timing=True)
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
 
@@ -382,21 +428,29 @@ def benchmark_eager(
         cache.zero_()
 
     def sample():
+        begin.record()
         prepare()
         start.record()
         fn()
         end.record()
         end.synchronize()
-        return start.elapsed_time(end)
+        return start.elapsed_time(end), begin.elapsed_time(start)
 
-    sample()
-    calibration_ms = 0.0
+    pacer = _PowerPacer()
+    pacer.admit(sample()[0])
+    calibration_ms, prepare_ms = 0.0, []
     for calibration_count in range(1, initial_rep + 1):
-        calibration_ms += sample()
+        pacer.admit(calibration_ms / max(1, calibration_count - 1) + min(prepare_ms[1:], default=0.0))
+        timed_ms, span_ms = sample()
+        calibration_ms += timed_ms
+        prepare_ms.append(span_ms)
         if calibration_ms >= max(warmup, rep):
             break
-    n_warmup, n_repeat = iteration_counts(calibration_ms / calibration_count, warmup, rep, min_rep, max_rep)
+    estimate = calibration_ms / calibration_count
+    sample_ms = estimate + min(prepare_ms[1:], default=0.0)
+    n_warmup, n_repeat = iteration_counts(estimate, warmup, rep, min_rep, max_rep)
     for _ in range(n_warmup):
+        pacer.admit(sample_ms)
         prepare()
         fn()
     torch.cuda.synchronize()
@@ -405,6 +459,7 @@ def benchmark_eager(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     ) as prof:
         for _ in range(n_repeat):
+            pacer.admit(sample_ms)
             prepare()
             torch.cuda.synchronize()
             with torch.profiler.record_function("tilegym.eager.sample"):
@@ -418,7 +473,9 @@ def benchmark_eager(
         lambda name: name.startswith("cu"),
         "Eager",
     )
-    return _summarize(profiled, kernel_filter, EAGER_PROTOCOL, collect_kernel_times, "eager")[0]
+    result = _summarize(profiled, kernel_filter, EAGER_PROTOCOL, collect_kernel_times, "eager")[0]
+    result["power_rests"] = pacer.rests
+    return result
 
 
 def autotune_cutile_cuda_graph(stream, grid, kernel, args):

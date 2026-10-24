@@ -26,9 +26,9 @@ dependencies = [
   "pyyaml",
   "sentencepiece",
   "tilegym",
-  "tokenizers==0.22.2",
+  "tokenizers==0.23.3",
   "torch==2.9.1",
-  "transformers==5.10.2",
+  "transformers==5.19.0",
 ]
 
 [project.optional-dependencies]
@@ -62,7 +62,8 @@ tilegym_hf_bench = ["kernel_filters/*.yaml"]
 [tool.uv]
 managed = true
 override-dependencies = [
-  "transformers==5.10.2",
+  "transformers==5.19.0",
+  "tokenizers==0.23.3",
   "triton==3.7.1",
   "cuda-toolkit[tileiras,nvcc,nvvm]==13.3.0",
   "nvidia-cuda-runtime>=13.3,<14",

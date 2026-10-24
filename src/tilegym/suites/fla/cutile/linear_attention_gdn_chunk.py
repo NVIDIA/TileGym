@@ -1,0 +1,4461 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+# cuTile port of `chunk_gated_delta_rule` (chunked Gated DeltaNet, GDN) from
+# flash-linear-attention; registers the single op `fla.linear_attention_gdn_chunk`.
+
+from types import SimpleNamespace
+
+import cuda.tile as ct
+import torch
+import torch.nn.functional as F
+
+from tilegym.backend import register_impl
+from tilegym.suites.fla.cutile._host_utils import _segmented_arange
+from tilegym.suites.fla.cutile._host_utils import input_guard
+from tilegym.suites.fla.cutile._tuning import OUTPUT_HINT_PAIRS
+from tilegym.suites.fla.cutile._tuning import STATE_HINT_PAIRS
+from tilegym.suites.fla.cutile._tuning import output_tile_configs
+from tilegym.suites.fla.cutile._tuning import tune_launch
+
+ConstInt = ct.Constant[int]
+
+RCP_LN2 = 1.4426950216  # 1/ln(2)
+
+
+# Host-side utility shims (fla.utils helpers)
+
+
+def prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
+    return torch.diff(cu_seqlens)
+
+
+def prepare_chunk_indices(
+    cu_seqlens: torch.Tensor,
+    chunk_size: int,
+    cu_seqlens_cpu: torch.Tensor | None = None,
+) -> torch.Tensor:
+    src = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    chunk_counts = (prepare_lens(src) + (chunk_size - 1)).div(chunk_size, rounding_mode="floor")
+    seg_id, intra_chunk_idx = _segmented_arange(chunk_counts)
+    return torch.stack([seg_id, intra_chunk_idx], 1).to(cu_seqlens)
+
+
+def prepare_chunk_offsets(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    cdiv = (prepare_lens(cu_seqlens) + chunk_size - 1) // chunk_size
+    return F.pad(cdiv, (1, 0), value=0).cumsum(-1)
+
+
+def _cdiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _next_power_of_2(n: int) -> int:
+    return 1 << (n - 1).bit_length()
+
+
+def _stream():
+    return torch.cuda.current_stream()
+
+
+_LAUNCH_HINT_CONFIGS = ((4, 4), (2, 4), (4, 8), (1, 8), (1, 4))
+
+
+_LAUNCH_HINT_CONFIGS_OCC8 = ((8, 4), (4, 4), (2, 4), (1, 4), (2, 8), (1, 8))
+
+
+def _tuned_launch(kernel, stream, grid, args, cache_key, configs=None):
+    choices = tuple(configs if configs is not None else _LAUNCH_HINT_CONFIGS)
+    tune_launch(
+        kernel,
+        stream,
+        lambda c: grid,
+        lambda c: args,
+        lambda: [SimpleNamespace(occupancy=o, num_worker_warps=w) for o, w in choices],
+        cache_key,
+        timeout=20,
+        config_key=("hints", choices),
+    )
+
+
+def _tuned_launch_dhu(kernel, stream, bv_choices, grid_fn, args_fn, cache_key):
+    choices = tuple(bv_choices)
+    tune_launch(
+        kernel,
+        stream,
+        lambda c: grid_fn(c.BV),
+        lambda c: args_fn(c.BV),
+        lambda: [
+            SimpleNamespace(occupancy=o, num_worker_warps=w, BV=bv) for bv in choices for o, w in STATE_HINT_PAIRS
+        ],
+        cache_key,
+        timeout=40,
+        config_key=(("BV",), choices, STATE_HINT_PAIRS),
+    )
+
+
+_fwd_o_tile_configs = output_tile_configs
+
+
+def _tuned_launch_o(kernel, stream, tile_choices, grid_fn, args_fn, cache_key):
+    choices = tuple(tile_choices)
+    tune_launch(
+        kernel,
+        stream,
+        lambda c: grid_fn(c.BK, c.BV),
+        lambda c: args_fn(c.BK, c.BV),
+        lambda: [
+            SimpleNamespace(occupancy=o, num_worker_warps=w, BK=bk, BV=bv)
+            for bk, bv in choices
+            for o, w in OUTPUT_HINT_PAIRS
+        ],
+        cache_key,
+        timeout=60,
+        config_key=(("BK", "BV"), choices, OUTPUT_HINT_PAIRS),
+    )
+
+
+def _tuned_launch_bt(kernel, stream, bt_choices, grid_fn, args_fn, cache_key):
+    choices = tuple(bt_choices)
+    tune_launch(
+        kernel,
+        stream,
+        lambda c: grid_fn(c.BT),
+        lambda c: args_fn(c.BT),
+        lambda: [
+            SimpleNamespace(occupancy=o, num_worker_warps=w, BT=bt) for bt in choices for o, w in STATE_HINT_PAIRS
+        ],
+        cache_key,
+        timeout=40,
+        config_key=(("BT",), choices, STATE_HINT_PAIRS),
+    )
+
+
+# Device helpers (plain `def` — NOT @ct.kernel)
+
+
+def exp(x):
+    return ct.exp(ct.astype(x, ct.float32))
+
+
+def exp2(x):
+    return ct.exp2(ct.astype(x, ct.float32))
+
+
+def softplus(x):
+    # TODO(cutile): softplus_nv inline-asm replaced with log1p formula.
+    return ct.where(x < 20.0, ct.log(1.0 + ct.exp(x)), x)
+
+
+def _tf32(a):
+    return ct.astype(a, ct.tfloat32) if a.dtype == ct.float32 else a
+
+
+def safe_matmul(a, b):
+    return ct.matmul(_tf32(a), _tf32(b))
+
+
+def safe_mma(a, b, acc):
+    return ct.mma(_tf32(a), _tf32(b), acc)
+
+
+def gather_flat(raw, off, *, mask=None, padding_value=0, check_bounds=False):
+    return raw.load_offset(off, mask=mask, padding_value=padding_value)
+
+
+def scatter_flat(raw, off, value, *, mask=None, check_bounds=False):
+    raw.store_offset(off, value, mask=mask)
+
+
+def _array_numel(arr):
+    # Total element count; rank statically unrolled (<=5) since a Python for over
+    # arr.shape is captured as a device loop and rejected. K<=256 bounds the rank.
+    s = arr.shape
+    nd = arr.ndim
+    n = s[0]
+    if nd > 1:
+        n = n * s[1]
+    if nd > 2:
+        n = n * s[2]
+    if nd > 3:
+        n = n * s[3]
+    if nd > 4:
+        n = n * s[4]
+    return n
+
+
+# Bounds-checked flat access: 1-D bounds mask `0 <= off < numel` AND-ed with any
+# caller mask. Pass `numel = _array_numel(arr)`.
+def gather_flat_cb(raw, off, numel, *, mask=None, padding_value=0):
+    inb = (off >= 0) & (off < numel)
+    m = inb if mask is None else (mask & inb)
+    return raw.load_offset(off, mask=m, padding_value=padding_value)
+
+
+def scatter_flat_cb(raw, off, value, numel, *, mask=None):
+    inb = (off >= 0) & (off < numel)
+    m = inb if mask is None else (mask & inb)
+    raw.store_offset(off, value, mask=m)
+
+
+# fla.modules.l2norm kernels
+
+
+@ct.kernel
+def l2norm_fwd_kernel1(x, y, rstd, eps, D, BD: ConstInt):
+    # D > 512 path: one row per program, row length D.
+    i_t = ct.bid(0)
+    cols = ct.arange(BD, dtype=ct.int32)
+    mask = cols < D
+
+    b_x = ct.astype(ct.gather(x, (i_t, cols), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_rstd = ct.rsqrt(ct.sum(b_x * b_x) + eps)
+    b_y = b_x * b_rstd
+    ct.scatter(y, (i_t, cols), ct.astype(b_y, y.dtype), mask=mask, check_bounds=False)
+    ct.scatter(rstd, (i_t,), ct.astype(b_rstd, rstd.dtype))
+
+
+@ct.kernel
+def l2norm_bwd_kernel1(y, rstd, dy, dy2, dx, eps, D, BD: ConstInt, HAS_DY2: ConstInt):
+    i_t = ct.bid(0)
+    cols = ct.arange(BD, dtype=ct.int32)
+    mask = cols < D
+
+    b_y = ct.astype(ct.gather(y, (i_t, cols), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_dy = ct.astype(ct.gather(dy, (i_t, cols), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    if HAS_DY2:
+        b_dy2 = ct.astype(ct.gather(dy2, (i_t, cols), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+        # Preserve bf16 `dk.add_(dk2)` rounding before the fp32 normalization math.
+        b_dy = ct.astype(ct.astype(b_dy + b_dy2, dy.dtype), ct.float32)
+    b_rstd = ct.astype(ct.gather(rstd, (i_t,), check_bounds=False, padding_value=0.0), ct.float32).item()
+
+    b_dx = b_dy * b_rstd - ct.sum(b_dy * b_y) * b_y * b_rstd
+    ct.scatter(dx, (i_t, cols), ct.astype(b_dx, dx.dtype), mask=mask, check_bounds=False)
+
+
+@ct.kernel
+def l2norm_fwd_kernel(x, y, rstd, eps, T, D: ConstInt, BD: ConstInt, BT: ConstInt):
+    # D <= 512 path: BT rows per block, BD power-of-2 cols. Block-aligned ->
+    # ct.load with block index + ZERO padding (faithful to make_block_ptr).
+    i_t = ct.bid(0)
+    b_x = ct.astype(ct.load(x, index=(i_t, 0), shape=(BT, BD), padding_mode=ct.PaddingMode.ZERO), ct.float32)
+    b_rstd = ct.rsqrt(ct.sum(b_x * b_x, axis=1) + eps)
+    b_y = b_x * b_rstd[:, None]
+    ct.store(y, index=(i_t, 0), tile=ct.astype(b_y, y.dtype))
+    ct.store(rstd, index=(i_t,), tile=ct.astype(b_rstd, rstd.dtype))
+
+
+@ct.kernel
+def l2norm_bwd_kernel(y, rstd, dy, dy2, dx, eps, T, D: ConstInt, BD: ConstInt, BT: ConstInt, HAS_DY2: ConstInt):
+    i_t = ct.bid(0)
+    b_y = ct.astype(ct.load(y, index=(i_t, 0), shape=(BT, BD), padding_mode=ct.PaddingMode.ZERO), ct.float32)
+    b_rstd = ct.astype(ct.load(rstd, index=(i_t,), shape=(BT,), padding_mode=ct.PaddingMode.ZERO), ct.float32)
+    b_dy = ct.astype(ct.load(dy, index=(i_t, 0), shape=(BT, BD), padding_mode=ct.PaddingMode.ZERO), ct.float32)
+    if HAS_DY2:
+        b_dy2 = ct.astype(ct.load(dy2, index=(i_t, 0), shape=(BT, BD), padding_mode=ct.PaddingMode.ZERO), ct.float32)
+        b_dy = ct.astype(ct.astype(b_dy + b_dy2, dy.dtype), ct.float32)
+    b_dot = ct.sum(b_dy * b_y, axis=1)
+    b_dx = b_dy * b_rstd[:, None] - b_dot[:, None] * b_y * b_rstd[:, None]
+    ct.store(dx, index=(i_t, 0), tile=ct.astype(b_dx, dx.dtype))
+
+
+# fla.ops.common.gate (fused_beta_sigmoid)
+
+
+@ct.kernel
+def fused_beta_sigmoid_fwd_kernel(x, y, scale, n_elements, BLOCK_SIZE: ConstInt):
+    pid = ct.bid(0)
+    offs = pid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    mask = offs < n_elements
+    b_x = ct.astype(ct.gather(x, offs, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_y = scale * (1.0 / (1.0 + ct.exp(-b_x)))
+    ct.scatter(y, offs, ct.astype(b_y, y.dtype), mask=mask, check_bounds=False)
+
+
+@ct.kernel
+def fused_beta_sigmoid_bwd_kernel(x, dy, dx, scale, n_elements, BLOCK_SIZE: ConstInt):
+    pid = ct.bid(0)
+    offs = pid * BLOCK_SIZE + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+    mask = offs < n_elements
+    b_x = ct.astype(ct.gather(x, offs, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_dy = ct.astype(ct.gather(dy, offs, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_y = 1.0 / (1.0 + ct.exp(-b_x))
+    b_dx = b_dy * scale * b_y * (1.0 - b_y)
+    ct.scatter(dx, offs, ct.astype(b_dx, dx.dtype), mask=mask, check_bounds=False)
+
+
+# fla.ops.utils.cumsum (scalar chunk_local_cumsum, used for the gate g)
+
+
+@ct.kernel
+def chunk_local_cumsum_scalar_kernel(
+    s,
+    o,
+    scale,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    BT: ConstInt,
+    REVERSE: ConstInt,
+    HAS_SCALE: ConstInt,
+    IS_VARLEN: ConstInt,
+    HEAD_FIRST: ConstInt,
+):
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // H
+    i_h = i_bh % H
+
+    bos = i_b * T
+    T_eff = T
+    if IS_VARLEN:
+        i_n = ct.load(chunk_indices, (i_t, 0), shape=()).item()
+        i_t = ct.load(chunk_indices, (i_t, 1), shape=()).item()
+        bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+        eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+        T_eff = eos - bos
+
+    offs = ct.arange(BT, dtype=ct.int32)
+    row = i_t * BT + offs
+    mask = row < T_eff
+    # s/o are (B, T, H); HEAD_FIRST is a transposed head-major access via raw
+    # element offsets (unused on the gated-delta-rule path).
+    if IS_VARLEN:
+        bt_batch = 0
+        t_idx = bos + row
+    else:
+        bt_batch = i_b
+        t_idx = row
+
+    if HEAD_FIRST:
+        idx = bos * H + i_h * T_eff + row
+        b_s = ct.astype(s.get_raw_memory().load_offset(idx, mask=mask, padding_value=0.0), ct.float32)
+    else:
+        b_s = ct.astype(
+            ct.gather(s, (bt_batch, t_idx, i_h), mask=mask, check_bounds=False, padding_value=0.0), ct.float32
+        )
+    b_o = ct.cumsum(b_s, axis=0)
+    if REVERSE:
+        b_z = ct.sum(b_s, axis=0)
+        b_o = -b_o + b_z + b_s
+    if HAS_SCALE:
+        b_o = b_o * scale
+    if HEAD_FIRST:
+        o.get_raw_memory().store_offset(idx, ct.astype(b_o, o.dtype), mask=mask)
+    else:
+        ct.scatter(o, (bt_batch, t_idx, i_h), ct.astype(b_o, o.dtype), mask=mask, check_bounds=False)
+
+
+# fla.ops.gated_delta_rule.gate (gdn_gate_chunk_cumsum / gdn_gate_bwd)
+
+
+@ct.kernel
+def gdn_gate_chunk_cumsum_scalar_kernel(
+    g,
+    A_log,
+    dt_bias,
+    o,
+    scale,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    BT: ConstInt,
+    REVERSE: ConstInt,
+    HAS_BIAS: ConstInt,
+    HAS_SCALE: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // H
+    i_h = i_bh % H
+
+    bos = i_b * T
+    T_eff = T
+    if IS_VARLEN:
+        i_n = ct.load(chunk_indices, (i_t, 0), shape=()).item()
+        i_t = ct.load(chunk_indices, (i_t, 1), shape=()).item()
+        bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+        eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+        T_eff = eos - bos
+
+    offs = ct.arange(BT, dtype=ct.int32)
+    row = i_t * BT + offs
+    mask = row < T_eff
+    if IS_VARLEN:
+        bt_batch = 0
+        t_idx = bos + row
+    else:
+        bt_batch = i_b
+        t_idx = row
+
+    b_g = ct.astype(ct.gather(g, (bt_batch, t_idx, i_h), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_A = ct.astype(ct.load(A_log, (i_h,), shape=()).item(), ct.float32)
+    if HAS_BIAS:
+        b_bias = ct.astype(ct.load(dt_bias, (i_h,), shape=()).item(), ct.float32)
+        b_g = b_g + b_bias
+
+    b_gate = -exp(b_A) * softplus(b_g)
+    b_o = ct.cumsum(b_gate, axis=0)
+    if REVERSE:
+        b_z = ct.sum(b_gate, axis=0)
+        b_o = -b_o + b_z + b_gate
+    if HAS_SCALE:
+        b_o = b_o * scale
+    ct.scatter(o, (bt_batch, t_idx, i_h), ct.astype(b_o, o.dtype), mask=mask, check_bounds=False)
+
+
+@ct.kernel
+def gdn_gate_bwd_kernel(g, A_log, dt_bias, dyg, dg, dA, T, H: ConstInt, BT: ConstInt, HAS_BIAS: ConstInt):
+    i_t = ct.bid(0)
+    i_h = ct.bid(1)
+
+    b_A = ct.astype(ct.load(A_log, (i_h,), shape=()).item(), ct.float32)
+    offs = ct.arange(BT, dtype=ct.int32)
+    row = i_t * BT + offs
+    mask = row < T
+    idx = i_h + row * H
+
+    b_g = ct.astype(ct.gather(g, idx, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_dyg = ct.astype(ct.gather(dyg, idx, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+    if HAS_BIAS:
+        b_bias = ct.astype(ct.load(dt_bias, (i_h,), shape=()).item(), ct.float32)
+        b_g = b_g + b_bias
+
+    b_neg_expA = -exp(b_A)
+    b_yg = b_neg_expA * softplus(b_g)
+    b_sig = 1.0 / (1.0 + ct.exp(-b_g))
+    b_dg = b_neg_expA * (b_dyg * b_sig)
+    b_dA = ct.sum(b_dyg * b_yg, axis=0)
+
+    ct.scatter(dg, idx, ct.astype(b_dg, dg.dtype), mask=mask, check_bounds=False)
+    ct.scatter(dA, i_t * H + i_h, b_dA)
+
+
+# fla.ops.common.chunk_scaled_dot_kkt + fla.ops.utils.solve_tril +
+# fla.ops.gated_delta_rule.chunk_fwd (fused kkt + blockwise triangular solve)
+
+
+def _split_kkt_32(block):
+    # Split a row-major [32,32] tile into 16x16 quadrants:
+    #   b_00 = block[0:16, 0:16], b_10 = block[16:32, 0:16], b_11 = block[16:32, 16:32]
+    b_00 = ct.extract(block, index=(0, 0), shape=(16, 16))
+    b_10 = ct.extract(block, index=(1, 0), shape=(16, 16))
+    b_11 = ct.extract(block, index=(1, 1), shape=(16, 16))
+    return b_00, b_10, b_11
+
+
+def _solve_kkt_16_block_full_skip1(b_A):
+    o = ct.arange(16, dtype=ct.int32)
+    m_I = ct.expand_dims(o, 1) == ct.expand_dims(o, 0)
+    b_Ai = -b_A
+    for i in range(2, 16):
+        is_row = o == i
+        b_a = ct.sum(ct.where(ct.expand_dims(is_row, 1), b_Ai, 0.0), axis=0)
+        b_a = ct.sum(ct.expand_dims(b_a, 1) * b_Ai, axis=0)
+        b_Ai = b_Ai + ct.where(ct.expand_dims(is_row, 1), b_a, 0.0)
+    return b_Ai + ct.astype(m_I, ct.float32)
+
+
+def _load_blk16(A, base, row0, col0, H: ConstInt, BT: ConstInt, T):
+    o16 = ct.arange(16, dtype=ct.int32)
+    rows = row0 + o16
+    cols = col0 + o16
+    off = base + ct.expand_dims(rows, 1) * (H * BT) + ct.expand_dims(cols, 0)
+    mask = ct.expand_dims(rows < T, 1) & ct.expand_dims(cols < BT, 0)
+    return ct.astype(ct.gather(A, off, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
+
+
+def _store_blk16(Ai, base, row0, col0, blk, H: ConstInt, BT: ConstInt, T):
+    # TODO(cutile): fp_downcast_rounding="rtne" not representable
+    o16 = ct.arange(16, dtype=ct.int32)
+    rows = row0 + o16
+    cols = col0 + o16
+    off = base + ct.expand_dims(rows, 1) * (H * BT) + ct.expand_dims(cols, 0)
+    mask = ct.expand_dims(rows < T, 1) & ct.expand_dims(cols < BT, 0)
+    ct.scatter(Ai, off, ct.astype(blk, Ai.dtype), mask=mask, check_bounds=False)
+
+
+# chunk_scaled_dot_kkt_fwd_kernel  -- beta * K @ K^T (lower-tri)
+@ct.kernel
+def chunk_scaled_dot_kkt_fwd_kernel(
+    k,
+    g,
+    beta,
+    A,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    IS_VARLEN: ConstInt,
+    USE_G: ConstInt,
+):
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // HV
+    i_h = i_bh % HV
+
+    bos = 0
+    if IS_VARLEN:
+        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
+        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
+        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
+        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    o_t = i_t * BT + ct.arange(BT, dtype=ct.int32)
+    m_t = o_t < T
+
+    beta_base = bos * HV + i_h
+    b_off = beta_base + o_t * HV
+    b_b = ct.astype(ct.gather(beta, b_off, mask=m_t, check_bounds=False, padding_value=0.0), ct.float32)
+
+    k_base = (bos * H + i_h // (HV // H)) * K
+    rows = i_t * BT + ct.arange(BT, dtype=ct.int32)
+    m_rows = rows < T
+
+    b_A = ct.zeros((BT, BT), dtype=ct.float32)
+    num_k = ct.cdiv(K, BK)
+    for i_k in range(num_k):
+        cols = i_k * BK + ct.arange(BK, dtype=ct.int32)
+        m_cols = cols < K
+        k_off = ct.expand_dims(rows, 1) * (H * K) + ct.expand_dims(cols, 0)
+        k_mask = ct.expand_dims(m_rows, 1) & ct.expand_dims(m_cols, 0)
+        b_k = ct.gather(k, k_base + k_off, mask=k_mask, check_bounds=False, padding_value=0.0)
+        b_A = ct.mma(b_k, ct.transpose(b_k), b_A)  # b_A += b_k @ b_k^T
+
+    if USE_G:
+        b_g = ct.astype(ct.gather(g, b_off, mask=m_t, check_bounds=False, padding_value=0.0), ct.float32)
+        b_g_diff = ct.expand_dims(b_g, 1) - ct.expand_dims(b_g, 0)
+        b_A = b_A * ct.exp2(ct.astype(b_g_diff, ct.float32))
+    b_A = b_A * ct.expand_dims(b_b, 1)
+
+    m_A = (ct.expand_dims(o_t, 1) > ct.expand_dims(o_t, 0)) & (ct.expand_dims(m_t, 1) & ct.expand_dims(m_t, 0))
+    b_A = ct.where(m_A, b_A, 0.0)
+
+    A_base = (bos * HV + i_h) * BT
+    out_rows = i_t * BT + ct.arange(BT, dtype=ct.int32)
+    out_cols = ct.arange(BT, dtype=ct.int32)
+    A_off = A_base + ct.expand_dims(out_rows, 1) * (BT * HV) + ct.expand_dims(out_cols, 0)
+    m_out = ct.broadcast_to(ct.expand_dims(out_rows < T, 1), (BT, BT))
+    ct.scatter(A, A_off, ct.astype(b_A, A.dtype), mask=m_out, check_bounds=False)
+
+
+# solve_tril_16x16_kernel
+@ct.kernel
+def solve_tril_16x16_kernel(
+    A,
+    Ai,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    BT: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // H
+    i_h = i_bh % H
+
+    bos = 0
+    if IS_VARLEN:
+        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
+        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
+        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
+        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    o_i = ct.arange(16, dtype=ct.int32)
+    m_A = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
+    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
+
+    A_base = (bos * H + i_h) * BT
+    Ai_base = (bos * H + i_h) * 16
+
+    offset = (i_t * 16) % BT
+    rows = i_t * 16 + ct.arange(16, dtype=ct.int32)
+    cols = offset + ct.arange(16, dtype=ct.int32)
+    a_off = A_base + ct.expand_dims(rows, 1) * (H * BT) + ct.expand_dims(cols, 0)
+    a_mask = ct.expand_dims(rows < T, 1) & ct.expand_dims(cols < BT, 0)
+    b_A = ct.astype(ct.gather(A, a_off, mask=a_mask, check_bounds=False, padding_value=0.0), ct.float32)
+    b_A = ct.where(m_A, b_A, 0.0)
+    b_A = -b_A
+
+    for i in range(2, min(16, T - i_t * 16)):
+        row_off = A_base + (i_t * 16 + i) * (H * BT) + (o_i + offset)
+        b_a = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a = ct.where(o_i < i, b_a, 0.0)
+        b_a = b_a + ct.sum(ct.expand_dims(b_a, 1) * b_A, axis=0)
+        b_A = ct.where(ct.expand_dims(o_i == i, 1), b_a, b_A)
+    b_A = b_A + ct.astype(m_I, ct.float32)
+
+    out_rows = i_t * 16 + ct.arange(16, dtype=ct.int32)
+    out_cols = ct.arange(16, dtype=ct.int32)
+    ai_off = Ai_base + ct.expand_dims(out_rows, 1) * (H * 16) + ct.expand_dims(out_cols, 0)
+    ai_mask = ct.broadcast_to(ct.expand_dims(out_rows < T, 1), (16, 16))
+    # TODO(cutile): fp_downcast_rounding="rtne" not representable
+    ct.scatter(Ai, ai_off, ct.astype(b_A, Ai.dtype), mask=ai_mask, check_bounds=False)
+
+
+# merge_16x16_to_32x32_inverse_kernel
+@ct.kernel
+def merge_16x16_to_32x32_inverse_kernel(
+    A,
+    Ai,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    BT: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    # input_precision="ieee" (full fp32) on the merge dots -> kept in fp32.
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // H
+    i_h = i_bh % H
+
+    bos = 0
+    if IS_VARLEN:
+        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
+        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
+        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
+        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    o_i = ct.arange(16, dtype=ct.int32)
+    m_A = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
+    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
+    A_base = (bos * H + i_h) * BT
+    Ai_base = (bos * H + i_h) * BT
+
+    b_Ai_11 = _load_blk16(A, A_base, i_t * BT, 0, H, BT, T)
+    b_Ai_22 = _load_blk16(A, A_base, i_t * BT + 16, 16, H, BT, T)
+
+    b_Ai_11 = -ct.where(m_A, b_Ai_11, 0.0)
+    b_Ai_22 = -ct.where(m_A, b_Ai_22, 0.0)
+
+    for i in range(2, min(16, T - i_t * BT)):
+        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i
+        b_a_11 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a_11 = b_a_11 + ct.sum(ct.expand_dims(b_a_11, 1) * b_Ai_11, axis=0)
+        b_Ai_11 = ct.where(ct.expand_dims(o_i == i, 1), b_a_11, b_Ai_11)
+    for i in range(16 + 2, min(32, T - i_t * BT)):
+        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 16
+        b_a_22 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a_22 = b_a_22 + ct.sum(ct.expand_dims(b_a_22, 1) * b_Ai_22, axis=0)
+        b_Ai_22 = ct.where(ct.expand_dims(o_i == i - 16, 1), b_a_22, b_Ai_22)
+
+    b_Ai_11 = b_Ai_11 + ct.astype(m_I, ct.float32)
+    b_Ai_22 = b_Ai_22 + ct.astype(m_I, ct.float32)
+
+    b_A_21 = _load_blk16(A, A_base, i_t * BT + 16, 0, H, BT, T)
+
+    # b_Ai_21 = -(b_Ai_22 @ b_A_21) @ b_Ai_11
+    # TODO(cutile): input_precision=ieee not representable; fp32 kept in fp32.
+    b_Ai_21 = -ct.matmul(ct.matmul(b_Ai_22, b_A_21), b_Ai_11)
+
+    _store_blk16(Ai, Ai_base, i_t * BT, 0, b_Ai_11, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 16, 16, b_Ai_22, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 16, 0, b_Ai_21, H, BT, T)
+
+
+# merge_16x16_to_64x64_inverse_kernel
+@ct.kernel
+def merge_16x16_to_64x64_inverse_kernel(
+    A,
+    Ai,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    BT: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    # input_precision="ieee" (full fp32) on every merge dot -> kept in fp32.
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // H
+    i_h = i_bh % H
+
+    bos = 0
+    if IS_VARLEN:
+        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
+        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
+        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
+        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    o_i = ct.arange(16, dtype=ct.int32)
+    m_A = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
+    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
+    A_base = (bos * H + i_h) * BT
+    Ai_base = (bos * H + i_h) * BT
+
+    b_Ai_11 = _load_blk16(A, A_base, i_t * BT, 0, H, BT, T)
+    b_Ai_22 = _load_blk16(A, A_base, i_t * BT + 16, 16, H, BT, T)
+    b_Ai_33 = _load_blk16(A, A_base, i_t * BT + 32, 32, H, BT, T)
+    b_Ai_44 = _load_blk16(A, A_base, i_t * BT + 48, 48, H, BT, T)
+
+    b_Ai_11 = -ct.where(m_A, b_Ai_11, 0.0)
+    b_Ai_22 = -ct.where(m_A, b_Ai_22, 0.0)
+    b_Ai_33 = -ct.where(m_A, b_Ai_33, 0.0)
+    b_Ai_44 = -ct.where(m_A, b_Ai_44, 0.0)
+
+    for i in range(2, min(16, T - i_t * BT)):
+        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i
+        b_a_11 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a_11 = ct.where(o_i < i, b_a_11, 0.0)
+        b_a_11 = b_a_11 + ct.sum(ct.expand_dims(b_a_11, 1) * b_Ai_11, axis=0)
+        b_Ai_11 = ct.where(ct.expand_dims(o_i == i, 1), b_a_11, b_Ai_11)
+    for i in range(16 + 2, min(32, T - i_t * BT)):
+        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 16
+        b_a_22 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a_22 = ct.where(o_i < i - 16, b_a_22, 0.0)
+        b_a_22 = b_a_22 + ct.sum(ct.expand_dims(b_a_22, 1) * b_Ai_22, axis=0)
+        b_Ai_22 = ct.where(ct.expand_dims(o_i == i - 16, 1), b_a_22, b_Ai_22)
+    for i in range(32 + 2, min(48, T - i_t * BT)):
+        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 32
+        b_a_33 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a_33 = ct.where(o_i < i - 32, b_a_33, 0.0)
+        b_a_33 = b_a_33 + ct.sum(ct.expand_dims(b_a_33, 1) * b_Ai_33, axis=0)
+        b_Ai_33 = ct.where(ct.expand_dims(o_i == i - 32, 1), b_a_33, b_Ai_33)
+    for i in range(48 + 2, min(64, T - i_t * BT)):
+        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 48
+        b_a_44 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
+        b_a_44 = ct.where(o_i < i - 48, b_a_44, 0.0)
+        b_a_44 = b_a_44 + ct.sum(ct.expand_dims(b_a_44, 1) * b_Ai_44, axis=0)
+        b_Ai_44 = ct.where(ct.expand_dims(o_i == i - 48, 1), b_a_44, b_Ai_44)
+
+    b_Ai_11 = b_Ai_11 + ct.astype(m_I, ct.float32)
+    b_Ai_22 = b_Ai_22 + ct.astype(m_I, ct.float32)
+    b_Ai_33 = b_Ai_33 + ct.astype(m_I, ct.float32)
+    b_Ai_44 = b_Ai_44 + ct.astype(m_I, ct.float32)
+
+    b_A_21 = _load_blk16(A, A_base, i_t * BT + 16, 0, H, BT, T)
+    b_A_31 = _load_blk16(A, A_base, i_t * BT + 32, 0, H, BT, T)
+    b_A_32 = _load_blk16(A, A_base, i_t * BT + 32, 16, H, BT, T)
+    b_A_41 = _load_blk16(A, A_base, i_t * BT + 48, 0, H, BT, T)
+    b_A_42 = _load_blk16(A, A_base, i_t * BT + 48, 16, H, BT, T)
+    b_A_43 = _load_blk16(A, A_base, i_t * BT + 48, 32, H, BT, T)
+
+    # TODO(cutile): input_precision=ieee not representable; fp32 kept in fp32.
+    b_Ai_21 = -ct.matmul(ct.matmul(b_Ai_22, b_A_21), b_Ai_11)
+    b_Ai_32 = -ct.matmul(ct.matmul(b_Ai_33, b_A_32), b_Ai_22)
+    b_Ai_43 = -ct.matmul(ct.matmul(b_Ai_44, b_A_43), b_Ai_33)
+
+    b_Ai_31 = -ct.matmul(b_Ai_33, ct.matmul(b_A_31, b_Ai_11) + ct.matmul(b_A_32, b_Ai_21))
+    b_Ai_42 = -ct.matmul(b_Ai_44, ct.matmul(b_A_42, b_Ai_22) + ct.matmul(b_A_43, b_Ai_32))
+    b_Ai_41 = -ct.matmul(
+        b_Ai_44,
+        ct.matmul(b_A_41, b_Ai_11) + ct.matmul(b_A_42, b_Ai_21) + ct.matmul(b_A_43, b_Ai_31),
+    )
+
+    _store_blk16(Ai, Ai_base, i_t * BT, 0, b_Ai_11, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 16, 16, b_Ai_22, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 32, 32, b_Ai_33, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 48, 48, b_Ai_44, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 16, 0, b_Ai_21, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 32, 0, b_Ai_31, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 32, 16, b_Ai_32, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 48, 0, b_Ai_41, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 48, 16, b_Ai_42, H, BT, T)
+    _store_blk16(Ai, Ai_base, i_t * BT + 48, 32, b_Ai_43, H, BT, T)
+
+
+# chunk_gated_delta_rule_fwd_kkt_solve_kernel  (fused kkt + solve, 4 sub-chunks)
+@ct.kernel
+def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
+    k,
+    g,
+    beta,
+    A,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    BT: ConstInt,
+    BC: ConstInt,
+    BK: ConstInt,
+    USE_G: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    """Fused: beta * K @ K^T (lower triangular) + solve_tril (I+A)^{-1} in one pass."""
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // HV
+    i_h = i_bh % HV
+
+    bos = 0
+    if IS_VARLEN:
+        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
+        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
+        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
+        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    if i_t * BT >= T:
+        return
+
+    i_tc0 = i_t * BT
+    i_tc1 = i_t * BT + BC
+    i_tc2 = i_t * BT + 2 * BC
+    i_tc3 = i_t * BT + 3 * BC
+
+    # Layouts: k (B,T,H,K)  beta/g (B,T,HV)  A (B,T,HV,BT). Varlen packs batch B=1.
+    i_kh = i_h // (HV // H)
+    if IS_VARLEN:
+        bt_batch = 0
+        t_base = bos
+    else:
+        bt_batch = i_b
+        t_base = 0
+
+    o_i = ct.arange(BC, dtype=ct.int32)
+    m_tc0 = (i_tc0 + o_i) < T
+    m_tc1 = (i_tc1 + o_i) < T
+    m_tc2 = (i_tc2 + o_i) < T
+    m_tc3 = (i_tc3 + o_i) < T
+
+    b_b0 = ct.astype(
+        ct.gather(beta, (bt_batch, t_base + i_tc0 + o_i, i_h), mask=m_tc0, check_bounds=False, padding_value=0.0),
+        ct.float32,
+    )
+    b_b1 = ct.astype(
+        ct.gather(beta, (bt_batch, t_base + i_tc1 + o_i, i_h), mask=m_tc1, check_bounds=False, padding_value=0.0),
+        ct.float32,
+    )
+    b_b2 = ct.astype(
+        ct.gather(beta, (bt_batch, t_base + i_tc2 + o_i, i_h), mask=m_tc2, check_bounds=False, padding_value=0.0),
+        ct.float32,
+    )
+    b_b3 = ct.astype(
+        ct.gather(beta, (bt_batch, t_base + i_tc3 + o_i, i_h), mask=m_tc3, check_bounds=False, padding_value=0.0),
+        ct.float32,
+    )
+
+    b_g0 = ct.zeros((BC,), dtype=ct.float32)
+    b_g1 = ct.zeros((BC,), dtype=ct.float32)
+    b_g2 = ct.zeros((BC,), dtype=ct.float32)
+    b_g3 = ct.zeros((BC,), dtype=ct.float32)
+    if USE_G:
+        b_g0 = ct.astype(
+            ct.gather(g, (bt_batch, t_base + i_tc0 + o_i, i_h), mask=m_tc0, check_bounds=False, padding_value=0.0),
+            ct.float32,
+        )
+        b_g1 = ct.astype(
+            ct.gather(g, (bt_batch, t_base + i_tc1 + o_i, i_h), mask=m_tc1, check_bounds=False, padding_value=0.0),
+            ct.float32,
+        )
+        b_g2 = ct.astype(
+            ct.gather(g, (bt_batch, t_base + i_tc2 + o_i, i_h), mask=m_tc2, check_bounds=False, padding_value=0.0),
+            ct.float32,
+        )
+        b_g3 = ct.astype(
+            ct.gather(g, (bt_batch, t_base + i_tc3 + o_i, i_h), mask=m_tc3, check_bounds=False, padding_value=0.0),
+            ct.float32,
+        )
+
+    # -- Step 1: 10 lower-tri [BC,BC] blocks of K @ K^T --
+    b_A00 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A11 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A22 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A33 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A10 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A20 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A21 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A30 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A31 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A32 = ct.zeros((BC, BC), dtype=ct.float32)
+
+    o_bc = ct.arange(BC, dtype=ct.int32)
+    num_k = ct.cdiv(K, BK)
+    for i_k in range(num_k):
+        off_k = i_k * BK
+        cols = off_k + ct.arange(BK, dtype=ct.int32)
+        m_cols = cols < K
+        rows0 = i_tc0 + o_bc
+        m0 = ct.expand_dims(rows0 < T, 1) & ct.expand_dims(m_cols, 0)
+        b_k0 = ct.gather(
+            k,
+            (bt_batch, ct.expand_dims(t_base + rows0, 1), i_kh, ct.expand_dims(cols, 0)),
+            mask=m0,
+            check_bounds=False,
+            padding_value=0.0,
+        )
+        b_A00 = ct.mma(b_k0, ct.transpose(b_k0), b_A00)
+
+        if i_tc1 < T:
+            rows1 = i_tc1 + o_bc
+            m1 = ct.expand_dims(rows1 < T, 1) & ct.expand_dims(m_cols, 0)
+            b_k1 = ct.gather(
+                k,
+                (bt_batch, ct.expand_dims(t_base + rows1, 1), i_kh, ct.expand_dims(cols, 0)),
+                mask=m1,
+                check_bounds=False,
+                padding_value=0.0,
+            )
+            b_A11 = ct.mma(b_k1, ct.transpose(b_k1), b_A11)
+            b_A10 = ct.mma(b_k1, ct.transpose(b_k0), b_A10)
+
+            if i_tc2 < T:
+                rows2 = i_tc2 + o_bc
+                m2 = ct.expand_dims(rows2 < T, 1) & ct.expand_dims(m_cols, 0)
+                b_k2 = ct.gather(
+                    k,
+                    (bt_batch, ct.expand_dims(t_base + rows2, 1), i_kh, ct.expand_dims(cols, 0)),
+                    mask=m2,
+                    check_bounds=False,
+                    padding_value=0.0,
+                )
+                b_A22 = ct.mma(b_k2, ct.transpose(b_k2), b_A22)
+                b_A20 = ct.mma(b_k2, ct.transpose(b_k0), b_A20)
+                b_A21 = ct.mma(b_k2, ct.transpose(b_k1), b_A21)
+
+                if i_tc3 < T:
+                    rows3 = i_tc3 + o_bc
+                    m3 = ct.expand_dims(rows3 < T, 1) & ct.expand_dims(m_cols, 0)
+                    b_k3 = ct.gather(
+                        k,
+                        (bt_batch, ct.expand_dims(t_base + rows3, 1), i_kh, ct.expand_dims(cols, 0)),
+                        mask=m3,
+                        check_bounds=False,
+                        padding_value=0.0,
+                    )
+                    b_A33 = ct.mma(b_k3, ct.transpose(b_k3), b_A33)
+                    b_A30 = ct.mma(b_k3, ct.transpose(b_k0), b_A30)
+                    b_A31 = ct.mma(b_k3, ct.transpose(b_k1), b_A31)
+                    b_A32 = ct.mma(b_k3, ct.transpose(b_k2), b_A32)
+
+    # -- Step 2: gate + beta scaling --
+    m_d = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
+    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
+
+    if USE_G:
+        b_A00 = b_A00 * ct.where(
+            m_d & ct.expand_dims(m_tc0, 1) & ct.expand_dims(m_tc0, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g0, 1) - ct.expand_dims(b_g0, 0), ct.float32)),
+            0.0,
+        )
+        b_A11 = b_A11 * ct.where(
+            m_d & ct.expand_dims(m_tc1, 1) & ct.expand_dims(m_tc1, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g1, 1) - ct.expand_dims(b_g1, 0), ct.float32)),
+            0.0,
+        )
+        b_A22 = b_A22 * ct.where(
+            m_d & ct.expand_dims(m_tc2, 1) & ct.expand_dims(m_tc2, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g2, 1) - ct.expand_dims(b_g2, 0), ct.float32)),
+            0.0,
+        )
+        b_A33 = b_A33 * ct.where(
+            m_d & ct.expand_dims(m_tc3, 1) & ct.expand_dims(m_tc3, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g3, 1) - ct.expand_dims(b_g3, 0), ct.float32)),
+            0.0,
+        )
+
+        b_A10 = b_A10 * ct.where(
+            ct.expand_dims(m_tc1, 1) & ct.expand_dims(m_tc0, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g1, 1) - ct.expand_dims(b_g0, 0), ct.float32)),
+            0.0,
+        )
+        b_A20 = b_A20 * ct.where(
+            ct.expand_dims(m_tc2, 1) & ct.expand_dims(m_tc0, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g2, 1) - ct.expand_dims(b_g0, 0), ct.float32)),
+            0.0,
+        )
+        b_A21 = b_A21 * ct.where(
+            ct.expand_dims(m_tc2, 1) & ct.expand_dims(m_tc1, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g2, 1) - ct.expand_dims(b_g1, 0), ct.float32)),
+            0.0,
+        )
+        b_A30 = b_A30 * ct.where(
+            ct.expand_dims(m_tc3, 1) & ct.expand_dims(m_tc0, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g3, 1) - ct.expand_dims(b_g0, 0), ct.float32)),
+            0.0,
+        )
+        b_A31 = b_A31 * ct.where(
+            ct.expand_dims(m_tc3, 1) & ct.expand_dims(m_tc1, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g3, 1) - ct.expand_dims(b_g1, 0), ct.float32)),
+            0.0,
+        )
+        b_A32 = b_A32 * ct.where(
+            ct.expand_dims(m_tc3, 1) & ct.expand_dims(m_tc2, 0),
+            ct.exp2(ct.astype(ct.expand_dims(b_g3, 1) - ct.expand_dims(b_g2, 0), ct.float32)),
+            0.0,
+        )
+    else:
+        b_A00 = ct.where(m_d, b_A00, 0.0)
+        b_A11 = ct.where(m_d, b_A11, 0.0)
+        b_A22 = ct.where(m_d, b_A22, 0.0)
+        b_A33 = ct.where(m_d, b_A33, 0.0)
+
+    b_A00 = b_A00 * ct.expand_dims(b_b0, 1)
+    b_A11 = b_A11 * ct.expand_dims(b_b1, 1)
+    b_A22 = b_A22 * ct.expand_dims(b_b2, 1)
+    b_A33 = b_A33 * ct.expand_dims(b_b3, 1)
+    b_A10 = b_A10 * ct.expand_dims(b_b1, 1)
+    b_A20 = b_A20 * ct.expand_dims(b_b2, 1)
+    b_A21 = b_A21 * ct.expand_dims(b_b2, 1)
+    b_A30 = b_A30 * ct.expand_dims(b_b3, 1)
+    b_A31 = b_A31 * ct.expand_dims(b_b3, 1)
+    b_A32 = b_A32 * ct.expand_dims(b_b3, 1)
+
+    # -- Step 3: forward substitution on diagonal blocks --
+    b_Ai00 = -b_A00
+    b_Ai11 = -b_A11
+    b_Ai22 = -b_A22
+    b_Ai33 = -b_A33
+
+    for i in range(2, min(BC, T - i_tc0)):
+        b_a00 = ct.sum(ct.where(ct.expand_dims(o_i == i, 1), -b_A00, 0.0), axis=0)
+        b_a00 = ct.where(o_i < i, b_a00, 0.0)
+        b_a00 = b_a00 + ct.sum(ct.expand_dims(b_a00, 1) * b_Ai00, axis=0)
+        b_Ai00 = ct.where(ct.expand_dims(o_i == i, 1), b_a00, b_Ai00)
+    for i in range(2, min(BC, T - i_tc1)):
+        b_a11 = ct.sum(ct.where(ct.expand_dims(o_i == i, 1), -b_A11, 0.0), axis=0)
+        b_a11 = ct.where(o_i < i, b_a11, 0.0)
+        b_a11 = b_a11 + ct.sum(ct.expand_dims(b_a11, 1) * b_Ai11, axis=0)
+        b_Ai11 = ct.where(ct.expand_dims(o_i == i, 1), b_a11, b_Ai11)
+    for i in range(2, min(BC, T - i_tc2)):
+        b_a22 = ct.sum(ct.where(ct.expand_dims(o_i == i, 1), -b_A22, 0.0), axis=0)
+        b_a22 = ct.where(o_i < i, b_a22, 0.0)
+        b_a22 = b_a22 + ct.sum(ct.expand_dims(b_a22, 1) * b_Ai22, axis=0)
+        b_Ai22 = ct.where(ct.expand_dims(o_i == i, 1), b_a22, b_Ai22)
+    for i in range(2, min(BC, T - i_tc3)):
+        b_a33 = ct.sum(ct.where(ct.expand_dims(o_i == i, 1), -b_A33, 0.0), axis=0)
+        b_a33 = ct.where(o_i < i, b_a33, 0.0)
+        b_a33 = b_a33 + ct.sum(ct.expand_dims(b_a33, 1) * b_Ai33, axis=0)
+        b_Ai33 = ct.where(ct.expand_dims(o_i == i, 1), b_a33, b_Ai33)
+
+    b_Ai00 = b_Ai00 + ct.astype(m_I, ct.float32)
+    b_Ai11 = b_Ai11 + ct.astype(m_I, ct.float32)
+    b_Ai22 = b_Ai22 + ct.astype(m_I, ct.float32)
+    b_Ai33 = b_Ai33 + ct.astype(m_I, ct.float32)
+
+    # -- Step 4: block merge --
+    # TODO(cutile): input_precision=ieee not representable; fp32 kept in fp32.
+    b_Ai10 = -ct.matmul(ct.matmul(b_Ai11, b_A10), b_Ai00)
+    b_Ai21 = -ct.matmul(ct.matmul(b_Ai22, b_A21), b_Ai11)
+    b_Ai32 = -ct.matmul(ct.matmul(b_Ai33, b_A32), b_Ai22)
+    b_Ai20 = -ct.matmul(b_Ai22, ct.matmul(b_A20, b_Ai00) + ct.matmul(b_A21, b_Ai10))
+    b_Ai31 = -ct.matmul(b_Ai33, ct.matmul(b_A31, b_Ai11) + ct.matmul(b_A32, b_Ai21))
+    b_Ai30 = -ct.matmul(
+        b_Ai33,
+        ct.matmul(b_A30, b_Ai00) + ct.matmul(b_A31, b_Ai10) + ct.matmul(b_A32, b_Ai20),
+    )
+
+    # -- Step 5: store full (I+A)^{-1} --
+    cBC = ct.arange(BC, dtype=ct.int32)
+    rA0 = i_tc0 + cBC
+    rA1 = i_tc1 + cBC
+    rA2 = i_tc2 + cBC
+    rA3 = i_tc3 + cBC
+
+    msk_A00 = ct.expand_dims(rA0 < T, 1) & ct.expand_dims(cBC < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA0, 1), i_h, ct.expand_dims(cBC, 0)),
+        ct.astype(b_Ai00, A.dtype),
+        mask=msk_A00,
+        check_bounds=False,
+    )
+
+    msk_A10 = ct.expand_dims(rA1 < T, 1) & ct.expand_dims(cBC < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA1, 1), i_h, ct.expand_dims(cBC, 0)),
+        ct.astype(b_Ai10, A.dtype),
+        mask=msk_A10,
+        check_bounds=False,
+    )
+
+    msk_A11 = ct.expand_dims(rA1 < T, 1) & ct.expand_dims((BC + cBC) < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA1, 1), i_h, ct.expand_dims(BC + cBC, 0)),
+        ct.astype(b_Ai11, A.dtype),
+        mask=msk_A11,
+        check_bounds=False,
+    )
+
+    msk_A20 = ct.expand_dims(rA2 < T, 1) & ct.expand_dims(cBC < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA2, 1), i_h, ct.expand_dims(cBC, 0)),
+        ct.astype(b_Ai20, A.dtype),
+        mask=msk_A20,
+        check_bounds=False,
+    )
+
+    msk_A21 = ct.expand_dims(rA2 < T, 1) & ct.expand_dims((BC + cBC) < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA2, 1), i_h, ct.expand_dims(BC + cBC, 0)),
+        ct.astype(b_Ai21, A.dtype),
+        mask=msk_A21,
+        check_bounds=False,
+    )
+
+    msk_A22 = ct.expand_dims(rA2 < T, 1) & ct.expand_dims((2 * BC + cBC) < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA2, 1), i_h, ct.expand_dims(2 * BC + cBC, 0)),
+        ct.astype(b_Ai22, A.dtype),
+        mask=msk_A22,
+        check_bounds=False,
+    )
+
+    msk_A30 = ct.expand_dims(rA3 < T, 1) & ct.expand_dims(cBC < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA3, 1), i_h, ct.expand_dims(cBC, 0)),
+        ct.astype(b_Ai30, A.dtype),
+        mask=msk_A30,
+        check_bounds=False,
+    )
+
+    msk_A31 = ct.expand_dims(rA3 < T, 1) & ct.expand_dims((BC + cBC) < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA3, 1), i_h, ct.expand_dims(BC + cBC, 0)),
+        ct.astype(b_Ai31, A.dtype),
+        mask=msk_A31,
+        check_bounds=False,
+    )
+
+    msk_A32 = ct.expand_dims(rA3 < T, 1) & ct.expand_dims((2 * BC + cBC) < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA3, 1), i_h, ct.expand_dims(2 * BC + cBC, 0)),
+        ct.astype(b_Ai32, A.dtype),
+        mask=msk_A32,
+        check_bounds=False,
+    )
+
+    msk_A33 = ct.expand_dims(rA3 < T, 1) & ct.expand_dims((3 * BC + cBC) < BT, 0)
+    ct.scatter(
+        A,
+        (bt_batch, ct.expand_dims(t_base + rA3, 1), i_h, ct.expand_dims(3 * BC + cBC, 0)),
+        ct.astype(b_Ai33, A.dtype),
+        mask=msk_A33,
+        check_bounds=False,
+    )
+
+
+# chunk_gated_delta_rule_fwd_kkt_solve_2block_kernel  (2 sub-chunks, BC=32)
+
+
+# chunk_gated_delta_rule_fwd_kkt_solve_2block_full_kernel  (no varlen, full)
+@ct.kernel
+def chunk_gated_delta_rule_fwd_kkt_solve_2block_full_kernel(
+    k,
+    g,
+    beta,
+    A,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    BT: ConstInt,
+    BC: ConstInt,
+    BK: ConstInt,
+    USE_G: ConstInt,
+):
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // HV
+    i_h = i_bh % HV
+    bos = i_b * T
+
+    i_tc0 = i_t * BT
+    i_tc1 = i_t * BT + BC
+    k_base = (bos * H + i_h // (HV // H)) * K
+    A_base = (bos * HV + i_h) * BT
+    beta_base = bos * HV + i_h
+    g_base = bos * HV + i_h
+
+    o_i = ct.arange(BC, dtype=ct.int32)
+    b_b0 = ct.astype(ct.gather(beta, beta_base + (i_tc0 + o_i) * HV, check_bounds=False, padding_value=0.0), ct.float32)
+    b_b1 = ct.astype(ct.gather(beta, beta_base + (i_tc1 + o_i) * HV, check_bounds=False, padding_value=0.0), ct.float32)
+
+    b_g0 = ct.zeros((BC,), dtype=ct.float32)
+    b_g1 = ct.zeros((BC,), dtype=ct.float32)
+    if USE_G:
+        b_g0 = ct.astype(ct.gather(g, g_base + (i_tc0 + o_i) * HV, check_bounds=False, padding_value=0.0), ct.float32)
+        b_g1 = ct.astype(ct.gather(g, g_base + (i_tc1 + o_i) * HV, check_bounds=False, padding_value=0.0), ct.float32)
+
+    b_A00 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A11 = ct.zeros((BC, BC), dtype=ct.float32)
+    b_A10 = ct.zeros((BC, BC), dtype=ct.float32)
+
+    o_bc = ct.arange(BC, dtype=ct.int32)
+    # Row masks: this "full" path also serves partial last chunks; rows >= T are
+    # zeroed in K and excluded from stores. K@K^T MMA stays M=32 (real HMMA).
+    m_r0 = (i_tc0 + o_bc) < T
+    m_r1 = (i_tc1 + o_bc) < T
+    num_k = ct.cdiv(K, BK)
+    for i_k in range(num_k):
+        off_k = i_k * BK
+        cols = off_k + ct.arange(BK, dtype=ct.int32)
+        m_cols = cols < K
+        rows0 = i_tc0 + o_bc
+        off0 = k_base + ct.expand_dims(rows0, 1) * (H * K) + ct.expand_dims(cols, 0)
+        m0 = ct.expand_dims(m_r0, 1) & ct.expand_dims(m_cols, 0)
+        b_k0 = ct.gather(k, off0, mask=m0, check_bounds=False, padding_value=0.0)
+        rows1 = i_tc1 + o_bc
+        off1 = k_base + ct.expand_dims(rows1, 1) * (H * K) + ct.expand_dims(cols, 0)
+        m1 = ct.expand_dims(m_r1, 1) & ct.expand_dims(m_cols, 0)
+        b_k1 = ct.gather(k, off1, mask=m1, check_bounds=False, padding_value=0.0)
+        b_A00 = ct.mma(b_k0, ct.transpose(b_k0), b_A00)
+        b_A11 = ct.mma(b_k1, ct.transpose(b_k1), b_A11)
+        b_A10 = ct.mma(b_k1, ct.transpose(b_k0), b_A10)
+
+    m_d = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
+    if USE_G:
+        # Gate as exp2(g_i - g_j), NOT factored exp2(g_i)*(1/exp2(g_j)): the latter
+        # is 0*inf = NaN at the fp32 exp2 under/overflow tail. Difference form stays
+        # finite for every kept (strictly-lower, g non-increasing) entry.
+        b_g0 = ct.astype(b_g0, ct.float32)
+        b_g1 = ct.astype(b_g1, ct.float32)
+        gd00 = ct.expand_dims(b_g0, 1) - ct.expand_dims(b_g0, 0)
+        gd11 = ct.expand_dims(b_g1, 1) - ct.expand_dims(b_g1, 0)
+        gd10 = ct.expand_dims(b_g1, 1) - ct.expand_dims(b_g0, 0)
+        b_A00 = b_A00 * ct.where(m_d, ct.exp2(gd00) * ct.expand_dims(b_b0, 1), 0.0)
+        b_A11 = b_A11 * ct.where(m_d, ct.exp2(gd11) * ct.expand_dims(b_b1, 1), 0.0)
+        b_A10 = b_A10 * (ct.exp2(gd10) * ct.expand_dims(b_b1, 1))
+    else:
+        b_A00 = ct.where(m_d, b_A00, 0.0) * ct.expand_dims(b_b0, 1)
+        b_A11 = ct.where(m_d, b_A11, 0.0) * ct.expand_dims(b_b1, 1)
+        b_A10 = b_A10 * ct.expand_dims(b_b1, 1)
+
+    # Hierarchical block-triangular inverse: split each 32x32 diagonal block into
+    # 16x16 quadrants, invert the diagonal sub-blocks by a short row loop, recover
+    # off-diagonals via HMMA matmuls (Ai_10 = -Ai_11 @ A_10 @ Ai_00). ~half the
+    # scalar iters of the monolithic 32-wide forward-sub; bulk moves to HMMA. fp32.
+    b_A10 = ct.astype(b_A10, A.dtype)
+    b_z16 = ct.zeros((16, 16), dtype=ct.float32)
+
+    b_A00_00, b_A00_10, b_A00_11 = _split_kkt_32(b_A00)
+    b_Ai00_00 = _solve_kkt_16_block_full_skip1(b_A00_00)
+    b_Ai00_11 = _solve_kkt_16_block_full_skip1(b_A00_11)
+    b_Ai00_10 = ct.astype(
+        -ct.matmul(
+            ct.astype(ct.matmul(ct.astype(b_Ai00_11, A.dtype), ct.astype(b_A00_10, A.dtype)), A.dtype),
+            ct.astype(b_Ai00_00, A.dtype),
+        ),
+        ct.float32,
+    )
+
+    b_A11_00, b_A11_10, b_A11_11 = _split_kkt_32(b_A11)
+    b_Ai11_00 = _solve_kkt_16_block_full_skip1(b_A11_00)
+    b_Ai11_11 = _solve_kkt_16_block_full_skip1(b_A11_11)
+    b_Ai11_10 = ct.astype(
+        -ct.matmul(
+            ct.astype(ct.matmul(ct.astype(b_Ai11_11, A.dtype), ct.astype(b_A11_10, A.dtype)), A.dtype),
+            ct.astype(b_Ai11_00, A.dtype),
+        ),
+        ct.float32,
+    )
+
+    b_Ai00 = ct.cat((ct.cat((b_Ai00_00, b_z16), 1), ct.cat((b_Ai00_10, b_Ai00_11), 1)), 0)
+    b_Ai11 = ct.cat((ct.cat((b_Ai11_00, b_z16), 1), ct.cat((b_Ai11_10, b_Ai11_11), 1)), 0)
+
+    # Off-diagonal merge: Ai10 = -Ai11 @ A10 @ Ai00 (matmuls -> HMMA).
+    b_Ai10 = -ct.matmul(
+        ct.astype(ct.matmul(ct.astype(b_Ai11, A.dtype), b_A10), A.dtype),
+        ct.astype(b_Ai00, A.dtype),
+    )
+
+    cBC = ct.arange(BC, dtype=ct.int32)
+    sm_r0 = ct.broadcast_to(ct.expand_dims((i_tc0 + cBC) < T, 1), (BC, BC))
+    sm_r1 = ct.broadcast_to(ct.expand_dims((i_tc1 + cBC) < T, 1), (BC, BC))
+    rows0 = i_tc0 + cBC
+    off00 = A_base + ct.expand_dims(rows0, 1) * (HV * BT) + ct.expand_dims(cBC, 0)
+    ct.scatter(A, off00, ct.astype(b_Ai00, A.dtype), mask=sm_r0, check_bounds=False)
+    rows1 = i_tc1 + cBC
+    off11 = A_base + ct.expand_dims(rows1, 1) * (HV * BT) + ct.expand_dims(BC + cBC, 0)
+    ct.scatter(A, off11, ct.astype(b_Ai11, A.dtype), mask=sm_r1, check_bounds=False)
+    off10 = A_base + ct.expand_dims(rows1, 1) * (HV * BT) + ct.expand_dims(cBC, 0)
+    ct.scatter(A, off10, ct.astype(b_Ai10, A.dtype), mask=sm_r1, check_bounds=False)
+    off0hi = A_base + ct.expand_dims(rows0, 1) * (HV * BT) + ct.expand_dims(BC + cBC, 0)
+    ct.scatter(A, off0hi, ct.astype(ct.zeros((BC, BC), dtype=ct.float32), A.dtype), mask=sm_r0, check_bounds=False)
+
+
+# fla.ops.gated_delta_rule.wy_fast (recompute_w_u / prepare_wy_repr_bwd)
+# TMA: (B,T,HV,D) reshaped host-side to (B*T,HV,D); block-indexed ct.load issues a
+# native TMA descriptor load of one head column. k uses the H-head layout (i_kh).
+
+
+@ct.kernel
+def recompute_w_u_fwd_kernel(
+    k,  # [B*T, H, K]
+    v,  # [B*T, HV, V]
+    beta,  # [B*T, HV]
+    w,  # [B*T, HV, K] (out)
+    u,  # [B*T, HV, V] (out)
+    A,  # [B*T, HV, BT]
+    g,  # [B*T, HV] (or dummy)
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    BV: ConstInt,
+    USE_G: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    i_t = ct.bid(0)
+    i_bh = ct.bid(1)
+    i_b = i_bh // HV
+    i_h = i_bh % HV
+    i_kh = i_h // (HV // H)
+
+    i_t_loc = i_t
+    if IS_VARLEN:
+        i_n = ct.astype(ct.load(chunk_indices, index=(i_t, 0), shape=()), ct.int32)
+        i_t_loc = ct.astype(ct.load(chunk_indices, index=(i_t, 1), shape=()), ct.int32)
+        bos = ct.astype(ct.load(cu_seqlens, index=(i_n,), shape=()), ct.int32)
+        eos = ct.astype(ct.load(cu_seqlens, index=(i_n + 1,), shape=()), ct.int32)
+    else:
+        bos = i_b * T
+        eos = bos + T
+
+    # Per-sequence contiguous slabs -> block-indexed (TMA) loads.
+    k_seg = k.slice(axis=0, start=bos, stop=eos)
+    v_seg = v.slice(axis=0, start=bos, stop=eos)
+    w_seg = w.slice(axis=0, start=bos, stop=eos)
+    u_seg = u.slice(axis=0, start=bos, stop=eos)
+    A_seg = A.slice(axis=0, start=bos, stop=eos)
+    beta_seg = beta.slice(axis=0, start=bos, stop=eos)
+
+    Z = ct.PaddingMode.ZERO
+    b_b = ct.load(beta_seg, index=(i_t_loc, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,))
+    b_A = ct.load(A_seg, index=(i_t_loc, i_h, 0), shape=(BT, 1, BT), padding_mode=Z).reshape((BT, BT))
+    for i_v in range(ct.cdiv(V, BV)):
+        b_v = ct.load(v_seg, index=(i_t_loc, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
+        b_vb = ct.astype(b_v * b_b[:, None], b_v.dtype)
+        acc = ct.zeros((BT, BV), dtype=ct.float32)
+        b_u = safe_mma(b_A, b_vb, acc)
+        ct.store(u_seg, index=(i_t_loc, i_h, i_v), tile=ct.astype(b_u, u.dtype).reshape((BT, 1, BV)))
+
+    b_g = ct.ones((BT,), dtype=ct.float32)
+    if USE_G:
+        b_g_val = ct.astype(
+            ct.load(g.slice(axis=0, start=bos, stop=eos), index=(i_t_loc, i_h), shape=(BT, 1), padding_mode=Z).reshape(
+                (BT,)
+            ),
+            ct.float32,
+        )
+        b_g = exp2(b_g_val)
+
+    # w = A @ (k * beta * g)
+    for i_k in range(ct.cdiv(K, BK)):
+        b_k = ct.load(k_seg, index=(i_t_loc, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
+        b_kb = b_k * b_b[:, None]
+        if USE_G:
+            b_kb = ct.astype(b_kb, ct.float32) * b_g[:, None]
+        acc = ct.zeros((BT, BK), dtype=ct.float32)
+        b_w = safe_mma(b_A, ct.astype(b_kb, b_k.dtype), acc)
+        ct.store(w_seg, index=(i_t_loc, i_h, i_k), tile=ct.astype(b_w, w.dtype).reshape((BT, 1, BK)))
+
+
+@ct.kernel
+def prepare_wy_repr_bwd_kernel(
+    k,
+    v,
+    beta,
+    g,
+    A,
+    dw,
+    du,
+    dk,
+    dv,
+    db,
+    dg,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    BV: ConstInt,
+    USE_G: ConstInt,
+    IS_VARLEN: ConstInt,
+    # NK/NV = cdiv(K,BK)/cdiv(V,BV) as RUNTIME ints so the K/V tile loops roll
+    # instead of unrolling (unrolled 4-trip loops spill regs at K=256). K/V/BK/BV
+    # stay ConstInt so offset arithmetic and tile shapes stay specialized.
+    NK,
+    NV,
+    NUM_WORK,  # persistent: total work-items (NT*BH)
+    BH_P,  # persistent: B*HV, for decoding i_bh/i_t from linear id
+):
+    k_flat = k.get_raw_memory()
+    v_flat = v.get_raw_memory()
+    dw_flat = dw.get_raw_memory()
+    du_flat = du.get_raw_memory()
+    dk_flat = dk.get_raw_memory()
+    dv_flat = dv.get_raw_memory()
+    beta_flat = beta.get_raw_memory()
+    g_flat = g.get_raw_memory()
+    A_flat = A.get_raw_memory()
+    db_flat = db.get_raw_memory()
+    dg_flat = dg.get_raw_memory()
+
+    _prog = ct.bid(0)
+    _nprog = ct.num_blocks(0)
+    _BH_P = BH_P
+    for _wid in range(_prog, NUM_WORK, _nprog):
+        i_bh = _wid % _BH_P
+        i_t = _wid // _BH_P
+        i_b = i_bh // HV
+        i_h = i_bh % HV
+        i_kh = i_h // (HV // H)
+
+        bos = i_b * T
+        Tloc = T
+        i_t_loc = i_t
+        if IS_VARLEN:
+            i_n = ct.load(chunk_indices, (i_t, 0), shape=()).item()
+            i_t_loc = ct.load(chunk_indices, (i_t, 1), shape=()).item()
+            bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+            eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+            Tloc = eos - bos
+
+        t_off = i_t_loc * BT + ct.arange(BT, dtype=ct.int32)
+        m_t = t_off < Tloc
+        row_hv = (bos + t_off) * HV + i_h
+        row_h = (bos + t_off) * H + i_kh
+
+        b_b = ct.astype(gather_flat(beta_flat, row_hv, mask=m_t, padding_value=0.0), ct.float32)
+
+        a_rows = row_hv[:, None]
+        a_cols = ct.arange(BT, dtype=ct.int32)[None, :]
+        b_A_nat = gather_flat(
+            A_flat,
+            ct.broadcast_to(a_rows, (BT, BT)) * BT + ct.broadcast_to(a_cols, (BT, BT)),
+            mask=ct.broadcast_to(m_t[:, None], (BT, BT)),
+            padding_value=0.0,
+        )
+        b_A = ct.transpose(b_A_nat)
+
+        b_db = ct.zeros((BT,), dtype=ct.float32)
+        b_dA = ct.zeros((BT, BT), dtype=ct.float32)
+        b_g = ct.zeros((BT,), dtype=ct.float32)
+        b_g_exp = ct.ones((BT,), dtype=ct.float32)
+        b_dg = ct.zeros((BT,), dtype=ct.float32)
+        if USE_G:
+            b_g = ct.astype(gather_flat(g_flat, row_hv, mask=m_t, padding_value=0.0), ct.float32)
+            b_g_exp = exp2(b_g)
+
+        k_off = ct.arange(BK, dtype=ct.int32)
+        for i_k in range(NK):
+            kcols = (i_k * BK + k_off)[None, :]
+            m_k = m_t[:, None] & ((i_k * BK + k_off) < K)[None, :]
+            krows = row_h[:, None]
+            kvrows = row_hv[:, None]
+            b_k = gather_flat(
+                k_flat,
+                ct.broadcast_to(krows, (BT, BK)) * K + ct.broadcast_to(kcols, (BT, BK)),
+                mask=m_k,
+                padding_value=0.0,
+            )
+            b_dw = gather_flat(
+                dw_flat,
+                ct.broadcast_to(kvrows, (BT, BK)) * K + ct.broadcast_to(kcols, (BT, BK)),
+                mask=m_k,
+                padding_value=0.0,
+            )
+            if USE_G:
+                b_kbg = ct.astype(b_k, ct.float32) * (b_b * b_g_exp)[:, None]
+            else:
+                b_kbg = ct.astype(b_k, ct.float32) * b_b[:, None]
+            b_dA = ct.mma(b_dw, ct.astype(ct.transpose(b_kbg), b_dw.dtype), b_dA)
+            b_dkbg = ct.astype(safe_matmul(b_A, b_dw), ct.float32)
+            if USE_G:
+                b_dk = b_dkbg * (b_g_exp * b_b)[:, None]
+                b_db = b_db + ct.sum(b_dkbg * ct.astype(b_k, ct.float32) * b_g_exp[:, None], axis=1)
+                b_dg = b_dg + ct.sum(b_dkbg * b_kbg, axis=1)
+            else:
+                b_dk = b_dkbg * b_b[:, None]
+                b_db = b_db + ct.sum(b_dkbg * ct.astype(b_k, ct.float32), axis=1)
+            scatter_flat(
+                dk_flat,
+                ct.broadcast_to(kvrows, (BT, BK)) * K + ct.broadcast_to(kcols, (BT, BK)),
+                ct.astype(b_dk, dk_flat.dtype),
+                mask=m_k,
+            )
+
+        v_off = ct.arange(BV, dtype=ct.int32)
+        for i_v in range(NV):
+            vcols = (i_v * BV + v_off)[None, :]
+            m_v = m_t[:, None] & ((i_v * BV + v_off) < V)[None, :]
+            vrows = row_hv[:, None]
+            b_v = gather_flat(
+                v_flat,
+                ct.broadcast_to(vrows, (BT, BV)) * V + ct.broadcast_to(vcols, (BT, BV)),
+                mask=m_v,
+                padding_value=0.0,
+            )
+            b_du = gather_flat(
+                du_flat,
+                ct.broadcast_to(vrows, (BT, BV)) * V + ct.broadcast_to(vcols, (BT, BV)),
+                mask=m_v,
+                padding_value=0.0,
+            )
+            b_vb = ct.astype(ct.astype(b_v, ct.float32) * b_b[:, None], b_v.dtype)
+            b_dA = ct.mma(b_du, ct.transpose(b_vb), b_dA)
+            b_dvb = ct.astype(safe_matmul(b_A, b_du), ct.float32)
+            b_dv = b_dvb * b_b[:, None]
+            b_db = b_db + ct.sum(b_dvb * ct.astype(b_v, ct.float32), axis=1)
+            scatter_flat(
+                dv_flat,
+                ct.broadcast_to(vrows, (BT, BV)) * V + ct.broadcast_to(vcols, (BT, BV)),
+                ct.astype(b_dv, dv_flat.dtype),
+                mask=m_v,
+            )
+
+        o_t = i_t_loc * BT + ct.arange(BT, dtype=ct.int32)
+        m_tt = o_t < Tloc
+        m_lt = (o_t[:, None] > o_t[None, :]) & (m_tt[:, None] & m_tt)
+        zero_bt = ct.zeros((BT, BT), dtype=ct.float32)
+        b_dA = ct.where(m_lt, b_dA, zero_bt)
+        b_dA = safe_matmul(ct.astype(b_dA, b_A.dtype), b_A)
+        b_dA = safe_matmul(b_A, ct.astype(b_dA, b_A.dtype))
+        if USE_G:
+            b_dA = b_dA * exp2(b_g[:, None] - b_g[None, :])
+        b_dA = ct.astype(ct.where(m_lt, -b_dA, zero_bt), k.dtype)
+
+        b_A2 = ct.zeros((BT, BT), dtype=ct.float32)
+        for i_k in range(NK):
+            kcols = (i_k * BK + k_off)[None, :]
+            m_k = m_t[:, None] & ((i_k * BK + k_off) < K)[None, :]
+            krows = row_h[:, None]
+            kvrows = row_hv[:, None]
+            b_k = gather_flat(
+                k_flat,
+                ct.broadcast_to(krows, (BT, BK)) * K + ct.broadcast_to(kcols, (BT, BK)),
+                mask=m_k,
+                padding_value=0.0,
+            )
+            b_dk_prev = gather_flat(
+                dk_flat,
+                ct.broadcast_to(kvrows, (BT, BK)) * K + ct.broadcast_to(kcols, (BT, BK)),
+                mask=m_k,
+                padding_value=0.0,
+            )
+            b_kt = ct.transpose(b_k)
+            b_kb = ct.astype(b_k, ct.float32) * b_b[:, None]
+            b_A2 = ct.mma(b_k, b_kt, b_A2)
+            b_dkb = ct.astype(safe_matmul(b_dA, b_k), ct.float32)
+            b_db = b_db + ct.sum(b_dkb * ct.astype(b_k, ct.float32), axis=1)
+            b_dk = b_dkb * b_b[:, None] + ct.astype(
+                safe_matmul(ct.transpose(b_dA), ct.astype(b_kb, b_dA.dtype)), ct.float32
+            )
+            b_dk = b_dk + ct.astype(b_dk_prev, ct.float32)
+            scatter_flat(
+                dk_flat,
+                ct.broadcast_to(kvrows, (BT, BK)) * K + ct.broadcast_to(kcols, (BT, BK)),
+                ct.astype(b_dk, dk_flat.dtype),
+                mask=m_k,
+            )
+
+        scatter_flat(db_flat, row_hv, ct.astype(b_db, db_flat.dtype), mask=m_t)
+
+        b_A2 = b_A2 * b_b[:, None]
+        if USE_G:
+            b_AdA = b_dA * b_A2
+            b_dg = b_dg + (ct.sum(b_AdA, axis=1) - ct.sum(b_AdA, axis=0))
+            scatter_flat(dg_flat, row_hv, ct.astype(b_dg, dg_flat.dtype), mask=m_t)
+
+
+# fla.ops.common.chunk_delta_h (fwd_h state recurrence + bwd dhu)
+# The recurrent hidden state (K x V) is carried across chunks in a Python for-loop
+# as a single full-width (BK, BV)/(BV, BK) tile (BK=next_pow2(K)); general for any K.
+# (The bk128 dense variant below keeps its own 128-wide 2-block split, K<=256.)
+
+
+def ct_min(a, b):
+    # scalar/tile min for runtime ints (builtin `min` is whitelisted; `hasattr` is not).
+    return min(a, b)
+
+
+@ct.kernel
+def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
+    k,
+    v,
+    w,
+    v_new,
+    g,
+    gk,
+    h,
+    h0,
+    ht,
+    cu_seqlens,
+    chunk_offsets,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BV: ConstInt,
+    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    USE_G: ConstInt,
+    USE_GK: ConstInt,
+    USE_INITIAL_STATE: ConstInt,
+    STORE_FINAL_STATE: ConstInt,
+    SAVE_NEW_VALUE: ConstInt,
+    STATE_V_FIRST: ConstInt,
+    IS_VARLEN: ConstInt,
+    USE_TMA: ConstInt,
+):
+    # State loads and stores use masked gather/scatter.
+    #
+    # The KV state is carried as a SINGLE full-width tile ((BV, BK) when
+    # STATE_V_FIRST else (BK, BV), BK=next_pow2(K)) instead of a 4-way 64-wide
+    # sub-block unroll, so the kernel is general for ANY K (no K<=256 cap). Every
+    # gather/scatter over the K axis uses oK=arange(BK) with a `(oK < K)` mask, so
+    # rows/cols [K:BK] are zero on load, contribute 0 to every MMA, and stay 0 in
+    # the state; gk padding loads as 0 so exp2(0)=1 multiplies the zero state rows.
+    i_v = ct.bid(0)
+    i_nh = ct.bid(1)
+    i_n = i_nh // HV
+    i_h = i_nh % HV
+
+    if IS_VARLEN:
+        bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+        eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+        T = eos - bos
+        NT = ct.cdiv(T, BT)
+        boh = ct.load(chunk_offsets, (i_n,), shape=()).item()
+    else:
+        bos = i_n * T
+        eos = i_n * T + T
+        NT = ct.cdiv(T, BT)
+        boh = i_n * NT
+
+    # State tile b_h: (BV, BK) when V-first else (BK, BV).
+    if STATE_V_FIRST:
+        b_h = ct.zeros((BV, BK), dtype=ct.float32)
+    else:
+        b_h = ct.zeros((BK, BV), dtype=ct.float32)
+
+    # Layouts: k (B,T,H,K)  v/w/v_new (B,T,HV,*)  g (B,T,HV)  gk (B,T,HV,K)
+    #   h (B,NT,HV,*)  h0/ht (N,HV,*). Varlen packs batch B=1; h0/ht indexed by i_n.
+    i_kh = i_h // (HV // H)
+    if IS_VARLEN:
+        bt_batch = 0
+        t_base = bos
+        h_batch = 0
+    else:
+        bt_batch = i_n
+        t_base = 0
+        h_batch = i_n
+
+    oK = ct.arange(BK, dtype=ct.int32)
+    o_bt = ct.arange(BT, dtype=ct.int32)
+    o_bv = ct.arange(BV, dtype=ct.int32)
+    m_v_lane = (i_v * BV + o_bv) < V
+    m_k_lane = oK < K
+
+    # --- Load initial state h0 -> b_h ---
+    if USE_INITIAL_STATE:
+        if STATE_V_FIRST:
+            row = (i_v * BV + o_bv)[:, None]
+            m1 = ct.broadcast_to(m_v_lane[:, None] & m_k_lane[None, :], (BV, BK))
+            b_h = b_h + ct.astype(
+                ct.gather(h0, (i_n, i_h, row, oK[None, :]), mask=m1, check_bounds=True, padding_value=0.0),
+                ct.float32,
+            )
+        else:
+            col = (i_v * BV + o_bv)[None, :]
+            m1 = ct.broadcast_to(m_k_lane[:, None] & m_v_lane[None, :], (BK, BV))
+            b_h = b_h + ct.astype(
+                ct.gather(h0, (i_n, i_h, oK[:, None], col), mask=m1, check_bounds=True, padding_value=0.0),
+                ct.float32,
+            )
+
+    # --- Recurrent state-carry loop over chunks (kept as Python for) ---
+    for i_t in range(NT):
+        if IS_VARLEN:
+            hc_idx = boh + i_t
+        else:
+            hc_idx = i_t
+
+        # Store current state b_h to h[.., i_t, ..]
+        if STATE_V_FIRST:
+            row = (i_v * BV + o_bv)[:, None]
+            hm1 = ct.broadcast_to(m_v_lane[:, None] & m_k_lane[None, :], (BV, BK))
+            ct.scatter(
+                h,
+                (h_batch, hc_idx, i_h, row, oK[None, :]),
+                ct.astype(b_h, h.dtype),
+                mask=hm1,
+                check_bounds=True,
+            )
+        else:
+            col = (i_v * BV + o_bv)[None, :]
+            hm1 = ct.broadcast_to(m_k_lane[:, None] & m_v_lane[None, :], (BK, BV))
+            ct.scatter(
+                h,
+                (h_batch, hc_idx, i_h, oK[:, None], col),
+                ct.astype(b_h, h.dtype),
+                mask=hm1,
+                check_bounds=True,
+            )
+
+        # --- b_v = b_w @ b_h (single full-width K MMA) ---
+        w_time = (t_base + i_t * BT + o_bt)[:, None]
+        wmask_r = (i_t * BT + o_bt) < T
+        bw1 = ct.gather(
+            w,
+            (bt_batch, w_time, i_h, oK[None, :]),
+            mask=ct.broadcast_to(wmask_r[:, None] & m_k_lane[None, :], (BT, BK)),
+            check_bounds=True,
+            padding_value=0.0,
+        )
+        bw1 = ct.where(wmask_r[:, None], bw1, ct.zeros((BT, BK), dtype=bw1.dtype))
+        b_v = ct.zeros((BT, BV), dtype=ct.float32)
+        a = bw1
+        bmat = ct.astype(ct.transpose(b_h), bw1.dtype) if STATE_V_FIRST else ct.astype(b_h, bw1.dtype)
+        a = ct.astype(a, ct.tfloat32) if a.dtype == ct.float32 else a
+        bmat = ct.astype(bmat, ct.tfloat32) if bmat.dtype == ct.float32 else bmat
+        b_v = ct.mma(a, bmat, b_v)
+
+        # b_v = load(v) - b_v
+        v_col = (i_v * BV + o_bv)[None, :]
+        vmask_c = (i_v * BV + o_bv) < V
+        v_time = (t_base + i_t * BT + o_bt)[:, None]
+        v_full = (wmask_r[:, None]) & (vmask_c[None, :])
+        b_v_load = ct.gather(
+            v,
+            (bt_batch, v_time, i_h, v_col),
+            mask=ct.broadcast_to(v_full, (BT, BV)),
+            check_bounds=True,
+            padding_value=0.0,
+        )
+        b_v_load = ct.where(v_full, b_v_load, ct.zeros((BT, BV), dtype=b_v_load.dtype))
+        b_v = ct.astype(b_v_load, ct.float32) - b_v
+
+        if SAVE_NEW_VALUE:
+            ct.scatter(
+                v_new,
+                (bt_batch, v_time, i_h, v_col),
+                ct.astype(b_v, v_new.dtype),
+                mask=ct.broadcast_to(v_full, (BT, BV)),
+                check_bounds=True,
+            )
+
+        last_idx = ct_min((i_t + 1) * BT, T) - 1
+
+        # --- USE_G gate decay ---
+        if USE_G:
+            m_t = (i_t * BT + o_bt) < T
+            b_g_last = ct.astype(
+                ct.gather(g, (bt_batch, t_base + last_idx, i_h), check_bounds=True, padding_value=0.0), ct.float32
+            )
+            b_g = ct.astype(
+                ct.gather(g, (bt_batch, t_base + i_t * BT + o_bt, i_h), mask=m_t, check_bounds=True, padding_value=0.0),
+                ct.float32,
+            )
+            decay = ct.where(m_t, exp2(b_g_last - b_g), ct.zeros((BT,), dtype=ct.float32))
+            b_v = b_v * decay[:, None]
+            b_g_last = exp2(b_g_last)
+            b_h = b_h * b_g_last
+
+        # --- USE_GK per-key gate decay ---
+        if USE_GK:
+            gk_time = t_base + last_idx
+            # ZERO-padded gk load: lanes [K:BK] -> 0 -> exp2(0)=1, multiplying the
+            # already-zero state rows/cols (no inf*0=nan).
+            b_gk1 = ct.astype(
+                ct.gather(gk, (bt_batch, gk_time, i_h, oK), mask=m_k_lane, check_bounds=True, padding_value=0.0),
+                ct.float32,
+            )
+            if STATE_V_FIRST:
+                b_h = b_h * exp2(b_gk1)[None, :]
+            else:
+                b_h = b_h * exp2(b_gk1)[:, None]
+
+        b_v = ct.astype(b_v, k.dtype)
+
+        # --- b_h += b_k @ b_v   (b_k is (BK, BT) transposed load of k) ---
+        k_time = (t_base + i_t * BT + o_bt)[None, :]
+        kmask = (oK[:, None] < K) & ((i_t * BT + o_bt)[None, :] < T)
+        bk1 = ct.gather(
+            k,
+            (bt_batch, k_time, i_kh, oK[:, None]),
+            mask=ct.broadcast_to(kmask, (BK, BT)),
+            check_bounds=True,
+            padding_value=0.0,
+        )
+        bk1 = ct.where(kmask, bk1, ct.zeros((BK, BT), dtype=bk1.dtype))
+        a = ct.astype(bk1, ct.tfloat32) if bk1.dtype == ct.float32 else bk1
+        bvm = ct.astype(b_v, ct.tfloat32) if b_v.dtype == ct.float32 else b_v
+        prod1 = ct.mma(a, bvm, ct.zeros((BK, BV), dtype=ct.float32))
+        if STATE_V_FIRST:
+            b_h = b_h + ct.transpose(prod1)
+        else:
+            b_h = b_h + prod1
+
+    # --- Store final state ht <- b_h  (ht (N, HV, *), per-sequence state) ---
+    if STORE_FINAL_STATE:
+        if STATE_V_FIRST:
+            row = (i_v * BV + o_bv)[:, None]
+            tm1 = ct.broadcast_to(m_v_lane[:, None] & m_k_lane[None, :], (BV, BK))
+            ct.scatter(ht, (i_n, i_h, row, oK[None, :]), ct.astype(b_h, ht.dtype), mask=tm1, check_bounds=True)
+        else:
+            col = (i_v * BV + o_bv)[None, :]
+            tm1 = ct.broadcast_to(m_k_lane[:, None] & m_v_lane[None, :], (BK, BV))
+            ct.scatter(ht, (i_n, i_h, oK[:, None], col), ct.astype(b_h, ht.dtype), mask=tm1, check_bounds=True)
+
+
+@ct.kernel
+def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_dense_tma(
+    k,
+    v,
+    w,
+    g,
+    h,
+    v_new,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BV: ConstInt,
+    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+):
+    """Dense aligned state scan (contiguous tensors, tile-aligned T/K/V, scalar
+    gate, K-major state) using block-indexed TMA accesses.
+
+    The KV state is carried as a SINGLE full-width ``(BK, BV)`` tile (``BK =
+    next_pow2(K)``) instead of a 4-way 64-wide sub-block unroll, so the kernel is
+    general for ANY ``K`` (no ``K<=256`` cap). ``w``/``k`` are K-contiguous, so a
+    single block-indexed ``ct.load(..., shape=(BT, 1, BK), padding_mode=ZERO)``
+    reads cols ``[0:K]`` and zero-pads ``[K:BK]``; padded columns / state rows
+    contribute 0 to every MMA."""
+    i_v = ct.bid(0)
+    i_nh = ct.bid(1)
+    i_n = i_nh // HV
+    i_h = i_nh % HV
+    i_kh = i_h // (HV // H)
+    NT = T // BT
+    Z = ct.PaddingMode.ZERO
+
+    b_h = ct.zeros((BK, BV), dtype=ct.float32)
+
+    for i_t in range(NT):
+        rt = i_n * NT + i_t
+        h_row = (i_n * NT + i_t) * HV + i_h
+
+        ct.store(h, index=(h_row, 0, i_v), tile=ct.astype(b_h, h.dtype).reshape((1, BK, BV)))
+
+        bw = ct.load(w, index=(rt, i_h, 0), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
+        b_v = safe_mma(bw, ct.astype(b_h, bw.dtype), ct.zeros((BT, BV), dtype=ct.float32))
+
+        b_v_load = ct.load(v, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
+        b_v = ct.astype(b_v_load, ct.float32) - b_v
+        ct.store(v_new, index=(rt, i_h, i_v), tile=ct.astype(b_v, v_new.dtype).reshape((BT, 1, BV)))
+
+        b_g_last = ct.astype(ct.load(g, index=(rt * BT + BT - 1, i_h), shape=()), ct.float32)
+        b_g = ct.astype(ct.load(g, index=(rt, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,)), ct.float32)
+        b_v = ct.astype(b_v * exp2(b_g_last - b_g)[:, None], k.dtype)
+        state_decay = exp2(b_g_last)
+        b_h = b_h * state_decay
+
+        bk1 = ct.load(k, index=(rt, i_kh, 0), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
+        b_h = b_h + safe_mma(ct.transpose(bk1), b_v, ct.zeros((BK, BV), dtype=ct.float32))
+
+
+@ct.kernel
+def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
+    q,
+    k,
+    w,
+    g,
+    gk,
+    dht,
+    dh0,
+    do,
+    dh,
+    dv,
+    dv2,
+    cu_seqlens,
+    chunk_offsets,
+    scale,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BV: ConstInt,
+    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    USE_G: ConstInt,
+    USE_GK: ConstInt,
+    USE_INITIAL_STATE: ConstInt,
+    USE_FINAL_STATE_GRADIENT: ConstInt,
+    STATE_V_FIRST: ConstInt,
+    IS_VARLEN: ConstInt,
+    USE_TMA: ConstInt,
+    occupancy: ConstInt = 1,
+):
+    # State loads and stores use masked gather/scatter.
+    #
+    # dh state is a SINGLE full-width tile ((BV, BK) when STATE_V_FIRST else
+    # (BK, BV), BK=next_pow2(K)) instead of a 4-way 64-wide sub-block unroll, so
+    # the kernel is general for ANY K (no K<=256 cap). Every flat gather/scatter
+    # over the K axis uses oK=arange(BK) with a `(oK < K)` mask, so rows/cols
+    # [K:BK] are zero on load, contribute 0 to every MMA, and are masked out on
+    # store; gk padding loads as 0 so exp2(0)=1 multiplies the zero state rows.
+    i_v = ct.bid(0)
+    i_nh = ct.bid(1)
+    i_n = i_nh // HV
+    i_h = i_nh % HV
+
+    if IS_VARLEN:
+        bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+        eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+        T = eos - bos
+        NT = ct.cdiv(T, BT)
+        boh = ct.load(chunk_offsets, (i_n,), shape=()).item()
+    else:
+        bos = i_n * T
+        eos = i_n * T + T
+        NT = ct.cdiv(T, BT)
+        boh = i_n * NT
+
+    if STATE_V_FIRST:
+        b_dh = ct.zeros((BV, BK), dtype=ct.float32)
+    else:
+        b_dh = ct.zeros((BK, BV), dtype=ct.float32)
+
+    q_base = (bos * H + i_h // (HV // H)) * K
+    k_base = (bos * H + i_h // (HV // H)) * K
+    w_base = (bos * HV + i_h) * K
+    do_base = (bos * HV + i_h) * V
+    dv_base = (bos * HV + i_h) * V
+    dv2_base = (bos * HV + i_h) * V
+    dh_base = (boh * HV + i_h) * K * V
+    gk_base0 = (bos * HV + i_h) * K
+    dh0_base = i_nh * K * V
+    dht_base = i_nh * K * V
+
+    # Raw flat handles + element counts for 1-D flat gather/scatter (cuTile 1.4.0).
+    dhtf = dht.get_raw_memory()
+    dht_n = _array_numel(dht)
+    dhf = dh.get_raw_memory()
+    dh_n = _array_numel(dh)
+    dh0f = dh0.get_raw_memory()
+    dh0_n = _array_numel(dh0)
+    gf = g.get_raw_memory()
+    g_n = _array_numel(g)
+    gkf = gk.get_raw_memory()
+    gk_n = _array_numel(gk)
+    dof = do.get_raw_memory()
+    do_n = _array_numel(do)
+    kf = k.get_raw_memory()
+    k_n = _array_numel(k)
+    qf = q.get_raw_memory()
+    q_n = _array_numel(q)
+    wf = w.get_raw_memory()
+    w_n = _array_numel(w)
+    dvf = dv.get_raw_memory()
+    dv_n = _array_numel(dv)
+    dv2f = dv2.get_raw_memory()
+    dv2_n = _array_numel(dv2)
+
+    oK = ct.arange(BK, dtype=ct.int32)
+    o_bt = ct.arange(BT, dtype=ct.int32)
+    o_bv = ct.arange(BV, dtype=ct.int32)
+    m_k_lane = oK < K
+
+    # --- Load final-state gradient dht -> b_dh ---
+    if USE_FINAL_STATE_GRADIENT:
+        if STATE_V_FIRST:
+            row = (i_v * BV + o_bv)[:, None]
+            b_dh = b_dh + gather_flat_cb(
+                dhtf, dht_base + row * K + oK[None, :], dht_n, mask=m_k_lane[None, :], padding_value=0.0
+            )
+        else:
+            col = (i_v * BV + o_bv)[None, :]
+            b_dh = b_dh + gather_flat_cb(
+                dhtf, dht_base + oK[:, None] * V + col, dht_n, mask=m_k_lane[:, None], padding_value=0.0
+            )
+
+    v_col = (i_v * BV + o_bv)[None, :]
+    vmask_c = (i_v * BV + o_bv) < V
+
+    # --- Reverse recurrent loop over chunks ---
+    for i_rev in range(NT):
+        i_t = NT - 1 - i_rev
+        dh_chunk = dh_base + i_t * HV * K * V
+
+        # Store b_dh -> dh[i_t]. Mask BK-wide K rows and BV-wide V cols; flat numel
+        # check alone would let over-range K rows spill into the next chunk's dh slot.
+        if STATE_V_FIRST:
+            row = (i_v * BV + o_bv)[:, None]
+            vmask = ((i_v * BV + o_bv) < V)[:, None]
+            scatter_flat_cb(
+                dhf,
+                dh_chunk + row * K + oK[None, :],
+                ct.astype(b_dh, dh.dtype),
+                dh_n,
+                mask=vmask & m_k_lane[None, :],
+            )
+        else:
+            col = (i_v * BV + o_bv)[None, :]
+            vmask = ((i_v * BV + o_bv) < V)[None, :]
+            scatter_flat_cb(
+                dhf,
+                dh_chunk + oK[:, None] * V + col,
+                ct.astype(b_dh, dh.dtype),
+                dh_n,
+                mask=m_k_lane[:, None] & vmask,
+            )
+
+        last_idx = ct_min((i_t + 1) * BT, T) - 1
+
+        bg_last_exp = ct.zeros((), dtype=ct.float32)
+        b_g_exp = ct.zeros((BT,), dtype=ct.float32)
+        bg_last = ct.zeros((), dtype=ct.float32)
+        b_g = ct.zeros((BT,), dtype=ct.float32)
+        m_t = (i_t * BT + o_bt) < T
+        if USE_G:
+            bg_last = ct.astype(gather_flat_cb(gf, (bos + last_idx) * HV + i_h, g_n, padding_value=0.0), ct.float32)
+            g_off = (bos * HV + i_h) + (i_t * BT + o_bt) * HV
+            b_g = ct.astype(gather_flat_cb(gf, g_off, g_n, mask=m_t, padding_value=0.0), ct.float32)
+            bg_last_exp = exp2(bg_last)
+            b_g_exp = exp2(b_g)
+
+        do_off = do_base + (i_t * BT + o_bt)[:, None] * (HV * V) + v_col
+        do_full = (m_t[:, None]) & (vmask_c[None, :])
+        b_do = gather_flat_cb(dof, do_off, do_n, padding_value=0.0)
+        b_do = ct.where(do_full, b_do, ct.zeros((BT, BV), dtype=b_do.dtype))
+
+        # b_dv = b_k @ b_dh  (single full-width K MMA). K-mask the gather: an oK>=K
+        # flat offset would read the NEXT head's in-bounds (numel-ok) K data.
+        k_row = (i_t * BT + o_bt)[:, None]
+        kmask_r = (i_t * BT + o_bt) < T
+        bk_full = kmask_r[:, None] & m_k_lane[None, :]
+        bk1 = gather_flat_cb(kf, k_base + k_row * (H * K) + oK[None, :], k_n, mask=bk_full, padding_value=0.0)
+        bk1 = ct.where(bk_full, bk1, ct.zeros((BT, BK), dtype=bk1.dtype))
+
+        b_gk1 = ct.zeros((BK,), dtype=ct.float32)
+        if USE_GK:
+            b_gk1 = ct.astype(
+                gather_flat_cb(gkf, gk_base0 + last_idx * HV * K + oK, gk_n, mask=m_k_lane, padding_value=0.0),
+                ct.float32,
+            )
+
+        b_dv = ct.zeros((BT, BV), dtype=ct.float32)
+        a = ct.astype(bk1, ct.tfloat32) if bk1.dtype == ct.float32 else bk1
+        if STATE_V_FIRST:
+            bmat = ct.astype(ct.transpose(b_dh), bk1.dtype)
+        else:
+            bmat = ct.astype(b_dh, bk1.dtype)
+        bmat = ct.astype(bmat, ct.tfloat32) if bmat.dtype == ct.float32 else bmat
+        b_dv = ct.mma(a, bmat, b_dv)
+
+        if USE_G:
+            decay = ct.where(m_t, exp2(bg_last - b_g), ct.zeros((BT,), dtype=ct.float32))
+            b_dv = b_dv * decay[:, None]
+
+        dv_off = dv_base + (i_t * BT + o_bt)[:, None] * (HV * V) + v_col
+        dv_loaded = gather_flat_cb(dvf, dv_off, dv_n, padding_value=0.0)
+        dv_loaded = ct.where(do_full, dv_loaded, ct.zeros((BT, BV), dtype=dv_loaded.dtype))
+        b_dv = b_dv + ct.astype(dv_loaded, ct.float32)
+        dv2_off = dv2_base + (i_t * BT + o_bt)[:, None] * (HV * V) + v_col
+        scatter_flat_cb(dv2f, dv2_off, ct.astype(b_dv, dv2.dtype), dv2_n, mask=do_full)
+
+        # --- b_dh += trans?(q@do*scale - w@dv)  (single full-width K MMA) ---
+        # b_w/b_q are (BK, BT) transposed loads; K-rows [K:BK] are zeroed by the
+        # `wmask` where (the gather itself may touch in-bounds neighbor data).
+        time = (i_t * BT + o_bt)[None, :]
+        tmask = (i_t * BT + o_bt)[None, :] < T
+        b_dv_cast = ct.astype(b_dv, ct.float32)
+
+        kr = oK[:, None]
+        wmask = m_k_lane[:, None] & tmask
+        b_w = gather_flat_cb(wf, w_base + kr * 1 + time * (HV * K), w_n, mask=wmask, padding_value=0.0)
+        b_w = ct.where(wmask, b_w, ct.zeros((BK, BT), dtype=b_w.dtype))
+        b_q = gather_flat_cb(qf, q_base + kr * 1 + time * (H * K), q_n, mask=wmask, padding_value=0.0)
+        b_q = ct.where(wmask, b_q, ct.zeros((BK, BT), dtype=b_q.dtype))
+        if USE_G:
+            b_dh = b_dh * bg_last_exp
+            b_q = b_q * b_g_exp[None, :]
+        if USE_GK:
+            if STATE_V_FIRST:
+                b_dh = b_dh * exp2(b_gk1)[None, :]
+            else:
+                b_dh = b_dh * exp2(b_gk1)[:, None]
+        qa = ct.astype(b_q, ct.tfloat32)
+        doa = ct.astype(b_do, ct.tfloat32)
+        qdo1 = ct.mma(qa, doa, ct.zeros((BK, BV), dtype=ct.float32))
+        wa = ct.astype(b_w, ct.tfloat32)
+        dva = ct.astype(b_dv_cast, ct.tfloat32)
+        wdv1 = ct.mma(wa, dva, ct.zeros((BK, BV), dtype=ct.float32))
+        upd1 = qdo1 * scale - wdv1
+        if STATE_V_FIRST:
+            b_dh = b_dh + ct.transpose(upd1)
+        else:
+            b_dh = b_dh + upd1
+
+    # --- Store initial-state gradient dh0 <- b_dh ---
+    if USE_INITIAL_STATE:
+        # Mask both the BK-wide K rows and BV-wide V cols; flat numel check alone
+        # would let an over-range K row spill into the next head's dh0 slot.
+        if STATE_V_FIRST:
+            row = (i_v * BV + o_bv)[:, None]
+            vmask = ((i_v * BV + o_bv) < V)[:, None]
+            scatter_flat_cb(
+                dh0f,
+                dh0_base + row * K + oK[None, :],
+                ct.astype(b_dh, dh0.dtype),
+                dh0_n,
+                mask=vmask & m_k_lane[None, :],
+            )
+        else:
+            col = (i_v * BV + o_bv)[None, :]
+            vmask = ((i_v * BV + o_bv) < V)[None, :]
+            scatter_flat_cb(
+                dh0f,
+                dh0_base + oK[:, None] * V + col,
+                ct.astype(b_dh, dh0.dtype),
+                dh0_n,
+                mask=m_k_lane[:, None] & vmask,
+            )
+
+
+@ct.kernel
+def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_dense_tma(
+    q,
+    k,
+    w,
+    g,
+    do,
+    dh,
+    dv,
+    dv2,
+    scale,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BV: ConstInt,
+    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    occupancy: ConstInt = 1,
+):
+    # Dense/aligned variant (STATE_V_FIRST=False, USE_G=True, no varlen/gk/state-grad,
+    # T%BT==0): no boundary masking. q/k/w/do/dv/dv2 reshaped host-side to (B*T,*,D)
+    # and dh to (B*NT*HV,K,V); block-indexed ct.load/ct.store -> native TMA (transposed
+    # (K,T) q/w loaded as (BT,BK) blocks then ct.transpose).
+    # dh state is a SINGLE full-width (BK, BV) tile (BK=next_pow2(K)) -> general for
+    # ANY K (no 64-wide sub-block unroll / K<=256 cap). q/k/w are K-contiguous, so a
+    # single block-indexed ct.load(shape=(BT,1,BK), padding_mode=ZERO) reads cols
+    # [0:K] and zero-pads [K:BK]; padded cols / state rows contribute 0 to every MMA.
+    # TODO(cutile): `occupancy` kept for signature parity; unused in body.
+    i_v = ct.bid(0)
+    i_nh = ct.bid(1)
+    i_n = i_nh // HV
+    i_h = i_nh % HV
+    NT = T // BT
+    i_kh = i_h // (HV // H)
+
+    b_dh = ct.zeros((BK, BV), dtype=ct.float32)
+
+    Z = ct.PaddingMode.ZERO
+
+    for i_rev in range(NT):
+        i_t = NT - 1 - i_rev
+        rt = i_n * NT + i_t
+        dh_row = (i_n * NT + i_t) * HV + i_h
+
+        ct.store(dh, index=(dh_row, 0, i_v), tile=ct.astype(b_dh, dh.dtype).reshape((1, BK, BV)))
+
+        bg_last = ct.astype(ct.load(g, index=(rt * BT + (BT - 1), i_h), shape=()), ct.float32)
+        b_g = ct.astype(ct.load(g, index=(rt, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,)), ct.float32)
+        bg_last_exp = exp2(bg_last)
+        b_g_exp = exp2(b_g)
+        b_do = ct.load(do, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
+        bk1 = ct.load(k, index=(rt, i_kh, 0), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
+
+        b_dv = ct.zeros((BT, BV), dtype=ct.float32)
+        b_dv = safe_mma(bk1, ct.astype(b_dh, bk1.dtype), b_dv)
+
+        b_dv = b_dv * exp2(bg_last - b_g)[:, None]
+        b_dv = b_dv + ct.astype(
+            ct.load(dv, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV)),
+            ct.float32,
+        )
+        ct.store(dv2, index=(rt, i_h, i_v), tile=ct.astype(b_dv, dv2.dtype).reshape((BT, 1, BV)))
+        dvb = ct.astype(b_dv, w.dtype)
+        doa = ct.astype(b_do, w.dtype)
+
+        b_w = ct.transpose(
+            ct.load(w, index=(rt, i_h, 0), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
+        )
+        b_q = ct.transpose(
+            ct.load(q, index=(rt, i_kh, 0), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
+        )
+        b_dh = b_dh * bg_last_exp
+        b_q = b_q * b_g_exp[None, :]
+        qdo = ct.mma(ct.astype(b_q, w.dtype), doa, ct.zeros((BK, BV), dtype=ct.float32))
+        wdv = ct.mma(ct.astype(b_w, w.dtype), dvb, ct.zeros((BK, BV), dtype=ct.float32))
+        b_dh = b_dh + (qdo * scale - wdv)
+
+
+@ct.kernel
+def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma(
+    q,
+    k,
+    w,
+    g,
+    do,
+    dh,
+    dv,
+    dv2,
+    scale,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BV: ConstInt,
+    occupancy: ConstInt = 1,
+):
+    # bk128 dense variant: K split into 128-wide blocks (dense/aligned, USE_G only).
+    # Same reshape/TMA recipe as the bk64 dense_tma variant.
+    # TODO(cutile): `occupancy` kept for signature parity; unused in body.
+    i_v = ct.bid(0)
+    i_nh = ct.bid(1)
+    i_n = i_nh // HV
+    i_h = i_nh % HV
+    NT = T // BT
+    i_kh = i_h // (HV // H)
+
+    b_dh1 = ct.zeros((128, BV), dtype=ct.float32)
+    b_dh2 = ct.zeros((128, BV), dtype=ct.float32)
+
+    Z = ct.PaddingMode.ZERO
+
+    for i_rev in range(NT):
+        i_t = NT - 1 - i_rev
+        rt = i_n * NT + i_t
+        dh_row = (i_n * NT + i_t) * HV + i_h
+
+        ct.store(dh, index=(dh_row, 0, i_v), tile=ct.astype(b_dh1, dh.dtype).reshape((1, 128, BV)))
+        if K > 128:
+            ct.store(dh, index=(dh_row, 1, i_v), tile=ct.astype(b_dh2, dh.dtype).reshape((1, 128, BV)))
+
+        bg_last = ct.astype(ct.load(g, index=(rt * BT + (BT - 1), i_h), shape=()), ct.float32)
+        b_g = ct.astype(ct.load(g, index=(rt, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,)), ct.float32)
+        bg_last_exp = exp2(bg_last)
+        b_g_exp = exp2(b_g)
+        b_do = ct.load(do, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
+        bk1 = ct.load(k, index=(rt, i_kh, 0), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
+
+        b_dv = ct.zeros((BT, BV), dtype=ct.float32)
+        b_dv = safe_mma(bk1, ct.astype(b_dh1, bk1.dtype), b_dv)
+        if K > 128:
+            bk2 = ct.load(k, index=(rt, i_kh, 1), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
+            b_dv = safe_mma(bk2, ct.astype(b_dh2, bk2.dtype), b_dv)
+
+        b_dv = b_dv * exp2(bg_last - b_g)[:, None]
+        b_dv = b_dv + ct.astype(
+            ct.load(dv, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV)),
+            ct.float32,
+        )
+        ct.store(dv2, index=(rt, i_h, i_v), tile=ct.astype(b_dv, dv2.dtype).reshape((BT, 1, BV)))
+        doa = ct.astype(b_do, w.dtype)
+        dvb = ct.astype(b_dv, w.dtype)
+
+        b_w = ct.transpose(
+            ct.load(w, index=(rt, i_h, 0), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
+        )
+        b_q = ct.transpose(
+            ct.load(q, index=(rt, i_kh, 0), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
+        )
+        b_dh1 = b_dh1 * bg_last_exp
+        b_q = b_q * b_g_exp[None, :]
+        qdo = ct.mma(ct.astype(b_q, w.dtype), doa, ct.zeros((128, BV), dtype=ct.float32))
+        wdv = ct.mma(b_w, dvb, ct.zeros((128, BV), dtype=ct.float32))
+        b_dh1 = b_dh1 + (qdo * scale - wdv)
+        if K > 128:
+            b_w = ct.transpose(
+                ct.load(w, index=(rt, i_h, 1), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
+            )
+            b_q = ct.transpose(
+                ct.load(q, index=(rt, i_kh, 1), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
+            )
+            b_dh2 = b_dh2 * bg_last_exp
+            b_q = b_q * b_g_exp[None, :]
+            qdo = ct.mma(ct.astype(b_q, w.dtype), doa, ct.zeros((128, BV), dtype=ct.float32))
+            wdv = ct.mma(b_w, dvb, ct.zeros((128, BV), dtype=ct.float32))
+            b_dh2 = b_dh2 + (qdo * scale - wdv)
+
+
+# fla.ops.common.chunk_o (fwd o, bwd dqkwg / dw / dv_local)
+
+safe_dot = safe_matmul  # alias: non-accumulating dot with fp32->tf32 guard
+
+
+@ct.kernel
+def chunk_fwd_kernel_o(
+    q,
+    k,
+    v,
+    h,
+    g,
+    g_gamma,
+    o,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    BV: ConstInt,
+    USE_G: ConstInt,
+    USE_G_GAMMA: ConstInt,
+    STATE_V_FIRST: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    i_v = ct.bid(0)
+    i_t = ct.bid(1)
+    i_bh = ct.bid(2)
+    i_b = i_bh // HV
+    i_h = i_bh % HV
+
+    if IS_VARLEN:
+        i_tg = i_t
+        i_n = ct.astype(ct.load(chunk_indices, index=(i_t, 0), shape=()), ct.int32)
+        i_t = ct.astype(ct.load(chunk_indices, index=(i_t, 1), shape=()), ct.int32)
+        bos = ct.astype(ct.load(cu_seqlens, index=(i_n,), shape=()), ct.int32)
+        eos = ct.astype(ct.load(cu_seqlens, index=(i_n + 1,), shape=()), ct.int32)
+        T = eos - bos
+    else:
+        NT = ct.cdiv(T, BT)
+        i_tg = i_b * NT + i_t
+        bos = i_b * T
+        eos = bos + T
+
+    # q/k/v/o reshaped host-side to (B*T,*,D) slabs, h to (B*NT*HV,*,*);
+    # block-indexed ct.load -> TMA.
+    i_kh = i_h // (HV // H)
+    i_hc = i_tg * HV + i_h
+
+    q_seg = q.slice(axis=0, start=bos, stop=eos)
+    k_seg = k.slice(axis=0, start=bos, stop=eos)
+    v_seg = v.slice(axis=0, start=bos, stop=eos)
+    o_seg = o.slice(axis=0, start=bos, stop=eos)
+    Z = ct.PaddingMode.ZERO
+
+    r_bt = ct.arange(BT, dtype=ct.int32)
+    o_t = i_t * BT + r_bt
+    m_t = o_t < T
+
+    b_o = ct.zeros((BT, BV), dtype=ct.float32)
+    b_A = ct.zeros((BT, BT), dtype=ct.float32)
+
+    for i_k in range(ct.cdiv(K, BK)):
+        b_q = ct.load(q_seg, index=(i_t, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=2).reshape((BT, BK))
+        b_k = ct.load(k_seg, index=(i_t, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=2).reshape((BT, BK))
+
+        if STATE_V_FIRST:
+            # b_h (BV, BK), o += q @ h^T
+            b_h = ct.load(h, index=(i_hc, i_v, i_k), shape=(1, BV, BK), padding_mode=Z, latency=2).reshape((BV, BK))
+            b_o = safe_mma(b_q, ct.transpose(b_h), b_o)
+        else:
+            # b_h (BK, BV), o += q @ h
+            b_h = ct.load(h, index=(i_hc, i_k, i_v), shape=(1, BK, BV), padding_mode=Z, latency=2).reshape((BK, BV))
+            b_o = safe_mma(b_q, b_h, b_o)
+        b_A = safe_mma(b_q, ct.transpose(b_k), b_A)
+
+    if USE_G:
+        b_g = ct.load(g.slice(axis=0, start=bos, stop=eos), index=(i_t, i_h), shape=(BT, 1), padding_mode=Z).reshape(
+            (BT,)
+        )
+        b_o = b_o * exp2(b_g)[:, None]
+        b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+    if USE_G_GAMMA:
+        b_gamma = ct.load(g_gamma, (i_h,), shape=()).item()
+        b_g = b_gamma * ct.astype(r_bt + 1, ct.float32)
+        b_o = b_o * exp2(b_g)[:, None]
+        b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+
+    m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
+    b_A = ct.where(m_A, b_A, ct.zeros((BT, BT), dtype=ct.float32))
+
+    b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z).reshape((BT, BV))
+
+    b_o = b_o * scale + safe_dot(ct.astype(b_A, b_v.dtype), b_v) * scale
+
+    ct.store(o_seg, index=(i_t, i_h, i_v), tile=ct.astype(b_o, o.dtype).reshape((BT, 1, BV)))
+
+
+@ct.kernel
+def chunk_bwd_kernel_dqkwg(
+    q,
+    k,
+    v,
+    g,
+    g_gamma,
+    h,
+    do,
+    dh,
+    dq,
+    dk,
+    dw,
+    dv,
+    dg,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    B: ConstInt,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    BV: ConstInt,
+    USE_G: ConstInt,
+    USE_G_GAMMA: ConstInt,
+    USE_DW: ConstInt,
+    STATE_V_FIRST: ConstInt,
+    IS_VARLEN: ConstInt,
+    NV,  # runtime cdiv(V,BV) -> rolled V-loop (avoids unroll reg-spill at K=256)
+    NUM_WORK,  # persistent: total work-items (NK*NT*BH)
+    NT_DECODE,  # persistent: NT used to decode (i_t, i_k) from linear id
+):
+    _prog = ct.bid(0)
+    _nprog = ct.num_blocks(0)
+    _BH_P = B * HV
+    for _wid in range(_prog, NUM_WORK, _nprog):
+        i_bh = _wid % _BH_P
+        _r = _wid // _BH_P
+        i_t = _r % NT_DECODE
+        i_k = _r // NT_DECODE
+        i_b = i_bh // HV
+        i_h = i_bh % HV
+
+        if IS_VARLEN:
+            i_tg = i_t
+            i_n = ct.load(chunk_indices, (i_t, 0), shape=()).item()
+            i_t = ct.load(chunk_indices, (i_t, 1), shape=()).item()
+            bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+            eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+            T = eos - bos
+        else:
+            NT = ct.cdiv(T, BT)
+            i_tg = i_b * NT + i_t
+            bos = i_b * T
+            eos = bos + T
+
+        i_kh = i_h // (HV // H)
+        i_hc = i_tg * HV + i_h
+
+        q_seg = q.slice(axis=0, start=bos, stop=eos)
+        k_seg = k.slice(axis=0, start=bos, stop=eos)
+        v_seg = v.slice(axis=0, start=bos, stop=eos)
+        do_seg = do.slice(axis=0, start=bos, stop=eos)
+        dq_seg = dq.slice(axis=0, start=bos, stop=eos)
+        dk_seg = dk.slice(axis=0, start=bos, stop=eos)
+        Z = ct.PaddingMode.ZERO
+
+        r_bt = ct.arange(BT, dtype=ct.int32)
+        o_t = i_t * BT + r_bt
+        m_t = o_t < T
+
+        b_g_gamma = ct.zeros((BT,), dtype=ct.float32)
+        b_g_last_gamma = 0.0
+        if USE_G_GAMMA:
+            b_gamma = ct.load(g_gamma, (i_h,), shape=()).item()
+            b_g_gamma = b_gamma * ct.astype(r_bt + 1, ct.float32)
+            rem = T - i_t * BT
+            bt_clip = BT if BT < rem else rem
+            b_g_last_gamma = b_gamma * bt_clip
+
+        b_dg_last = ct.zeros((1,), dtype=ct.float32)
+        b_dq = ct.zeros((BT, BK), dtype=ct.float32)
+        b_dk = ct.zeros((BT, BK), dtype=ct.float32)
+        b_ds = ct.zeros((BT, BT), dtype=ct.float32)
+        b_dw = ct.zeros((BT, BK), dtype=ct.float32)
+
+        for i_v in range(NV):
+            # h/dh state tiles: (BV,BK) when V-first; else load (BK,BV) and transpose.
+            if STATE_V_FIRST:
+                b_h = ct.load(h, index=(i_hc, i_v, i_k), shape=(1, BV, BK), padding_mode=Z, latency=2).reshape((BV, BK))
+                b_dh = ct.load(dh, index=(i_hc, i_v, i_k), shape=(1, BV, BK), padding_mode=Z, latency=2).reshape(
+                    (BV, BK)
+                )
+            else:
+                b_h = ct.transpose(
+                    ct.load(h, index=(i_hc, i_k, i_v), shape=(1, BK, BV), padding_mode=Z, latency=2).reshape((BK, BV))
+                )
+                b_dh = ct.transpose(
+                    ct.load(dh, index=(i_hc, i_k, i_v), shape=(1, BK, BV), padding_mode=Z, latency=2).reshape((BK, BV))
+                )
+
+            b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=2).reshape((BT, BV))
+            b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=2).reshape(
+                (BT, BV)
+            )
+
+            if USE_G:
+                b_dg_last = b_dg_last + ct.sum(ct.astype(b_h, ct.float32) * ct.astype(b_dh, ct.float32))
+            b_ds = safe_mma(b_do, ct.transpose(b_v), b_ds)
+            b_dq = safe_mma(b_do, ct.astype(b_h, b_do.dtype), b_dq)
+            b_dk = safe_mma(b_v, ct.astype(b_dh, b_v.dtype), b_dk)
+            if USE_DW:
+                b_dv = ct.load(
+                    dv.slice(axis=0, start=bos, stop=eos),
+                    index=(i_t, i_h, i_v),
+                    shape=(BT, 1, BV),
+                    padding_mode=Z,
+                    latency=2,
+                ).reshape((BT, BV))
+                b_dw = safe_mma(ct.astype(b_dv, b_v.dtype), ct.astype(b_h, b_v.dtype), b_dw)
+
+        if USE_DW:
+            dw_seg = dw.slice(axis=0, start=bos, stop=eos)
+            ct.store(dw_seg, index=(i_t, i_h, i_k), tile=ct.astype(-b_dw, dw.dtype).reshape((BT, 1, BK)))
+
+        b_q = ct.load(q_seg, index=(i_t, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=2).reshape((BT, BK))
+        b_k = ct.load(k_seg, index=(i_t, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=2).reshape((BT, BK))
+
+        m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
+
+        if USE_G:
+            g_seg = g.slice(axis=0, start=bos, stop=eos)
+            b_g = ct.load(g_seg, index=(i_t, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,))
+            end_idx = i_t * BT + BT
+            end_clip = end_idx if end_idx < T else T
+            b_g_last = ct.load(g_seg, (end_clip - 1, i_h), shape=()).item()
+
+            b_dg_last = b_dg_last * exp2(b_g_last)
+            b_dq = b_dq * exp2(b_g)[:, None] * scale
+            decay_k = ct.where(m_t, exp2(-b_g + b_g_last), ct.zeros((BT,), dtype=ct.float32))
+            b_dk = b_dk * decay_k[:, None]
+            b_dg_last = b_dg_last + ct.sum(b_dk * ct.astype(b_k, ct.float32))
+            b_ds = ct.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), ct.zeros((BT, BT), dtype=ct.float32)) * scale
+            b_ds_c = ct.astype(b_ds, b_k.dtype)
+            b_dq = safe_mma(b_ds_c, b_k, b_dq)
+            b_dk = safe_mma(ct.transpose(b_ds_c), b_q, b_dk)
+            b_dg = ct.sum(b_dq * ct.astype(b_q, ct.float32), axis=1) - ct.sum(b_dk * ct.astype(b_k, ct.float32), axis=1)
+            last_row = end_clip - 1
+            b_dg = ct.where(o_t < last_row, b_dg, b_dg + b_dg_last)
+            ct.store(dq_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((BT, 1, BK)))
+            ct.store(dk_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((BT, 1, BK)))
+            dg_seg = dg.slice(axis=1, start=bos, stop=eos)
+            ct.store(dg_seg, index=(i_k, i_t, i_h), tile=ct.astype(b_dg, dg.dtype).reshape((1, BT, 1)))
+        elif USE_G_GAMMA:
+            b_g = b_g_gamma
+            b_g_last = b_g_last_gamma
+            b_dq = b_dq * exp2(b_g)[:, None] * scale
+            decay_k = ct.where(m_t, exp2(-b_g + b_g_last), ct.zeros((BT,), dtype=ct.float32))
+            b_dk = b_dk * decay_k[:, None]
+            b_ds = ct.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), ct.zeros((BT, BT), dtype=ct.float32)) * scale
+            b_ds_c = ct.astype(b_ds, b_k.dtype)
+            b_dq = safe_mma(b_ds_c, b_k, b_dq)
+            b_dk = safe_mma(ct.transpose(b_ds_c), b_q, b_dk)
+            ct.store(dq_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((BT, 1, BK)))
+            ct.store(dk_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((BT, 1, BK)))
+        else:
+            b_ds = ct.where(m_A, b_ds, ct.zeros((BT, BT), dtype=ct.float32))
+            b_ds_c = ct.astype(b_ds, b_k.dtype)
+            b_dq = safe_mma(b_ds_c, b_k, b_dq)
+            b_dk = safe_mma(ct.transpose(b_ds_c), b_q, b_dk) * scale
+            b_dq = b_dq * scale
+            ct.store(dq_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((BT, 1, BK)))
+            ct.store(dk_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((BT, 1, BK)))
+
+
+@ct.kernel
+def chunk_bwd_kernel_dw(
+    h,
+    dv,
+    dw,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    BV: ConstInt,
+    STATE_V_FIRST: ConstInt,
+    IS_VARLEN: ConstInt,
+):
+    i_k = ct.bid(0)
+    i_t = ct.bid(1)
+    i_bh = ct.bid(2)
+    i_b = i_bh // HV
+    i_h = i_bh % HV
+
+    hf = h.get_raw_memory()
+    dvf = dv.get_raw_memory()
+    dwf = dw.get_raw_memory()
+
+    if IS_VARLEN:
+        i_tg = i_t
+        i_n = ct.load(chunk_indices, (i_t, 0), shape=()).item()
+        i_t = ct.load(chunk_indices, (i_t, 1), shape=()).item()
+        bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+        eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+        T = eos - bos
+    else:
+        NT = ct.cdiv(T, BT)
+        i_tg = i_b * NT + i_t
+        bos = i_b * T
+
+    h_base = (i_tg * HV + i_h) * K * V
+    dv_base = (bos * HV + i_h) * V
+    dw_base = (bos * HV + i_h) * K
+
+    r_bt = ct.arange(BT, dtype=ct.int32)
+    r_bk = ct.arange(BK, dtype=ct.int32)
+    r_bv = ct.arange(BV, dtype=ct.int32)
+    k_col = i_k * BK + r_bk
+
+    b_dw = ct.zeros((BT, BK), dtype=ct.float32)
+    for i_v in range(ct.cdiv(V, BV)):
+        v_idx = i_v * BV + r_bv
+        if STATE_V_FIRST:
+            h_off = h_base + v_idx[:, None] * K + k_col[None, :]
+        else:
+            h_off = h_base + v_idx[:, None] * 1 + k_col[None, :] * V
+        h_mask = (v_idx[:, None] < V) & (k_col[None, :] < K)
+        b_h = gather_flat(hf, h_off, mask=h_mask, padding_value=0)
+
+        dvrow = i_t * BT + r_bt
+        dv_off = dv_base + dvrow[:, None] * (HV * V) + v_idx[None, :]
+        dv_mask = (dvrow[:, None] < T) & (v_idx[None, :] < V)
+        b_dv = gather_flat(dvf, dv_off, mask=dv_mask, padding_value=0)
+        b_dw = safe_mma(ct.astype(b_dv, b_h.dtype), b_h, b_dw)
+
+    dwrow = i_t * BT + r_bt
+    dw_off = dw_base + dwrow[:, None] * (HV * K) + k_col[None, :]
+    dw_mask = (dwrow[:, None] < T) & (k_col[None, :] < K)
+    scatter_flat(dwf, dw_off, ct.astype(-b_dw, dw.dtype), mask=dw_mask)
+
+
+@ct.kernel
+def chunk_bwd_kernel_dv_local(
+    q,
+    k,
+    g,
+    g_gamma,
+    A,
+    do,
+    dv,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    T,
+    H: ConstInt,
+    HV: ConstInt,
+    K: ConstInt,
+    V: ConstInt,
+    BT: ConstInt,
+    BK: ConstInt,
+    BV: ConstInt,
+    USE_G: ConstInt,
+    USE_G_GAMMA: ConstInt,
+    USE_A: ConstInt,
+    IS_VARLEN: ConstInt,
+    NUM_WORK,  # persistent
+    BH_P,  # persistent: B*HV
+):
+    _prog = ct.bid(0)
+    _nprog = ct.num_blocks(0)
+    for _wid in range(_prog, NUM_WORK, _nprog):
+        i_bh = _wid % BH_P
+        i_t = _wid // BH_P
+        i_b = i_bh // HV
+        i_h = i_bh % HV
+
+        qf = q.get_raw_memory()
+        kf = k.get_raw_memory()
+        dof = do.get_raw_memory()
+        dvf = dv.get_raw_memory()
+        Af = A.get_raw_memory()
+        gf = g.get_raw_memory()
+
+        if IS_VARLEN:
+            i_n = ct.load(chunk_indices, (i_t, 0), shape=()).item()
+            i_t = ct.load(chunk_indices, (i_t, 1), shape=()).item()
+            bos = ct.load(cu_seqlens, (i_n,), shape=()).item()
+            eos = ct.load(cu_seqlens, (i_n + 1,), shape=()).item()
+            T = eos - bos
+        else:
+            bos = i_b * T
+
+        q_base = (bos * H + i_h // (HV // H)) * K
+        k_base = (bos * H + i_h // (HV // H)) * K
+        do_base = (bos * HV + i_h) * V
+        dv_base = (bos * HV + i_h) * V
+
+        r_bt = ct.arange(BT, dtype=ct.int32)
+        r_bk = ct.arange(BK, dtype=ct.int32)
+        r_bv = ct.arange(BV, dtype=ct.int32)
+
+        o_t = i_t * BT + r_bt
+        m_t = o_t < T
+
+        b_A = ct.zeros((BT, BT), dtype=ct.float32)
+        b_g = ct.zeros((BT,), dtype=ct.float32)
+        b_gamma = 0.0
+
+        if USE_A:
+            A_base = (bos * HV + i_h) * BT
+            a_row = r_bt
+            a_col = i_t * BT + r_bt
+            A_off = A_base + a_row[:, None] * 1 + a_col[None, :] * (HV * BT)
+            A_mask = (a_row[:, None] < BT) & (a_col[None, :] < T)
+            b_A = gather_flat(Af, A_off, mask=A_mask, padding_value=0)
+        else:
+            if USE_G:
+                g_base = bos * HV + i_h
+                g_off = g_base + o_t * HV
+                b_g = gather_flat(gf, g_off, mask=m_t, padding_value=0)
+            if USE_G_GAMMA:
+                b_gamma = ct.load(g_gamma, (i_h,), shape=()).item()
+                b_g = b_gamma * ct.astype(r_bt + 1, ct.float32)
+
+            for i_k in range(ct.cdiv(K, BK)):
+                k_col = i_k * BK + r_bk
+                q_t = i_t * BT + r_bt
+                q_off = q_base + k_col[:, None] * 1 + q_t[None, :] * (H * K)
+                q_mask = (k_col[:, None] < K) & (q_t[None, :] < T)
+                b_q = gather_flat(qf, q_off, mask=q_mask, padding_value=0)
+                k_row = i_t * BT + r_bt
+                k_off = k_base + k_row[:, None] * (H * K) + k_col[None, :]
+                k_mask = (k_row[:, None] < T) & (k_col[None, :] < K)
+                b_k = gather_flat(kf, k_off, mask=k_mask, padding_value=0)
+                b_A = b_A + safe_dot(b_k, b_q) * scale
+
+            if USE_G or USE_G_GAMMA:
+                # Numerically stable decay: a single exp2 of the pairwise difference.
+                # The factored form exp2(g_j - g_ref) * exp2(g_ref - g_i) produced
+                # 0 * inf = NaN on the causal diagonal when the intra-chunk cumsum of
+                # g is very negative (~-2000 in log2 for random-init gates): with
+                # g_ref = g[chunk_start], exp2(g_end - g_ref)=0 and exp2(g_ref - g_end)=inf.
+                # exp2(g_j - g_i) is mathematically identical (g_ref cancels); causal
+                # entries (i<=j) give g_j - g_i <= 0 so exp2 in (0,1], and non-causal
+                # entries (possibly inf) are masked to 0 by m_A below.
+                b_A = b_A * exp2(b_g[None, :] - b_g[:, None])
+
+        m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
+        b_A = ct.astype(ct.where(m_A, b_A, ct.zeros((BT, BT), dtype=ct.float32)), do.dtype)
+
+        for i_v in range(ct.cdiv(V, BV)):
+            v_idx = i_v * BV + r_bv
+            do_row = i_t * BT + r_bt
+            do_off = do_base + do_row[:, None] * (HV * V) + v_idx[None, :]
+            do_mask = (do_row[:, None] < T) & (v_idx[None, :] < V)
+            b_do = gather_flat(dof, do_off, mask=do_mask, padding_value=0)
+            b_dv = safe_dot(ct.astype(b_A, b_do.dtype), b_do)
+            dv_off = dv_base + do_row[:, None] * (HV * V) + v_idx[None, :]
+            scatter_flat(dvf, dv_off, ct.astype(b_dv, dv.dtype), mask=do_mask)
+
+
+# Host wrappers (compute grid + fixed tile sizes, then ct.launch)
+# cuTile never accepts None; optional tensors are passed as a 1-element dummy +
+# an integer flag (USE_*/IS_VARLEN/HAS_*).
+
+
+# Per-(device, dtype) cache of the read-only 1-element placeholder for None optional
+# args (always paired with a flag==0). Caching avoids a torch.zeros(1) FillFunctor
+# launch per call, which otherwise serializes on the CPU -> GPU idle.
+_DUMMY_CACHE: dict = {}
+
+
+def _dummy(device, dtype=torch.float32):
+    key = (str(device), dtype)
+    t = _DUMMY_CACHE.get(key)
+    if t is None:
+        t = torch.zeros(1, device=device, dtype=dtype)
+        _DUMMY_CACHE[key] = t
+    return t
+
+
+def _i32(t):
+    return t if t.dtype == torch.int32 else t.to(torch.int32)
+
+
+def _opt(t, device, dtype=torch.float32):
+    """Contiguous tensor if present, else a 1-element dummy (paired with a flag)."""
+    if t is None:
+        return _dummy(device, dtype)
+    return t.contiguous()
+
+
+def _opt_i32(t, device):
+    if t is None:
+        return _dummy(device, torch.int32)
+    return _i32(t)
+
+
+# l2norm
+def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
+    x_shape_og = x.shape
+    x = x.reshape(-1, x.shape[-1]).contiguous()
+    y = torch.empty_like(x) if output_dtype is None else torch.empty_like(x, dtype=output_dtype)
+    T, D = x.shape[0], x.shape[-1]
+    MAX_FUSED_SIZE = 65536 // x.element_size()
+    BD = min(MAX_FUSED_SIZE, _next_power_of_2(D))
+    if D > BD:
+        raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
+    rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
+    if D <= 512:
+        bt_choices = [32, 16, 64, 128]
+
+        def _grid(bt):
+            return (_cdiv(T, bt),)
+
+        def _args(bt):
+            return (x, y, rstd, float(eps), T, D, BD, bt)
+
+        _tuned_launch_bt(
+            l2norm_fwd_kernel,
+            _stream(),
+            bt_choices,
+            _grid,
+            _args,
+            cache_key=(T, D, BD, str(x.dtype)),
+        )
+    else:
+        ct.launch(_stream(), (T,), l2norm_fwd_kernel1, (x, y, rstd, float(eps), D, BD))
+    return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
+
+
+def l2norm_bwd(
+    y: torch.Tensor,
+    rstd: torch.Tensor,
+    dy: torch.Tensor,
+    eps: float = 1e-6,
+    dy2: torch.Tensor | None = None,
+):
+    y_shape_og = y.shape
+    y = y.reshape(-1, dy.shape[-1]).contiguous()
+    dy = dy.reshape(-1, dy.shape[-1]).contiguous()
+    dy2_arg = dy2.reshape(-1, dy.shape[-1]).contiguous() if dy2 is not None else _dummy(y.device, dy.dtype)
+    dx = torch.empty_like(y)
+    T, D = y.shape[0], y.shape[-1]
+    MAX_FUSED_SIZE = 65536 // y.element_size()
+    BD = min(MAX_FUSED_SIZE, _next_power_of_2(D))
+    if D > BD:
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+    rstd_flat = rstd.reshape(-1).contiguous()
+    if D <= 512:
+        BT = 32
+        grid = (_cdiv(T, BT),)
+        _tuned_launch(
+            l2norm_bwd_kernel,
+            _stream(),
+            grid,
+            (y, rstd_flat, dy, dy2_arg, dx, float(eps), T, D, BD, BT, int(dy2 is not None)),
+            cache_key=(D, BD, BT, str(y.dtype), int(dy2 is not None)),
+        )
+    else:
+        ct.launch(
+            _stream(),
+            (T,),
+            l2norm_bwd_kernel1,
+            (y, rstd_flat, dy, dy2_arg, dx, float(eps), D, BD, int(dy2 is not None)),
+        )
+    return dx.view(y_shape_og)
+
+
+# fused_beta_sigmoid
+_BETA_SIGMOID_BLOCK_SIZE = 2048
+
+
+def fused_beta_sigmoid_fwd(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    y = torch.empty_like(x, dtype=torch.float32)
+    n = x.numel()
+    grid = (_cdiv(n, _BETA_SIGMOID_BLOCK_SIZE),)
+    ct.launch(
+        _stream(),
+        grid,
+        fused_beta_sigmoid_fwd_kernel,
+        (x.reshape(-1), y.reshape(-1), float(scale), n, _BETA_SIGMOID_BLOCK_SIZE),
+    )
+    return y
+
+
+def fused_beta_sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    dx = torch.empty_like(x)
+    n = x.numel()
+    grid = (_cdiv(n, _BETA_SIGMOID_BLOCK_SIZE),)
+    ct.launch(
+        _stream(),
+        grid,
+        fused_beta_sigmoid_bwd_kernel,
+        (x.reshape(-1), dy.reshape(-1), dx.reshape(-1), float(scale), n, _BETA_SIGMOID_BLOCK_SIZE),
+    )
+    return dx
+
+
+class BetaSigmoidFunction(torch.autograd.Function):
+    @staticmethod
+    @input_guard
+    def forward(ctx, x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+        y = fused_beta_sigmoid_fwd(x, scale)
+        ctx.save_for_backward(x)
+        ctx.scale = scale
+        return y
+
+    @staticmethod
+    @input_guard
+    def backward(ctx, dy: torch.Tensor):
+        (x,) = ctx.saved_tensors
+        dx = fused_beta_sigmoid_bwd(x, dy, ctx.scale)
+        return dx.type_as(x), None
+
+
+def fused_beta_sigmoid(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    return BetaSigmoidFunction.apply(x, scale)
+
+
+# chunk_local_cumsum (scalar gate) / gdn_gate_chunk_cumsum / gdn_gate_bwd
+def chunk_local_cumsum_scalar(
+    g,
+    chunk_size,
+    reverse=False,
+    scale=None,
+    cu_seqlens=None,
+    head_first=False,
+    output_dtype=torch.float,
+    chunk_indices=None,
+):
+    if head_first:
+        B, H, T = g.shape
+    else:
+        B, T, H = g.shape
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    g_out = torch.empty_like(g, dtype=output_dtype or g.dtype)
+    is_varlen = cu_seqlens is not None
+    dev = g.device
+    scale_val = float(scale) if scale is not None else 0.0
+    has_scale = int(scale is not None)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    ct.launch(
+        _stream(),
+        (NT, B * H),
+        chunk_local_cumsum_scalar_kernel,
+        (
+            g,
+            g_out,
+            scale_val,
+            cu_arg,
+            ci_arg,
+            T,
+            H,
+            BT,
+            int(bool(reverse)),
+            has_scale,
+            int(is_varlen),
+            int(bool(head_first)),
+        ),
+    )
+    return g_out
+
+
+def chunk_local_cumsum(
+    g,
+    chunk_size,
+    reverse=False,
+    scale=None,
+    cu_seqlens=None,
+    head_first=False,
+    output_dtype=torch.float,
+    chunk_indices=None,
+    **kwargs,
+):
+    assert len(g.shape) == 3, f"Unsupported input shape {g.shape}, expected (B, T, H)."
+    return chunk_local_cumsum_scalar(
+        g=g,
+        chunk_size=chunk_size,
+        reverse=reverse,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        head_first=head_first,
+        output_dtype=output_dtype,
+        chunk_indices=chunk_indices,
+    )
+
+
+def gdn_gate_chunk_cumsum(
+    g,
+    A_log,
+    chunk_size,
+    scale=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    chunk_indices=None,
+    output_dtype=torch.float,
+):
+    B, T, H = g.shape
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    o = torch.empty_like(g, dtype=output_dtype or g.dtype)
+    is_varlen = cu_seqlens is not None
+    dev = g.device
+    dt_arg = _opt(dt_bias, dev, A_log.dtype).reshape(-1)
+    scale_val = float(scale) if scale is not None else 0.0
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    ct.launch(
+        _stream(),
+        (NT, B * H),
+        gdn_gate_chunk_cumsum_scalar_kernel,
+        (
+            g,
+            A_log.contiguous().reshape(-1),
+            dt_arg,
+            o,
+            scale_val,
+            cu_arg,
+            ci_arg,
+            T,
+            H,
+            BT,
+            0,
+            int(dt_bias is not None),
+            int(scale is not None),
+            int(is_varlen),
+        ),
+    )
+    return o
+
+
+def gdn_gate_bwd(g, A_log, dt_bias, dyg):
+    H = g.shape[-1]
+    T = g.numel() // H
+    BT = 32
+    NT = _cdiv(T, BT)
+    dg = torch.empty_like(g, dtype=torch.float32)
+    dA = A_log.new_empty(NT, H, dtype=torch.float32)
+    dev = g.device
+    dt_arg = _opt(dt_bias, dev, A_log.dtype).reshape(-1)
+    ct.launch(
+        _stream(),
+        (NT, H),
+        gdn_gate_bwd_kernel,
+        (
+            g.contiguous().reshape(-1),
+            A_log.contiguous().reshape(-1),
+            dt_arg,
+            dyg.contiguous().reshape(-1),
+            dg.reshape(-1),
+            dA.reshape(-1),
+            T,
+            H,
+            BT,
+            int(dt_bias is not None),
+        ),
+    )
+    dg = dg.view_as(g).type_as(g)
+    dA = dA.sum(0).view_as(A_log).type_as(A_log)
+    dbias = dg.view(-1, H).sum(0).to(dt_bias) if dt_bias is not None else None
+    return dg, dA, dbias
+
+
+# chunk_scaled_dot_kkt + solve_tril
+def chunk_scaled_dot_kkt_fwd(
+    k, g=None, beta=None, cu_seqlens=None, chunk_size=64, output_dtype=torch.float32, chunk_indices=None
+):
+    B, T, H, K, HV = *k.shape, beta.shape[2]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    A = torch.empty(B, T, HV, BT, device=k.device, dtype=output_dtype)
+    is_varlen = cu_seqlens is not None
+    dev = k.device
+    BK = 64
+    g_arg = _opt(g, dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    ct.launch(
+        _stream(),
+        (NT, B * HV),
+        chunk_scaled_dot_kkt_fwd_kernel,
+        (
+            # flat element offsets require rank-1 Arrays.
+            k.contiguous().reshape(-1),
+            g_arg.reshape(-1),
+            beta.contiguous().reshape(-1),
+            A.reshape(-1),
+            cu_arg,
+            ci_arg,
+            T,
+            H,
+            HV,
+            K,
+            BT,
+            BK,
+            int(is_varlen),
+            int(g is not None),
+        ),
+    )
+    return A
+
+
+def solve_tril(A, cu_seqlens=None, chunk_indices=None, output_dtype=torch.float):
+    assert A.shape[-1] in [16, 32, 64]
+    output_dtype = A.dtype if output_dtype is None else output_dtype
+    B, T, H, BT = A.shape
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = len(chunk_indices) if cu_seqlens is not None else _cdiv(T, BT)
+    Ai = torch.zeros_like(A, dtype=output_dtype)
+    if BT == 16:
+        kern = solve_tril_16x16_kernel
+    elif BT == 32:
+        kern = merge_16x16_to_32x32_inverse_kernel
+    else:
+        kern = merge_16x16_to_64x64_inverse_kernel
+    is_varlen = cu_seqlens is not None
+    dev = A.device
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    ct.launch(
+        _stream(),
+        (NT, B * H),
+        kern,
+        (A.contiguous(), Ai, cu_arg, ci_arg, T, H, BT, int(is_varlen)),
+    )
+    return Ai
+
+
+# recompute_w_u_fwd / prepare_wy_repr_bwd
+def recompute_w_u_fwd(k, v, beta, A, g=None, cu_seqlens=None, chunk_indices=None):
+    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    BT = A.shape[-1]
+    BK = 64
+    BV = 64
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    w = k.new_empty(B, T, HV, K)
+    u = torch.empty_like(v)
+    is_varlen = cu_seqlens is not None
+    dev = k.device
+    # Reshape (B, T, *) -> (B*T, *) so per-sequence slabs are block-indexable (TMA).
+    BTtot = B * T
+    k3 = k.reshape(BTtot, H, K)
+    v3 = v.reshape(BTtot, HV, V)
+    beta2 = beta.reshape(BTtot, HV)
+    w3 = w.reshape(BTtot, HV, K)
+    u3 = u.reshape(BTtot, HV, V)
+    A3 = A.reshape(BTtot, HV, BT)
+    g_arg = g.reshape(BTtot, HV) if g is not None else torch.zeros(1, 1, device=dev, dtype=k.dtype)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    _tuned_launch(
+        recompute_w_u_fwd_kernel,
+        _stream(),
+        (NT, B * HV),
+        (
+            k3,
+            v3,
+            beta2,
+            w3,
+            u3,
+            A3,
+            g_arg,
+            cu_arg,
+            ci_arg,
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(g is not None),
+            int(is_varlen),
+        ),
+        cache_key=((NT, B * HV), K, V, BT, BK, BV, int(g is not None), int(is_varlen), str(k.dtype)),
+    )
+    return w, u
+
+
+def prepare_wy_repr_bwd(k, v, beta, A, dw, du, g=None, cu_seqlens=None, chunk_indices=None):
+    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    BT = 64
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    CONST_TILING = 64
+    BK = min(max(_next_power_of_2(K), 16), 128)
+    BV = min(max(_next_power_of_2(V), 16), 128)
+    dk = k.new_empty(B, T, HV, K)
+    dv = torch.empty_like(v)
+    dg = torch.empty_like(g) if g is not None else None
+    db = torch.empty_like(beta)
+    is_varlen = cu_seqlens is not None
+    dev = k.device
+    g_arg = _opt(g, dev)
+    dg_arg = dg if dg is not None else _dummy(dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    # Persistent scheduling (see chunk_bwd_dqkwg): ~#SMs*4 resident blocks, each
+    # loops a strided range over the NT*(B*HV) work-items.
+    _wy_bh = B * HV
+    _wy_work = NT * _wy_bh
+    _wy_prog = min(_wy_work, torch.cuda.get_device_properties(dev).multi_processor_count * 4)
+    _tuned_launch(
+        prepare_wy_repr_bwd_kernel,
+        _stream(),
+        (_wy_prog,),
+        (
+            k.contiguous(),
+            v.contiguous(),
+            beta.contiguous(),
+            g_arg,
+            A.contiguous(),
+            dw.contiguous(),
+            du.contiguous(),
+            dk,
+            dv,
+            db,
+            dg_arg,
+            cu_arg,
+            ci_arg,
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(g is not None),
+            int(is_varlen),
+            _cdiv(K, BK),
+            _cdiv(V, BV),
+            _wy_work,  # NUM_WORK
+            _wy_bh,  # BH_P
+        ),
+        cache_key=((NT, B * HV), K, V, BT, BK, BV, int(g is not None), int(is_varlen), str(k.dtype)),
+    )
+    if H != HV:
+        dk = dk.view(B, T, H, HV // H, K).sum(3)
+    return dk, dv, db, dg
+
+
+# chunk_gated_delta_rule_fwd_h / bwd_dhu
+def chunk_gated_delta_rule_fwd_h(
+    k,
+    w,
+    u,
+    g=None,
+    gk=None,
+    initial_state=None,
+    output_final_state=False,
+    chunk_size=64,
+    save_new_value=True,
+    state_v_first=False,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    chunk_indices=None,
+):
+    B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    if cu_seqlens is None:
+        N, NT, chunk_offsets = B, _cdiv(T, BT), None
+    else:
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+    # State fwd_h kernel carries a full-width (BK, BV) tile (BK=next_pow2(K)),
+    # so it is general for any K (no 64-wide sub-block unroll / K<=256 cap).
+
+    if state_v_first:
+        h = k.new_empty(B, NT, HV, V, K)
+        final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
+    else:
+        h = k.new_empty(B, NT, HV, K, V)
+        final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
+    v_new = torch.empty_like(u) if save_new_value else None
+
+    is_varlen = cu_seqlens is not None
+    dev = k.device
+    vnew_arg = v_new if v_new is not None else _dummy(dev, u.dtype)
+    g_arg = _opt(g, dev)
+    gk_arg = _opt(gk, dev)
+    h0_arg = initial_state if initial_state is not None else _dummy(dev)
+    ht_arg = final_state if final_state is not None else _dummy(dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    co_arg = _opt_i32(chunk_offsets, dev)
+    BV = 64
+    if V % 32 == 0:
+        try:
+            _props = torch.cuda.get_device_properties(dev)
+            sm_count = _props.multi_processor_count
+        except Exception:  # noqa: BLE001
+            sm_count = 0
+        grid_blocks = _cdiv(V, 64) * (N * HV)
+        # Split only when the doubled BV=32 grid still fits within one wave
+        # (grid_blocks*2 <= SMs); otherwise the halved MMA width is a net loss.
+        if sm_count and grid_blocks * 2 <= sm_count:
+            # Grid-saturation split (all arches): halve BV to double CTAs when the
+            # BV=64 grid under-occupies (V-lanes independent -> no extra serial work).
+            BV = 32
+    grid = (_cdiv(V, BV), N * HV)
+
+    use_dense = (
+        g is not None
+        and gk is None
+        and initial_state is None
+        and not output_final_state
+        and save_new_value
+        and not state_v_first
+        and cu_seqlens is None
+        and H <= 128
+        and T % BT == 0
+        and K % 64 == 0
+        and V % BV == 0
+    )
+    if use_dense:
+        BTtot = B * T
+        k3 = k.contiguous().reshape(BTtot, H, K)
+        v3 = u.contiguous().reshape(BTtot, HV, V)
+        w3 = w.contiguous().reshape(BTtot, HV, K)
+        g2 = g.contiguous().reshape(BTtot, HV)
+        h3 = h.reshape(B * NT * HV, K, V)
+        vnew3 = v_new.reshape(BTtot, HV, V)
+        BK = _next_power_of_2(K)
+        _tuned_launch(
+            chunk_gated_delta_rule_fwd_kernel_h_blockdim64_dense_tma,
+            _stream(),
+            grid,
+            (k3, v3, w3, g2, h3, vnew3, T, H, HV, K, V, BT, BV, BK),
+            cache_key=(grid, K, V, BT, BV, BK, str(k.dtype)),
+        )
+        return h, v_new, final_state
+
+    # Multi-dim arrays passed as-is (per-dim indices + real strides).
+    _tuned_launch(
+        chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
+        _stream(),
+        grid,
+        (
+            k,
+            u,
+            w,
+            vnew_arg,
+            g_arg,
+            gk_arg,
+            h,
+            h0_arg,
+            ht_arg,
+            cu_arg,
+            co_arg,
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BV,
+            _next_power_of_2(K),
+            int(g is not None),
+            int(gk is not None),
+            int(initial_state is not None),
+            int(output_final_state),
+            int(save_new_value),
+            int(state_v_first),
+            int(is_varlen),
+            0,
+        ),
+        cache_key=(
+            grid,
+            K,
+            V,
+            BT,
+            BV,
+            _next_power_of_2(K),
+            int(g is not None),
+            int(gk is not None),
+            int(initial_state is not None),
+            int(output_final_state),
+            int(save_new_value),
+            int(state_v_first),
+            int(is_varlen),
+            str(k.dtype),
+        ),
+    )
+    return h, v_new, final_state
+
+
+def chunk_gated_delta_rule_bwd_dhu(
+    q,
+    k,
+    w,
+    do,
+    dv,
+    g=None,
+    gk=None,
+    h0=None,
+    dht=None,
+    scale=None,
+    state_v_first=False,
+    cu_seqlens=None,
+    chunk_size=64,
+    chunk_indices=None,
+):
+    B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
+    BT = chunk_size
+    # State dhu kernel carries a full-width (BK, BV) tile (BK=next_pow2(K)), so it
+    # is general for any K (no 64-wide sub-block unroll / K<=256 cap).
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    if cu_seqlens is None:
+        N, NT, chunk_offsets = B, _cdiv(T, BT), None
+    else:
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+
+    if state_v_first:
+        dh = q.new_empty(B, NT, HV, V, K)
+    else:
+        dh = q.new_empty(B, NT, HV, K, V)
+    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+    dv2 = torch.empty_like(dv)
+
+    is_varlen = cu_seqlens is not None
+    dev = q.device
+
+    # Fast path (dense_tma): gate present, no gk/state-grad/varlen, K-major state,
+    # 64-aligned dims -> dense branch-free reverse-scan dhu kernel (dominant bwd
+    # kernel). bk128 split (M=128 MMA) when K % 128 == 0.
+    use_dense = (
+        g is not None
+        and gk is None
+        and h0 is None
+        and dht is None
+        and scale is not None
+        and (not state_v_first)
+        and cu_seqlens is None
+        and H <= 128
+        and T % BT == 0
+        and K % 64 == 0
+        and V % 64 == 0
+    )
+    if use_dense:
+        # TMA slab reshapes: (B, T, *) -> (B*T, *) and dh -> (B*NT*HV, K, V) so the
+        # dhu kernels block-index them (native TMA). BV is autotuned below.
+        BTtot = B * T
+        q3 = q.contiguous().reshape(BTtot, H, K)
+        k3 = k.contiguous().reshape(BTtot, H, K)
+        w3 = w.contiguous().reshape(BTtot, HV, K)
+        g2 = g.contiguous().reshape(BTtot, HV)
+        do3 = do.contiguous().reshape(BTtot, HV, V)
+        dv3 = dv.contiguous().reshape(BTtot, HV, V)
+        dh5 = dh.reshape(B * NT * HV, K, V)
+        dv2_5 = dv2.reshape(BTtot, HV, V)
+
+        def _grid(bv):
+            return (_cdiv(V, bv), N * HV)
+
+        BK = _next_power_of_2(K)
+
+        # BV autotune candidates ({32,64} for bk64, {32,64,128} for bk128);
+        # default-first (BV=64) so a tuning failure keeps fixed-BV behavior.
+        # bk128 (2 fixed 128-wide blocks) caps at K<=256; K>256 falls through to
+        # the generalized (full-width BK tile) bk64 dense_tma kernel.
+        if 128 <= K <= 256 and K % 128 == 0:
+            kern = chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma
+            bv_choices = [64, 32, 128]
+
+            def _args(bv):
+                return (
+                    q3,
+                    k3,
+                    w3,
+                    g2,
+                    do3,
+                    dh5,
+                    dv3,
+                    dv2_5,
+                    float(scale),
+                    T,
+                    H,
+                    HV,
+                    K,
+                    V,
+                    BT,
+                    bv,
+                    1,  # occupancy ConstInt (signature parity; real hint via replace_hints)
+                )
+        else:
+            kern = chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_dense_tma
+            bv_choices = [64, 32]
+
+            def _args(bv):
+                return (
+                    q3,
+                    k3,
+                    w3,
+                    g2,
+                    do3,
+                    dh5,
+                    dv3,
+                    dv2_5,
+                    float(scale),
+                    T,
+                    H,
+                    HV,
+                    K,
+                    V,
+                    BT,
+                    bv,
+                    BK,
+                    1,  # occupancy ConstInt (signature parity; real hint via replace_hints)
+                )
+
+        bv_choices = [bv for bv in bv_choices if V % bv == 0]
+        dense_key = (N * HV, K, V, BT, BK, str(q.dtype))
+        _tuned_launch_dhu(kern, _stream(), bv_choices, _grid, _args, cache_key=dense_key)
+        return dh, dh0, dv2
+    BK = _next_power_of_2(K)
+    BV = 16 if K > 128 else 64
+    grid = (_cdiv(V, BV), N * HV)
+    g_arg = _opt(g, dev)
+    gk_arg = _opt(gk, dev)
+    dht_arg = _opt(dht, dev)
+    dh0_arg = dh0 if dh0 is not None else _dummy(dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    co_arg = _opt_i32(chunk_offsets, dev)
+    _tuned_launch(
+        chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64,
+        _stream(),
+        grid,
+        (
+            q.contiguous(),
+            k.contiguous(),
+            w.contiguous(),
+            g_arg,
+            gk_arg,
+            dht_arg,
+            dh0_arg,
+            do.contiguous(),
+            dh,
+            dv.contiguous(),
+            dv2,
+            cu_arg,
+            co_arg,
+            float(scale),
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BV,
+            BK,
+            int(g is not None),
+            int(gk is not None),
+            int(h0 is not None),
+            int(dht is not None),
+            int(state_v_first),
+            int(is_varlen),
+            0,
+            1,
+        ),
+        cache_key=(
+            grid,
+            K,
+            V,
+            BT,
+            BV,
+            BK,
+            int(g is not None),
+            int(gk is not None),
+            int(state_v_first),
+            int(is_varlen),
+            str(q.dtype),
+        ),
+    )
+    return dh, dh0, dv2
+
+
+# chunk_fwd_o / chunk_bwd_dqkwg / chunk_bwd_dv_local
+def chunk_fwd_o(
+    q,
+    k,
+    v,
+    h,
+    g=None,
+    g_gamma=None,
+    scale=None,
+    state_v_first=False,
+    cu_seqlens=None,
+    chunk_size=64,
+    chunk_indices=None,
+):
+    B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    o = torch.empty_like(v)
+    is_varlen = cu_seqlens is not None
+    dev = q.device
+    g_arg = g.reshape(B * T, HV) if g is not None else torch.zeros(1, 1, device=dev, dtype=q.dtype)
+    gg_arg = _opt(g_gamma, dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    # Reshape to (B*T,*,D) / (B*NT*HV,*,*) slabs for block-indexed TMA.
+    BTtot = B * T
+    q3 = q.reshape(BTtot, H, K)
+    k3 = k.reshape(BTtot, H, K)
+    v3 = v.reshape(BTtot, HV, V)
+    o3 = o.reshape(BTtot, HV, V)
+    if state_v_first:
+        h3 = h.reshape(B * NT * HV, V, K)
+    else:
+        h3 = h.reshape(B * NT * HV, K, V)
+
+    # The first candidate is the padded baseline; the remaining candidates
+    # cover square and asymmetric tiles.
+    tile_choices = _fwd_o_tile_configs(K, V)
+
+    def _grid(bk, bv):
+        return (_cdiv(V, bv), NT, B * HV)
+
+    def _args(bk, bv):
+        return (
+            q3,
+            k3,
+            v3,
+            h3,
+            g_arg,
+            gg_arg,
+            o3,
+            cu_arg,
+            ci_arg,
+            float(scale),
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            bk,
+            bv,
+            int(g is not None),
+            int(g_gamma is not None),
+            int(state_v_first),
+            int(is_varlen),
+        )
+
+    _tuned_launch_o(
+        chunk_fwd_kernel_o,
+        _stream(),
+        tile_choices,
+        _grid,
+        _args,
+        cache_key=(
+            B,
+            NT,
+            HV,
+            K,
+            V,
+            BT,
+            int(g is not None),
+            int(g_gamma is not None),
+            int(state_v_first),
+            int(is_varlen),
+            str(q.dtype),
+        ),
+    )
+    return o
+
+
+def chunk_bwd_dqkwg(
+    q,
+    k,
+    v,
+    do,
+    h,
+    dh,
+    w=None,
+    g=None,
+    g_gamma=None,
+    dv=None,
+    scale=None,
+    state_v_first=False,
+    cu_seqlens=None,
+    chunk_size=64,
+    chunk_indices=None,
+):
+    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    CONST_TILING = 64
+    BK = min(max(_next_power_of_2(K), 16), 128)
+    BV = min(max(_next_power_of_2(V), 16), CONST_TILING)
+    NK = _cdiv(K, BK)
+    dq = q.new_empty(B, T, HV, K)
+    dk = k.new_empty(B, T, HV, K)
+    dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
+    dw = torch.empty_like(w) if w is not None else None
+    is_varlen = cu_seqlens is not None
+    dev = q.device
+    _num_work = NK * NT * (B * HV)
+    _n_sm = torch.cuda.get_device_properties(dev).multi_processor_count
+    _num_prog = min(_num_work, _n_sm * 4)
+    grid = (_num_prog,)
+    # Reshape to (B*T,*,D) / (B*NT*HV,*,*) / (NK,B*T,HV) slabs for block-indexed TMA.
+    BTtot = B * T
+    q3 = q.contiguous().reshape(BTtot, H, K)
+    k3 = k.contiguous().reshape(BTtot, H, K)
+    v3 = v.contiguous().reshape(BTtot, HV, V)
+    do3 = do.contiguous().reshape(BTtot, HV, V)
+    dq3 = dq.reshape(BTtot, HV, K)
+    dk3 = dk.reshape(BTtot, HV, K)
+    if state_v_first:
+        h3 = h.contiguous().reshape(B * NT * HV, V, K)
+        dh3 = dh.contiguous().reshape(B * NT * HV, V, K)
+    else:
+        h3 = h.contiguous().reshape(B * NT * HV, K, V)
+        dh3 = dh.contiguous().reshape(B * NT * HV, K, V)
+    g_arg = g.contiguous().reshape(BTtot, HV) if g is not None else _dummy(dev, q.dtype)
+    gg_arg = _opt(g_gamma, dev)
+    dw3 = dw.reshape(BTtot, HV, K) if dw is not None else _dummy(dev, k.dtype)
+    dv3 = dv.contiguous().reshape(BTtot, HV, V) if dv is not None else _dummy(dev, k.dtype)
+    dg3 = dg.reshape(NK, BTtot, HV) if dg is not None else _dummy(dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    _FUSE_DW = True
+    split_dw = (not _FUSE_DW) and dw is not None and dv is not None and K <= 128 and V <= 128 and not is_varlen
+    use_dw = int(dw is not None and dv is not None and not split_dw)
+    if split_dw:
+        dw3 = _dummy(dev, k.dtype)
+    _tuned_launch(
+        chunk_bwd_kernel_dqkwg,
+        _stream(),
+        grid,
+        (
+            q3,
+            k3,
+            v3,
+            g_arg,
+            gg_arg,
+            h3,
+            do3,
+            dh3,
+            dq3,
+            dk3,
+            dw3,
+            dv3,
+            dg3,
+            cu_arg,
+            ci_arg,
+            float(scale),
+            B,
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(g is not None),
+            int(g_gamma is not None),
+            use_dw,
+            int(state_v_first),
+            int(is_varlen),
+            _cdiv(V, BV),
+            _num_work,  # NUM_WORK (persistent loop bound)
+            NT,  # NT_DECODE (decode i_t,i_k from linear work id)
+        ),
+        cache_key=(
+            grid,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(g is not None),
+            int(g_gamma is not None),
+            use_dw,
+            int(state_v_first),
+            int(is_varlen),
+            str(q.dtype),
+        ),
+    )
+    if split_dw:
+        _tuned_launch(
+            chunk_bwd_kernel_dw,
+            _stream(),
+            grid,
+            (
+                h.contiguous(),
+                dv.contiguous(),
+                dw,
+                cu_arg,
+                ci_arg,
+                T,
+                HV,
+                K,
+                V,
+                BT,
+                BK,
+                BV,
+                int(state_v_first),
+                int(is_varlen),
+            ),
+            cache_key=(
+                "dw",
+                grid,
+                K,
+                V,
+                BT,
+                BK,
+                BV,
+                int(state_v_first),
+                int(is_varlen),
+                str(q.dtype),
+            ),
+        )
+    if H != HV:
+        dq = dq.view(B, T, H, HV // H, K).sum(3)
+        dk = dk.view(B, T, H, HV // H, K).sum(3)
+    if dg is not None:
+        dg = dg.sum(0)
+    return dq, dk, dw, dg
+
+
+def chunk_bwd_dv_local(
+    q, k, do, g=None, g_gamma=None, A=None, scale=None, cu_seqlens=None, chunk_size=64, chunk_indices=None
+):
+    B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    CONST_TILING = 64
+    BK = min(max(_next_power_of_2(K), 16), 128)
+    BV = min(max(_next_power_of_2(V), 16), CONST_TILING)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    dv = torch.empty_like(do)
+    is_varlen = cu_seqlens is not None
+    dev = q.device
+    _dvl_bh = B * HV
+    _dvl_work = NT * _dvl_bh
+    grid = (min(_dvl_work, torch.cuda.get_device_properties(dev).multi_processor_count * 4),)
+    g_arg = _opt(g, dev)
+    gg_arg = _opt(g_gamma, dev)
+    A_arg = _opt(A, dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    scale_val = float(scale) if scale is not None else 0.0
+    _tuned_launch(
+        chunk_bwd_kernel_dv_local,
+        _stream(),
+        grid,
+        (
+            q.contiguous(),
+            k.contiguous(),
+            g_arg,
+            gg_arg,
+            A_arg,
+            do.contiguous(),
+            dv,
+            cu_arg,
+            ci_arg,
+            scale_val,
+            T,
+            H,
+            HV,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(g is not None),
+            int(g_gamma is not None),
+            int(A is not None),
+            int(is_varlen),
+            _dvl_work,  # NUM_WORK
+            _dvl_bh,  # BH_P
+        ),
+        cache_key=(
+            grid,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(g is not None),
+            int(g_gamma is not None),
+            int(A is not None),
+            int(is_varlen),
+            str(q.dtype),
+        ),
+    )
+    return dv
+
+
+# fused intra (kkt + solve_tril + recompute_w_u)
+def chunk_gated_delta_rule_fwd_intra(k, v, g=None, beta=None, cu_seqlens=None, chunk_size=64, chunk_indices=None):
+    B, T, H, K, HV = *k.shape, beta.shape[2]
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    is_varlen = cu_seqlens is not None
+    # Dense fast path (bf16, non-varlen, whole chunks): the 2block_full kernel fully
+    # overwrites A (incl. zero upper triangle) so torch.empty is correct; other paths
+    # may leave holes and keep torch.zeros.
+    use_full_kernel = k.dtype != torch.float32 and not is_varlen and T % BT == 0 and K <= 256
+    if use_full_kernel:
+        A = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    else:
+        A = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    dev = k.device
+    BK = 64
+    g_arg = _opt(g, dev)
+    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
+    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
+    if not use_full_kernel:
+        BC = 16
+        _tuned_launch(
+            chunk_gated_delta_rule_fwd_kkt_solve_kernel,
+            _stream(),
+            (NT, B * HV),
+            (
+                k,
+                g_arg,
+                beta,
+                A,
+                cu_arg,
+                ci_arg,
+                T,
+                H,
+                HV,
+                K,
+                BT,
+                BC,
+                BK,
+                int(g is not None),
+                int(is_varlen),
+            ),
+            cache_key=(NT, B * HV, K, BT, BC, BK, int(g is not None), int(is_varlen), str(k.dtype)),
+        )
+    else:
+        BC = 32
+        k_flat = k.reshape(-1)
+        beta_flat = beta.reshape(-1)
+        A_flat = A.reshape(-1)
+        g_flat = g.reshape(-1) if g is not None else g_arg
+        _tuned_launch(
+            chunk_gated_delta_rule_fwd_kkt_solve_2block_full_kernel,
+            _stream(),
+            (NT, B * HV),
+            (
+                k_flat,
+                g_flat,
+                beta_flat,
+                A_flat,
+                T,
+                H,
+                HV,
+                K,
+                BT,
+                BC,
+                BK,
+                int(g is not None),
+            ),
+            cache_key=(NT, B * HV, K, BT, BC, BK, int(g is not None), str(k.dtype)),
+            configs=_LAUNCH_HINT_CONFIGS_OCC8,
+        )
+    w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=g, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    return w, u, A
+
+
+# fla.ops.gated_delta_rule.chunk (forward / backward drivers + entry)
+
+
+def chunk_gated_delta_rule_fwd(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    scale,
+    initial_state,
+    output_final_state,
+    state_v_first=False,
+    cu_seqlens=None,
+    cp_context=None,
+    chunk_indices=None,
+    use_gate_in_kernel=False,
+    A_log=None,
+    dt_bias=None,
+):
+    assert cp_context is None, "context-parallel not supported in this port"
+    g_input = g if use_gate_in_kernel else None
+    if use_gate_in_kernel:
+        g = gdn_gate_chunk_cumsum(
+            g=g,
+            A_log=A_log,
+            chunk_size=64,
+            scale=RCP_LN2,
+            dt_bias=dt_bias,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+    else:
+        g = chunk_local_cumsum(g, chunk_size=64, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+
+    w, u, A = chunk_gated_delta_rule_fwd_intra(
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
+    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+        k=k,
+        w=w,
+        u=u,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
+    )
+    o = chunk_fwd_o(
+        q=q,
+        k=k,
+        v=v_new,
+        h=h,
+        g=g,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
+    )
+    return g, o, A, final_state, initial_state, g_input
+
+
+def chunk_gated_delta_rule_bwd(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A,
+    scale,
+    initial_state,
+    do,
+    dht,
+    state_v_first=False,
+    cu_seqlens=None,
+    cp_context=None,
+    chunk_indices=None,
+    use_gate_in_kernel=False,
+    g_input=None,
+    A_log=None,
+    dt_bias=None,
+):
+    assert cp_context is None, "context-parallel not supported in this port"
+    w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=g, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+        k=k,
+        w=w,
+        u=u,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=False,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
+    )
+    dv = chunk_bwd_dv_local(q=q, k=k, g=g, do=do, scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
+        q=q,
+        k=k,
+        w=w,
+        g=g,
+        h0=initial_state,
+        dht=dht,
+        do=do,
+        dv=dv,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
+    )
+    dq, dk, dw, dg = chunk_bwd_dqkwg(
+        q=q,
+        k=k,
+        v=v_new,
+        w=w,
+        g=g,
+        h=h,
+        dv=dv,
+        do=do,
+        dh=dh,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
+    )
+    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        A=A,
+        dw=dw,
+        du=dv,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
+    dg.add_(dg2)
+    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    dA_log, ddt_bias = None, None
+    if use_gate_in_kernel:
+        dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg)
+    return dq, dk, dk2, dv, db, dg, dh0, dA_log, ddt_bias
+
+
+class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
+    @staticmethod
+    @input_guard
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        initial_state,
+        output_final_state,
+        state_v_first=False,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+        use_qk_l2norm_in_kernel=False,
+        use_gate_in_kernel=False,
+        A_log=None,
+        dt_bias=None,
+        use_beta_sigmoid_in_kernel=False,
+        allow_neg_eigval=False,
+        cp_context=None,
+    ):
+        assert cp_context is None, "context-parallel not supported in this port"
+        q_rstd, k_rstd = None, None
+        if use_qk_l2norm_in_kernel:
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+
+        beta_raw = beta
+        if use_beta_sigmoid_in_kernel:
+            beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
+
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
+        g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            cp_context=cp_context,
+            chunk_indices=chunk_indices,
+            state_v_first=state_v_first,
+            use_gate_in_kernel=use_gate_in_kernel,
+            A_log=A_log,
+            dt_bias=dt_bias,
+        )
+        ctx.save_for_backward(
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g,
+            beta_raw,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+            g_input,
+            A_log,
+            dt_bias,
+        )
+        ctx.scale = scale
+        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        ctx.use_beta_sigmoid_in_kernel = use_beta_sigmoid_in_kernel
+        ctx.allow_neg_eigval = allow_neg_eigval
+        ctx.cp_context = cp_context
+        ctx.state_v_first = state_v_first
+        ctx.use_gate_in_kernel = use_gate_in_kernel
+        return ct.astype(o, q.dtype) if hasattr(o, "astype") else o.to(q.dtype), final_state
+
+    @staticmethod
+    @input_guard
+    def backward(ctx, do, dht):
+        (
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g,
+            beta_raw,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+            g_input,
+            A_log,
+            dt_bias,
+        ) = ctx.saved_tensors
+        dq, dk, dk2, dv, db, dg, dh0, dA_log, ddt_bias = chunk_gated_delta_rule_bwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A=A,
+            scale=ctx.scale,
+            initial_state=initial_state,
+            do=do,
+            dht=dht,
+            cu_seqlens=cu_seqlens,
+            cp_context=ctx.cp_context,
+            chunk_indices=chunk_indices,
+            state_v_first=ctx.state_v_first,
+            use_gate_in_kernel=ctx.use_gate_in_kernel,
+            g_input=g_input,
+            A_log=A_log,
+            dt_bias=dt_bias,
+        )
+        if ctx.use_qk_l2norm_in_kernel:
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk, dy2=dk2)
+        else:
+            dk.add_(dk2)
+        if ctx.use_beta_sigmoid_in_kernel:
+            db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
+        return (
+            dq.to(q),
+            dk.to(k),
+            dv.to(v),
+            dg.to(g),
+            db.to(beta_raw),
+            None,
+            dh0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            dA_log,
+            ddt_bias,
+            None,
+            None,
+            None,
+        )
+
+
+@torch.compiler.disable
+@input_guard
+def chunk_gated_delta_rule(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    scale=None,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    use_beta_sigmoid_in_kernel=False,
+    allow_neg_eigval=False,
+    state_v_first=False,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    cp_context=None,
+    *,
+    use_gate_in_kernel=False,
+    A_log=None,
+    dt_bias=None,
+    **kwargs,
+):
+    r"""Chunked Gated DeltaNet (GDN). cuTile port of
+    ``fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule``.
+    Returns ``(o, final_state)``."""
+    assert cp_context is None, "context-parallel not supported in this port"
+
+    if "transpose_state_layout" in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        state_v_first = kwargs.pop("transpose_state_layout")
+
+    if q.shape[2] != k.shape[2]:
+        raise ValueError(
+            f"q and k must have the same number of heads, got q.shape[2]={q.shape[2]} and k.shape[2]={k.shape[2]}"
+        )
+    H, HV = q.shape[2], v.shape[2]
+    if HV % H != 0:
+        raise ValueError(f"For GVA, HV ({HV}) must be divisible by H ({H}), got HV % H = {HV % H}")
+
+    if "head_first" in kwargs:
+        raise DeprecationWarning("head_first has been removed. Inputs must be in `[B, T, H, ...]` format.")
+
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(f"Batch size must be 1 when using cu_seqlens, got {q.shape[0]}.")
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"#initial states must equal #sequences ({len(cu_seqlens) - 1}), got {initial_state.shape[0]}."
+            )
+    if kwargs:
+        raise TypeError(f"Unexpected keyword arguments: {sorted(kwargs)}")
+    if use_gate_in_kernel:
+        if A_log is None:
+            raise ValueError("A_log must be provided when use_gate_in_kernel=True.")
+    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
+        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
+
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    o, final_state = ChunkGatedDeltaRuleFunction.apply(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        initial_state,
+        output_final_state,
+        state_v_first,
+        cu_seqlens,
+        cu_seqlens_cpu,
+        use_qk_l2norm_in_kernel,
+        use_gate_in_kernel,
+        A_log,
+        dt_bias,
+        use_beta_sigmoid_in_kernel,
+        allow_neg_eigval,
+        cp_context,
+    )
+    return o, final_state
+
+
+chunk_gdn = chunk_gated_delta_rule
+
+
+# TileGym dispatch registration (single op)
+@register_impl("fla.linear_attention_gdn_chunk", backend="cutile")
+@input_guard
+def linear_attention_gdn_chunk(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    scale=None,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    use_beta_sigmoid_in_kernel=False,
+    cu_seqlens=None,
+    *,
+    allow_neg_eigval=False,
+    state_v_first=False,
+    cu_seqlens_cpu=None,
+    cp_context=None,
+    **kwargs,
+):
+    """Dispatch-compatible entry point for the cuTile Chunked Gated DeltaNet implementation."""
+    return chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        cp_context=cp_context,
+        **kwargs,
+    )

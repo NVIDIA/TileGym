@@ -195,7 +195,7 @@ class _FMHAPerfBase(common.PyTestCase):
                 rtol=rtol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(backend, backend_fn)
+        result = common.benchmark_framework(backend, backend_fn, cooldown_s=1.0 if backend == "sota" else 0.0)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
@@ -244,7 +244,7 @@ class _FMHAPerfBase(common.PyTestCase):
                 atol=atol,
                 check_stride=False,
             )
-        result = common.benchmark_framework(backend, backend_fn)
+        result = common.benchmark_framework(backend, backend_fn, cooldown_s=1.0 if backend == "sota" else 0.0)
         record_property("benchmark", result)
 
         # Explicit cleanup to prevent OOM
