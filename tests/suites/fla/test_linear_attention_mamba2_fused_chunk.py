@@ -112,6 +112,16 @@ class Test_FLA_LinearAttentionMamba2FusedChunk(common.PyTestCase):
         ref = naive_mamba2(q, k, v, alpha, scale=scale)
         _assert_close_rms(o, ref, ratio, name="o")
 
+    @pytest.mark.parametrize("B,T,H,K,V", [(1, 512, 2, 64, 64), (2, 257, 2, 128, 128)])
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    def test_op_long_sequence(self, B, T, H, K, V, dtype, backend):
+        self._prep(backend)
+        q, k, v, alpha, g = make_inputs(B, T, H, K, V, dtype)
+        o, _ = fused_chunk_mamba2(q, k, v, g, scale=K**-0.5)
+        ref = naive_mamba2(q, k, v, alpha, scale=K**-0.5)
+        _assert_close_rms(o, ref, 1e-2 if dtype == torch.float32 else 3e-2, name="o")
+
     @pytest.mark.parametrize("B, T, H, K, V", SHAPES_BWD)
     @pytest.mark.parametrize("backend", _BACKENDS)
     def test_op_backward(self, B, T, H, K, V, backend):

@@ -12,7 +12,20 @@ class StatefulNormalizeFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def forward(ctx, o, q, k, scale, z_init, reverse, cu_seqlens, cumsum):
+    def forward(
+        ctx,
+        o,
+        q,
+        k,
+        scale,
+        z_init,
+        reverse,
+        cu_seqlens,
+        cumsum,
+        product_fn=None,
+        divide_fn=None,
+        backward_product_fn=None,
+    ):
         k_cum = cumsum(k, reverse=reverse, cu_seqlens=cu_seqlens, output_dtype=k.dtype) if k.shape[1] else k.clone()
         if z_init is not None:
             if cu_seqlens is not None:
@@ -21,8 +34,15 @@ class StatefulNormalizeFunction(torch.autograd.Function):
             else:
                 z_init_b = z_init
             k_cum = k_cum + z_init_b
-        denom = (q * scale * k_cum).sum(-1, keepdim=True) + 1e-10
-        o_out = o / denom
+        product = (
+            q * scale * k_cum if product_fn is None else product_fn(o, q, k_cum, scale, cu_seqlens, z_init, reverse)
+        )
+        s = product.sum(-1, keepdim=True)
+        if divide_fn is None:
+            denom = s + 1e-10
+            o_out = o / denom
+        else:
+            o_out, denom = divide_fn(o, s, cu_seqlens, z_init, reverse)
         if cu_seqlens is not None:
             nonempty = cu_seqlens[1:] > cu_seqlens[:-1]
             idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
@@ -36,6 +56,7 @@ class StatefulNormalizeFunction(torch.autograd.Function):
             z_state_out = k.new_zeros((k.shape[0], 1, k.shape[2], k.shape[3])) if z_init is None else z_init.clone()
 
         ctx.cumsum = cumsum
+        ctx.backward_product_fn = backward_product_fn
         ctx.save_for_backward(o, q, k_cum, denom)
         ctx.scale = scale
         ctx.reverse = reverse
@@ -55,8 +76,11 @@ class StatefulNormalizeFunction(torch.autograd.Function):
         d_o_in = do / denom
         ddenom = -(do * o).sum(-1, keepdim=True) / (denom * denom)
 
-        dq = ddenom * scale * k_cum
-        dk_cum = ddenom * scale * q
+        if ctx.backward_product_fn is None:
+            dq = ddenom * scale * k_cum
+            dk_cum = ddenom * scale * q
+        else:
+            dq, dk_cum = ctx.backward_product_fn(ddenom, q, k_cum, scale, cu_seqlens, ctx.has_z_init)
 
         if dz_state is not None:
             if cu_seqlens is not None:
@@ -103,4 +127,4 @@ class StatefulNormalizeFunction(torch.autograd.Function):
             if dk_cum.shape[1]
             else dk_cum.to(ctx.k_dtype)
         )
-        return d_o_in, dq, dk, None, dz_init, None, None, None
+        return d_o_in, dq, dk, None, dz_init, None, None, None, None, None, None

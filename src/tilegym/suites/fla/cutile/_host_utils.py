@@ -9,6 +9,14 @@ import torch
 import torch.nn.functional as F
 
 
+def _sm_split_threshold(device_index) -> int:
+    try:
+        sm = torch.cuda.get_device_properties(device_index).multi_processor_count
+    except Exception:
+        sm = 148
+    return sm // 2
+
+
 def input_guard(fn=None, *, no_guard_contiguous=False, set_device=True):
     """Make all input tensors contiguous and set the device based on input tensors."""
 

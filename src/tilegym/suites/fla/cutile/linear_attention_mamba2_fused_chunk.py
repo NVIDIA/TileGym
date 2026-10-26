@@ -666,6 +666,10 @@ def fused_chunk_fwd(
     BV = min(max(_next_power_of_2(V), 16), 128)
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     NK = _cdiv(K, BK)
+    if cu_seqlens is None and BV == 128 and torch.cuda.get_device_capability(q.device)[0] == 10:
+        num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
+        if NK * _cdiv(V, BV) * N * H * 2 <= num_sms:
+            BV = 64
     NV = _cdiv(V, BV)
 
     o = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)

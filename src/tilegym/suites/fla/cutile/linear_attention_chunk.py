@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from tilegym.backend import register_impl
 from tilegym.suites.fla.cutile._host_utils import _segmented_arange
+from tilegym.suites.fla.cutile._host_utils import _sm_split_threshold
 from tilegym.suites.fla.cutile._host_utils import input_guard
 from tilegym.suites.fla.cutile._normalization import StatefulNormalizeFunction
 
@@ -63,6 +64,13 @@ def _cdiv_kernel(a, b):
 # ---------------------------------------------------------------------------
 # fla.ops.utils.cumsum -- local / global cumulative sum, scalar (3D) variants.
 # ---------------------------------------------------------------------------
+
+
+@ct.function
+def _normalization_product_stages(q, kc, scale):
+    qs = ct.astype(ct.astype(q, ct.float32) * scale, q.dtype)
+    product = ct.astype(ct.astype(qs, ct.float32) * ct.astype(kc, ct.float32), q.dtype)
+    return qs, product
 
 
 @ct.kernel
@@ -852,6 +860,45 @@ def chunk_bwd_kernel_dv(
     ct.store(dv_seg, index=(h_b, i_t, i_h, i_v), tile=ct.astype(b_dv, dv.dtype).reshape((1, BT, 1, BV)))
 
 
+@ct.function
+def _normalization_divide_stages(o, s):
+    sf = ct.astype(s, ct.float32)
+    eps = ct.full((), 1e-10, dtype=ct.float32)
+    denom = ct.astype(ct.add(sf, eps, rounding_mode=ct.RoundingMode.RN, flush_to_zero=False), s.dtype)
+    out = ct.astype(
+        ct.truediv(
+            ct.astype(o, ct.float32),
+            ct.astype(denom, ct.float32),
+            rounding_mode=ct.RoundingMode.RN,
+            flush_to_zero=False,
+        ),
+        o.dtype,
+    )
+    return denom, out
+
+
+@ct.kernel
+def _normalization_divide_kernel(O, S, OUT, D, BR: ct.Constant[int], BC: ct.Constant[int]):
+    row = ct.bid(0)
+    column = ct.bid(1)
+    o = ct.load(O, index=(row, column), shape=(BR, BC), padding_mode=ct.PaddingMode.ZERO)
+    s = ct.load(S, index=(row,), shape=(BR,), padding_mode=ct.PaddingMode.ZERO)
+    d, out = _normalization_divide_stages(o, s[:, None])
+    ct.store(OUT, index=(row, column), tile=out)
+    if column == 0:
+        ct.store(D, index=(row,), tile=d.reshape((BR,)))
+
+
+@ct.kernel
+def _normalization_product_kernel(Q, KC, P, SCALE: ct.Constant[float], BLOCK: ConstInt):
+    block = ct.bid(0)
+    q = ct.load(Q, index=(block,), shape=(BLOCK,), padding_mode=ct.PaddingMode.ZERO)
+    kc = ct.load(KC, index=(block,), shape=(BLOCK,), padding_mode=ct.PaddingMode.ZERO)
+    scale = ct.full((), SCALE, dtype=ct.float32)
+    _, product = _normalization_product_stages(q, kc, scale)
+    ct.store(P, index=(block,), tile=product)
+
+
 # ===========================================================================
 # Host wrappers
 # ===========================================================================
@@ -1023,7 +1070,7 @@ def chunk_global_cumsum_vector(
     B, T, H, S = s.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BS = min(32, _next_power_of_2(S))
-    BT = 64
+    BT = 128 if not reverse and T >= 128 else 64
 
     z = torch.empty_like(s, dtype=output_dtype or s.dtype)
     is_varlen = cu_seqlens is not None
@@ -1172,6 +1219,19 @@ def chunk_fwd_h(
 
     BK, BV = _state_tile_kv(K, V, N * H, k.device)
 
+    if (
+        k.dtype == v.dtype == torch.bfloat16
+        and states_in_fp32
+        and state_fp32_dot
+        and (cu_seqlens is None)
+        and (h0 is None)
+        and (not output_final_state)
+        and (K == V == 64)
+        and (BT == 128)
+        and (T % BT == 0)
+        and (N * H <= _sm_split_threshold(k.device.index))
+    ):
+        BV = 32
     use_h0 = h0 is not None
     store_ht = ht is not None
     is_varlen = cu_seqlens is not None
@@ -1757,9 +1817,85 @@ def chunk_simple_gla(
 # ===========================================================================
 
 
+def _normalization_product_or_eager(o, q, k_cum, scale, cu_seqlens, z_init, reverse):
+    if (
+        q.dtype == k_cum.dtype == o.dtype == torch.bfloat16
+        and q.ndim == k_cum.ndim == o.ndim == 4
+        and q.shape == k_cum.shape
+        and o.shape[:3] == q.shape[:3]
+        and 0 < q.numel() <= 2147483647
+        and q.is_cuda
+        and q.device == k_cum.device == o.device
+        and q.is_contiguous()
+        and k_cum.is_contiguous()
+        and q.stride()
+        == k_cum.stride()
+        == (q.shape[1] * q.shape[2] * q.shape[3], q.shape[2] * q.shape[3], q.shape[3], 1)
+        and q.data_ptr() % 16 == 0
+        and k_cum.data_ptr() % 16 == 0
+        and type(scale) in (int, float)
+        and -3.4028234663852886e38 <= scale <= 3.4028234663852886e38
+        and cu_seqlens is None
+        and z_init is None
+        and not reverse
+        and torch.cuda.get_device_capability(q.device) == (10, 0)
+    ):
+        product = torch.empty_like(q)
+        if product.stride() == q.stride() and product.data_ptr() % 16 == 0:
+            ct.launch(
+                torch.cuda.current_stream(),
+                (_cdiv(q.numel(), 1024),),
+                _normalization_product_kernel,
+                (q.view(-1), k_cum.view(-1), product.view(-1), float(scale), 1024),
+            )
+            return product
+    return q * scale * k_cum
+
+
+def _normalization_divide_or_eager(o, s, cu_seqlens, z_init, reverse):
+    if (
+        o.dtype == s.dtype == torch.bfloat16
+        and o.ndim == 4
+        and s.shape == o.shape[:-1] + (1,)
+        and 0 < o.shape[-1] <= 128 * 65535
+        and 0 < o.numel() <= 2147483647
+        and o.is_cuda
+        and o.device == s.device
+        and all(x.is_contiguous() and x.data_ptr() % 16 == 0 for x in (o, s))
+        and cu_seqlens is None
+        and z_init is None
+        and not reverse
+        and torch.cuda.get_device_capability(o.device) == (10, 0)
+    ):
+        out = torch.empty_like(o)
+        denom = torch.empty_like(s)
+        V = o.shape[-1]
+        BC = min(128, 1 << (V - 1).bit_length())
+        ct.launch(
+            torch.cuda.current_stream(),
+            (_cdiv(s.numel(), 8), _cdiv(V, BC)),
+            _normalization_divide_kernel,
+            (o.view(-1, V), s.view(-1), out.view(-1, V), denom.view(-1), 8, BC),
+        )
+        return out, denom
+    denom = s + 1e-10
+    return o / denom, denom
+
+
 def normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens):
     """Apply running normalization Z_t = sum_{s<=t} k_s (or sum_{s>=t} for reverse)."""
-    return StatefulNormalizeFunction.apply(o, q, k, scale, z_init, reverse, cu_seqlens, chunk_global_cumsum)
+    return StatefulNormalizeFunction.apply(
+        o,
+        q,
+        k,
+        scale,
+        z_init,
+        reverse,
+        cu_seqlens,
+        chunk_global_cumsum,
+        _normalization_product_or_eager,
+        _normalization_divide_or_eager,
+    )
 
 
 # ===========================================================================

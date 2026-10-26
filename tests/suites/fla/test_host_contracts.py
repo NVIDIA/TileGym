@@ -59,6 +59,21 @@ def _module_function(path, name, env):
     return result
 
 
+@pytest.mark.parametrize("suffix", ["chunk", "fused_chunk"])
+def test_op_large_normalization_product_falls_back(suffix, monkeypatch):
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    module = _import_module(f"tilegym.suites.fla.cutile.linear_attention_{suffix}")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (10, 0))
+    monkeypatch.setattr(module.ct, "launch", lambda *args, **kwargs: pytest.fail("Unexpected GPU launch"))
+    with FakeTensorMode():
+        q = torch.empty((1, 131072, 128, 128), device="cuda", dtype=torch.bfloat16)
+        product = module._normalization_product_or_eager(q, q, q, 0.5, None, None, False)
+        assert product.shape == q.shape
+        assert product.dtype == q.dtype
+        assert product.device == q.device
+
+
 @pytest.mark.parametrize(
     "suffix,callee",
     [

@@ -33,7 +33,11 @@ _BACKENDS = ["cutile"]
 
 # (B, T, H, K, V)
 SHAPES = [
+    (2, 65, 2, 4, 8),
+    (1, 64, 1, 7, 16),
     (1, 128, 1, 8, 64),
+    (1, 33, 1, 15, 8),
+    (1, 64, 1, 16, 16),
     (1, 128, 1, 64, 8),
     (2, 128, 4, 64, 64),
     (1, 256, 2, 32, 48),
@@ -491,12 +495,13 @@ class Test_FLA_LinearAttentionGdnChunk(common.PyTestCase):
 
         assert rms_ratio(o_out, o_ref) < 2e-2
 
+    @pytest.mark.parametrize("H", [2, 8])
     @pytest.mark.parametrize("backend", _BACKENDS)
-    def test_op_forward_gate_in_kernel(self, backend):
+    def test_op_forward_gate_in_kernel(self, backend, H):
         """Forward with `use_gate_in_kernel=True` (A_log / dt_bias path)."""
         self._prep(backend)
         torch.manual_seed(5)
-        B, T, H, K, V = 2, 128, 2, 64, 64
+        B, T, K, V = 2, 128, 64, 64
         scale = K**-0.5
         q, k, v, beta, _ = make_inputs(B, T, H, K, V)
         g_raw = torch.rand(B, T, H, device="cuda").to(torch.bfloat16)

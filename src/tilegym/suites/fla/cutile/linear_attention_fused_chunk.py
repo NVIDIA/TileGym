@@ -855,7 +855,7 @@ def chunk_global_cumsum_vector_kernel(
             b_c = b_z[None, :] + ct.cumsum(b_s, axis=0)
         if HAS_SCALE:
             b_c = b_c * scale
-        ct.store(o_seg, index=(i_t, i_h, i_s), tile=ct.astype(b_c, o.dtype).reshape((BT, 1, BS)))
+        ct.store(o_seg, index=(i_t, i_h, i_s), tile=ct.astype(b_c, o.dtype).reshape((BT, 1, BS)), allow_tma=False)
         b_z = b_z + ct.sum(b_s, axis=0)
 
 
@@ -1413,6 +1413,92 @@ def chunk_global_cumsum(
         )
 
 
+@ct.function
+def _normalization_product_stages(q, kc, scale):
+    qs = ct.astype(ct.astype(q, ct.float32) * scale, q.dtype)
+    product = ct.astype(ct.astype(qs, ct.float32) * ct.astype(kc, ct.float32), q.dtype)
+    return qs, product
+
+
+@ct.kernel
+def _normalization_product_kernel(Q, KC, P, SCALE: ConstFloat, BLOCK: ConstInt):
+    block = ct.bid(0)
+    q = ct.load(Q, index=(block,), shape=(BLOCK,), padding_mode=ct.PaddingMode.ZERO)
+    kc = ct.load(KC, index=(block,), shape=(BLOCK,), padding_mode=ct.PaddingMode.ZERO)
+    scale = ct.full((), SCALE, dtype=ct.float32)
+    _, product = _normalization_product_stages(q, kc, scale)
+    ct.store(P, index=(block,), tile=product)
+
+
+def _normalization_product_or_eager(o, q, k_cum, scale, cu_seqlens, z_init, reverse):
+    if (
+        q.dtype == k_cum.dtype == torch.bfloat16
+        and q.shape == k_cum.shape
+        and 0 < q.numel() <= 2147483647
+        and q.is_contiguous()
+        and k_cum.is_contiguous()
+        and q.data_ptr() % 16 == 0
+        and k_cum.data_ptr() % 16 == 0
+        and cu_seqlens is None
+        and z_init is None
+        and torch.cuda.get_device_capability(q.device)[0] == 10
+    ):
+        product = torch.empty_like(q)
+        ct.launch(
+            torch.cuda.current_stream(),
+            (_cdiv(q.numel(), 1024),),
+            _normalization_product_kernel,
+            (q.view(-1), k_cum.view(-1), product.view(-1), float(scale), 1024),
+        )
+        return product
+    return q * scale * k_cum
+
+
+@ct.function
+def _normalization_backward_stages(dd, q, kc, scale):
+    # Keep the BF16 rounding after each product used by the eager backward.
+    ds = ct.astype(ct.astype(dd, ct.float32) * scale, dd.dtype)
+    dq = ct.astype(ct.astype(ds, ct.float32) * ct.astype(kc, ct.float32), q.dtype)
+    dk = ct.astype(ct.astype(ds, ct.float32) * ct.astype(q, ct.float32), q.dtype)
+    return ds, dq, dk
+
+
+@ct.kernel
+def _normalization_backward_products_kernel(DD, Q, KC, DQ, DK, SCALE: ConstFloat, K: ConstInt, BLOCK: ConstInt):
+    idx = ct.bid(0) * BLOCK + ct.arange(BLOCK, dtype=ct.int32)
+    q = ct.gather(Q, (idx,), check_bounds=True, padding_value=0)
+    kc = ct.gather(KC, (idx,), check_bounds=True, padding_value=0)
+    dd = ct.gather(DD, (idx // K,), check_bounds=True, padding_value=0)
+    _, dq, dk = _normalization_backward_stages(dd, q, kc, ct.full((), SCALE, dtype=ct.float32))
+    ct.scatter(DQ, (idx,), dq, check_bounds=True)
+    ct.scatter(DK, (idx,), dk, check_bounds=True)
+
+
+def _normalization_backward_products_or_eager(ddenom, q, k_cum, scale, cu_seqlens, has_z_init):
+    if (
+        q.dtype == k_cum.dtype == ddenom.dtype == torch.bfloat16
+        and q.shape == k_cum.shape
+        and q.ndim == 4
+        and q.shape[-1] > 0
+        and ddenom.shape == q.shape[:-1] + (1,)
+        and 0 < q.numel() <= 2147483647
+        and all(t.is_contiguous() and t.data_ptr() % 16 == 0 for t in (q, k_cum, ddenom))
+        and cu_seqlens is None
+        and not has_z_init
+        and torch.cuda.get_device_capability(q.device)[0] == 10
+    ):
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(q)
+        ct.launch(
+            torch.cuda.current_stream(),
+            (_cdiv(q.numel(), 1024),),
+            _normalization_backward_products_kernel,
+            (ddenom.view(-1), q.view(-1), k_cum.view(-1), dq.view(-1), dk.view(-1), float(scale), q.shape[-1], 1024),
+        )
+        return dq, dk
+    return ddenom * scale * k_cum, ddenom * scale * q
+
+
 def normalize_with_z_state(
     o: torch.Tensor,
     q: torch.Tensor,
@@ -1422,7 +1508,19 @@ def normalize_with_z_state(
     reverse: bool,
     cu_seqlens: torch.LongTensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return StatefulNormalizeFunction.apply(o, q, k, scale, z_init, reverse, cu_seqlens, chunk_global_cumsum)
+    return StatefulNormalizeFunction.apply(
+        o,
+        q,
+        k,
+        scale,
+        z_init,
+        reverse,
+        cu_seqlens,
+        chunk_global_cumsum,
+        _normalization_product_or_eager,
+        None,
+        _normalization_backward_products_or_eager,
+    )
 
 
 # ===========================================================================

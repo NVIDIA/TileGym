@@ -127,6 +127,21 @@ class Test_FLA_LinearAttentionGdnGate(common.PyTestCase):
         assert _rms_ratio(cs, _ref_chunk_cumsum(g, A_log, chunk_size, scale=None, dt_bias=dt_bias)) < 1e-3
         assert _rms_ratio(cs_scale, _ref_chunk_cumsum(g, A_log, chunk_size, scale=0.5, dt_bias=None)) < 1e-3
 
+    @pytest.mark.parametrize("H", [8, 16])
+    @pytest.mark.parametrize("chunk_size", [16, 64, 128])
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    def test_op_chunk_cumsum_aligned_and_tail(self, backend, chunk_size, H):
+        self._prep(backend)
+        gdn_gate_chunk_cumsum = _resolve(backend, "linear_attention_gdn_gate", "gdn_gate_chunk_cumsum")
+        torch.manual_seed(8)
+        A_log = torch.randn(H, device="cuda")
+        dt_bias = torch.randn(H, device="cuda")
+        for T in [2 * chunk_size, 2 * chunk_size + 1]:
+            g = torch.randn(2, T, H, device="cuda")
+            actual = gdn_gate_chunk_cumsum(g, A_log, chunk_size, scale=0.5, dt_bias=dt_bias)
+            reference = _ref_chunk_cumsum(g, A_log, chunk_size, scale=0.5, dt_bias=dt_bias)
+            assert _rms_ratio(actual, reference) < 1e-3
+
     @pytest.mark.parametrize("backend", _BACKENDS)
     def test_op_chunk_cumsum_varlen(self, backend):
         """`gdn_gate_chunk_cumsum` varlen path vs the per-sequence torch reference."""
