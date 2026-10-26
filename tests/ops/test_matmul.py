@@ -19,6 +19,9 @@ _MATMUL_BASE_INPUTS = [
     (8192, 8192, 8192, 0, 0, False, False, torch.bfloat16),
     (8, 8, 8, 0, 0, False, False, torch.bfloat16),
     (3072, 6144, 2720, 0, 0, False, False, torch.bfloat16),
+    (1024, 1024, 1024, 0, 0, False, True, torch.bfloat16),
+    (1024, 1024, 1024, 0, 0, True, False, torch.bfloat16),
+    (37, 64, 2048, 0, 0, False, True, torch.bfloat16),
 ]
 
 
@@ -213,8 +216,6 @@ class Test_Matmul(common.PyTestCase):
             pytest.skip("Skip 32768x32768 matmul on A100 (sm80) due to OOM")
         if dtype == torch.float8_e4m3fn and torch.cuda.get_device_capability()[0] == 8:
             pytest.skip("Skip due to sm80 not support fp8 type")
-        if backend == "cutile" and not static_persistent and (transpose_a or transpose_b):
-            pytest.skip("cuTile transpose is not supported when static_persistent is False")
 
         a, b = self.prepare_data(m, n, k, transpose_a, transpose_b, offset_a, offset_b, dtype)
         kernel_kwargs = {

@@ -105,6 +105,12 @@ def get_configs_test():
             (0, False, "alibi", 0.1, "nsbd", True),
             (512, True, "matrix", 0.1, "nsbd", True),
         ]
+    ] + [
+        # S_kv whose int8 mask / fp16 bias rows are not a multiple of 16 bytes
+        (4, 32, 1, 37, 53, 64, is_causal, torch.float16, backend, 0, True, "matrix", 0.0, "bnsd", varlen)
+        for is_causal in [True, False]
+        for backend in _test_backends
+        for varlen in [False, True]
     ]
 
 

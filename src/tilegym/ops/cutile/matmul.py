@@ -220,8 +220,10 @@ def _matmul_kernel(
     C,
     TILE_SIZE_M: ConstInt,  # Tile size along M dimension (rows of C)
     TILE_SIZE_N: ConstInt,  # Tile size along N dimension (columns of C)
-    TILE_SIZE_K: ConstInt,
-):  # Tile size along K dimension (inner product dimension)
+    TILE_SIZE_K: ConstInt,  # Tile size along K dimension (inner product dimension)
+    TRANSPOSE_A: ct.Constant[bool],
+    TRANSPOSE_B: ct.Constant[bool],
+):
     """
     cuTile kernel for performing matrix multiplication C = A @ B.
 
@@ -230,8 +232,8 @@ def _matmul_kernel(
     involves iterating over the K-dimension in chunks of `TILE_SIZE_K`.
 
     Args:
-        A: Input matrix A (M x K).
-        B: Input matrix B (K x N).
+        A: Input matrix A (M x K), or (K x M) if TRANSPOSE_A.
+        B: Input matrix B (K x N), or (N x K) if TRANSPOSE_B.
         C: Output matrix C (M x N).
         TILE_SIZE_M (ConstInt): The height of the output tile computed by this block.
                        Corresponds to rows of A and C.
@@ -239,17 +241,21 @@ def _matmul_kernel(
                        Corresponds to columns of B and C.
         TILE_SIZE_K (ConstInt): The depth of the inner loop (K-dimension) tile size.
                        Corresponds to columns of A and rows of B.
+        TRANSPOSE_A (bool): A is stored as (K x M).
+        TRANSPOSE_B (bool): B is stored as (N x K).
     """
     GROUP_SIZE_M = 8
-    M = A.shape[0]
-    N = B.shape[1]
+    M = A.shape[1] if TRANSPOSE_A else A.shape[0]
+    N = B.shape[0] if TRANSPOSE_B else B.shape[1]
     bidx, bidy = _swizzle_2d(M, N, TILE_SIZE_M, TILE_SIZE_N, GROUP_SIZE_M)
 
     # Calculate the total number of K-tiles that need to be processed.
-    # `ct.num_tiles(A, axis=1, shape=(TILE_SIZE_M, TILE_SIZE_K))` extracts the K-dimension (axis 1)
-    # from matrix A's shape, assuming A's shape is conceptually (M_tiles, K_tiles),
-    # and then implicitly performs ceiling division by `TILE_SIZE_K` to get the number of K-tiles.
-    num_tiles_k = ct.num_tiles(A, axis=1, shape=(TILE_SIZE_M, TILE_SIZE_K))
+    # `ct.num_tiles(A, axis=..., shape=...)` extracts the K-dimension from matrix A's shape
+    # and implicitly performs ceiling division by `TILE_SIZE_K` to get the number of K-tiles.
+    if TRANSPOSE_A:
+        num_tiles_k = ct.num_tiles(A, axis=0, shape=(TILE_SIZE_K, TILE_SIZE_M))
+    else:
+        num_tiles_k = ct.num_tiles(A, axis=1, shape=(TILE_SIZE_M, TILE_SIZE_K))
 
     # Initialize an accumulator for the current output tile (TILE_SIZE_M x TILE_SIZE_N).
     # It's common practice to use `float32` for accumulation even with `float16` inputs
@@ -268,12 +274,22 @@ def _matmul_kernel(
         # Load tile from matrix A.
         # The `index=(bidx, k_tile_idx)` specifies which (M-tile, K-tile) to load
         # from global memory A. `shape=(TILE_SIZE_M, TILE_SIZE_K)` defines the size of this tile.
-        a = ct.load(A, index=(bidx, k), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad).astype(dtype)
+        # A transposed A is loaded from its (K, M) layout and transposed in registers.
+        if TRANSPOSE_A:
+            a = ct.load(A, index=(k, bidx), shape=(TILE_SIZE_K, TILE_SIZE_M), padding_mode=zero_pad)
+            a = ct.transpose(a).astype(dtype)
+        else:
+            a = ct.load(A, index=(bidx, k), shape=(TILE_SIZE_M, TILE_SIZE_K), padding_mode=zero_pad).astype(dtype)
 
         # Load tile from matrix B.
         # The `index=(k_tile_idx, bidy)` specifies which (K-tile, N-tile) to load
         # from global memory B. `shape=(TILE_SIZE_K, TILE_SIZE_N)` defines the size of this tile.
-        b = ct.load(B, index=(k, bidy), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad).astype(dtype)
+        # A transposed B is loaded from its (N, K) layout and transposed in registers.
+        if TRANSPOSE_B:
+            b = ct.load(B, index=(bidy, k), shape=(TILE_SIZE_N, TILE_SIZE_K), padding_mode=zero_pad)
+            b = ct.transpose(b).astype(dtype)
+        else:
+            b = ct.load(B, index=(k, bidy), shape=(TILE_SIZE_K, TILE_SIZE_N), padding_mode=zero_pad).astype(dtype)
 
         # Perform Matrix Multiplication for the current tiles.
         # `ct.mma` computes the product of the two loaded tiles and accumulates the result.
@@ -398,10 +414,10 @@ def _static_persistent_matmul_kernel(
         ct.store(C, index=(bid_m, bid_n), tile=result)
 
 
-def _cutile_autotune_matmul(stream, a, b, c):
+def _cutile_autotune_matmul(stream, a, b, c, trans_a, trans_b):
     M, N = c.shape
-    K = a.shape[1]
-    cache_key = (M, N, K, a.dtype, str(a.device))
+    K = a.shape[0] if trans_a else a.shape[1]
+    cache_key = (M, N, K, trans_a, trans_b, a.dtype, str(a.device))
     if cache_key not in _matmul_tune_cache:
         configs = list(_matmul_autotune_configs(a.dtype))
         if is_autotune_disabled():
@@ -412,7 +428,7 @@ def _cutile_autotune_matmul(stream, a, b, c):
                 stream,
                 lambda cfg: (ceil(M / cfg.TILE_SIZE_M) * ceil(N / cfg.TILE_SIZE_N), 1, 1),
                 _matmul_kernel,
-                lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K),
+                lambda cfg: (a, b, c, cfg.TILE_SIZE_M, cfg.TILE_SIZE_N, cfg.TILE_SIZE_K, trans_a, trans_b),
                 lambda cfg: {"num_ctas": cfg.num_ctas, "occupancy": cfg.occupancy},
             )
         best_cfg = result.best.config
@@ -425,7 +441,7 @@ def _cutile_autotune_matmul(stream, a, b, c):
         stream,
         (ceil(M / best_cfg.TILE_SIZE_M) * ceil(N / best_cfg.TILE_SIZE_N), 1, 1),
         tuned_kernel,
-        (a, b, c, best_cfg.TILE_SIZE_M, best_cfg.TILE_SIZE_N, best_cfg.TILE_SIZE_K),
+        (a, b, c, best_cfg.TILE_SIZE_M, best_cfg.TILE_SIZE_N, best_cfg.TILE_SIZE_K, trans_a, trans_b),
     )
     return c
 
@@ -529,7 +545,5 @@ def matmul(
     if static_persistent:
         _cutile_autotune_static_persistent_matmul(stream, a, b, c, M, N, K, trans_a, trans_b)
     else:
-        assert trans_a == False, "trans_a is not supported for cutile"
-        assert trans_b == False, "trans_b is not supported for cutile"
-        _cutile_autotune_matmul(stream, a, b, c)
+        _cutile_autotune_matmul(stream, a, b, c, trans_a, trans_b)
     return c

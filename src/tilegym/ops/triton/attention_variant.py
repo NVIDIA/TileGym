@@ -72,8 +72,8 @@ def _attn_fwd_inner(
     dropout,
     seed,
     qk_scale,
-    S_qo: tl.constexpr,
-    S_kv: tl.constexpr,
+    S_qo,
+    S_kv,
     NEG_INF: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -344,7 +344,7 @@ def _early_config_prune(configs, named_args, **kwargs):
     configs=_get_configs(),
     key=[
         "S_qo",
-        "S_KV_RECOMPILE_KEY",
+        "S_KV_TUNE_KEY",
         "STAGE",
         "QUERY_GROUP_SIZE",
         "dtype",
@@ -383,8 +383,8 @@ def _prefill_fmha(
     L,
     sm_scale,
     H,
-    S_qo: tl.constexpr,
-    S_kv: tl.constexpr,
+    S_qo,
+    S_kv,
     dropout: tl.constexpr,
     seed,
     BLOCK_D: tl.constexpr,
@@ -406,7 +406,7 @@ def _prefill_fmha(
     LAYOUT: tl.constexpr,
     dtype: tl.constexpr,
     warp_specialize: tl.constexpr,
-    S_KV_RECOMPILE_KEY: tl.constexpr,
+    S_KV_TUNE_KEY,
 ):
     if isinstance(Q, tl.tensor_descriptor):
         dtype = Q.type.block_type.element_ty
@@ -563,14 +563,40 @@ def _prefill_fmha(
         )
 
 
-def _check_stride(tensor):
-    elem_bytes = tensor.dtype.itemsize
-    for s in tensor.stride()[:-1]:
-        assert (s * elem_bytes) % 16 == 0, "strides must be 16-byte aligned"
+def _is_tma_addressable(tensor):
+    elem_bytes = tensor.element_size()
+    return (
+        tensor.stride(-1) == 1
+        and tensor.data_ptr() % 16 == 0
+        and all(s * elem_bytes % 16 == 0 for s in tensor.stride()[:-1])
+    )
+
+
+def _tma_empty(shape, dtype, device):
+    """Allocate a tensor of ``shape`` whose rows are laid out on a 16-byte-aligned pitch."""
+    row_align = 16 // dtype.itemsize
+    pitch = triton.cdiv(shape[-1], row_align) * row_align
+    return torch.empty(*shape[:-1], pitch, dtype=dtype, device=device)[..., : shape[-1]]
+
+
+def _tma_operand(tensor):
+    """Return ``tensor``, or an equal copy on an aligned row pitch, that a TMA descriptor can address.
+
+    Broadcast (stride-0) dimensions stay broadcast, so an expanded operand is never materialized.
+    """
+    if _is_tma_addressable(tensor):
+        return tensor
+    src = tensor
+    for dim, stride in enumerate(tensor.stride()[:-1]):
+        if stride == 0:
+            src = src.narrow(dim, 0, 1)
+    dst = _tma_empty(src.shape, tensor.dtype, tensor.device)
+    dst.copy_(src)
+    return dst.expand(tensor.shape)
 
 
 def _build_tensor_descriptor(tensor):
-    _check_stride(tensor)
+    assert _is_tma_addressable(tensor), "TMA operands need a unit inner stride and 16-byte-aligned base and strides"
     return TensorDescriptor(
         tensor,
         tensor.shape,
@@ -627,11 +653,8 @@ class _attention(torch.autograd.Function):
         BLOCK_D = triton.next_power_of_2(block_d)
         OUT_BLOCK_D = triton.next_power_of_2(out_block_d)
 
-        o = torch.empty(
-            *_permute_by_layout_host(B, H, S_qo, out_block_d, layout),
-            device=q.device,
-            dtype=q.dtype,
-        )
+        q, k, v = _tma_operand(q), _tma_operand(k), _tma_operand(v)
+        o = _tma_empty(_permute_by_layout_host(B, H, S_qo, out_block_d, layout), q.dtype, q.device)
         l = torch.empty((B, H, S_qo), device=q.device, dtype=torch.float32)
 
         stage = 3 if is_causal else 1
@@ -671,13 +694,13 @@ class _attention(torch.autograd.Function):
 
         if random_mask is not None:
             assert random_mask.shape == (B, H, S_qo, S_kv)
-            desc_random_mask = _build_tensor_descriptor(random_mask)
+            desc_random_mask = _build_tensor_descriptor(_tma_operand(random_mask))
         else:
             desc_random_mask = torch.empty(0, 0, 0, 0)
 
         # Create TensorDescriptor for bias (only for vector and matrix types)
         if (bias_type == "vector") or (bias_type == "matrix"):
-            desc_bias = _build_tensor_descriptor(bias)
+            desc_bias = _build_tensor_descriptor(_tma_operand(bias))
         else:
             desc_bias = bias
 
@@ -719,7 +742,7 @@ class _attention(torch.autograd.Function):
             USE_RANDOM_MASK=USE_RANDOM_MASK,
             LAYOUT=layout,
             dtype=q.dtype,
-            S_KV_RECOMPILE_KEY=triton.cdiv(S_kv, 64),
+            S_KV_TUNE_KEY=triton.next_power_of_2(S_kv),
         )
         return o
 

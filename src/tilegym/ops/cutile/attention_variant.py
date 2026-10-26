@@ -28,7 +28,7 @@ from tilegym.logger import get_logger
 
 from .utils import cached_replace_hints
 
-# Module-level tune cache: (B, H, S_qo, S_kv, TILE_D, OUT_TILE_D, query_group_size, is_causal, window_size, BIAS_TYPE, USE_RANDOM_MASK, USE_Q_LENS, USE_KV_LENS, layout, dtype, device) -> (best_cfg, tuned_kernel)
+# Module-level tune cache: (B, H, S_qo, next_power_of_2(S_kv), TILE_D, OUT_TILE_D, query_group_size, is_causal, window_size, BIAS_TYPE, USE_RANDOM_MASK, USE_Q_LENS, USE_KV_LENS, layout, dtype, device) -> (best_cfg, tuned_kernel)
 _fmha_variant_tune_cache: dict = {}
 
 logger = get_logger(__name__)
@@ -534,7 +534,7 @@ def _fmha_variant_autotune(
         B,
         H,
         S_qo,
-        S_kv,
+        _next_power_of_2(S_kv),
         TILE_D,
         OUT_TILE_D,
         query_group_size,
