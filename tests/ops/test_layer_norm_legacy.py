@@ -72,6 +72,42 @@ class Test_LayerNorm(common.PyTestCase):
             )
 
     @pytest.mark.parametrize(
+        "batch,seq,n,dtype",
+        [
+            (4, 128, 256, torch.float32),
+            (2, 64, 512, torch.float16),
+        ],
+    )
+    @pytest.mark.parametrize("layout", ["permuted", "row_sliced", "offset"])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_strided_input(self, batch, seq, n, dtype, layout, backend):
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+
+        self.setUp()
+
+        device = torch.device("cuda")
+        eps = 1e-5
+        if layout == "permuted":
+            # reshape(-1, n) cannot be a view and must copy.
+            x = torch.randn((batch, n, seq), dtype=dtype, device=device).permute(0, 2, 1)
+        elif layout == "row_sliced":
+            # reshape(-1, n) is a view with row stride 2 * n.
+            x = torch.randn((batch, seq, 2 * n), dtype=dtype, device=device)[..., :n]
+        else:
+            # reshape(-1, n) is a view with row stride n + 1 whose base is one element past an aligned allocation.
+            x = torch.randn((batch, seq, n + 1), dtype=dtype, device=device)[..., 1 : n + 1]
+        weight = torch.randn((n,), dtype=dtype, device=device)
+        bias = torch.randn((n,), dtype=dtype, device=device)
+
+        with torch.no_grad():
+            out = tilegym.ops.layer_norm_legacy(x, (n,), weight, bias, eps, 0.0)
+            ref = self.reference(x, (n,), weight, bias, eps, 0.0)
+        torch.testing.assert_close(out, ref, atol=1e-2, rtol=0.0)
+
+    @pytest.mark.parametrize(
         "m,n,dtype",
         [(4096, 2**i, torch.float16) for i in range(5, 15, 1)],
         ids=lambda x: f"n={x}" if isinstance(x, int) else str(x),

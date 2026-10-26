@@ -33,18 +33,20 @@ def _rope_kernel(
     TILE_RD: ConstInt,
 ):
     """
-    Unified RoPE kernel operating in-place on 4-D Q/K tensors.
+    Unified RoPE kernel operating in-place on half-split Q/K views.
 
-    Works for both full RoPE (TILE_RD = head_dim // 2) and partial RoPE
-    (TILE_RD = rope_dim // 2 < head_dim // 2).  Tile-space index
-    ``dim_tile=0`` selects ``[0 : TILE_RD]`` and ``dim_tile=1`` selects
-    ``[TILE_RD : 2*TILE_RD]``, so only the first ``2*TILE_RD`` elements
-    of head_dim are rotated; the rest pass through unchanged.
+    Works for both full RoPE (rope_dim == head_dim) and partial RoPE
+    (rope_dim < head_dim).  The host passes ``x[..., :rope_dim]`` viewed as
+    ``(..., 2, rope_dim // 2)``, so index 0 / 1 on the half axis selects
+    exactly ``[0 : rope_dim//2]`` / ``[rope_dim//2 : rope_dim]`` even when
+    ``rope_dim // 2`` is not a power of 2 (``TILE_RD`` is the padded size;
+    out-of-bounds lanes are zero-filled on load and dropped on store).
+    Elements past ``rope_dim`` are never touched.
 
-    q shape: (bsz, num_q_heads, seq_len, head_dim)  — in-place
-    k shape: (bsz, num_kv_heads, seq_len, head_dim)  — in-place
-    cos shape: (cos_bs, seq_len, rope_dim)            — 3-D
-    sin shape: (cos_bs, seq_len, rope_dim)            — 3-D
+    q shape: (bsz, num_q_heads, seq_len, 2, rope_dim // 2)  — in-place view
+    k shape: (bsz, num_kv_heads, seq_len, 2, rope_dim // 2) — in-place view
+    cos shape: (cos_bs, seq_len, 1, rope_dim // 2)
+    sin shape: (cos_bs, seq_len, 1, rope_dim // 2)
     """
     bid = ct.bid(0)
     batch_idx = bid // SEQ_LEN
@@ -54,12 +56,12 @@ def _rope_kernel(
     # ####################################################################
     # Load cos and sin values — first half of rope_dim
     # ####################################################################
-    cos_row = ct.load(cos, index=(cos_batch_idx, row_idx, 0), shape=(1, 1, TILE_RD), padding_mode=PAD_ZERO).reshape(
-        (1, TILE_RD)
-    )
-    sin_row = ct.load(sin, index=(cos_batch_idx, row_idx, 0), shape=(1, 1, TILE_RD), padding_mode=PAD_ZERO).reshape(
-        (1, TILE_RD)
-    )
+    cos_row = ct.load(
+        cos, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_RD), padding_mode=PAD_ZERO
+    ).reshape((1, TILE_RD))
+    sin_row = ct.load(
+        sin, index=(cos_batch_idx, row_idx, 0, 0), shape=(1, 1, 1, TILE_RD), padding_mode=PAD_ZERO
+    ).reshape((1, TILE_RD))
 
     # ####################################################################
     # Process Q tensor — first half [0:rope_dim//2] and second half
@@ -67,14 +69,14 @@ def _rope_kernel(
     # ####################################################################
     q_tile_1 = ct.load(
         q,
-        index=(batch_idx, 0, row_idx, 0),
-        shape=(1, TILE_QH, 1, TILE_RD),
+        index=(batch_idx, 0, row_idx, 0, 0),
+        shape=(1, TILE_QH, 1, 1, TILE_RD),
         padding_mode=PAD_ZERO,
     ).reshape((TILE_QH, TILE_RD))
     q_tile_2 = ct.load(
         q,
-        index=(batch_idx, 0, row_idx, 1),
-        shape=(1, TILE_QH, 1, TILE_RD),
+        index=(batch_idx, 0, row_idx, 1, 0),
+        shape=(1, TILE_QH, 1, 1, TILE_RD),
         padding_mode=PAD_ZERO,
     ).reshape((TILE_QH, TILE_RD))
     # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
@@ -82,13 +84,13 @@ def _rope_kernel(
     new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
     ct.store(
         q,
-        index=(batch_idx, 0, row_idx, 0),
-        tile=new_q_tile_1.reshape((1, TILE_QH, 1, TILE_RD)).astype(q.dtype),
+        index=(batch_idx, 0, row_idx, 0, 0),
+        tile=new_q_tile_1.reshape((1, TILE_QH, 1, 1, TILE_RD)).astype(q.dtype),
     )
     ct.store(
         q,
-        index=(batch_idx, 0, row_idx, 1),
-        tile=new_q_tile_2.reshape((1, TILE_QH, 1, TILE_RD)).astype(q.dtype),
+        index=(batch_idx, 0, row_idx, 1, 0),
+        tile=new_q_tile_2.reshape((1, TILE_QH, 1, 1, TILE_RD)).astype(q.dtype),
     )
 
     # ####################################################################
@@ -96,14 +98,14 @@ def _rope_kernel(
     # ####################################################################
     k_tile_1 = ct.load(
         k,
-        index=(batch_idx, 0, row_idx, 0),
-        shape=(1, TILE_KH, 1, TILE_RD),
+        index=(batch_idx, 0, row_idx, 0, 0),
+        shape=(1, TILE_KH, 1, 1, TILE_RD),
         padding_mode=PAD_ZERO,
     ).reshape((TILE_KH, TILE_RD))
     k_tile_2 = ct.load(
         k,
-        index=(batch_idx, 0, row_idx, 1),
-        shape=(1, TILE_KH, 1, TILE_RD),
+        index=(batch_idx, 0, row_idx, 1, 0),
+        shape=(1, TILE_KH, 1, 1, TILE_RD),
         padding_mode=PAD_ZERO,
     ).reshape((TILE_KH, TILE_RD))
     # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
@@ -111,14 +113,37 @@ def _rope_kernel(
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
     ct.store(
         k,
-        index=(batch_idx, 0, row_idx, 0),
-        tile=new_k_tile_1.reshape((1, TILE_KH, 1, TILE_RD)).astype(k.dtype),
+        index=(batch_idx, 0, row_idx, 0, 0),
+        tile=new_k_tile_1.reshape((1, TILE_KH, 1, 1, TILE_RD)).astype(k.dtype),
     )
     ct.store(
         k,
-        index=(batch_idx, 0, row_idx, 1),
-        tile=new_k_tile_2.reshape((1, TILE_KH, 1, TILE_RD)).astype(k.dtype),
+        index=(batch_idx, 0, row_idx, 1, 0),
+        tile=new_k_tile_2.reshape((1, TILE_KH, 1, 1, TILE_RD)).astype(k.dtype),
     )
+
+
+def _half_split_view(x, rope_dim):
+    """View ``x[..., :rope_dim]`` as ``(..., 2, rope_dim // 2)`` without copying."""
+    return x[..., :rope_dim].unflatten(-1, (2, rope_dim // 2))
+
+
+def _cos_sin_views(cos, sin, rope_dim, batch_size, seq_len):
+    """View the first ``rope_dim // 2`` elements of cos/sin as ``(..., 1, rope_dim // 2)``.
+
+    The kernel only reads the first half, so this accepts both full-width
+    (``rope_dim``) and half-width (``rope_dim // 2``, e.g. DeepSeek) cos/sin.
+    It loads the cos/sin row of each q/k (batch, seq) position, so cos/sin
+    must be ``(1 or batch_size, seq_len, width)``.
+    """
+    assert sin.shape == cos.shape, f"sin shape {tuple(sin.shape)} must equal cos shape {tuple(cos.shape)}"
+    assert cos.shape[:-1] in ((1, seq_len), (batch_size, seq_len)), (
+        f"cos/sin shape {tuple(cos.shape)} must be (1 or {batch_size}, {seq_len}, width) to match q/k"
+    )
+    assert cos.shape[-1] in (rope_dim, rope_dim // 2), (
+        f"cos/sin last dim ({cos.shape[-1]}) must be rope_dim ({rope_dim}) or rope_dim // 2 ({rope_dim // 2})"
+    )
+    return cos[..., : rope_dim // 2].unsqueeze(-2), sin[..., : rope_dim // 2].unsqueeze(-2)
 
 
 def _rope_forward(q, k, cos, sin, rope_dim=None):
@@ -126,9 +151,11 @@ def _rope_forward(q, k, cos, sin, rope_dim=None):
     Apply rotary position encoding **in-place** on 4-D Q/K tensors.
 
     Supports both full RoPE (rope_dim is None) and partial RoPE
-    (rope_dim < head_dim).  The unified kernel uses tile-space indexing so
-    only the first ``rope_dim`` elements are touched; no host-side reshape,
-    slice, or concatenation is needed.
+    (rope_dim < head_dim).  Q/K are passed to the kernel as zero-copy
+    ``(..., 2, rope_dim // 2)`` views of their first ``rope_dim`` elements,
+    so only those elements are touched and any ``rope_dim // 2`` (power of 2
+    or not) is handled exactly.  cos/sin are passed as ``(..., 1, rope_dim // 2)``
+    views of their first half, so half-width cos/sin also work.
 
     Args:
         q: [bsz, n_q_head, seq_len, head_dim] - Query tensor (modified in-place)
@@ -151,6 +178,7 @@ def _rope_forward(q, k, cos, sin, rope_dim=None):
     if cos.ndim == 2:
         cos = cos.unsqueeze(0)
         sin = sin.unsqueeze(0)
+    cos_view, sin_view = _cos_sin_views(cos, sin, rope_dim, batch_size, seq_len)
 
     TILE_RD = next_power_of_2(half_rope_dim)
     TILE_QH = next_power_of_2(n_q_head)
@@ -158,16 +186,16 @@ def _rope_forward(q, k, cos, sin, rope_dim=None):
 
     n_row = batch_size * seq_len
     grid = (n_row, 1, 1)
-    kernel = _select_rope_kernel(q, k, cos, sin, rope_dim, grid, TILE_QH, TILE_KH, TILE_RD)
+    kernel = _select_rope_kernel(q, k, cos_view, sin_view, rope_dim, grid, TILE_QH, TILE_KH, TILE_RD)
     ct.launch(
         torch.cuda.current_stream(),
         grid,
         kernel,
         (
-            q,
-            k,
-            cos,
-            sin,
+            _half_split_view(q, rope_dim),
+            _half_split_view(k, rope_dim),
+            cos_view,
+            sin_view,
             cos.shape[0],
             seq_len,
             TILE_QH,
@@ -215,8 +243,8 @@ def _select_rope_kernel(q, k, cos, sin, rope_dim, grid, tile_qh, tile_kh, tile_r
         q_trial = q.clone()
         k_trial = k.clone()
         return (
-            q_trial,
-            k_trial,
+            _half_split_view(q_trial, rope_dim),
+            _half_split_view(k_trial, rope_dim),
             cos,
             sin,
             cos.shape[0],

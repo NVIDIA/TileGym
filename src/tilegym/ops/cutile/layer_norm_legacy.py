@@ -203,11 +203,12 @@ def _switch_to_contiguous_if_needed(x: torch.Tensor) -> torch.Tensor:
 class _LayerNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, normalized_shape, weight, bias, eps, weight_shift=0.0):
-        # allocate output
-        y = torch.empty_like(x)
         # reshape input data into 2D tensor
         x_arg = x.reshape(-1, x.shape[-1])
         M, N = x_arg.shape
+        # Row-major (M, N) output so the kernel writes y directly.
+        y_arg = torch.empty((M, N), dtype=x.dtype, device=x.device)
+        y = y_arg.view(x.shape)
         mean = torch.empty((M,), dtype=torch.float32, device="cuda")
         rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
         # Less than 64KB per feature: enqueue fused kernel
@@ -221,7 +222,6 @@ class _LayerNorm(torch.autograd.Function):
 
         # Pass X, Y as 2D (M, N) so gather/scatter bounds (row < M, cols < N) mask partial block
         # (e.g. N=9, BLOCK_SIZE=8) without writing into the next row.
-        y_arg = y.reshape(-1, y.shape[-1])
         grid = (M,)
         ct.launch(
             torch.cuda.current_stream(),

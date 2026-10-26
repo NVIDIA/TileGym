@@ -175,16 +175,15 @@ def _fmha_varlen_kernel(
             offs_n = j * TILE_N + offs_n_tile_2d
             mask = ct.full((TILE_M, TILE_N), True, dtype=ct.bool_)
 
-            # KV length mask (out of bound)
-            if KV_LEN_MASK:
+            # KV length / S_KV tail mask (out of bound)
+            if KV_LEN_MASK or S_KV % TILE_N != 0:
                 mask = mask & (offs_n < kv_len_val)
 
             # Causal mask
             if CAUSAL:
                 mask = mask & (offs_m_2d >= offs_n)  # [TILE_M, TILE_N]
 
-            mask = ct.where(mask, 0.0, -math.inf)  # [TILE_M, TILE_N]
-            qk = qk + mask
+            qk = ct.where(mask, qk, -math.inf)  # [TILE_M, TILE_N]
 
         # Moving qk_scale multiplication after reduce_max is to improve performance.
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
@@ -204,6 +203,7 @@ def _fmha_varlen_kernel(
             V,
             index=(batch_idx, off_kv_h, j, 0),
             shape=(1, 1, TILE_N, TILE_D),
+            padding_mode=ct.PaddingMode.ZERO,
             latency=4,
         ).reshape((TILE_N, TILE_D))  # [TILE_N, TILE_D]
         p = p.astype(Q.dtype)

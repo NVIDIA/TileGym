@@ -461,6 +461,36 @@ class Test_FMHA_varlen(common.PyTestCase):
         )
 
     @pytest.mark.parametrize(
+        "max_q_seq_len, max_kv_seq_len",
+        [
+            # S_kv not a multiple of any kernel TILE_N
+            (64, 65),
+            (128, 200),
+            (100, 333),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_noncausal_unaligned_kv_tail(self, max_q_seq_len, max_kv_seq_len, backend: str):
+        try:
+            tilegym.set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+
+        self.setUp()
+
+        device = torch.device("cuda")
+        batch, num_heads, head_dim, dtype = 2, 4, 128, torch.bfloat16
+        # Unit-variance data so that any unmasked KV tail column changes the output.
+        q = torch.randn(batch, num_heads, max_q_seq_len, head_dim, device=device).to(dtype)
+        k = torch.randn(batch, num_heads, max_kv_seq_len, head_dim, device=device).to(dtype)
+        v = torch.randn(batch, num_heads, max_kv_seq_len, head_dim, device=device).to(dtype)
+        sm_scale = 1.0 / math.sqrt(head_dim)
+
+        out = fmha_varlen(q, k, v, scaling=sm_scale, is_causal=False)
+        ref = torch.nn.functional.scaled_dot_product_attention(q.float(), k.float(), v.float(), scale=sm_scale)
+        torch.testing.assert_close(out.float(), ref, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize(
         "batch,heads,q_seq_len,kv_seq_len,head_dim,dtype",
         [
             (4, 32, q_seq_len, kv_seq_len, 128, dtype)

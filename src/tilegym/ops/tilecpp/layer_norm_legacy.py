@@ -13,8 +13,10 @@ import numpy as np
 import torch
 
 from tilegym.backend import register_impl
+from tilegym.ops.tilecpp.persistent_layer_norm import _switch_to_contiguous_if_needed
 from tilegym.ops.tilecpp.utils._cuda_utils import TileCppKernel
 from tilegym.ops.tilecpp.utils._cuda_utils import get_cpp_type
+from tilegym.ops.tilecpp.utils._cuda_utils import ptr_alignment
 from tilegym.ops.tilecpp.utils._dump_types import dump_kernel_types
 
 
@@ -50,7 +52,16 @@ def _launch_layer_norm_fwd(
 
     kernel, _, _ = _layer_norm_fwd_kernel.get_kernel(
         dtype=dtype,
-        template_params=[w_cpp_type, b_cpp_type, N, BLOCK_SIZE],
+        template_params=[
+            w_cpp_type,
+            b_cpp_type,
+            N,
+            BLOCK_SIZE,
+            x.stride(0),
+            ptr_alignment(x),
+            ptr_alignment(weight),
+            ptr_alignment(bias),
+        ],
         signature=f"{{T}}*, {{T}}*, const {w_cpp_type}*, const {b_cpp_type}*, float*, float*, float, float",
     )
 
@@ -73,13 +84,15 @@ def _launch_layer_norm_fwd(
 class LayerNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, normalized_shape, weight, bias, eps, weight_shift=0.0):
-        # allocate output
-        y = torch.empty_like(x)
         weight = weight.contiguous()
         bias = bias.contiguous()
-        # reshape input data into 2D tensor
-        x_arg = x.reshape(-1, x.shape[-1])
+        # reshape input data into 2D tensor; the kernel takes the row stride and
+        # vectorizes along unit-stride columns
+        x_arg = _switch_to_contiguous_if_needed(x.reshape(-1, x.shape[-1]))
         M, N = x_arg.shape
+        # Row-major (M, N) output so the kernel writes y directly.
+        y_arg = torch.empty((M, N), dtype=x.dtype, device=x.device)
+        y = y_arg.view(x.shape)
         mean = torch.empty((M,), dtype=torch.float32, device="cuda")
         rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
         # Less than 64KB per feature: enqueue fused kernel
@@ -90,7 +103,7 @@ class LayerNorm(torch.autograd.Function):
 
         _launch_layer_norm_fwd(
             x_arg,
-            y,
+            y_arg,
             weight,
             bias,
             mean,

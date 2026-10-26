@@ -58,9 +58,13 @@ class Test_RoPE(common.PyTestCase):
             # different q/k heads
             (1, 128, 32, 8, 64, 1.0),
             (2, 128, 32, 8, 64, 1.0),
-            # Weird shapes
-            pytest.param(3, 423, 73, 213, 92, 1.0, marks=pytest.mark.skip(reason="only support atol 1e-1")),
-            pytest.param(3, 423, 73, 155, 92, 1.0, marks=pytest.mark.skip(reason="only support atol 1e-1")),
+            # Weird shapes (head_dim // 2 is not a power of 2)
+            (3, 423, 73, 213, 92, 1.0),
+            (3, 423, 73, 155, 92, 1.0),
+            # rope_dim // 2 is not a power of 2
+            (2, 64, 8, 4, 96, 1.0),
+            (2, 64, 8, 4, 80, 1.0),
+            (2, 64, 8, 4, 160, 0.5),
             # Partial RoPE: Qwen3.5 config (head_dim=256, partial_rotary_factor=0.25 → rope_dim=64)
             (1, 128, 32, 8, 256, 0.25),
             (2, 128, 32, 8, 256, 0.25),
@@ -220,6 +224,51 @@ class Test_RoPE(common.PyTestCase):
 
         torch.testing.assert_close(q_ref.grad, q_tt.grad, atol=atol, rtol=rtol)
         torch.testing.assert_close(k_ref.grad, k_tt.grad, atol=atol, rtol=rtol)
+
+    @staticmethod
+    def reference_deepseek_rope(q, k, freqs_cis):
+        """Reference: HF DeepSeek-V2 ``apply_rotary_emb`` (interleaved pairs rotated by
+        complex ``freqs_cis`` of shape (bsz, seq_len, head_dim // 2)), with the output
+        de-interleaved into the half-split layout that the deepseek wrapper returns."""
+
+        def rotate(x):
+            b, h, s, d = x.shape
+            x_c = torch.view_as_complex(x.float().reshape(b, h, s, d // 2, 2))
+            out = torch.view_as_real(x_c * freqs_cis.unsqueeze(1)).flatten(3).type_as(x)
+            return out.view(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
+
+        return rotate(q), rotate(k)
+
+    @pytest.mark.parametrize(
+        "bsz, seq_len, num_q_heads, num_kv_heads, head_dim",
+        [
+            (2, 16, 16, 16, 64),
+            (1, 128, 8, 1, 64),
+            (2, 64, 4, 2, 128),
+            # head_dim // 2 is not a power of 2
+            (2, 32, 4, 4, 96),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_deepseek(self, bsz, seq_len, num_q_heads, num_kv_heads, head_dim, backend):
+        """get_apply_rope_func("deepseek") takes half-width cos/sin (freqs_cis.real/.imag)."""
+        try:
+            tilegym.set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+
+        self.setUp()
+
+        device = torch.device("cuda")
+        q = torch.randn((bsz, num_q_heads, seq_len, head_dim), device=device)
+        k = torch.randn((bsz, num_kv_heads, seq_len, head_dim), device=device)
+        angles = torch.randn((bsz, seq_len, head_dim // 2), device=device)
+        freqs_cis = torch.polar(torch.ones_like(angles), angles)
+
+        ref_q, ref_k = self.reference_deepseek_rope(q, k, freqs_cis)
+        tt_q, tt_k = tilegym.ops.get_apply_rope_func("deepseek")(q.clone(), k.clone(), freqs_cis)
+        torch.testing.assert_close(tt_q, ref_q, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(tt_k, ref_k, atol=1e-5, rtol=1e-5)
 
     @pytest.mark.parametrize(
         "bsz, seq_len, num_q_heads, num_kv_heads, head_dim, partial_rotary_factor",

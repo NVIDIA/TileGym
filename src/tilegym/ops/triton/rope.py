@@ -215,6 +215,33 @@ def _rope_kernel(
         )
 
 
+def _check_cos_sin_extents(q, cos, sin, rope_dim=None):
+    """The kernels address the cos/sin row of each q/k (batch, seq) position, so
+    cos/sin must be ``(1 or bsz, seq_len, width)`` with ``width`` equal to
+    ``rope_dim`` or ``rope_dim // 2``."""
+    batch_size, _, seq_len, head_dim = q.shape
+    rope_dim = head_dim if rope_dim is None else rope_dim
+    assert sin.shape == cos.shape, f"sin shape {tuple(sin.shape)} must equal cos shape {tuple(cos.shape)}"
+    assert cos.shape[:-1] in ((1, seq_len), (batch_size, seq_len)), (
+        f"cos/sin shape {tuple(cos.shape)} must be (1 or {batch_size}, {seq_len}, width) to match q/k"
+    )
+    assert cos.shape[-1] in (rope_dim, rope_dim // 2), (
+        f"cos/sin width {cos.shape[-1]} must be rope_dim ({rope_dim}) or rope_dim // 2"
+    )
+
+
+def _tma_compatible(q, k, cos, sin):
+    """Whether the TMA kernel's ``(..., 2, head_dim // 2)`` views of q/k and of the
+    contiguous cos/sin meet TensorDescriptor's 16-byte base and stride alignment."""
+    half_head_dim = q.shape[-1] // 2
+    return all(
+        x.stride(-1) == 1
+        and x.data_ptr() % 16 == 0
+        and all(s * x.element_size() % 16 == 0 for s in (*x.stride()[:-1], half_head_dim))
+        for x in (q, k)
+    ) and all(half_head_dim * x.element_size() % 16 == 0 for x in (cos, sin))
+
+
 def _rope_forward_tma(q, k, cos, sin):
     batch_size, n_q_head, seq_len, head_dim = q.shape
     n_kv_head = k.shape[1]
@@ -424,11 +451,17 @@ class _TritonRopeFunction(torch.autograd.Function):
         """
         q size: (bsz, n_q_head, seq_len, head_dim)
         k size: (bsz, n_kv_head, seq_len, head_dim)
-        cos size: (1, seq_len, rope_dim) or (bsz, seq_len, rope_dim)  — rope_dim == head_dim for full RoPE
+        cos size: (seq_len, rope_dim), (1, seq_len, rope_dim) or (bsz, seq_len, rope_dim)  — rope_dim == head_dim for full RoPE
         sin size: same as cos
         """
-        if use_tma and rope_dim is None:
-            # TMA path only supports full RoPE; fall back to standard kernel for partial
+        # Ensure cos/sin are 3-D: (cos_bs, seq_len, rope_dim or rope_dim // 2).
+        if cos.ndim == 2:
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+        _check_cos_sin_extents(q, cos, sin, rope_dim)
+        if use_tma and rope_dim is None and _tma_compatible(q, k, cos, sin):
+            # TMA path only supports full RoPE with 16-byte-aligned half-split views;
+            # the standard kernel handles partial RoPE and any head_dim
             q, k, cos, sin = _rope_forward_tma(q, k, cos, sin)
         else:
             q, k, cos, sin = _rope_forward(q, k, cos, sin, rope_dim=rope_dim)

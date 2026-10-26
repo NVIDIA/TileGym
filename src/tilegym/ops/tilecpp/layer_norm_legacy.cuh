@@ -21,8 +21,12 @@
  * Computes: y = (x - mean) / sqrt(var + eps) * (weight + weight_shift) + bias
  *
  * Each program handles one row. Uses loop over blocks if N > BLOCK_SIZE.
+ * Rows of X are STRIDE_X_ROW elements apart (columns are unit-stride); Y is
+ * row-major (M, N). X_ALIGN / W_ALIGN / B_ALIGN are the byte alignments of the
+ * X / W / B pointers (at most 16), which may be views at any element offset.
  */
-template<typename T, typename WT, typename BT, int N, int BLOCK_SIZE>
+template<typename T, typename WT, typename BT, int N, int BLOCK_SIZE, int STRIDE_X_ROW,
+         int X_ALIGN, int W_ALIGN, int B_ALIGN>
 __tile_global__ void layer_norm_fwd_fused_kernel(
     T* __restrict__ X,
     T* __restrict__ Y,
@@ -39,15 +43,15 @@ __tile_global__ void layer_norm_fwd_fused_kernel(
     using f32xN = ct::tile<float, ct::shape<BLOCK_SIZE>>;
     using i32xN = ct::tile<int, ct::shape<BLOCK_SIZE>>;
 
-    X = ct::assume_aligned<16>(X);
+    X = ct::assume_aligned<X_ALIGN>(X);
     Y = ct::assume_aligned<16>(Y);
-    W = ct::assume_aligned<16>(W);
-    B = ct::assume_aligned<16>(B);
+    W = ct::assume_aligned<W_ALIGN>(W);
+    B = ct::assume_aligned<B_ALIGN>(B);
     Mean = ct::assume_aligned<16>(Mean);
     Rstd = ct::assume_aligned<16>(Rstd);
 
     int row = ct::bid().x;
-    T* X_row = X + row * N;
+    T* X_row = X + row * STRIDE_X_ROW;
     T* Y_row = Y + row * N;
 
     constexpr int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;

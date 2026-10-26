@@ -248,6 +248,17 @@ def get_scalar_converter(dtype: torch.dtype) -> Callable:
     return get_dtype_info(dtype)[1]
 
 
+def ptr_alignment(tensor: torch.Tensor) -> int:
+    """Byte alignment of ``tensor``'s data pointer, capped at 16.
+
+    Pass it as the template argument of ``ct::assume_aligned`` for pointers to
+    caller-provided tensors, which may be views at any element offset. Fresh
+    allocations, and therefore ordinary contiguous tensors, give 16.
+    """
+    ptr = tensor.data_ptr()
+    return 16 if ptr % 16 == 0 else ptr & -ptr
+
+
 # =============================================================================
 # CUDA Compilation
 # =============================================================================
