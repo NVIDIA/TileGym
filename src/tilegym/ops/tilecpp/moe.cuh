@@ -164,7 +164,9 @@ __tile_global__ void fused_moe_kernel(
         constexpr int num_k_blocks = (K + BLOCK_SIZE_K - 1) / BLOCK_SIZE_K;
         for (auto k_block : ct::irange(0, num_k_blocks)) {
             auto a_ptrs = a_base_ptrs + k_block * a_k_stride;
-            auto a = ct::load_masked(a_ptrs, token_mask_2d, zero_scalar<IN_T>());
+            int k_remaining = (K % BLOCK_SIZE_K == 0) ? BLOCK_SIZE_K : K - k_block * BLOCK_SIZE_K;
+            auto a_mask = token_mask_2d & (offs_k_init_2d < k_remaining);
+            auto a = ct::load_masked(a_ptrs, a_mask, zero_scalar<IN_T>());
 
             // Load B using partition_view: b_ptr shape (E, N, K), load (off_experts, bid_n, k_block)
             auto b_layout = ct::layout_right_mapping{ct::extents<uint32_t, EM, N, K>{}};

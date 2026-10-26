@@ -73,6 +73,8 @@ class Test_MOE(common.PyTestCase):
     @pytest.mark.parametrize(
         "num_tokens, hidden_size, moe_intermediate_size, n_experts, top_k",
         [
+            (16, 16, 16, 8, 4),
+            (16, 80, 32, 8, 2),
             (16, 512, 256, 8, 2),
             (32, 1024, 512, 16, 4),
             (64, 1024, 512, 20, 8),
@@ -141,8 +143,11 @@ class Test_MOE(common.PyTestCase):
         topk_ids = torch.randint(0, n_experts, (num_tokens, top_k), dtype=torch.long, device=device)
         topk_weights = torch.softmax(torch.randn(num_tokens, top_k, device=device), dim=-1).to(init_dtype)
 
+        # Place hidden_states in front of NaN-filled memory so reads past its last row are caught
+        storage = torch.full(((num_tokens + 8) * hidden_size,), float("nan"), dtype=init_dtype, device=device)
+        hidden_states = storage[: num_tokens * hidden_size].view(num_tokens, hidden_size).copy_(hidden_states)
+
         # Ensure all tensors are contiguous
-        hidden_states = hidden_states.contiguous()
         w1 = w1.contiguous()
         w2 = w2.contiguous()
         topk_weights = topk_weights.contiguous()
@@ -192,6 +197,28 @@ class Test_MOE(common.PyTestCase):
             rtol=rtol,
             atol=atol,
         )
+
+    @pytest.mark.parametrize("hidden_size, intermediate_size", [(16, 16), (80, 32), (128, 128)])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_k_tail_keeps_tokens_independent(self, backend, dtype, hidden_size, intermediate_size):
+        try:
+            set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Failed to set backend {backend}: {e}")
+
+        self.setUp()
+        device = "cuda"
+        hidden_states = torch.full((4, hidden_size), 0.125, dtype=dtype, device=device)
+        hidden_states[1] = float("nan")
+        w1 = torch.full((1, intermediate_size * 2, hidden_size), 0.03125, dtype=dtype, device=device)
+        w2 = torch.full((1, hidden_size, intermediate_size), 0.03125, dtype=dtype, device=device)
+        topk_weights = torch.ones(4, 1, dtype=dtype, device=device)
+        topk_ids = torch.zeros(4, 1, dtype=torch.int64, device=device)
+
+        actual = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
+        expected = self.reference(hidden_states, w1, w2, topk_weights, topk_ids)
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2, equal_nan=True)
 
     _perf_call_types = ["e2e_fused"]
 

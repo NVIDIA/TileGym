@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import List
 from typing import Optional
 from typing import Tuple
 
@@ -113,6 +114,10 @@ def fused_moe_torch(A, B, C, topk_weights, topk_ids, mul_routed_weight):
     return acc_selected
 
 
+def _cdiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
 def fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -125,6 +130,7 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[List[int]] = None,
 ):
     """
     Standard MoE implementation with chunked execution.
@@ -134,7 +140,15 @@ def fused_experts_impl(
     w2: [n_experts, hidden_size, moe_intermediate_size] (64, 2048, 1408)
     topk_weights: [batch_size * seq_len, top_k] (9, 6)
     topk_ids: [batch_size * seq_len, top_k] (9, 6)
+    block_shape: [block_n, block_k] quantization block of the FP8 scales; the FP8 tiles match it.
     """
+    if use_fp8_w8a8:
+        assert block_shape is not None, "FP8 W8A8 requires the quantization block_shape"
+        block_n, block_k = block_shape
+        assert w1_scale.shape[1:] == (_cdiv(w1.shape[1], block_n), _cdiv(w1.shape[2], block_k))
+        assert w2_scale.shape[1:] == (_cdiv(w2.shape[1], block_n), _cdiv(w2.shape[2], block_k))
+        assert a1_scale.shape[-1] == _cdiv(hidden_states.shape[-1], block_k)
+
     _backend = get_current_backend()
     if _backend == "cutile":
         config = {
@@ -145,11 +159,8 @@ def fused_experts_impl(
             "num_warps": 8,
             "num_stages": 4,
         }
-        # Override block sizes to match scale tensor shapes for FP8
-        if use_fp8_w8a8 and w1_scale is not None:
-            _, N, K = w1.shape
-            config["TILE_SIZE_N"] = N // w1_scale.shape[1]
-            config["TILE_SIZE_K"] = K // w1_scale.shape[2]
+        if use_fp8_w8a8:
+            config["TILE_SIZE_N"], config["TILE_SIZE_K"] = block_n, block_k
     elif _backend == "tilecpp":
         config = {
             "BLOCK_SIZE_M": 128,
@@ -159,11 +170,8 @@ def fused_experts_impl(
             "num_warps": 8,
             "num_stages": 4,
         }
-        # Override block sizes to match scale tensor shapes for FP8
-        if use_fp8_w8a8 and w1_scale is not None:
-            _, N, K = w1.shape
-            config["BLOCK_SIZE_N"] = N // w1_scale.shape[1]
-            config["BLOCK_SIZE_K"] = K // w1_scale.shape[2]
+        if use_fp8_w8a8:
+            config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"] = block_n, block_k
     device = hidden_states.device
     if not w1.is_cuda:
         w1 = w1.to(device)
@@ -279,7 +287,7 @@ def fused_experts_impl(
             a2_scale = torch.ones(
                 [
                     intermediate_cache2.shape[0],
-                    intermediate_cache2.shape[1] // config["BLOCK_SIZE_N"],
+                    _cdiv(intermediate_cache2.shape[1], block_k),
                 ],
                 dtype=torch.float32,
                 device=intermediate_cache2.device,

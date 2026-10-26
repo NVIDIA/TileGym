@@ -45,8 +45,6 @@ def _fused_moe_kernel(
     TOP_K: ct.Constant[int],
     USE_FP8_W8A8: ct.Constant[int],
     USE_INT8_W8A16: ct.Constant[int],
-    EVEN_KS: ct.Constant[int],
-    A_STRIDE_1: ct.Constant[int],  # Original A shape[1] before flatten
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -96,20 +94,19 @@ def _fused_moe_kernel(
         off_experts = ct.load(expert_ids_ptr, index=(bid_m,), shape=(1,))
         off_experts = off_experts.item()
         row_indices = offs_token // TOP_K
-        a_row_offset = row_indices[:, None] * A_STRIDE_1
         # Iterate to compute a tile of the C matrix.
         # We accumulate into a `[TILE_SIZE_M, TILE_SIZE_N]` tile.
         accumulator = ct.full((TILE_SIZE_M, TILE_SIZE_N), 0.0, dtype=ct.float32)
         for k in range(0, ct.cdiv(K, TILE_SIZE_K)):
             # Load the next tile of A and B
             col_indices = k * TILE_SIZE_K + ct.arange(TILE_SIZE_K, dtype=ct.int32)
-            a_indices = a_row_offset + col_indices[None, :]
-            a = ct.gather(a_ptr, a_indices, padding_value=0)
+            a = ct.gather(a_ptr, (row_indices[:, None], col_indices[None, :]), padding_value=0)
             b = ct.load(
                 b_ptr,
                 index=(off_experts, k, bid_n),
                 shape=(1, TILE_SIZE_K, TILE_SIZE_N),
                 order=(0, 2, 1),
+                padding_mode=ct.PaddingMode.ZERO,
             )
             b = ct.reshape(b, (TILE_SIZE_K, TILE_SIZE_N))
 
@@ -160,12 +157,6 @@ def invoke_fused_moe_kernel(
         math.ceil(sorted_token_ids.shape[0] / config["TILE_SIZE_M"]) * math.ceil(B.shape[1] / config["TILE_SIZE_N"]),
     )
 
-    K = B.shape[2] - padded_size
-    if K % config["TILE_SIZE_K"] == 0:
-        even_Ks = True
-    else:
-        even_Ks = False
-
     group_n = 0 if block_shape is None else block_shape[0]
     group_k = 0 if block_shape is None else block_shape[1]
 
@@ -184,19 +175,12 @@ def invoke_fused_moe_kernel(
     # TILE_SIZE_N > N silently overwrite the next row.
     C = C.view(-1, C.shape[2])
 
-    # Save original stride of A before flattening (A is still gathered via a
-    # 1D index; out-of-range padded tokens rely on gather's padding_value=0).
-    a_stride_1 = A.shape[1]
-
-    # Flatten A to 1D for gather operations
-    A_flat = A.reshape(-1)
-
     ct.launch(
         torch.cuda.current_stream(),
         grid,
         _fused_moe_kernel,
         (
-            A_flat,
+            A,
             B,
             C,
             A_scale,
@@ -219,7 +203,5 @@ def invoke_fused_moe_kernel(
             top_k,  # top_k
             int(use_fp8_w8a8),  # use_fp8_w8a8 (convert bool to int)
             int(use_int8_w8a16),  # use_int8_w8a16 (convert bool to int)
-            int(even_Ks),  # even_Ks (convert bool to int)
-            a_stride_1,  # Original A.shape[1]
         ),
     )

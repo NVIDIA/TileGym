@@ -277,9 +277,10 @@ def invoke_fused_moe_kernel(
     if use_fp8_w8a8:
         assert A_scale is not None, "A_scale required for FP8"
         assert B_scale is not None, "B_scale required for FP8"
-        assert A_scale.shape[-1] == A.shape[-1] // config["BLOCK_SIZE_K"]
-        assert B_scale.shape[-1] == B.shape[-1] // config["BLOCK_SIZE_K"]
-        assert B_scale.shape[1] == B.shape[1] // config["BLOCK_SIZE_N"]
+        block_n, block_k = config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
+        assert A_scale.shape[-1] == (A.shape[-1] + block_k - 1) // block_k
+        assert B_scale.shape[-1] == (B.shape[-1] + block_k - 1) // block_k
+        assert B_scale.shape[1] == (B.shape[1] + block_n - 1) // block_n
 
     N = B.shape[1]
     K = B.shape[2]
