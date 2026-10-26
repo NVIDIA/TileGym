@@ -129,7 +129,9 @@ def _time_ms(
     setup_fn: Callable | None = None,
 ) -> float:
     with torch.cuda.stream(stream):
-        return benchmark_cuda_graph(run_once, warmup=warmup_ms, rep=rep_ms, max_rep=96, setup_fn=setup_fn)["median"]
+        return benchmark_cuda_graph(
+            run_once, warmup=warmup_ms, rep=rep_ms, max_rep=96, setup_fn=setup_fn, telemetry=False
+        )["median"]
 
 
 @contextmanager

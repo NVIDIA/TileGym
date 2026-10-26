@@ -4,7 +4,9 @@
 
 """Cold-cache CUDA Graph timing shared by benchmarks and autotuners."""
 
+import ctypes
 import math
+import os
 import re
 import time
 from contextlib import ExitStack
@@ -20,6 +22,206 @@ GRAPH_REPEATS = 8
 # saturated GPU needs about 100 ms idle to recover.
 POWER_BURST_MS = 30.0
 POWER_REST_MS = 100.0
+
+TELEMETRY_ENV = "TILEGYM_SAMPLE_TELEMETRY"
+TELEMETRY_MAX_READS = 64
+# Per-sample reads are issued while the sample's GPU work is in flight; below this
+# sample length they could outlast it and add host idle between samples.
+TELEMETRY_MIN_SAMPLE_MS = 1.0
+_NVML_CLOCK_SM = 1
+_NVML_REASON_IDLE = 0x1
+# Clocks-event reasons that are slowdowns: SW power cap, HW slowdown, SW thermal,
+# HW thermal, HW power brake. Idle, applications-clocks and display-clock settings
+# are not.
+_NVML_REASON_LIMITERS = 0x4 | 0x8 | 0x20 | 0x40 | 0x80
+_NVML_FI_POWER_INSTANT = 186
+_NVML_FI_POWER_CURRENT_LIMIT = 190
+_NVML_FI_POWER_REQUESTED_LIMIT = 192
+_NVML_FI_EVENT_COUNTERS = {
+    "sw_power_cap": 74,
+    "sw_thermal": 269,
+    "hw_thermal": 270,
+    "hw_power_brake": 271,
+}
+
+
+class _NvmlFieldValue(ctypes.Structure):
+    _fields_ = [
+        ("fieldId", ctypes.c_uint),
+        ("scopeId", ctypes.c_uint),
+        ("timestamp", ctypes.c_longlong),
+        ("latencyUsec", ctypes.c_longlong),
+        ("valueType", ctypes.c_int),
+        ("nvmlReturn", ctypes.c_int),
+        ("value", ctypes.c_ulonglong),
+    ]
+
+
+class _DeviceTelemetry:
+    """SM clock, instantaneous board power and clocks-event reasons of the current device, via NVML.
+
+    Each per-sample read happens on the host while the sample's GPU work is in
+    flight, so it never appears on the device timeline; samples shorter than
+    TELEMETRY_MIN_SAMPLE_MS get no per-sample reads (the read could outlast the
+    work and add host idle between samples), only the per-measurement block. The cumulative
+    clocks-event counters (nanoseconds spent under each limiter) are read only
+    at measurement boundaries because each read costs about half a
+    millisecond. The library is loaded directly so no Python package is
+    required; a missing library, an NVML error, or TILEGYM_SAMPLE_TELEMETRY=0
+    leaves the telemetry fields unavailable instead of failing the measurement.
+    """
+
+    _lib = None
+    _load_failed = False
+
+    def __init__(self, enabled=True):
+        self.handle = None
+        self.reasons_fn = None
+        self.status = "unavailable"
+        if not enabled or os.environ.get(TELEMETRY_ENV, "1") == "0":
+            self.status = "disabled"
+            return
+        lib = self._library()
+        if lib is None:
+            return
+        uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+        handle = ctypes.c_void_p()
+        if lib.nvmlDeviceGetHandleByUUID(f"GPU-{uuid}".encode(), ctypes.byref(handle)) != 0:
+            return
+        self.handle = handle
+        self.reasons_fn = getattr(lib, "nvmlDeviceGetCurrentClocksEventReasons", None) or getattr(
+            lib, "nvmlDeviceGetCurrentClocksThrottleReasons", None
+        )
+        self.status = "recorded"
+
+    @classmethod
+    def _library(cls):
+        if cls._lib is None and not cls._load_failed:
+            try:
+                lib = ctypes.CDLL("libnvidia-ml.so.1")
+                if lib.nvmlInit_v2() != 0:
+                    raise OSError("nvmlInit_v2 failed")
+                cls._lib = lib
+            except (OSError, AttributeError):
+                cls._load_failed = True
+        return cls._lib
+
+    def _fields(self, ids):
+        values = (_NvmlFieldValue * len(ids))()
+        for i, field_id in enumerate(ids):
+            values[i].fieldId = field_id
+            values[i].scopeId = 0
+        if self._lib.nvmlDeviceGetFieldValues(self.handle, len(ids), values) != 0:
+            return {}
+        out = {}
+        for v in values:
+            if v.nvmlReturn == 0:
+                out[v.fieldId] = v.value & 0xFFFFFFFF if v.valueType == 1 else v.value
+        return out
+
+    def read(self):
+        if self.handle is None:
+            return None
+        lib = self._lib
+        clock = ctypes.c_uint()
+        reasons = ctypes.c_ulonglong()
+        record = {}
+        if lib.nvmlDeviceGetClockInfo(self.handle, _NVML_CLOCK_SM, ctypes.byref(clock)) == 0:
+            record["sm_clock_mhz"] = clock.value
+        power = self._fields([_NVML_FI_POWER_INSTANT]).get(_NVML_FI_POWER_INSTANT)
+        if power is not None:
+            record["power_w"] = power / 1000
+        if self.reasons_fn is not None and self.reasons_fn(self.handle, ctypes.byref(reasons)) == 0:
+            record["clocks_event_reasons"] = reasons.value
+        return record
+
+    def counters(self):
+        """Cumulative nanoseconds under each clock limiter, plus a host timestamp in ns."""
+        if self.handle is None:
+            return None
+        values = self._fields(list(_NVML_FI_EVENT_COUNTERS.values()))
+        return {
+            "host_ns": time.perf_counter_ns(),
+            **{name: values[fid] for name, fid in _NVML_FI_EVENT_COUNTERS.items() if fid in values},
+        }
+
+    def limits(self):
+        """Power limits in watts and the maximum SM clock, read once per measurement."""
+        if self.handle is None:
+            return {}
+        out = {}
+        limit = ctypes.c_uint()
+        if self._lib.nvmlDeviceGetEnforcedPowerLimit(self.handle, ctypes.byref(limit)) == 0:
+            out["enforced_power_limit_w"] = limit.value / 1000
+        fields = self._fields([_NVML_FI_POWER_REQUESTED_LIMIT, _NVML_FI_POWER_CURRENT_LIMIT])
+        if _NVML_FI_POWER_REQUESTED_LIMIT in fields:
+            out["requested_power_limit_w"] = fields[_NVML_FI_POWER_REQUESTED_LIMIT] / 1000
+        if _NVML_FI_POWER_CURRENT_LIMIT in fields:
+            out["current_power_limit_w"] = fields[_NVML_FI_POWER_CURRENT_LIMIT] / 1000
+        if self._lib.nvmlDeviceGetMaxClockInfo(self.handle, _NVML_CLOCK_SM, ctypes.byref(limit)) == 0:
+            out["max_sm_clock_mhz"] = limit.value
+        return out
+
+
+def _telemetry_stride(count):
+    return max(1, -(-count // TELEMETRY_MAX_READS))
+
+
+def _attach_telemetry(samples, readings, status, block=None):
+    for sample in samples:
+        sample["telemetry_status"] = status
+    for index, record in readings:
+        if record:
+            samples[index]["telemetry"] = record
+    if samples and block:
+        samples[0]["telemetry_block"] = block
+    return samples
+
+
+def _telemetry_block(telemetry, start, end):
+    """Limiter time fractions over one measurement from cumulative counters, plus the limits.
+
+    The fractions cover the wall time of the timed loop, host gaps included, and the
+    driver updates the counters and the clocks-event reasons on its own cadence
+    (about 100 ms), so they describe the device state around the samples, not the
+    state during one sample; sample durations remain the measurement.
+    """
+    block = telemetry.limits()
+    if start and end and end["host_ns"] > start["host_ns"]:
+        wall = end["host_ns"] - start["host_ns"]
+        block["limiter_time_fraction"] = {
+            name: min(1.0, max(0.0, (end[name] - start[name]) / wall))
+            for name in _NVML_FI_EVENT_COUNTERS
+            if name in start and name in end
+        }
+        block["block_wall_ms"] = wall / 1e6
+    return block
+
+
+def _telemetry_summary(samples):
+    status = next((s["telemetry_status"] for s in samples if "telemetry_status" in s), "unavailable")
+    summary = {"telemetry_status": status}
+    if samples and samples[0].get("telemetry_block"):
+        summary["telemetry_block"] = samples[0]["telemetry_block"]
+    readings = [(index, s["telemetry"]) for index, s in enumerate(samples) if s.get("telemetry")]
+    if not readings:
+        return summary
+    summary["telemetry_samples"] = [
+        {
+            "sample": index,
+            **{k: (f"{v:#x}" if k == "clocks_event_reasons" else v) for k, v in record.items()},
+        }
+        for index, record in readings
+    ]
+    clocks = sorted(r["sm_clock_mhz"] for _, r in readings if "sm_clock_mhz" in r)
+    if clocks:
+        summary["sm_clock_mhz_min"] = clocks[0]
+        summary["sm_clock_mhz_median"] = clocks[len(clocks) // 2]
+        summary["sm_clock_mhz_max"] = clocks[-1]
+    reasons = [r["clocks_event_reasons"] for _, r in readings if "clocks_event_reasons" in r]
+    if reasons:
+        summary["throttled_sample_fraction"] = sum(bool(r & _NVML_REASON_LIMITERS) for r in reasons) / len(reasons)
+    return summary
 
 
 def _available_graph_memory():
@@ -129,11 +331,21 @@ class _CapturedCall:
             self.end.synchronize()
         return self.start.elapsed_time(self.end), self.begin.elapsed_time(self.start)
 
-    def profile_samples(self, count, calls=None, pacer=None, sample_ms=0.0):
+    def profile_samples(self, count, calls=None, telemetry=True, pacer=None, sample_ms=0.0, replay_ms=None):
         calls = [self] if calls is None else calls
+        telemetry = _DeviceTelemetry(enabled=telemetry)
+        stride = _telemetry_stride(count)
+        # Gate on the replay alone: sample_ms also holds the preparation, which does
+        # not overlap the read.
+        replay_ms = sample_ms if replay_ms is None else replay_ms
+        per_sample = telemetry.handle is not None and replay_ms >= TELEMETRY_MIN_SAMPLE_MS
+        readings = []
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
         ) as prof:
+            # Boundary counters bracket the sample loop alone, so the limiter fractions
+            # describe the timed work and its rests, not profiler start-up or parsing.
+            counters_start = telemetry.counters()
             for index in range(count):
                 call = calls[index % len(calls)]
                 if pacer is not None:
@@ -143,8 +355,13 @@ class _CapturedCall:
                     torch.cuda.synchronize()
                     with torch.profiler.record_function("tilegym.graph.sample"):
                         call.graph.replay()
+                        if per_sample and index % stride == 0:
+                            readings.append((index, telemetry.read()))
                         torch.cuda.current_stream().synchronize()
-        return _profile_graph_samples(prof.profiler.kineto_results.events(), count, len(calls))
+            counters_end = telemetry.counters()
+        samples = _profile_graph_samples(prof.profiler.kineto_results.events(), count, len(calls))
+        block = _telemetry_block(telemetry, counters_start, counters_end) if telemetry.handle else None
+        return _attach_telemetry(samples, readings, telemetry.status, block)
 
 
 _GRAPH_LAUNCHES = ("cudaGraphLaunch", "cudaGraphLaunch_ptsz", "cuGraphLaunch", "cuGraphLaunch_ptsz")
@@ -266,6 +483,7 @@ def _summarize(profiled, kernel_filter, protocol, collect_kernel_times, kind):
         "cache_flush_bytes": FLUSH_BYTES,
         "samples_ms": samples,
     }
+    result.update(_telemetry_summary(profiled))
     if collect_kernel_times or patterns is not None:
         kernel_times = _sample_kernel_records(profiled)
         result["kernel_times"] = kernel_times
@@ -289,6 +507,7 @@ def benchmark_cuda_graph(
     collect_kernel_times=False,
     graph_repeats=GRAPH_REPEATS,
     input_context=nullcontext,
+    telemetry=True,
     pacer=None,
 ):
     """Measure cold-cache device spans with balanced samples across graphs.
@@ -312,6 +531,8 @@ def benchmark_cuda_graph(
     POWER_BURST_MS still runs whole after a rest, so its time includes any capping
     the kernel itself triggers. A caller timing several functions in a row passes
     one pacer so that bursts continue across calls.
+    telemetry=False skips the NVML reads, for callers such as autotuning that only
+    rank candidates and would otherwise pay the reads per candidate.
     """
     _check_budget(warmup, rep, min_rep, initial_rep, max_rep)
     if graph_repeats < 1:
@@ -371,7 +592,9 @@ def benchmark_cuda_graph(
                     captured.graph.replay()
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
-        profiled = call.profile_samples(n_repeat, calls=calls, pacer=pacer, sample_ms=sample_ms)
+        profiled = call.profile_samples(
+            n_repeat, calls=calls, telemetry=telemetry, pacer=pacer, sample_ms=sample_ms, replay_ms=estimate
+        )
         result, times = _summarize(profiled, kernel_filter, GRAPH_PROTOCOL, collect_kernel_times, "CUDA Graph")
         graph_means = torch.stack([times[index::n_graphs].mean() for index in range(n_graphs)])
         graph_std = graph_means.std(correction=0).item()
@@ -455,16 +678,24 @@ def benchmark_eager(
         fn()
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
+    telemetry = _DeviceTelemetry()
+    stride = _telemetry_stride(n_repeat)
+    per_sample = telemetry.handle is not None and estimate >= TELEMETRY_MIN_SAMPLE_MS
+    readings = []
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     ) as prof:
-        for _ in range(n_repeat):
+        counters_start = telemetry.counters()
+        for index in range(n_repeat):
             pacer.admit(sample_ms)
             prepare()
             torch.cuda.synchronize()
             with torch.profiler.record_function("tilegym.eager.sample"):
                 fn()
+                if per_sample and index % stride == 0:
+                    readings.append((index, telemetry.read()))
                 torch.cuda.synchronize()
+        counters_end = telemetry.counters()
     # Only CUDA runtime and driver calls share correlation IDs with device activities.
     profiled = _profile_samples(
         prof.profiler.kineto_results.events(),
@@ -473,6 +704,8 @@ def benchmark_eager(
         lambda name: name.startswith("cu"),
         "Eager",
     )
+    block = _telemetry_block(telemetry, counters_start, counters_end) if telemetry.handle else None
+    _attach_telemetry(profiled, readings, telemetry.status, block)
     result = _summarize(profiled, kernel_filter, EAGER_PROTOCOL, collect_kernel_times, "eager")[0]
     result["power_rests"] = pacer.rests
     return result
@@ -486,4 +719,4 @@ def autotune_cutile_cuda_graph(stream, grid, kernel, args):
         with _CapturedCall(
             lambda: ct.launch(torch.cuda.current_stream(), grid, kernel, args), None, None, True, warmup=False
         ) as call:
-            return call.profile_samples(1)[0]["span_ms"] * 1000
+            return call.profile_samples(1, telemetry=False)[0]["span_ms"] * 1000
