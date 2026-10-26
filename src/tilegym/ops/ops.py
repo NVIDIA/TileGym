@@ -465,7 +465,9 @@ def fmha(
         scaling: Scale factor for attention scores (default: 1/sqrt(D))
         is_causal: Whether to apply causal masking
         **kwargs: Additional arguments, including:
-            - has_backward (bool): Whether backward pass is needed (default: False)
+            - has_backward (bool): The softmax log-sum-exp backward needs is always
+              saved when autograd may need it; True additionally forces it outside
+              autograd (default: False)
             - kernel_configs (dict): Backend-specific kernel configurations
 
     Returns:

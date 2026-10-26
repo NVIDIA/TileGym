@@ -48,7 +48,8 @@ def fmha_interface(
         is_causal: Whether to apply causal masking
         scaling: Scaling factor for attention scores
         backend: Backend to use (cutile, torch)
-        has_backward: Whether backward pass is needed
+        has_backward: The softmax log-sum-exp backward needs is always saved when
+            autograd may need it; True additionally forces it outside autograd
         kernel_configs: Kernel configuration parameters
         **kwargs: Additional arguments for specific backends
 

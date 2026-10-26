@@ -134,12 +134,14 @@ def fmha_kernel_impl(
 
         # Moving qk_scale multiplication after reduce_max is to improve performance.
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
-        qk = qk * qk_scale - m_ij  # [TILE_M, TILE_N]
+        # Rows with every key masked so far keep m_ij == -inf; subtract 0 instead.
+        m_ij_safe = ct.where(m_ij == -math.inf, 0.0, m_ij)  # [TILE_M, 1]
+        qk = qk * qk_scale - m_ij_safe  # [TILE_M, TILE_N]
 
         # Attention weights
         p = ct.exp2(qk, flush_to_zero=True)  # [TILE_M, TILE_N]
         l_ij = ct.sum(p, axis=-1, keepdims=True)  # [TILE_M, 1]
-        alpha = ct.exp2(m_i - m_ij, flush_to_zero=True)  # [TILE_M, 1]
+        alpha = ct.exp2(m_i - m_ij_safe, flush_to_zero=True)  # [TILE_M, 1]
         # Update m_i and l_i
         l_i = l_i * alpha + l_ij  # [TILE_M, 1]
         # Scale acc
@@ -155,7 +157,8 @@ def fmha_kernel_impl(
         acc = ct.mma(p, v, acc)  # [TILE_M, TILE_N]
         m_i = m_ij  # [TILE_M, 1]
 
-    acc = ct.truediv(acc, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
+    # Rows that see no key (causal, query before key position 0) have l_i == 0 and output 0.
+    acc = ct.truediv(acc, ct.where(l_i == 0.0, 1.0, l_i), flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, TILE_M, TILE_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
 
@@ -321,11 +324,12 @@ def _fmha_fwd_kernel_with_lse(
             qk += mask
 
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
-        qk = qk * qk_scale - m_ij
+        m_ij_safe = ct.where(m_ij == -math.inf, 0.0, m_ij)
+        qk = qk * qk_scale - m_ij_safe
 
         p = ct.exp2(qk, flush_to_zero=True)
         l_ij = ct.sum(p, axis=-1, keepdims=True)
-        alpha = ct.exp2(m_i - m_ij, flush_to_zero=True)
+        alpha = ct.exp2(m_i - m_ij_safe, flush_to_zero=True)
 
         l_i = l_i * alpha + l_ij
         acc = acc * alpha
@@ -340,8 +344,8 @@ def _fmha_fwd_kernel_with_lse(
         acc = ct.mma(p, v, acc)
         m_i = m_ij
 
-    # Final normalization
-    acc = ct.truediv(acc, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
+    # Final normalization; rows that see no key have l_i == 0 and output 0, LSE -inf.
+    acc = ct.truediv(acc, ct.where(l_i == 0.0, 1.0, l_i), flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, TILE_M, TILE_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
 
@@ -410,6 +414,7 @@ def _fmha_bwd_dkdv_kernel(
     LSE,  # Passed as 1D flattened
     Delta,  # Passed as 1D flattened
     qk_scale: float,
+    input_pos: int,  # position of query 0 among the keys (S_kv - S_qo)
     TILE_D: ConstInt,
     H_Q: ConstInt,  # Number of query heads
     H_KV: ConstInt,  # Number of KV heads
@@ -466,7 +471,8 @@ def _fmha_bwd_dkdv_kernel(
 
     # Determine loop bounds based on causal masking
     if CAUSAL:
-        start_m = bid_n * TILE_N // TILE_M
+        # First query tile that sees any key of this K/V tile.
+        start_m = max(bid_n * TILE_N - input_pos, 0) // TILE_M
     else:
         start_m = 0
     num_m_tiles = ct.cdiv(q_seqlen, TILE_M)
@@ -521,7 +527,7 @@ def _fmha_bwd_dkdv_kernel(
 
             # Apply causal mask
             if CAUSAL:
-                mask = offs_n <= offs_m  # [TILE_N, TILE_M]: k_pos <= q_pos
+                mask = offs_n <= offs_m + input_pos  # [TILE_N, TILE_M]: k_pos <= q_pos
                 p_t = ct.where(mask, p_t, 0.0)
 
             # Compute dV += P^T @ dO
@@ -562,6 +568,7 @@ def _fmha_bwd_dq_kernel(
     LSE,  # Passed as 1D flattened
     Delta,  # Passed as 1D flattened
     qk_scale: float,
+    input_pos: int,  # position of query 0 among the keys (S_kv - S_qo)
     TILE_D: ConstInt,
     H: ConstInt,
     SEQ_LEN: ConstInt,
@@ -620,8 +627,7 @@ def _fmha_bwd_dq_kernel(
     # Determine loop bounds based on causal masking
     if CAUSAL:
         # Only process K/V tiles where k_pos <= q_pos (at least partially)
-        end_n = ct.cdiv((bid_m + 1) * TILE_M, TILE_N)
-        end_n = min(end_n, ct.cdiv(k_seqlen, TILE_N))
+        end_n = ct.cdiv(max(min(input_pos + (bid_m + 1) * TILE_M, k_seqlen), 0), TILE_N)
     else:
         end_n = ct.cdiv(k_seqlen, TILE_N)
 
@@ -658,7 +664,7 @@ def _fmha_bwd_dq_kernel(
 
         # Apply causal mask
         if CAUSAL:
-            mask = offs_m >= offs_n  # [TILE_M, TILE_N]: q_pos >= k_pos
+            mask = offs_m + input_pos >= offs_n  # [TILE_M, TILE_N]: q_pos >= k_pos
             p = ct.where(mask, p, 0.0)
 
         # Compute dP = dO @ V^T: [TILE_M, TILE_N]
@@ -892,6 +898,8 @@ def tile_fmha(
 ):
     if scaling is None:
         scaling = 1.0 / math.sqrt(q.size(-1))
+    if torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad):
+        return _FlashAttentionFunction.apply(q, k, v, scaling, is_causal)
     kernel_configs = kwargs.get("kernel_configs", None)
     o = _tile_prefill_fmha(q, k, v, scaling, is_causal, kernel_configs)
     return o
@@ -956,7 +964,7 @@ def fmha_forward_with_lse(
             o,
             lse_flat,
             sm_scale,
-            0,  # input_pos
+            k_len - q_len,  # input_pos
             hidden_size,
             num_heads,
             batch_size,
@@ -1013,6 +1021,7 @@ def _fmha_backward(
 
     assert num_heads % num_head_kv == 0
     query_group_size = num_heads // num_head_kv
+    input_pos = k_len - q_len
     dq = torch.empty_like(q)
     dk = torch.zeros_like(k)  # Use zeros for GQA accumulation
     dv = torch.zeros_like(v)
@@ -1076,6 +1085,7 @@ def _fmha_backward(
                 lse_flat,
                 delta_flat,
                 sm_scale,
+                input_pos,
                 TILE_D,
                 num_heads,
                 num_head_kv,
@@ -1116,6 +1126,7 @@ def _fmha_backward(
                         lse_flat,
                         delta_flat,
                         sm_scale,
+                        input_pos,
                         TILE_D,
                         num_heads,
                         num_head_kv,
@@ -1147,6 +1158,7 @@ def _fmha_backward(
                 lse_flat,
                 delta_flat,
                 sm_scale,
+                input_pos,
                 TILE_D,
                 num_heads,
                 num_head_kv,
@@ -1177,6 +1189,7 @@ def _fmha_backward(
                 lse_flat,
                 delta_flat,
                 sm_scale,
+                input_pos,
                 TILE_D,
                 num_heads,
                 padded_q_len,
@@ -1214,6 +1227,7 @@ def _fmha_backward(
                         lse_flat,
                         delta_flat,
                         sm_scale,
+                        input_pos,
                         TILE_D,
                         num_heads,
                         padded_q_len,
@@ -1243,6 +1257,7 @@ def _fmha_backward(
                 lse_flat,
                 delta_flat,
                 sm_scale,
+                input_pos,
                 TILE_D,
                 num_heads,
                 padded_q_len,
@@ -1359,13 +1374,4 @@ def tile_fmha_functional(
     Returns:
         output: Attention output [batch, num_heads, seq_len, head_dim]
     """
-    if scaling is None:
-        scaling = 1.0 / math.sqrt(q.size(-1))
-
-    # Check if we're in inference mode (no gradients needed)
-    if not torch.is_grad_enabled() or not (q.requires_grad or k.requires_grad or v.requires_grad):
-        # Use fast inference path
-        return tile_fmha(q, k, v, scaling=scaling, is_causal=is_causal, **kwargs)
-    else:
-        # Use training path with backward support
-        return _FlashAttentionFunction.apply(q, k, v, scaling, is_causal)
+    return tile_fmha(q, k, v, scaling=scaling, is_causal=is_causal, **kwargs)
