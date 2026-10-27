@@ -165,9 +165,10 @@ def _build_kernels(
             raise RuntimeError(
                 "cutile-rs: cargo not found on PATH (install Rust, or set CUTILE_RS_AUTOBUILD=0 to use a prebuilt .so)."
             )
-        try:
+
+        def _cargo_build(*extra_args: str) -> None:
             subprocess.run(
-                [cargo_bin, "build", "--release"],
+                [cargo_bin, "build", "--release", *extra_args],
                 cwd=crate_dir,
                 env=env,
                 check=True,
@@ -175,6 +176,18 @@ def _build_kernels(
                 text=True,
                 timeout=900,
             )
+
+        try:
+            # Build offline first: when $CARGO_HOME already caches every
+            # dependency (e.g. an image that prebuilt this crate), this skips the
+            # crates.io index round-trip that a lockfile-less build otherwise
+            # needs. Fall back to an online build when the cache is cold or
+            # missing a dependency.
+            try:
+                _cargo_build("--offline")
+            except subprocess.CalledProcessError:
+                logger.info("cutile-rs: offline cargo build failed; retrying online ...")
+                _cargo_build()
         except FileNotFoundError as e:
             raise RuntimeError(
                 "cutile-rs: cargo not found on PATH (install Rust, or set CUTILE_RS_AUTOBUILD=0 to use a prebuilt .so)."
