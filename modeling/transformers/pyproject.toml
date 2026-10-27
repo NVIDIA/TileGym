@@ -65,7 +65,7 @@ override-dependencies = [
   "transformers==5.19.0",
   "tokenizers==0.23.3",
   "triton==3.7.1",
-  "cuda-toolkit[tileiras,nvcc,nvvm]==13.3.0",
+  "cuda-toolkit[tileiras,nvcc,nvvm]==13.4.3",
   "nvidia-cuda-runtime>=13.3,<14",
   "nvidia-nvjitlink>=13.3,<14",
 ]
