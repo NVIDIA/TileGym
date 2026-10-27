@@ -11,8 +11,10 @@ matplotlib
 pandas
 numpy
 cuda-tile>=1.5.0  # Or use: pip install cuda-tile[tileiras] for bundled tileiras compiler
-filelock>=3.20.3  # CVE fix: GHSA-w853-jp5j-5j7f, GHSA-qmgc-5h2g-mvrw
-pillow>=12.1.1  # CVE fix: GHSA-cfh3-3jmp-rvhc
+filelock>=3.20.3; python_version < "3.11"  # CVE fix: GHSA-w853-jp5j-5j7f, GHSA-qmgc-5h2g-mvrw (filelock>=4.1.1 needs Python>=3.11)
+filelock>=4.2.1; python_version >= "3.11"  # CVE fix: GHSA-2g95-wg33-c5x2 and related 2026-10 advisories
+pillow>=12.1.1; python_version < "3.11"  # CVE fix: GHSA-cfh3-3jmp-rvhc (Pillow>=13 needs Python>=3.11)
+pillow>=13.0.0; python_version >= "3.11"  # CVE fix: GHSA-462x-pgg6-55fp and related 2026-10 advisories
 cuda-bindings>=13.2.0
 cuda-core>=0.7.0
 # nvidia-ml-py  # optional
