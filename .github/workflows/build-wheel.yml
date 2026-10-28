@@ -110,9 +110,15 @@ jobs:
 
       - name: Audit dependencies for CVEs
         if: ${{ inputs.run-pip-audit }}
+        env:
+          # Python 3.10 only: no fixed release of these packages supports 3.10 (Pillow >= 13.0.0
+          # and filelock >= 4.1.1 require Python >= 3.11). Their advisories are listed but do not
+          # fail the job there; every other package is still audited on 3.10.
+          WAIVED_PACKAGES: ${{ matrix.python-version == '3.10' && 'pillow filelock' || '' }}
         run: |
           pip install pip-audit
-          # Extract installable deps from wheel metadata.
+          # Extract installable deps from wheel metadata, keeping environment markers
+          # (e.g. python_version) so per-Python pins resolve correctly.
           # Skips git+ deps and extras-only deps which can't be resolved in a plain environment.
           python - <<'EOF'
           import zipfile, glob
@@ -121,11 +127,11 @@ jobs:
               meta = next(n for n in z.namelist() if n.endswith('/METADATA'))
               lines = z.read(meta).decode().splitlines()
           deps = [
-              l.split('Requires-Dist: ')[1].split(';')[0].strip()
+              l.split('Requires-Dist: ')[1].strip()
               for l in lines
               if l.startswith('Requires-Dist:')
               and 'extra ==' not in l
-              and '@' not in l.split('Requires-Dist: ')[1]
+              and '@' not in l.split('Requires-Dist: ')[1].split(';')[0]
           ]
           with open('audit-requirements.txt', 'w') as f:
               f.write('\n'.join(deps))
@@ -133,10 +139,14 @@ jobs:
           EOF
           # Temporary ignores for transformers==5.3.0; revisit when the transformers dependency is upgraded.
           # The 2025 PYSEC ignores were dropped because those advisories no longer match this version.
-          pip-audit -r audit-requirements.txt \
+          # pip-audit exits non-zero when it finds vulnerabilities; check_pip_audit.py decides pass/fail.
+          # A resolution error leaves no report, which also fails the check.
+          rm -f pip-audit.json
+          pip-audit -r audit-requirements.txt --format json --output pip-audit.json \
             --ignore-vuln PYSEC-2026-2290 \
             --ignore-vuln CVE-2026-9856 \
-            --ignore-vuln CVE-2026-80047
+            --ignore-vuln CVE-2026-80047 || true
+          python .github/scripts/check_pip_audit.py pip-audit.json $WAIVED_PACKAGES
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}

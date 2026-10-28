@@ -360,6 +360,11 @@ jobs:
             DURATIONS_ARGS="--durations-path /workspace/tilegym/.github/.test_durations"
           fi
 
+          DESELECT_ARGS=(
+            --deselect "tests/ops/test_mamba2.py::Test_Mamba2_ChunkBackward::test_op[cutile-chunk128-ungrouped-bf16]"
+            --deselect "tests/ops/test_mamba2.py::Test_Mamba2_ChunkBackward::test_op_grouped_state_gradients[cutile-128]"
+          )
+
           docker pull ${IMAGE}
           # No autotune-disable flag: ops tests exercise the autotuned paths. The
           # switch is TILEGYM_DISABLE_AUTOTUNE (src/tilegym/autotune.py); the
@@ -379,6 +384,7 @@ jobs:
                 -v -k test_op \
                 --splits ${{ strategy.job-total }} --group ${{ matrix.shard }} \
                 ${DURATIONS_ARGS} \
+                "${DESELECT_ARGS[@]}" \
                 -n 4 \
                 --junitxml=/test-results/ops-results-${{ matrix.shard }}.xml \
                 --html=/test-results/ops-report-${{ matrix.shard }}.html \

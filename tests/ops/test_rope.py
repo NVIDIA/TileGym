@@ -126,9 +126,7 @@ class Test_RoPE(common.PyTestCase):
         k2 = _tensor_k.clone().requires_grad_(True)
 
         pos_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(bsz, -1)
-        rotary_emb = LlamaRotaryEmbedding(
-            config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim), device=device
-        )
+        rotary_emb = LlamaRotaryEmbedding(config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim)).to(device)
         cos, sin = rotary_emb(_tensor_k, pos_ids)
         # Validate forward pass
         dq, dk = (
@@ -206,9 +204,7 @@ class Test_RoPE(common.PyTestCase):
         k_tt = k_base.clone().requires_grad_(True)
 
         pos_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(bsz, -1)
-        rotary_emb = LlamaRotaryEmbedding(
-            config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim), device=device
-        )
+        rotary_emb = LlamaRotaryEmbedding(config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim)).to(device)
         cos, sin = rotary_emb(k_ref, pos_ids)
 
         if partial_rotary_factor < 1.0:
@@ -332,10 +328,7 @@ class Test_RoPE(common.PyTestCase):
         )
 
         pos_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(bsz, -1)
-        rotary_emb = LlamaRotaryEmbedding(
-            config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim),
-            device=device,
-        )
+        rotary_emb = LlamaRotaryEmbedding(config=LlamaConfig(num_kv_heads=num_kv_heads, head_dim=rope_dim)).to(device)
         cos, sin = rotary_emb(_tensor_k, pos_ids)
 
         if framework == "pytorch":

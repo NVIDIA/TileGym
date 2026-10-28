@@ -238,7 +238,9 @@ class Test_FLA_LinearAttentionGdnChunk(common.PyTestCase):
 
     @pytest.mark.parametrize("B, T, H, K, V", LARGE_KV_SHAPES)
     @pytest.mark.parametrize("backend", _BACKENDS)
-    def test_op_large_k(self, B, T, H, K, V, backend):
+    def test_op_large_k(self, B, T, H, K, V, backend, arch):
+        if arch in ["sm120", "sm121"] and K > 256:
+            pytest.skip("Skip on sm120, sm121: l2norm_bwd launch runs out of memory for K > 256.")
         self._prep(backend)
         scale = K**-0.5
         q, k, v, beta, g = make_inputs(B, T, H, K, V)
