@@ -88,3 +88,6 @@ def bench_nvfp4_quantize(rows, cols, backend, dtype, device=DEVICE):
 if __name__ == "__main__":
     if get_supported_backends():
         bench_nvfp4_quantize.run(print_data=True)
+    else:
+        # run_all_json.py records this line as the skip reason in the CI summary
+        print("SKIPPED: needs the cuTile backend with dev features and V_13_3 bytecode support (FP4)")

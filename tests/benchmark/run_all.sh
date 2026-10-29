@@ -35,7 +35,7 @@ echo "Running benchmarks sequentially (parallel execution disabled to ensure acc
 echo "Output format: $FORMAT"
 echo "Results will be saved to: $OUTPUT_DIR"
 echo "Current directory: $(pwd)"
-echo "Benchmark files found: $(find . -name 'bench_*.py' -not -path './__pycache__/*' | wc -l)"
+echo "Benchmark files found: $(find . -name 'bench_*.py' -not -name 'bench_utils.py' -not -path './__pycache__/*' | wc -l)"
 echo ""
 
 # Check if output directory is writable
@@ -93,7 +93,7 @@ while IFS= read -r file; do
         FAILED_BENCHMARKS+=("$rel_path")
     fi
     echo ""
-done < <(find . -name 'bench_*.py' -not -path './__pycache__/*' | sort)
+done < <(find . -name 'bench_*.py' -not -name 'bench_utils.py' -not -path './__pycache__/*' | sort)
 
 echo "=========================================="
 if [ ${#FAILED_BENCHMARKS[@]} -eq 0 ]; then

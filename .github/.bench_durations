@@ -18,7 +18,6 @@
 "bench_silu_and_mul.py": 9.45,
 "bench_softmax.py": 130.84,
 "bench_swiglu.py": 53.41,
-"bench_utils.py": 1.81,
 "experimental/bench_attention_backward.py": 541.64,
 "experimental/bench_dpo_loss.py": 42.6,
 "experimental/bench_dropout_backward.py": 4.99,
