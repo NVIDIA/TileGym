@@ -92,15 +92,49 @@ def _all_numeric(tokens: List[str]) -> bool:
     return True
 
 
+# Triton >= 3.6 appends the y-axis label to each measurement column, e.g. "CuTile (GB/s)".
+_UNIT_SUFFIX_RE = re.compile(r"\s+\([^()]*\)$")
+
+
+def _split_header(header_line: str, data_line: str) -> List[str]:
+    """Split a table header into column labels, using a data row to locate the columns.
+
+    Labels can contain spaces ("CuTile (GB/s)", "CuTile static persistent"), so the
+    header can't be split on whitespace. pandas right-aligns each label with its
+    column's values, so cut the header at the right edge of every value after the
+    row index.
+    """
+    edges = [m.end() for m in re.finditer(r"\S+", data_line)][1:]
+    labels = []
+    start = 0
+    for end in edges:
+        labels.append(header_line[start:end].strip())
+        start = end
+    return labels
+
+
+def _strip_unit_suffix(labels: List[str]) -> List[str]:
+    """Drop the " (<ylabel>)" suffix Triton >= 3.6 adds to the measurement columns.
+
+    The measurement columns come last and share the suffix, so take it from the last
+    label. This keeps backend names the same across Triton versions ("CuTile").
+    """
+    match = _UNIT_SUFFIX_RE.search(labels[-1])
+    if not match:
+        return labels
+    suffix = match.group(0)
+    return [label[: -len(suffix)] if label.endswith(suffix) else label for label in labels]
+
+
 def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
     """
     Parse benchmark output and extract structured data.
 
-    Example format:
+    Example format (Triton < 3.6 prints the columns without the " (GB/s)" unit):
         benchmark-name-GBps:
-                N  CuTile  PyTorch
-        0    1024   450.2    320.1
-        1    2048   890.5    620.3
+                N  CuTile (GB/s)  PyTorch (GB/s)
+        0  1024.0          450.2           320.1
+        1  2048.0          890.5           620.3
     """
     results = []
     lines = output.strip().split("\n")
@@ -120,11 +154,12 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
             current_unit = parts[-1]  # TFLOPS or GBps
             current_benchmark = "-".join(parts[:-1])  # Everything before unit
 
-            # Next line should be header
+            # Next line should be header. Keep its leading spaces: the column labels
+            # are located by position once the first data row is seen.
             i += 1
             if i < len(lines):
-                header_line = lines[i].strip()
-                header_row = header_line.split()
+                header_line = lines[i]
+                header_row = None
                 i += 1
 
                 # Following lines are data rows until we hit empty line or next benchmark.
@@ -135,16 +170,20 @@ def parse_benchmark_output(output: str) -> List[Dict[str, Any]]:
                 # autotuner logs like "namespace(TILE_SIZE_M=128, ...): 17.5±0.2 us" or
                 # "<n> succeeded, 0 failed" -- contains non-numeric tokens, so we keep only
                 # lines whose tokens are an integer index plus all-numeric columns of the
-                # expected width.
-                expected_cols = len(header_row) + 1 if header_row else 0
+                # header's width.
                 data_rows = []
                 while i < len(lines):
                     data_line = lines[i].strip()
                     if not data_line or data_line.endswith("-TFLOPS:") or data_line.endswith("-GBps:"):
                         break
                     tokens = data_line.split()
-                    if tokens and tokens[0].isdigit() and len(tokens) == expected_cols and _all_numeric(tokens):
-                        data_rows.append(tokens)
+                    if tokens and tokens[0].isdigit() and _all_numeric(tokens):
+                        if header_row is None:
+                            labels = _split_header(header_line, lines[i])
+                            if labels and all(labels):
+                                header_row = _strip_unit_suffix(labels)
+                        if header_row is not None and len(tokens) == len(header_row) + 1:
+                            data_rows.append(tokens)
                     i += 1
 
                 # Structure the data
