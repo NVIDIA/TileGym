@@ -36,6 +36,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def results_file_name(bench_file: str) -> str:
+    """Return the name of the results file that run_all_json.py writes for a benchmark.
+
+    The regression report lists each benchmark by its "benchmark_file" field, the
+    script path relative to tests/benchmark (e.g. "experimental/bench_mhc.py").
+    run_all_json.py saves that benchmark's results as
+    "experimental_bench_mhc_results.json", so map the one to the other the same way.
+    """
+    return bench_file.replace("/", "_").replace(".py", "") + "_results.json"
+
+
 def merge_baselines(
     old_baseline_dir: Path,
     new_results_dir: Path,
@@ -76,33 +87,34 @@ def merge_baselines(
     all_files = report["benchmark_files"]["all_files"]
 
     for bench_file in all_files:
+        result_name = results_file_name(bench_file)
         # Determine source (old baseline or new results)
         if bench_file in files_with_regressions:
             # Keep old baseline for regressed benchmarks
-            source_file = old_baseline_dir / bench_file
+            source_file = old_baseline_dir / result_name
             if source_file.exists():
-                shutil.copy2(source_file, output_dir / bench_file)
+                shutil.copy2(source_file, output_dir / result_name)
                 kept_old_regressions.append(bench_file)
                 logger.warning(f"[KEPT OLD] {bench_file}: Kept OLD baseline (regressions detected)")
             else:
                 # No old baseline exists, use new (first run scenario)
-                source_file = new_results_dir / bench_file
+                source_file = new_results_dir / result_name
                 if source_file.exists():
-                    shutil.copy2(source_file, output_dir / bench_file)
+                    shutil.copy2(source_file, output_dir / result_name)
                     used_new.append(bench_file)
                     logger.info(f"[NEW] {bench_file}: Used NEW results (no old baseline)")
         else:
             # Use new results for improved/neutral benchmarks
-            source_file = new_results_dir / bench_file
+            source_file = new_results_dir / result_name
             if source_file.exists():
-                shutil.copy2(source_file, output_dir / bench_file)
+                shutil.copy2(source_file, output_dir / result_name)
                 used_new.append(bench_file)
                 logger.info(f"[UPDATED] {bench_file}: Updated to NEW results")
             else:
                 # Fall back to old baseline if new doesn't exist (shouldn't happen)
-                source_file = old_baseline_dir / bench_file
+                source_file = old_baseline_dir / result_name
                 if source_file.exists():
-                    shutil.copy2(source_file, output_dir / bench_file)
+                    shutil.copy2(source_file, output_dir / result_name)
                     kept_old_fallback.append(bench_file)
                     logger.warning(f"[KEPT OLD] {bench_file}: Kept OLD baseline (new not found)")
 
@@ -111,14 +123,14 @@ def merge_baselines(
     combined_old = old_baseline_dir / "all_benchmarks.json"
 
     # Rebuild combined file from merged individual files
-    if (output_dir / f"{all_files[0]}").exists():  # Check if we have any files
+    if (output_dir / results_file_name(all_files[0])).exists():  # Check if we have any files
         merged_combined = {
             "timestamp": json.load(open(combined_new))["timestamp"] if combined_new.exists() else "unknown",
             "benchmarks": [],
         }
 
         for bench_file in sorted(all_files):
-            result_file = output_dir / bench_file
+            result_file = output_dir / results_file_name(bench_file)
             if result_file.exists():
                 with open(result_file) as f:
                     merged_combined["benchmarks"].append(json.load(f))

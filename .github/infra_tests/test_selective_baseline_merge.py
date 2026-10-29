@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from check_benchmark_regression import RegressionChecker
+from merge_baseline_selective import merge_baselines
 
 
 def create_benchmark_result(benchmark_name, benchmark_file, values):
@@ -221,11 +222,83 @@ def test_all_benchmarks_regress():
         print("✅ All benchmarks regress → no files safe to update")
 
 
+def write_run_all_json_results(output_dir, benchmark_data):
+    """Write results the way tests/benchmark/run_all_json.py does.
+
+    "benchmark_file" is the script path relative to tests/benchmark, and each
+    result is saved as that path with "/" replaced by "_" and ".py" by "_results.json".
+    """
+    results = {"timestamp": "2025-01-01T00:00:00Z", "benchmarks": []}
+
+    for bench_file, (bench_name, values) in benchmark_data.items():
+        bench_result = create_benchmark_result(bench_name, bench_file, values)
+        results["benchmarks"].append(bench_result)
+
+        result_name = bench_file.replace("/", "_").replace(".py", "") + "_results.json"
+        with open(Path(output_dir) / result_name, "w") as f:
+            json.dump(bench_result, f)
+
+    with open(Path(output_dir) / "all_benchmarks.json", "w") as f:
+        json.dump(results, f)
+
+
+def test_merge_keeps_old_baseline_only_for_regressed_files():
+    """Test that the merged baseline takes each run_all_json.py result file from the right run."""
+    with (
+        tempfile.TemporaryDirectory() as tmpdir_current,
+        tempfile.TemporaryDirectory() as tmpdir_baseline,
+        tempfile.TemporaryDirectory() as tmpdir_output,
+    ):
+        baseline_dir = Path(tmpdir_baseline)
+        current_dir = Path(tmpdir_current)
+        merged_dir = Path(tmpdir_output) / "merged"
+
+        write_run_all_json_results(
+            baseline_dir,
+            {
+                "bench_softmax.py": ("softmax-benchmark", [80.0, 160.0, 240.0]),
+                "experimental/bench_mhc.py": ("mhc-benchmark", [100.0, 200.0, 300.0]),
+            },
+        )
+        # Current: softmax regressed, mhc improved
+        write_run_all_json_results(
+            current_dir,
+            {
+                "bench_softmax.py": ("softmax-benchmark", [70.0, 140.0, 210.0]),  # -12%
+                "experimental/bench_mhc.py": ("mhc-benchmark", [120.0, 240.0, 360.0]),  # +20%
+            },
+        )
+
+        checker = RegressionChecker(threshold_pct=5.0, improvement_threshold_pct=5.0)
+        checker.compare_all(checker.load_results(current_dir), checker.load_results(baseline_dir))
+        report_file = Path(tmpdir_output) / "report.json"
+        checker.save_report(report_file)
+
+        merge_baselines(baseline_dir, current_dir, report_file, merged_dir)
+
+        def load(path):
+            with open(path) as f:
+                return json.load(f)
+
+        # The regressed benchmark keeps its old baseline, the improved one takes the new results
+        softmax_file = "bench_softmax_results.json"
+        mhc_file = "experimental_bench_mhc_results.json"
+        assert load(merged_dir / softmax_file) == load(baseline_dir / softmax_file)
+        assert load(merged_dir / mhc_file) == load(current_dir / mhc_file)
+
+        # The combined file is rebuilt from the merged files, so the next run can compare against it
+        combined = load(merged_dir / "all_benchmarks.json")
+        assert combined["benchmarks"] == [load(merged_dir / softmax_file), load(merged_dir / mhc_file)]
+
+        print("✅ Merged baseline keeps the old results only for regressed benchmark files")
+
+
 if __name__ == "__main__":
     test_tracks_per_benchmark_regressions()
     test_report_includes_file_lists()
     test_all_benchmarks_improve()
     test_all_benchmarks_regress()
+    test_merge_keeps_old_baseline_only_for_regressed_files()
     print()
     print("=" * 70)
     print("✅ All selective baseline merge tests passed!")
