@@ -12,6 +12,7 @@ Reads *_results.txt or *_results.json files and converts to markdown tables.
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -50,24 +51,63 @@ def parse_benchmark_file(filepath):
     return sections, "PASSED"
 
 
+# Triton >= 3.6 appends the y-axis label to each measurement column, e.g. "CuTile (GB/s)".
+_UNIT_SUFFIX_RE = re.compile(r"\s+\([^()]*\)$")
+
+
+def _is_data_row(parts):
+    """Return True for a pandas table row: an integer index followed by numbers."""
+    if not parts or not parts[0].isdigit():
+        return False
+    try:
+        for p in parts:
+            float(p)
+    except ValueError:
+        return False
+    return True
+
+
+def _header_labels(header_line, data_line):
+    """Split a table header into one label per data column.
+
+    Same rules as parse_benchmark_output in tests/benchmark/run_all_json.py, which the
+    benchmark-aggregate job doesn't check out. Labels can contain spaces ("CuTile (GB/s)",
+    "CuTile static persistent"), so if a whitespace split doesn't fit, cut the header at
+    the right edge of every value after the row index (pandas right-aligns each label with
+    its values). Then drop the " (<ylabel>)" suffix shared by the measurement columns.
+    """
+    labels = header_line.split()
+    edges = [m.end() for m in re.finditer(r"\S+", data_line)][1:]
+    if len(labels) != len(edges):
+        labels = []
+        start = 0
+        for end in edges:
+            labels.append(header_line[start:end].strip())
+            start = end
+    match = _UNIT_SUFFIX_RE.search(labels[-1]) if labels else None
+    if match:
+        suffix = match.group(0)
+        labels = [label[: -len(suffix)] if label.endswith(suffix) else label for label in labels]
+    return labels
+
+
 def table_to_markdown(table_text):
     """Convert pandas-style table to markdown."""
-    lines = [l.strip() for l in table_text.strip().split("\n") if l.strip()]
+    # Keep the header's leading spaces: they may be needed to locate the columns
+    lines = [l.rstrip() for l in table_text.split("\n") if l.strip()]
     if not lines:
         return ""
 
-    # First line is the header
-    header = lines[0].split()
-
-    # Parse data rows (skip index column)
-    data_rows = []
-    for line in lines[1:]:
-        parts = line.split()
-        if parts:
-            data_rows.append(parts)
-
-    if not data_rows:
+    # Data rows are an integer index plus one number per column; skip other output
+    row_lines = [line for line in lines[1:] if _is_data_row(line.split())]
+    if not row_lines:
         return ""
+
+    # First line is the header
+    header = _header_labels(lines[0], row_lines[0])
+
+    # Parse data rows (the index is skipped below)
+    data_rows = [line.split() for line in row_lines if len(line.split()) == len(header) + 1]
 
     # Build markdown table
     md = "| " + " | ".join(header) + " |\n"
@@ -252,7 +292,13 @@ def format_benchmark_summary(results_dir):
                 continue
 
             if not benchmarks:
-                summary += "⚠️ No results captured\n\n"
+                # A benchmark that can't run here says why (see run_all_json.py)
+                with open(result_file) as f:
+                    skip_reason = json.load(f).get("skip_reason", "")
+                if skip_reason:
+                    summary += f"⏭️ Skipped: {skip_reason}\n\n"
+                else:
+                    summary += "⚠️ No results captured\n\n"
                 continue
 
             for benchmark_data in benchmarks:

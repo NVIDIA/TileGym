@@ -79,6 +79,36 @@ fused-attention-batch4-head32-d128-fwd-causal=False-float8_e5m2-TFLOPS:
         md = format_benchmark_summary.table_to_markdown("")
         assert md == ""
 
+    def test_table_to_markdown_with_unit_columns(self):
+        """Test a Triton >= 3.6 table, whose labels contain spaces and a unit suffix."""
+        table_text = """        N  CuTile static persistent (GB/s)  PyTorch (GB/s)
+0  1024.0                           980.50          610.25
+1  8192.0                          1450.75          902.00
+3 succeeded, 0 failed"""
+
+        md = format_benchmark_summary.table_to_markdown(table_text)
+
+        assert md.splitlines() == [
+            "| N | CuTile static persistent | PyTorch |",
+            "| --- | --- | --- |",
+            "| 1024.0 | 980.50 | 610.25 |",
+            "| 8192.0 | 1450.75 | 902.00 |",
+        ]
+
+    def test_format_benchmark_summary_shows_skip_reason(self):
+        """Test that a benchmark which skipped itself shows its reason."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_file = Path(tmpdir) / "bench_skipped_results.json"
+            result_file.write_text(
+                '{"benchmark_file": "bench_skipped.py", "status": "PASSED", "benchmarks": [],'
+                ' "skip_reason": "needs FP4 support"}'
+            )
+
+            summary = format_benchmark_summary.format_benchmark_summary(tmpdir)
+
+            assert "⏭️ Skipped: needs FP4 support" in summary
+            assert "No results captured" not in summary
+
     def test_format_benchmark_summary_no_results(self):
         """Test formatting when no results directory exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
