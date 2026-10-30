@@ -3073,7 +3073,7 @@ requires-dist = [
     { name = "cffi", marker = "extra == 'dev'" },
     { name = "cuda-bindings", specifier = ">=13.2.0" },
     { name = "cuda-core", specifier = ">=0.7.0" },
-    { name = "cuda-tile", extras = ["tileiras"], specifier = ">=1.6.0" },
+    { name = "cuda-tile", extras = ["tileiras"], specifier = ">=1.6.0,<1.7" },
     { name = "filelock", specifier = ">=4.2.1" },
     { name = "flashinfer-bench", marker = "extra == 'dev'", specifier = "==0.1.2" },
     { name = "huggingface-hub" },
