@@ -36,7 +36,9 @@ from tilegym.backend import register_impl
 
 from .cross_entropy import _get_tuned_ce_kernel
 from .utils import addmm_f32_
+from .utils import loss_normalization
 from .utils import next_power_of_2
+from .utils import scale_
 
 MAX_FUSED_SIZE = 65536 // 2
 
@@ -102,9 +104,9 @@ def _launch_ce(
             token_acc_slice if return_token_accuracy else dummy_f32,
             pred_slice if return_predicted_tokens else dummy_i64,
             int(V),
-            float(inv_n_non_ignore),
-            float(sum_non_ignore_weight),
-            float(weight_sum),
+            inv_n_non_ignore.reshape(1),
+            sum_non_ignore_weight.reshape(1),
+            weight_sum.reshape(1),
             int(ignore_index),
             float(label_smoothing),
             float(lse_square_scale),
@@ -164,22 +166,16 @@ def _fused_linear_ce_forward_ct(
     reduction_mean = int(reduction == "mean")
 
     # Normalization counts.
-    target_mask = target != ignore_index
-    total_n_non_ignore = target_mask.sum().item()
-    inv_n_non_ignore = 1.0 / max(total_n_non_ignore, 1)
-
     has_weight = ce_weight is not None
-    sum_non_ignore_weight = float(total_n_non_ignore)
-    weight_sum = 0.0
     if has_weight:
         assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
         assert torch.is_floating_point(ce_weight), (
             f"If given, weight has to be of floating point dtype. Got: {ce_weight.dtype}"
         )
-        sum_non_ignore_weight = float(
-            torch.gather(ce_weight, dim=0, index=target.masked_select(target_mask)).sum().item()
-        )
-        weight_sum = float(ce_weight.sum().item())
+    total_n_non_ignore, inv_n_non_ignore, sum_non_ignore_weight, weight_sum = loss_normalization(
+        target, ignore_index, V, ce_weight
+    )
+    if has_weight:
         ce_weight = ce_weight.contiguous().float()
     has_softcap = softcap is not None
 
@@ -325,7 +321,7 @@ def _fused_linear_ce_forward_ct(
     else:
         loss = loss_1d.sum()
         z_loss = z_loss_1d.sum() if return_z_loss else None
-        token_accuracy = token_accuracy_1d.sum() / max(total_n_non_ignore, 1) if return_token_accuracy else None
+        token_accuracy = token_accuracy_1d.sum() / total_n_non_ignore if return_token_accuracy else None
     predicted_tokens = predicted_tokens_1d if return_predicted_tokens else None
 
     return (
@@ -428,44 +424,37 @@ class FusedLinearCrossEntropyCuTileFunction(torch.autograd.Function):
     def backward(ctx, grad_output, grad_output2, grad_output3, grad_output4):
         grad_input_saved, grad_weight_saved, grad_bias_saved, d_logits_saved, _input, weight = ctx.saved_tensors
 
-        scalar_1 = torch.tensor(1.0, device=grad_output.device)
-        scale_by_grad = not torch.equal(grad_output, scalar_1)
-
         if ctx.chunked_bif:
             # ── BACKWARD-IN-FORWARD PATH ─────────────────────────────────────
             # Grads were computed during forward; just apply grad_output scaling.
             grad_input = grad_input_saved if grad_input_saved.numel() > 0 else None
             grad_weight = grad_weight_saved if grad_weight_saved.numel() > 0 else None
             grad_bias = grad_bias_saved if grad_bias_saved.numel() > 0 else None
-            if scale_by_grad:
-                if grad_input is not None:
-                    grad_input = grad_input * grad_output
-                if grad_weight is not None:
-                    grad_weight = grad_weight * grad_output
-                if grad_bias is not None:
-                    grad_bias = grad_bias * grad_output
+            for grad in (grad_input, grad_weight, grad_bias):
+                if grad is not None:
+                    scale_(grad, grad_output)
         else:
             # ── SINGLE-PASS PATH ─────────────────────────────────────────────
             # d_logits was saved; compute grad_input and grad_weight now.
+            # grad_output is applied to the (BT, H)/(V, H)/(V,) products rather
+            # than to the much larger (BT, V) d_logits.
             if not ctx.input_requires_grad:
                 return (None,) * 15
 
             d_logits = d_logits_saved
-            if scale_by_grad:
-                d_logits = d_logits * grad_output
 
             # grad_input: (BT, H) — one matmul
-            grad_input = d_logits @ weight if ctx.input_requires_grad else None
+            grad_input = scale_(d_logits @ weight, grad_output) if ctx.input_requires_grad else None
 
             # grad_weight: (V, H) — one matmul. Use bf16 operands directly; cuBLAS
             # GEMM bf16 × bf16 → fp32 accumulate internally, so the explicit
             # `.float()` cast on both operands is wasted memory traffic (the
             # BT×V cast alone is up to 16 GB at BT=32768, V=128256). Numerical
             # parity with fp32 inputs (with fp32 accumulate) within atol/rtol=1e-2.
-            grad_weight = torch.mm(d_logits.t(), _input) if ctx.weight_requires_grad else None
+            grad_weight = scale_(torch.mm(d_logits.t(), _input), grad_output) if ctx.weight_requires_grad else None
 
             # grad_bias: (V,) — cheap row-sum of d_logits
-            grad_bias = d_logits.sum(dim=0) if ctx.has_bias else None
+            grad_bias = scale_(d_logits.sum(dim=0), grad_output) if ctx.has_bias else None
 
         # forward inputs: _input, weight, target, bias, ce_weight, ignore_index,
         # lse_square_scale, label_smoothing, reduction, softcap, return_z_loss,
