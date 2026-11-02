@@ -93,6 +93,12 @@ def pytest_addoption(parser):
             default=False,
             help="Run all tests",
         )
+        parser.addoption(
+            "--first-config-only",
+            action="store_true",
+            default=False,
+            help="Only run the first configuration of each parametrized test, once per backend (for CI speed)",
+        )
     except ValueError:
         # if it is added by parent directory, skip it
         pass
@@ -111,6 +117,63 @@ def quick_run(request):
 @pytest.fixture
 def framework(request):
     return request.config.getoption("--framework")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Filter test items based on various parameters"""
+
+    def try_get_option(config, option_name):
+        try:
+            return config.getoption(option_name)
+        except ValueError:
+            return False
+
+    # Apply first-config-only filter for ALL parametrized tests
+    first_config_only = try_get_option(config, "--first-config-only")
+    if first_config_only:
+        filtered_items = []
+        # Dict to track first candidate (possibly skipped) and whether we selected a runnable item
+        first_candidate = {}
+        selected = set()
+
+        def _has_marker(it, name):
+            return it.get_closest_marker(name) is not None or any(True for _ in it.iter_markers(name=name))
+
+        def _group_key(it):
+            # One configuration per test method *and* backend, so every backend a test
+            # is parametrized over keeps a configuration, not just the first one.
+            params = it.callspec.params if getattr(it, "callspec", None) is not None else {}
+            # Both parameter names are in use across the suites.
+            backend = params.get("backend") or params.get("framework")
+            return it.nodeid.split("[")[0], None if backend is None else str(backend)
+
+        for item in items:
+            # For ALL parametrized tests, we want to group by test class + test method (+ backend)
+            # e.g., test_rms_norm.py::Test_RMSNorm::test_op or test_softmax.py::Test_Softmax::test_perf
+            # Non-parametrized tests (no "[" in nodeid) pass through directly
+            if "[" not in item.nodeid:
+                filtered_items.append(item)
+                continue
+
+            key = _group_key(item)
+
+            skiplike = any(_has_marker(item, m) for m in ("skip", "skipif", "xfail"))
+
+            # If we haven't recorded any candidate for this group, store the first one we see (could be skipped)
+            if key not in first_candidate:
+                first_candidate[key] = item
+
+            # If this item is not skip, and we haven't selected for this group yet, choose it immediately
+            if (not skiplike) and (key not in selected):
+                selected.add(key)
+                filtered_items.append(item)
+
+        # For groups where we never found a runnable item, fallback to first candidate (even if skipped)
+        for key, cand in first_candidate.items():
+            if key not in selected:
+                filtered_items.append(cand)
+
+        items[:] = filtered_items
 
 
 @pytest.fixture(autouse=True)
