@@ -25,7 +25,9 @@ from tilegym.backend import register_impl
 
 from .jsd import JSD_BLOCK_SIZE
 from .jsd import _jsd_kernel
+from .utils import loss_normalization
 from .utils import next_power_of_2
+from .utils import scale_
 
 amp_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
 amp_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
@@ -52,12 +54,7 @@ def _fused_linear_jsd_forward(
     # Cap at JSD_BLOCK_SIZE to avoid register spill in _jsd_kernel.
     BLOCK_SIZE = min(JSD_BLOCK_SIZE, next_power_of_2(vocab_size))
 
-    if has_label:
-        n_non_ignore = (shift_labels != ignore_index).sum().item()
-    else:
-        n_non_ignore = num_rows
-
-    if n_non_ignore == 0:
+    if num_rows == 0:
         empty_input_grad = (
             torch.zeros(num_rows, hidden_size, dtype=dtype, device=device) if compute_grad_input else None
         )
@@ -65,19 +62,19 @@ def _fused_linear_jsd_forward(
             torch.zeros(vocab_size, hidden_size, dtype=dtype, device=device) if compute_grad_weight else None
         )
         return (
-            torch.tensor(0.0, device=device, dtype=dtype),
+            torch.zeros((), device=device, dtype=dtype),
             empty_input_grad,
             empty_weight_grad,
         )
 
-    inv_n_non_ignore = 1.0 / n_non_ignore
+    inv_n_non_ignore = loss_normalization(shift_labels, ignore_index)[1].reshape(1) if has_label else 1.0 / num_rows
     label_tensor = shift_labels if has_label else torch.empty(1, device=device, dtype=torch.int64)
 
     inc_factor = (vocab_size + hidden_size - 1) // hidden_size
     chunk_size = next_power_of_2((num_rows + inc_factor - 1) // inc_factor)
     num_chunks = (num_rows + chunk_size - 1) // chunk_size
 
-    total_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+    total_loss = torch.zeros((), device=device, dtype=torch.float32)
     grad_input = torch.zeros(num_rows, hidden_size, dtype=dtype, device=device) if compute_grad_input else None
     grad_weight = torch.zeros_like(student_weight) if compute_grad_weight else None
 
@@ -115,7 +112,7 @@ def _fused_linear_jsd_forward(
                 log_prob_s_chunk,  # dX in-place
                 label_chunk,
                 float(beta),
-                float(inv_n_non_ignore),
+                inv_n_non_ignore,
                 int(ignore_index),
                 int(vocab_size),
                 int(BLOCK_SIZE),
@@ -197,13 +194,8 @@ class FusedLinearJSDCuTileFunction(torch.autograd.Function):
         if not ctx.input_requires_grad and not ctx.weight_requires_grad:
             return None, None, None, None, None, None, None, None
 
-        if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
-            grad_input = grad_input_saved if ctx.input_requires_grad else None
-            grad_weight = grad_weight_saved if ctx.weight_requires_grad else None
-        else:
-            # Multiply on device — avoids .item() host-device sync.
-            grad_input = (grad_input_saved * grad_output) if ctx.input_requires_grad else None
-            grad_weight = (grad_weight_saved * grad_output) if ctx.weight_requires_grad else None
+        grad_input = scale_(grad_input_saved, grad_output) if ctx.input_requires_grad else None
+        grad_weight = scale_(grad_weight_saved, grad_output) if ctx.weight_requires_grad else None
 
         return grad_input, grad_weight, None, None, None, None, None, None
 

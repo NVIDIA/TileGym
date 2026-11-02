@@ -513,7 +513,10 @@ def benchmark_cuda_graph(
     """Measure cold-cache device spans with balanced samples across graphs.
 
     Calibration uses at most initial_rep samples and stops once their combined
-    GPU duration reaches the larger of the warmup and measurement budgets.
+    timed GPU duration reaches the larger of the warmup and measurement budgets.
+    Warmup and measurement iteration counts are sized from the whole sample,
+    preparation included, while setup and the cache flush stay outside the
+    reported times.
     Compilation and tuning finish before capture. An optional setup graph runs
     before the flush and timed graph, including when recreating backward inputs.
     Capture errors propagate; this function never switches to eager execution.
@@ -551,8 +554,8 @@ def benchmark_cuda_graph(
         initial_rests = pacer.rests
         # The first preparation also pays one-time host work such as lazy module
         # loading, and any span can include host stalls that leave the GPU idle,
-        # so the shortest span after the first is closest to its GPU work. A
-        # single calibration sample already fills the budget, so it has none.
+        # so the shortest span after the first is closest to its GPU work. With
+        # only one sample, use its preparation span conservatively.
         calibration_ms, prepare_ms = 0.0, []
         for calibration_count in range(1, initial_rep + 1):
             pacer.admit(calibration_ms / max(1, calibration_count - 1) + min(prepare_ms[1:], default=0.0))
@@ -562,8 +565,8 @@ def benchmark_cuda_graph(
             if calibration_ms >= max(warmup, rep):
                 break
         estimate = calibration_ms / calibration_count
-        sample_ms = estimate + min(prepare_ms[1:], default=0.0)
-        n_warmup, n_repeat = iteration_counts(estimate, warmup, rep, min_rep, max_rep)
+        sample_ms = estimate + min(prepare_ms[1:] or prepare_ms)
+        n_warmup, n_repeat = iteration_counts(sample_ms, warmup, rep, min_rep, max_rep)
         n_graphs = min(graph_repeats, n_repeat)
         requested_graph_count = n_graphs
         if graph_pool_reserved_bytes:
@@ -670,8 +673,8 @@ def benchmark_eager(
         if calibration_ms >= max(warmup, rep):
             break
     estimate = calibration_ms / calibration_count
-    sample_ms = estimate + min(prepare_ms[1:], default=0.0)
-    n_warmup, n_repeat = iteration_counts(estimate, warmup, rep, min_rep, max_rep)
+    sample_ms = estimate + min(prepare_ms[1:] or prepare_ms)
+    n_warmup, n_repeat = iteration_counts(sample_ms, warmup, rep, min_rep, max_rep)
     for _ in range(n_warmup):
         pacer.admit(sample_ms)
         prepare()
