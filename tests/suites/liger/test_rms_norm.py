@@ -24,6 +24,7 @@ def _reference_rms_norm(X, W, eps, offset=0.0):
 
 class Test_Liger_RMSNorm(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "shape, dtype",
@@ -195,3 +196,49 @@ class Test_Liger_RMSNorm(common.PyTestCase):
             atol=1e-2,
             rtol=1e-1,
         )
+
+    @pytest.mark.parametrize(
+        "shape, dtype",
+        [
+            ((2048, 1024), torch.bfloat16),
+            ((2048, 2048), torch.bfloat16),
+            ((2048, 4096), torch.bfloat16),
+            ((2048, 8192), torch.bfloat16),
+            ((2048, 16384), torch.bfloat16),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, dtype, backend, record_property, monkeypatch):
+        self.setUp()
+        device = torch.device("cuda")
+        H = shape[-1]
+        eps = 1e-6
+
+        X = torch.randn(*shape, dtype=dtype, device=device, requires_grad=True)
+        W = torch.ones(H, dtype=dtype, device=device)
+
+        if backend in self._backends:
+            if not tilegym.is_backend_available(backend):
+                pytest.skip(f"Backend {backend} not available")
+            tilegym.set_backend(backend)
+            framework_fn = lambda: rms_norm(X.clone(), W, eps)
+        elif backend == "pytorch":
+            framework_fn = lambda: _reference_rms_norm(X, W, eps)
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        if backend != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: _reference_rms_norm(X, W, eps),
+                kwargs={},
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+        del X, W, framework_fn
+        torch.cuda.empty_cache()
+        gc.collect()

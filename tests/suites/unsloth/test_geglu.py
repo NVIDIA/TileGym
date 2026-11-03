@@ -26,6 +26,7 @@ DEVICE = "cuda"
 
 class Test_Unsloth_GEGLU_Exact_Forward(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @staticmethod
     def reference(gate, up):
@@ -67,9 +68,38 @@ class Test_Unsloth_GEGLU_Exact_Forward(common.PyTestCase):
             atol=1e-3,
         )
 
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (2, 128, 256),
+            (2, 256, 4096),
+            (4, 512, 5120),  # Production-like
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        gate = torch.randn(*shape, dtype=dtype, device=DEVICE)
+        up = torch.randn(*shape, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: self.reference(gate, up)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: geglu_exact_forward(gate, up)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
 
 class Test_Unsloth_GEGLU_Exact_Backward(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @staticmethod
     def reference(DW, e, g):
@@ -119,6 +149,35 @@ class Test_Unsloth_GEGLU_Exact_Backward(common.PyTestCase):
             check_stride=False,
         )
 
+    @pytest.mark.parametrize(
+        "M, N",
+        [
+            (256, 512),
+            (1024, 1024),
+            (2048, 5120),  # Production-like
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, M, N, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        DW = torch.randn(M, N, dtype=dtype, device=DEVICE)
+        e = torch.randn(M, N, dtype=dtype, device=DEVICE)
+        g = torch.randn(M, N, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: self.reference(DW.clone(), e.clone(), g.clone())
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: geglu_exact_backward(DW.clone(), e.clone(), g.clone())
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
 
 # =============================================================================
 # Approximate GEGLU
@@ -127,6 +186,7 @@ class Test_Unsloth_GEGLU_Exact_Backward(common.PyTestCase):
 
 class Test_Unsloth_GEGLU_Approx_Forward(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @staticmethod
     def reference(gate, up):
@@ -169,9 +229,38 @@ class Test_Unsloth_GEGLU_Approx_Forward(common.PyTestCase):
             atol=1e-3,
         )
 
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (2, 128, 256),
+            (2, 256, 4096),
+            (4, 512, 5120),  # Production-like
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        gate = torch.randn(*shape, dtype=dtype, device=DEVICE)
+        up = torch.randn(*shape, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: self.reference(gate, up)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: geglu_approx_forward(gate, up)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
 
 class Test_Unsloth_GEGLU_Approx_Backward(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @staticmethod
     def reference(DW, e, g):
@@ -225,3 +314,32 @@ class Test_Unsloth_GEGLU_Approx_Backward(common.PyTestCase):
             multiple_outputs=True,
             check_stride=False,
         )
+
+    @pytest.mark.parametrize(
+        "M, N",
+        [
+            (256, 512),
+            (1024, 1024),
+            (2048, 5120),  # Production-like
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, M, N, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        DW = torch.randn(M, N, dtype=dtype, device=DEVICE)
+        e = torch.randn(M, N, dtype=dtype, device=DEVICE)
+        g = torch.randn(M, N, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: self.reference(DW.clone(), e.clone(), g.clone())
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: geglu_approx_backward(DW.clone(), e.clone(), g.clone())
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
