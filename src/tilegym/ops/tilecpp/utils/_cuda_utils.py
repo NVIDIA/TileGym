@@ -85,7 +85,9 @@ def _get_cache_dir() -> Path:
             cache_dir = Path(xdg_cache) / "tilecpp"
         else:
             cache_dir = Path.home() / ".cache" / "tilecpp"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Created lazily on the first compile: importing this module (which
+    # tilegym does at import time to probe the backend) must not fail when
+    # the cache location is not writable.
     return cache_dir
 
 
@@ -314,6 +316,7 @@ def compile_cuda_to_cubin(
 
     # Write wrapper .cu file using the same base name as the cubin
     cu_file = output_path.with_suffix(".cu")
+    cu_file.parent.mkdir(parents=True, exist_ok=True)
     with open(cu_file, "w") as f:
         f.write(wrapper_source)
 

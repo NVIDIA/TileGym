@@ -156,3 +156,24 @@ def test_compile_rejects_invalid_timeout(compiler_inputs, monkeypatch, value):
     with pytest.raises(ValueError):
         _cuda_utils.compile_cuda_to_cubin(header, output)
     assert not output.with_suffix(".cu").exists()
+
+
+def test_cache_dir_lookup_does_not_create_it(tmp_path, monkeypatch):
+    """Resolving the cache location (done at import) must not fail when it is unusable."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    monkeypatch.setenv("TILECPP_CACHE_DIR", str(blocker / "cache"))
+    assert _cuda_utils._get_cache_dir() == blocker / "cache"
+    assert not (blocker / "cache").exists()
+
+
+def test_compile_creates_missing_output_dir(compiler_inputs, monkeypatch):
+    """The first compile creates the cubin directory, which is no longer made at import."""
+    compiler, header, output = compiler_inputs
+    write_compiler(
+        compiler,
+        "import sys\nfrom pathlib import Path\nPath(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'cubin')\n",
+    )
+    output = output.parent / "missing" / "kernel.cubin"
+    assert _cuda_utils.compile_cuda_to_cubin(header, output) == output
+    assert output.read_bytes() == b"cubin"
