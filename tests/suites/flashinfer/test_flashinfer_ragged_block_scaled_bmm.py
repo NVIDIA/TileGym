@@ -208,7 +208,7 @@ class Test_FlashInfer_RaggedBlockScaledBMM(common.PyTestCase):
         return A_fp8, B_fp8, As, Bs, ref_c, segment_offsets, max_m
 
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
@@ -218,23 +218,23 @@ class Test_FlashInfer_RaggedBlockScaledBMM(common.PyTestCase):
     @pytest.mark.parametrize("n, k", [(2048, 2048), (4096, 4096)])
     @pytest.mark.parametrize("dtype, out_dtype", [(torch.float8_e4m3fn, torch.bfloat16)])
     @pytest.mark.parametrize("trans_a, trans_b", [(False, True)])
-    def test_op(self, framework, num_groups, m, n, k, dtype, out_dtype, trans_a, trans_b, arch):
+    def test_op(self, backend, num_groups, m, n, k, dtype, out_dtype, trans_a, trans_b, arch):
         if torch.cuda.get_device_capability(0) == (10, 3):
             pytest.xfail("Skip on sm103: due to CUDA error: unspecified launch failure")
 
         self.setUp()
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         if arch == "sm80" and "float8" in dtype.__repr__():
             pytest.skip("FP8 is not supported on sm80 (Ampere).")
 
-        use_aligned_segments = framework == "cutile"
+        use_aligned_segments = backend == "cutile"
 
         (
             a,
@@ -269,3 +269,107 @@ class Test_FlashInfer_RaggedBlockScaledBMM(common.PyTestCase):
         )
 
         torch.testing.assert_close(ref_c, c, atol=1.0, rtol=1.0)
+
+    @pytest.mark.parametrize("num_groups", [16])
+    @pytest.mark.parametrize("m", [128, 512, 1024, 2048, 4096])
+    @pytest.mark.parametrize("n", [2048, 4096, 8192])
+    @pytest.mark.parametrize("k", [2048, 4096, 8192])
+    @pytest.mark.parametrize("dtype, out_dtype", [(torch.float8_e4m3fn, torch.bfloat16)])
+    @pytest.mark.parametrize("trans_a", [False])
+    @pytest.mark.parametrize("trans_b", [True])
+    @pytest.mark.parametrize("use_max_m_device", [False])
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "cutile",
+        ],
+    )
+    def test_perf(
+        self,
+        num_groups,
+        m,
+        n,
+        k,
+        dtype,
+        out_dtype,
+        trans_a,
+        trans_b,
+        use_max_m_device,
+        backend: str,
+        record_property,
+    ):
+        self.setUp()
+        if "float8" in str(dtype) and torch.cuda.get_device_capability()[0] < 9:
+            pytest.skip("FP8 requires compute capability 9.0 or newer")
+        _impl_fw = ["cutile"]
+        if backend in _impl_fw:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+
+        assert out_dtype == torch.bfloat16, "Only bfloat16 is supported"
+        assert dtype == torch.float8_e4m3fn, "Only float8_e4m3fn is supported"
+
+        torch.manual_seed(0)
+        random.seed(0)
+
+        # cuTile requires aligned segments (multiples of BLOCK_M=128)
+        _aligned_fw = ["cutile"]
+        use_aligned_segments = backend in _aligned_fw
+
+        (
+            a,
+            b,
+            a_scale,
+            b_scale,
+            ref_c,
+            segment_offsets,
+            max_m,
+        ) = self.prepare_data(
+            num_groups,
+            m,
+            n,
+            k,
+            trans_a,
+            trans_b,
+            out_dtype,
+            use_aligned_segments=use_aligned_segments,
+        )
+
+        if backend in _impl_fw:
+            framework_fn = lambda: flashinfer.ops.ragged_block_scaled_bmm(
+                a,
+                b,
+                a_scale,
+                b_scale,
+                segment_offsets,
+                max_m,
+                max_m_device=None,
+                transpose_a=trans_a,
+                transpose_b=trans_b,
+                out_dtype=out_dtype,
+            )
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        res = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", res)
+
+        c = flashinfer.ops.ragged_block_scaled_bmm(
+            a,
+            b,
+            a_scale,
+            b_scale,
+            segment_offsets,
+            max_m,
+            max_m_device=None,
+            transpose_a=trans_a,
+            transpose_b=trans_b,
+            out_dtype=out_dtype,
+        )
+
+        # Use relaxed tolerance for FP8/BF16 block-scaled operations
+        # FP8 has limited precision, and block scaling introduces additional numerical variance
+        atol, rtol = 1.0, 0.05
+        torch.testing.assert_close(ref_c, c, atol=atol, rtol=rtol)

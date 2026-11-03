@@ -14,6 +14,7 @@ from tilegym.suites.unsloth.ops import cross_entropy_loss
 DEVICE = "cuda"
 
 _backends = ["cutile"]
+_perf_backends = _backends + ["pytorch"]
 
 
 class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
@@ -43,13 +44,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_basic(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_basic(self, batch, seq_len, vocab_size, dtype, backend):
         """Test basic cross-entropy (vocab <= 65536)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         logits = torch.randn(batch, seq_len, vocab_size, dtype=dtype, device=DEVICE)
@@ -69,13 +70,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_large_vocab(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_large_vocab(self, batch, seq_len, vocab_size, dtype, backend):
         """Test chunked large-vocab path (vocab > 65536)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         logits = torch.randn(batch, seq_len, vocab_size, dtype=dtype, device=DEVICE)
@@ -93,13 +94,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_softcapping(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_softcapping(self, batch, seq_len, vocab_size, dtype, backend):
         """Test cross-entropy with logit softcapping (Gemma-2 style)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         logits = torch.randn(batch, seq_len, vocab_size, dtype=dtype, device=DEVICE)
@@ -117,13 +118,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_logit_scaling(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_logit_scaling(self, batch, seq_len, vocab_size, dtype, backend):
         """Test cross-entropy with logit scaling (Cohere style)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         logits = torch.randn(batch, seq_len, vocab_size, dtype=dtype, device=DEVICE)
@@ -134,8 +135,8 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
 
         torch.testing.assert_close(result, expected, rtol=1e-2, atol=1e-2)
 
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_all_ignored(self, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_all_ignored(self, backend):
         """Test with all labels set to -100 (all ignored).
 
         Two sub-checks:
@@ -144,10 +145,10 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
           2. With explicit n_items=1: loss should be 0.0 since all CE terms
              are masked out (sum of 0 masked losses / 1 = 0).
         """
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         logits = torch.randn(1, 8, 1024, dtype=torch.bfloat16, device=DEVICE)
@@ -173,13 +174,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward(self, batch, seq_len, vocab_size, dtype, backend):
         """Test backward pass: verify logits gradient against PyTorch reference."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         labels = torch.randint(0, vocab_size, (batch, seq_len), device=DEVICE)
@@ -204,13 +205,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward_softcapping(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_softcapping(self, batch, seq_len, vocab_size, dtype, backend):
         """Test backward pass with logit_softcapping (Gemma-2 style)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         labels = torch.randint(0, vocab_size, (batch, seq_len), device=DEVICE)
@@ -235,13 +236,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward_logit_scaling(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_logit_scaling(self, batch, seq_len, vocab_size, dtype, backend):
         """Test backward pass with logit_scaling (Cohere style)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         labels = torch.randint(0, vocab_size, (batch, seq_len), device=DEVICE)
@@ -267,13 +268,13 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward_large_vocab(self, batch, seq_len, vocab_size, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_large_vocab(self, batch, seq_len, vocab_size, dtype, backend):
         """Test backward pass for large-vocab: verify logits gradient against PyTorch reference."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         labels = torch.randint(0, vocab_size, (batch, seq_len), device=DEVICE)
@@ -290,3 +291,40 @@ class Test_Unsloth_CrossEntropyLoss(common.PyTestCase):
 
         assert logits_test.grad is not None, "Gradient should flow back to logits"
         torch.testing.assert_close(logits_test.grad, grad_ref, rtol=1e-2, atol=1e-2)
+
+
+# =============================================================================
+# Per-kernel perf classes — each maps to one kernel entry point.
+# =============================================================================
+
+
+class Test_Unsloth_CrossEntropyLoss_LargeVocab_Forward(common.PyTestCase):
+    """Perf for the chunked cross-entropy forward (vocab > 65536)."""
+
+    @pytest.mark.parametrize(
+        "batch, seq_len, vocab_size",
+        [
+            (1, 16, 100000),
+            (2, 8, 128256),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch, seq_len, vocab_size, backend, record_property):
+        """Benchmark forward pass for large-vocab (chunked path, vocab > 65536)."""
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        logits = torch.randn(batch, seq_len, vocab_size, dtype=dtype, device=DEVICE)
+        labels = torch.randint(0, vocab_size, (batch, seq_len), device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: Test_Unsloth_CrossEntropyLoss.reference(logits, labels)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: cross_entropy_loss(logits, labels)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)

@@ -26,6 +26,7 @@ class SimpleMLP(nn.Module):
 
 class Test_Liger_TiledMLP(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "bsz, seq_len, hidden_size",
@@ -112,3 +113,48 @@ class Test_Liger_TiledMLP(common.PyTestCase):
         assert torch.allclose(x_tiled.grad, x_ref.grad, atol=1e-5, rtol=1e-5), (
             f"Backward mismatch: max_diff={((x_tiled.grad - x_ref.grad).abs().max()).item():.8f}"
         )
+
+    @pytest.mark.parametrize(
+        "shape, dtype",
+        [
+            ((2, 1024, 4096), torch.bfloat16),
+            ((2, 2048, 4096), torch.bfloat16),
+            ((2, 4096, 4096), torch.bfloat16),
+            ((2, 8192, 4096), torch.bfloat16),
+            ((2, 16384, 4096), torch.bfloat16),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, dtype, backend, record_property, monkeypatch):
+        self.setUp()
+        device = torch.device("cuda")
+        bsz, seq_len, hidden_size = shape
+        x_data = torch.randn(bsz, seq_len, hidden_size, device=device, dtype=dtype) * 0.1
+
+        mlp = SimpleMLP(hidden_size, device=device, dtype=dtype)
+        fn = lambda mod, x: mod(x)
+
+        if backend in self._backends:
+            if not tilegym.is_backend_available(backend):
+                pytest.skip(f"Backend {backend} not available")
+            tilegym.set_backend(backend)
+            framework_fn = lambda: tiled_mlp(fn, mlp, x_data.detach().clone())
+        elif backend == "pytorch":
+            framework_fn = lambda: fn(mlp, x_data)
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        if backend != "pytorch":
+            out_test = framework_fn()
+            out_ref = fn(mlp, x_data)
+            # bf16 chunked GEMM (num_shards > 1) accumulates in a different order than
+            # the unsharded reference, differing by ~1 bf16 ULP (~2e-3); ReLU-mask flips
+            # at near-zero activations make rtol unusable, so bound on abs only.
+            assert torch.allclose(out_test, out_ref, atol=2e-3, rtol=0)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+        del x_data, framework_fn
+        torch.cuda.empty_cache()
+        gc.collect()

@@ -54,6 +54,7 @@ def _reference_multi_token_attention(scores, weight, bias=None, stride=1, paddin
 
 class Test_Liger_MultiTokenAttention(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "batch_channels_L, dtype",
@@ -201,3 +202,51 @@ class Test_Liger_MultiTokenAttention(common.PyTestCase):
             return _reference_multi_token_attention(scores, weight, bias=bias)
 
         self.assertCorrectness(fw, ref, kwargs={}, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize(
+        "shape, dtype",
+        [
+            ((2, 4, 32, 32), torch.bfloat16),
+            ((2, 4, 64, 64), torch.bfloat16),
+            ((2, 4, 128, 128), torch.bfloat16),
+            ((2, 4, 256, 256), torch.bfloat16),
+            ((2, 4, 512, 512), torch.bfloat16),
+            ((2, 4, 1024, 1024), torch.bfloat16),
+            ((2, 4, 2048, 2048), torch.bfloat16),
+            ((2, 4, 4096, 4096), torch.bfloat16),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, dtype, backend, record_property, monkeypatch):
+        self.setUp()
+        device = torch.device("cuda")
+        batch, c_in, L, _ = shape
+
+        weight = torch.randn(c_in, c_in, 3, 3, dtype=dtype, device=device)
+        scores = torch.randn(batch, c_in, L, L, dtype=dtype, device=device, requires_grad=True)
+
+        if backend in self._backends:
+            if not tilegym.is_backend_available(backend):
+                pytest.skip(f"Backend {backend} not available")
+            tilegym.set_backend(backend)
+            framework_fn = lambda: multi_token_attention(scores, weight, groups=1, padding=1)
+        elif backend == "pytorch":
+            framework_fn = lambda: _reference_multi_token_attention(scores, weight, groups=1, padding=1)
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        if backend != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: _reference_multi_token_attention(scores, weight, groups=1, padding=1),
+                kwargs={},
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+        del scores, weight, framework_fn
+        torch.cuda.empty_cache()
+        gc.collect()
