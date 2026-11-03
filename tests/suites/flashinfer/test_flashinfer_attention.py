@@ -431,6 +431,160 @@ class Test_FlashInfer_PrefillRagged(common.PyTestCase):
             torch.testing.assert_close(out_impl, out_ref, atol=1e-2, rtol=2e-1)
             torch.testing.assert_close(lse_impl, lse_ref, atol=1e-2, rtol=2e-1)
 
+    @pytest.mark.parametrize("dtype", ["bfloat16", "float8_e4m3fn"])
+    @pytest.mark.parametrize("num_batch, s_kv, head_dim_qk", get_prefill_ragged_problem_configs(quick_run=False))
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "cutile",
+        ],
+    )
+    def test_perf(
+        self,
+        num_batch,
+        s_kv,
+        head_dim_qk,
+        dtype,
+        backend,
+        record_property,
+    ):
+        if dtype == "float8_e4m3fn" and torch.cuda.get_device_capability()[0] < 9:
+            pytest.skip("Skip float8_e4m3fn on sm80 (A100): FP8 e4m3 unsupported on capability < 9")
+        if torch.cuda.get_device_capability() == (9, 0) and num_batch * s_kv >= 100 * 1024:
+            pytest.skip("Skip large prefill ragged attention on sm90 due to OOM")
+        if torch.cuda.get_device_capability() == (12, 0) and s_kv >= 8192:
+            pytest.skip("Skip OOM on sm120: FlashInfer ragged prefill with kv_len=8192 exceeds 32 GiB VRAM")
+        # head_dim=192 with large batch×seqlen causes OOM across all architectures
+        if head_dim_qk == 192 and num_batch * s_kv >= 32 * 8192:
+            pytest.skip(
+                f"OOM: head_dim=192 num_batch={num_batch} s_kv={s_kv} "
+                f"(num_batch*s_kv={num_batch * s_kv} >= {32 * 8192})"
+            )
+
+        # Convert string dtype to torch dtype
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float8_e4m3fn": torch.float8_e4m3fn,
+        }
+        dtype = dtype_map[dtype]
+        self.setUp()
+        if backend in self._backends:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+        if backend == "pytorch" and not CUDNN_AVAILABLE:
+            pytest.skip("Skip pytorch framework: cuDNN not available")
+
+        device = torch.device("cuda")
+        (
+            q,
+            k_cache,
+            v_cache,
+            scale,
+            actual_seq_lens,
+            block_tables,
+            actual_seq_offset,
+            q_indptr,
+            k_indptr,
+            v_indptr,
+            o_indptr,
+            lse_indptr,
+        ) = bsr_attention_sample.generate_sample_data(
+            batch_size=num_batch,
+            max_seq_len=s_kv,
+            head_dim_qk=head_dim_qk,
+            is_decode=False,
+            device=device,
+            dtype=dtype,
+        )
+
+        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
+        lse = torch.zeros([q.shape[0], q.shape[1]], device=device, dtype=torch.float32)
+
+        def run_backend_wrapper():
+            return cudnn_prefill.cudnn_batch_prefill_with_kv_cache(
+                q,
+                k_cache,
+                v_cache,
+                scale,
+                workspace_buffer,
+                max_token_per_sequence=s_kv,
+                max_sequence_kv=s_kv,
+                actual_seq_lens_q=actual_seq_lens,
+                actual_seq_lens_kv=actual_seq_lens,
+                block_tables=None,
+                causal=True,
+                return_lse=True,
+                lse=lse,
+                is_cuda_graph_compatible=True,
+                batch_offsets_q=q_indptr,
+                batch_offsets_o=o_indptr,
+                batch_offsets_k=k_indptr,
+                batch_offsets_v=v_indptr,
+                batch_offsets_stats=lse_indptr,
+            )
+
+        if backend in self._backends:
+
+            def framework_fn():
+                return flashinfer_ops.prefill_attention_kv_ragged(
+                    q,
+                    k_cache,
+                    v_cache,
+                    actual_seq_lens,
+                    actual_seq_lens,
+                    actual_seq_offset,
+                    block_tables,
+                    scale,
+                    1.0,
+                    num_batch,
+                    s_kv,
+                )
+
+        elif backend == "pytorch":
+
+            def framework_fn():
+                return run_backend_wrapper()
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        # Run benchmarks
+        res = common.benchmark_framework(backend, framework_fn)
+        # Record results for reporting
+        record_property("benchmark", res)
+        # Run after benchmark
+        if dtype != torch.float8_e4m3fn and backend != "pytorch" and CUDNN_AVAILABLE:
+            atol = 1e-2
+            rtol = 2e-1
+            if backend in self._backends:
+                self.assertCorrectness(
+                    framework_fn,
+                    lambda: run_backend_wrapper(),
+                    kwargs={},
+                    atol=atol,
+                    rtol=rtol,
+                    multiple_outputs=True,
+                )
+        elif dtype == torch.float8_e4m3fn and backend != "pytorch":
+            # cuDNN reference doesn't support fp8.
+            out = framework_fn()
+            if isinstance(out, (list, tuple)):
+                out = out[0]
+            ref_out = _ragged_attention_reference(
+                q,
+                k_cache,
+                v_cache,
+                actual_seq_lens,
+                actual_seq_offset,
+                scale,
+                causal=True,
+            )
+            torch.testing.assert_close(out.float(), ref_out, atol=2e-1, rtol=3e-1)
+        elif backend != "pytorch" and not CUDNN_AVAILABLE:
+            warnings.warn("cuDNN not available, skipping correctness check")
+
 
 def get_decoding_problem_configs(quick_run=False, full_run=False):
     if quick_run:

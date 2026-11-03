@@ -15,6 +15,7 @@ from tilegym.suites.unsloth.ops import swiglu_fg
 DEVICE = "cuda"
 
 _backends = ["cutile"]
+_perf_backends = _backends + ["pytorch"]
 
 
 class Test_Unsloth_SwiGLU_Forward(common.PyTestCase):
@@ -113,3 +114,32 @@ class Test_Unsloth_SwiGLU_Backward(common.PyTestCase):
             multiple_outputs=True,
             check_stride=False,
         )
+
+    @pytest.mark.parametrize(
+        "M, N",
+        [
+            (256, 512),
+            (512, 4096),
+            (2048, 5120),  # Production-like
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, M, N, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        DW = torch.randn(M, N, dtype=dtype, device=DEVICE)
+        e = torch.randn(M, N, dtype=dtype, device=DEVICE)
+        g = torch.randn(M, N, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: self.reference(DW.clone(), e.clone(), g.clone())
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: swiglu_bwd(DW.clone(), e.clone(), g.clone())
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
