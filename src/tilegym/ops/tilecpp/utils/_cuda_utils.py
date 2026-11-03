@@ -85,7 +85,9 @@ def _get_cache_dir() -> Path:
             cache_dir = Path(xdg_cache) / "tilecpp"
         else:
             cache_dir = Path.home() / ".cache" / "tilecpp"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Created lazily on the first compile: importing this module (which
+    # tilegym does at import time to probe the backend) must not fail when
+    # the cache location is not writable.
     return cache_dir
 
 
@@ -269,6 +271,24 @@ def get_source_hash(source: str) -> str:
     return hashlib.md5(source.encode()).hexdigest()[:16]
 
 
+_compiler_fingerprints: Dict[str, str] = {}
+
+
+def _compiler_fingerprint() -> str:
+    """Identify the nvcc in NVCC_PATH so cached cubins are not reused across compilers.
+
+    Uses ``nvcc --version`` (falling back to the resolved path when it cannot run),
+    so switching TILECPP_NVCC_PATH or upgrading the toolkit's nvcc misses the cache.
+    """
+    if NVCC_PATH not in _compiler_fingerprints:
+        try:
+            identity = subprocess.run([NVCC_PATH, "--version"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            identity = ""
+        _compiler_fingerprints[NVCC_PATH] = identity or os.path.realpath(NVCC_PATH)
+    return _compiler_fingerprints[NVCC_PATH]
+
+
 def compile_cuda_to_cubin(
     header_path: Path,
     output_path: Path,
@@ -314,6 +334,7 @@ def compile_cuda_to_cubin(
 
     # Write wrapper .cu file using the same base name as the cubin
     cu_file = output_path.with_suffix(".cu")
+    cu_file.parent.mkdir(parents=True, exist_ok=True)
     with open(cu_file, "w") as f:
         f.write(wrapper_source)
 
@@ -537,7 +558,7 @@ class TileCppKernel:
         cpp_type, _ = get_dtype_info(dtype)
         all_params = _format_template_params(cpp_type, template_params)
         template_key = "_".join(all_params)
-        source_hash = get_source_hash(self.source_hash + template_key)
+        source_hash = get_source_hash(self.source_hash + template_key + _compiler_fingerprint())
         cubin_path = self._make_cubin_path(template_key, arch, source_hash)
         if is_cache_disabled():
             return self._compile_kernel(cubin_path, all_params, signature, cpp_type, arch), cubin_path

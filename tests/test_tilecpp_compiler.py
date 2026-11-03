@@ -156,3 +156,47 @@ def test_compile_rejects_invalid_timeout(compiler_inputs, monkeypatch, value):
     with pytest.raises(ValueError):
         _cuda_utils.compile_cuda_to_cubin(header, output)
     assert not output.with_suffix(".cu").exists()
+
+
+def test_cache_dir_lookup_does_not_create_it(tmp_path, monkeypatch):
+    """Resolving the cache location (done at import) must not fail when it is unusable."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    monkeypatch.setenv("TILECPP_CACHE_DIR", str(blocker / "cache"))
+    assert _cuda_utils._get_cache_dir() == blocker / "cache"
+    assert not (blocker / "cache").exists()
+
+
+def test_compile_creates_missing_output_dir(compiler_inputs, monkeypatch):
+    """The first compile creates the cubin directory, which is no longer made at import."""
+    compiler, header, output = compiler_inputs
+    write_compiler(
+        compiler,
+        "import sys\nfrom pathlib import Path\nPath(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'cubin')\n",
+    )
+    output = output.parent / "missing" / "kernel.cubin"
+    assert _cuda_utils.compile_cuda_to_cubin(header, output) == output
+    assert output.read_bytes() == b"cubin"
+
+
+def test_cubin_cache_is_keyed_on_compiler(tmp_path, monkeypatch):
+    """A cubin cached by one nvcc must not be returned after switching to another."""
+    monkeypatch.setattr(_cuda_utils, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(_cuda_utils, "should_save_source", lambda: False)
+    monkeypatch.setattr(_cuda_utils, "is_cache_disabled", lambda: False)
+    monkeypatch.delenv("TILECPP_COMPILE_TIMEOUT_S", raising=False)
+    header = tmp_path / "kernel.cuh"
+    header.write_text("")
+    kernel = _cuda_utils.TileCppKernel(source_path=header, kernel_name="kernel")
+    for version in ("13.3", "13.4"):
+        compiler = tmp_path / f"nvcc-{version}"
+        write_compiler(
+            compiler,
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"if '--version' in sys.argv:\n    print('Cuda compilation tools, release {version}')\n    sys.exit(0)\n"
+            f"Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'{version}')\n",
+        )
+        monkeypatch.setattr(_cuda_utils, "NVCC_PATH", str(compiler))
+        cubin, _ = kernel.compile_artifact(_cuda_utils.torch.float32, [], "{T}*", 90)
+        assert cubin == version.encode()
