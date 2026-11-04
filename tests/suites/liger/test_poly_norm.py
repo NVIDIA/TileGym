@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+import importlib
+
 import pytest
 import torch
 
@@ -78,6 +80,53 @@ class Test_Liger_PolyNorm(common.PyTestCase):
             atol=1e-2,
             rtol=1e-2,
         )
+
+    @pytest.mark.parametrize(
+        "shape, dtype",
+        [
+            ((64, 4096), torch.float32),
+            ((128, 2048), torch.bfloat16),
+            ((33, 8192), torch.bfloat16),
+            ((8, 16384), torch.float32),
+            ((16, 3000), torch.float32),
+        ],
+    )
+    @pytest.mark.parametrize("backend", ["cutile"])
+    def test_op_fwd_schedules(self, shape, dtype, backend, monkeypatch):
+        """Check outputs and gradients for every cuTile forward schedule."""
+        try:
+            tilegym.set_backend(backend)
+        except Exception as e:
+            pytest.skip(f"Backend is not supported: {e}")
+        self.setUp()
+
+        module = importlib.import_module("tilegym.suites.liger.cutile.poly_norm")
+        monkeypatch.setattr(module, "is_autotune_disabled", lambda: False)
+
+        device = torch.device("cuda")
+        eps = 1e-6
+        n_rows, n_cols = shape
+        x = torch.randn(*shape, dtype=dtype, device=device)
+        weight = torch.randn(3, dtype=dtype, device=device)
+        bias = torch.randn(1, dtype=dtype, device=device)
+        key = (n_rows, n_cols, dtype, str(x.device))
+
+        for body_key, blk, occ, nww in module._fwd_configs(n_cols):
+            kernel = module._FWD_BODY[body_key].replace_hints(occupancy=occ, num_worker_warps=nww)
+            monkeypatch.setattr(module, "_fwd_tune_cache", {key: (kernel, blk)})
+            self.assertCorrectness(
+                poly_norm,
+                self.reference,
+                {
+                    "input": x.clone().requires_grad_(True),
+                    "weight": weight.clone().requires_grad_(True),
+                    "bias": bias.clone().requires_grad_(True),
+                    "eps": eps,
+                },
+                gradient=torch.randn(*shape, dtype=dtype, device=device),
+                atol=1e-2,
+                rtol=1e-2,
+            )
 
     @pytest.mark.parametrize(
         "shape, dtype",
