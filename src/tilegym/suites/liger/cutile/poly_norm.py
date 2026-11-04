@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 """
 PolyNorm normalization kernel (CuTile backend).
 
@@ -11,6 +10,7 @@ where norm(u) = u / sqrt(mean(u²) + ε)
 Reference:
 1. https://github.com/BryceZhuo/PolyCom/
 2. https://arxiv.org/pdf/2411.03884
+
 """
 
 from types import SimpleNamespace
@@ -41,27 +41,14 @@ def _poly_norm_fwd_kernel(
     BLOCK_SIZE: ct.Constant[int],
     ALIGNED: ct.Constant[bool],
 ):
-    """
-    PolyNorm forward kernel (row-parallel).
-
-    Two passes per row:
-    1. Accumulate sum-of-squares for each power, compute rstd, cache it.
-    2. Compute output y = w0*norm(x^3) + w1*norm(x^2) + w2*norm(x) + b.
-
-    ALIGNED=True: n_cols is a power of 2, so BLOCK_SIZE==n_cols and no partial
-    chunk exists. Uses check_bounds=False (hardware TMA path, ~10% faster).
-    ALIGNED=False: general case with software bounds checking.
-    """
+    """Two-pass PolyNorm forward; ALIGNED requires N_COLS divisible by BLOCK_SIZE."""
     row_idx = ct.bid(0)
 
-    # Load scalar weights and bias
     w0 = ct.astype(ct.load(weights, 0, shape=()), ct.float32)
     w1 = ct.astype(ct.load(weights, 1, shape=()), ct.float32)
     w2 = ct.astype(ct.load(weights, 2, shape=()), ct.float32)
     b = ct.astype(ct.load(bias, 0, shape=()), ct.float32)
 
-    # Pass 1: accumulate sum-of-squares for each power using "fold" trick
-    # sum_sq_p[i] accumulates sum over col-chunks at position i within BLOCK_SIZE
     sum_sq_3 = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
     sum_sq_2 = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
     sum_sq_1 = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
@@ -74,31 +61,31 @@ def _poly_norm_fwd_kernel(
         else:
             x_tile = ct.gather(x_input, (row_idx, col_indices), check_bounds=True, padding_value=0.0)
         x_f32 = ct.astype(x_tile, ct.float32)
-        # x4-path: reuse x2 for sum_sq_1 and x4 for sum_sq_2; x^6 = x4*x2 inline.
-        # Saves 2 FMUL/element vs computing x3=x^3 separately.
-        x2 = x_f32 * x_f32  # x^2
-        x4 = x2 * x2  # x^4
-        sum_sq_1 = sum_sq_1 + x2  # sum x^2
-        sum_sq_2 = sum_sq_2 + x4  # sum x^4
-        sum_sq_3 = sum_sq_3 + x4 * x2  # sum x^6 = x^4 * x^2
 
-    # Compute rstd = rsqrt(mean(u^2) + eps) for each power
-    rstd_3 = ct.rsqrt(ct.sum(sum_sq_3, axis=0, keepdims=False) / N_COLS + eps)
-    rstd_2 = ct.rsqrt(ct.sum(sum_sq_2, axis=0, keepdims=False) / N_COLS + eps)
-    rstd_1 = ct.rsqrt(ct.sum(sum_sq_1, axis=0, keepdims=False) / N_COLS + eps)
+        x2 = x_f32 * x_f32
+        x4 = x2 * x2
+        sum_sq_1 = sum_sq_1 + x2
+        sum_sq_2 = sum_sq_2 + x4
+        sum_sq_3 = sum_sq_3 + x4 * x2
 
-    # Cache rstd values for backward pass
+    tot_1, tot_2, tot_3 = ct.reduce(
+        (sum_sq_1, sum_sq_2, sum_sq_3),
+        0,
+        lambda a1, a2, a3, b1, b2, b3: (a1 + b1, a2 + b2, a3 + b3),
+        (0.0, 0.0, 0.0),
+    )
+    rstd_3 = ct.rsqrt(tot_3 * (1.0 / N_COLS) + eps)
+    rstd_2 = ct.rsqrt(tot_2 * (1.0 / N_COLS) + eps)
+    rstd_1 = ct.rsqrt(tot_1 * (1.0 / N_COLS) + eps)
+
     ct.scatter(rstd3, row_idx, rstd_3)
     ct.scatter(rstd2, row_idx, rstd_2)
     ct.scatter(rstd1, row_idx, rstd_1)
 
-    # Precompute loop-invariant scalar products (w × rstd) before pass 2.
-    # Horner form: y = x2*(w0r3*x + w1r2) + w2r1*x + b  — avoids materialising x3 tile.
     w0r3 = w0 * rstd_3
     w1r2 = w1 * rstd_2
     w2r1 = w2 * rstd_1
 
-    # Pass 2: compute output
     for ci in range(num_chunks):
         col_indices = ct.arange(BLOCK_SIZE, dtype=ct.int32) + ci * BLOCK_SIZE
         if ALIGNED:
@@ -107,7 +94,7 @@ def _poly_norm_fwd_kernel(
             x_tile = ct.gather(x_input, (row_idx, col_indices), check_bounds=True, padding_value=0.0)
         x_f32 = ct.astype(x_tile, ct.float32)
         x2 = x_f32 * x_f32
-        # Horner: y = x2*(w0r3*x + w1r2) + w2r1*x + b
+
         inner = w0r3 * x_f32 + w1r2
         y_f32 = x2 * inner + w2r1 * x_f32 + b
         if ALIGNED:
@@ -130,7 +117,7 @@ def _poly_norm_fwd_kernel_sc_large(
     BLOCK_SIZE: ct.Constant[int],
     ALIGNED: ct.Constant[bool],
 ):
-    """Single-chunk: re-gather x in pass2, latency=2 on both gathers."""
+    """Single-chunk PolyNorm forward with a second input gather for the output pass."""
     row_idx = ct.bid(0)
 
     w0 = ct.astype(ct.load(weights, 0, shape=()), ct.float32)
@@ -147,9 +134,15 @@ def _poly_norm_fwd_kernel_sc_large(
     x2 = x_f32 * x_f32
     x4 = x2 * x2
 
-    rstd_3 = ct.rsqrt(ct.sum(x4 * x2, axis=0, keepdims=False) / N_COLS + eps)
-    rstd_2 = ct.rsqrt(ct.sum(x4, axis=0, keepdims=False) / N_COLS + eps)
-    rstd_1 = ct.rsqrt(ct.sum(x2, axis=0, keepdims=False) / N_COLS + eps)
+    tot_1, tot_2, tot_3 = ct.reduce(
+        (x2, x4, x4 * x2),
+        0,
+        lambda a1, a2, a3, b1, b2, b3: (a1 + b1, a2 + b2, a3 + b3),
+        (0.0, 0.0, 0.0),
+    )
+    rstd_3 = ct.rsqrt(tot_3 * (1.0 / N_COLS) + eps)
+    rstd_2 = ct.rsqrt(tot_2 * (1.0 / N_COLS) + eps)
+    rstd_1 = ct.rsqrt(tot_1 * (1.0 / N_COLS) + eps)
 
     ct.scatter(rstd3, row_idx, rstd_3)
     ct.scatter(rstd2, row_idx, rstd_2)
@@ -187,23 +180,12 @@ def _poly_norm_bwd_kernel(
     BLOCK_SIZE: ct.Constant[int],
     ALIGNED: ct.Constant[bool],
 ):
-    """
-    PolyNorm backward kernel (row-parallel).
+    """Two-pass PolyNorm backward with atomic weight and bias gradient accumulation.
 
-    Two passes per row:
-    1. Compute S_p = sum(dy * x^p) for each power p, and dB = sum(dy).
-    2. Compute dx using closed-form gradient formula.
-
-    dW/dB contributions are atomically reduced into a single (4,) output tensor
-    directly inside the kernel — eliminates a separate host-side .sum(dim=1)
-    + .to(W.dtype) launch chain.
-
-    ALIGNED=True uses check_bounds=False (hardware TMA, ~10% faster) when
-    n_cols is a power of 2 and BLOCK_SIZE==n_cols.
+    ALIGNED requires N_COLS divisible by BLOCK_SIZE.
     """
     row_idx = ct.bid(0)
 
-    # Load weights and cached rstd values
     w0 = ct.astype(ct.load(weights, 0, shape=()), ct.float32)
     w1 = ct.astype(ct.load(weights, 1, shape=()), ct.float32)
     w2 = ct.astype(ct.load(weights, 2, shape=()), ct.float32)
@@ -268,89 +250,66 @@ def _poly_norm_bwd_kernel(
             ct.scatter(dx, (row_idx, col_indices), ct.astype(dx_t, dx.dtype), check_bounds=True)
 
 
-# Large-N variant (n_cols >= 8192): higher occupancy + 8 worker warps to widen
-# parallelism on latency-bound 2-pass multi-chunk path.
 _poly_norm_bwd_kernel_large = _poly_norm_bwd_kernel.replace_hints(occupancy=4, num_worker_warps=8)
 
-
-# ---------------------------------------------------------------------------
-# Forward schedule autotune (tune-once / cache / launch)
-# ---------------------------------------------------------------------------
-# The best forward (kernel-variant, BLOCK_SIZE, occupancy) triple is
-# shape- and board-dependent, so it is selected by exhaustive_search once per
-# (n_rows, n_cols, dtype, device) and cached. Only forward schedule/config
-# selection depends on this; kernel math, the backward path, and dispatch
-# registration are unaffected.
 _fwd_tune_cache: dict = {}
 
-# Body key -> base @ct.kernel object. "mc" = fold-accumulator multi-chunk kernel
-# (BLOCK_SIZE may be < n_cols); "sc" = single-chunk re-gather kernel (one tile
-# covers the whole row, so BLOCK_SIZE >= n_cols).
 _FWD_BODY = {"mc": _poly_norm_fwd_kernel, "sc": _poly_norm_fwd_kernel_sc_large}
 
 
 def _fwd_configs(n_cols):
-    """Candidate (body_key, BLOCK_SIZE, occupancy) triples for this row width.
+    """Return (body, block size, occupancy, worker warps) candidates.
 
-    The first entry doubles as the fixed schedule used when autotune is
-    disabled, so is_autotune_disabled() never needs a separately maintained
-    default. Occupancy is higher for narrow tiles (to hide gather latency) and
-    lower for wide tiles (higher per-CTA tile pressure).
+    The first candidate is the fixed schedule when autotuning is disabled.
     """
     np2 = next_power_of_2(n_cols)
     cfgs = []
-    # Single-chunk: one tile covers the whole row (BLOCK_SIZE >= n_cols).
+
     sc_block = min(MAX_FUSED_SIZE, np2)
-    if sc_block >= n_cols:
+    if sc_block >= n_cols and sc_block != 4096:
         if sc_block <= 2048:
             sc_occ = (8, 16)
-        elif sc_block <= 4096:
-            sc_occ = (4, 8)
         else:
             sc_occ = (2, 4)
+        sc_nww = (4, 8) if sc_block >= 8192 else (4,)
         for occ in sc_occ:
-            cfgs.append(("sc", sc_block, occ))
-    # Multi-chunk fold-accumulator (BLOCK < n_cols): only competitive at wide
-    # rows, and the only usable body when next_pow2(n_cols) > MAX_FUSED_SIZE
-    # leaves no single-chunk tile.
-    mc_blocks = [2048, 4096] if n_cols >= 8192 else []
-    for blk in mc_blocks:
-        for occ in (4, 8):
-            cfgs.append(("mc", blk, occ))
+            for nww in sc_nww:
+                cfgs.append(("sc", sc_block, occ, nww))
+
+    for blk in (512, 1024, 2048, 4096):
+        if blk >= n_cols:
+            continue
+        for occ in (6, 8) if blk <= 1024 else (4, 8):
+            for nww in (4, 8) if blk >= 1024 else (4,):
+                cfgs.append(("mc", blk, occ, nww))
     return cfgs
 
 
 def _tune_forward(stream, grid, launch_args, n_cols):
-    """Search forward schedules and return (tuned_kernel, BLOCK_SIZE).
-
-    Runs one exhaustive_search per kernel body (each body is a distinct
-    @ct.kernel object, so it cannot share a single search), then keeps the
-    globally fastest measured config. _fwd_configs() always yields at least
-    one candidate per body that has any, so no separate fallback is needed
-    here — same as the other cuTile autotune sites (mla.py, attention_varlen.py).
-    """
+    """Return the fastest forward schedule across kernel bodies."""
     configs = _fwd_configs(n_cols)
-    best = None  # (mean_us, body_key, BLOCK_SIZE, occupancy)
-    for body_key in ("sc", "mc"):
-        sub = [SimpleNamespace(BLOCK_SIZE=blk, occupancy=occ) for (k, blk, occ) in configs if k == body_key]
-        if not sub:
-            continue
-        base = _FWD_BODY[body_key]
+    best = None  # (mean_us, body_key, BLOCK_SIZE, occupancy, num_worker_warps)
+    for body_key in dict.fromkeys(k for (k, _, _, _) in configs):
+        sub = [
+            SimpleNamespace(BLOCK_SIZE=blk, occupancy=occ, num_worker_warps=nww)
+            for (k, blk, occ, nww) in configs
+            if k == body_key
+        ]
         with ct.compiler_timeout(60):
             result = exhaustive_search(
                 sub,
                 stream,
                 lambda cfg: grid,
-                base,
+                _FWD_BODY[body_key],
                 lambda cfg: launch_args(cfg.BLOCK_SIZE),
-                lambda cfg: {"occupancy": cfg.occupancy},
+                lambda cfg: {"occupancy": cfg.occupancy, "num_worker_warps": cfg.num_worker_warps},
             )
         m = result.best
         if best is None or m.mean_us < best[0]:
-            best = (m.mean_us, body_key, m.config.BLOCK_SIZE, m.config.occupancy)
+            best = (m.mean_us, body_key, m.config.BLOCK_SIZE, m.config.occupancy, m.config.num_worker_warps)
 
-    _, body_key, blk, occ = best
-    return _FWD_BODY[body_key].replace_hints(occupancy=occ), blk
+    _, body_key, blk, occ, nww = best
+    return _FWD_BODY[body_key].replace_hints(occupancy=occ, num_worker_warps=nww), blk
 
 
 class PolyNormCuTileFunction(torch.autograd.Function):
@@ -368,8 +327,6 @@ class PolyNormCuTileFunction(torch.autograd.Function):
         X_2d = X.contiguous().view(-1, dim)
         n_rows, n_cols = X_2d.shape
 
-        # B is a scalar bias — accept 0-dim (torch.tensor(1.0)) or (1,); the kernel reads
-        # bias[0], so flatten to a 1-element tensor and restore B's shape for the dB gradient.
         bias_shape = B.shape
         B = B.reshape(1)
 
@@ -383,30 +340,13 @@ class PolyNormCuTileFunction(torch.autograd.Function):
         Wc = W.contiguous()
         Bc = B.contiguous()
 
-        # launch_args(blk): full kernel-arg tuple for a given BLOCK_SIZE. Both
-        # forward bodies share this signature, so autotune and the final launch
-        # reuse it. aligned=True (hardware TMA path) whenever BLOCK_SIZE divides
-        # n_cols evenly.
         def launch_args(blk):
-            return (
-                X_2d,
-                Y,
-                Wc,
-                Bc,
-                RSTD3,
-                RSTD2,
-                RSTD1,
-                int(n_cols),
-                float(eps),
-                int(blk),
-                bool((n_cols % blk) == 0),
-            )
+            aligned = bool((n_cols % blk) == 0)
+            return (X_2d, Y, Wc, Bc, RSTD3, RSTD2, RSTD1, int(n_cols), float(eps), int(blk), aligned)
 
-        # Per-shape schedule autotune: tune once, cache the winning specialized
-        # kernel + BLOCK_SIZE, then launch directly on every later call.
         if is_autotune_disabled():
-            body_key, BLOCK_SIZE, occ = _fwd_configs(n_cols)[0]
-            fwd_kernel = _FWD_BODY[body_key].replace_hints(occupancy=occ)
+            body_key, BLOCK_SIZE, occ, nww = _fwd_configs(n_cols)[0]
+            fwd_kernel = _FWD_BODY[body_key].replace_hints(occupancy=occ, num_worker_warps=nww)
         else:
             cache_key = (n_rows, n_cols, X_2d.dtype, str(X_2d.device))
             if cache_key not in _fwd_tune_cache:
@@ -430,21 +370,14 @@ class PolyNormCuTileFunction(torch.autograd.Function):
         dY_2d = dy.contiguous().view(-1, dim)
         n_rows, n_cols = dY_2d.shape
 
-        # Bwd has 4 fp32 accumulators (S_3, S_2, S_1, dB) of BLOCK_SIZE each.
-        # Cap BLOCK_SIZE at 4096 to keep accumulators in registers (16KB per tile)
-        # and avoid spills observed at BLOCK_SIZE >= 16384 on norm-like bwd kernels.
         BWD_MAX_BLOCK = 4096
         BLOCK_SIZE = min(BWD_MAX_BLOCK, next_power_of_2(n_cols))
         aligned = (n_cols % BLOCK_SIZE) == 0
 
         dx = torch.empty_like(dY_2d)
-        # The kernel atomically accumulates dW/dB contributions across all rows
-        # directly into this 4-element fp32 buffer — eliminates the host-side
-        # .sum(dim=1) + .to(W.dtype) launch chain.
+
         dwdb_output = torch.zeros(4, dtype=torch.float32, device=W.device)
 
-        # Medium/large-N (n_cols>=8192) is latency-bound on the 2-pass multi-chunk
-        # IR; the occ=4/nww=8 variant closes the gap.
         kernel_choice = _poly_norm_bwd_kernel_large if n_cols >= 8192 else _poly_norm_bwd_kernel
 
         grid = (n_rows, 1, 1)
@@ -469,7 +402,7 @@ class PolyNormCuTileFunction(torch.autograd.Function):
 
         sums = dwdb_output.to(W.dtype)  # (4,) cast to W.dtype
         dW = sums[:3]
-        dB = sums[3:4].reshape(ctx.bias_shape)  # match B's original shape (scalar or (1,))
+        dB = sums[3:4].reshape(ctx.bias_shape)
 
         return dx.view(*shape), dW, dB, None
 
