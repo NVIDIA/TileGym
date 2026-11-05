@@ -714,7 +714,8 @@ def benchmark_eager(
     return result
 
 
-def autotune_cutile_cuda_graph(stream, grid, kernel, args):
+def autotune_cutile_cuda_graph(stream, grid, kernel, args, flush_l2=None):
+    # cuda.tile >= 1.7 passes flush_l2; the captured-graph span protocol owns cache handling.
     import cuda.tile as ct
 
     # Upstream owns warmup; each callback must launch once on its prepared inputs.
