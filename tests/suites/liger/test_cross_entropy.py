@@ -435,3 +435,29 @@ class Test_Liger_CrossEntropy(common.PyTestCase):
             expected_gradient = torch.autograd.grad(expected_loss, ref_input, grad_outputs=scale)[0]
             torch.testing.assert_close(actual_loss, expected_loss, atol=2e-4, rtol=2e-4)
             torch.testing.assert_close(actual_gradient, expected_gradient, atol=2e-4, rtol=2e-4)
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("backend", ["cutile"])  # scale_ exists only in the cuTile backend
+    def test_op_scale_chunked(self, dtype, backend, monkeypatch):
+        """scale_ splits big tensors into several launches; every chunk must be scaled exactly once."""
+        self.setUp()
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+        from tilegym.suites.liger.cutile import utils
+
+        # Use a small chunk so a small tensor needs several launches, as a > 2**31 element
+        # tensor does with the real chunk. 7 x 4113 = 28791 elements -> 4 launches, the
+        # last one partial and not a multiple of the 4096 block.
+        monkeypatch.setattr(utils, "_SCALE_CHUNK", 2 * 4096)
+        launches = []
+        launch = utils.ct.launch
+        monkeypatch.setattr(utils.ct, "launch", lambda *args: launches.append(args) or launch(*args))
+        x = torch.randn(7, 4113, dtype=dtype, device="cuda")
+        scale = torch.tensor(-2.5, device="cuda")
+        expected = (x.float() * scale).to(dtype)
+        out = utils.scale_(x, scale)
+        assert out is x
+        torch.testing.assert_close(x, expected, atol=0, rtol=0)
+        assert len(launches) == 4
