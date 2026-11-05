@@ -95,6 +95,11 @@ def loss_normalization(target, ignore_index, vocab_size=0, weight=None):
     return output.unbind()
 
 
+# cuTile array shapes are int32: scale_ splits tensors with more than 2**31 - 1 elements
+# (e.g. 32768 x 128256 logits) into chunks of this many elements, a multiple of its block.
+_SCALE_CHUNK = 1 << 30
+
+
 @ct.kernel
 def _scale_kernel(x, scale, BLOCK: ct.Constant[int]):
     factor = ct.astype(ct.load(scale, (0,), shape=()), ct.float32)
@@ -106,9 +111,11 @@ def scale_(x, scale):
     """Multiply the dense tensor ``x`` in place by the device scalar ``scale``; returns ``x``."""
     flat = x.permute(sorted(range(x.ndim), key=x.stride, reverse=True)).view(-1)
     block = 4096
-    ct.launch(
-        torch.cuda.current_stream(), (ct.cdiv(flat.numel(), block),), _scale_kernel, (flat, scale.reshape(1), block)
-    )
+    stream = torch.cuda.current_stream()
+    scale = scale.reshape(1)
+    for start in range(0, flat.numel(), _SCALE_CHUNK):
+        part = flat[start : start + _SCALE_CHUNK]
+        ct.launch(stream, (ct.cdiv(part.numel(), block),), _scale_kernel, (part, scale, block))
     return x
 
 
