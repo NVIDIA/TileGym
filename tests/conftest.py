@@ -119,8 +119,22 @@ def framework(request):
     return request.config.getoption("--framework")
 
 
+def _drop_inapplicable_cudagraph_markers(items):
+    """disable_cudagraph(backends=[...]) applies only to items whose backend parameter is listed."""
+    for item in items:
+        marker = item.get_closest_marker("disable_cudagraph")
+        backends = marker.kwargs.get("backends") if marker else None
+        if backends is None:
+            continue
+        callspec = getattr(item, "callspec", None)
+        if callspec is not None and callspec.params.get("backend") in backends:
+            continue
+        item.own_markers = [mark for mark in item.own_markers if mark.name != "disable_cudagraph"]
+
+
 def pytest_collection_modifyitems(config, items):
     """Filter test items based on various parameters"""
+    _drop_inapplicable_cudagraph_markers(items)
 
     def try_get_option(config, option_name):
         try:
