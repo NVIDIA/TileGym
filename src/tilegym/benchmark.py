@@ -14,14 +14,40 @@ from contextlib import nullcontext
 
 import torch
 
-GRAPH_PROTOCOL = "cuda-graph-cold-span-v4"
-EAGER_PROTOCOL = "cuda-eager-cold-span-v2"
+GRAPH_PROTOCOL = "cuda-graph-cold-span-v5"
+EAGER_PROTOCOL = "cuda-eager-cold-span-v3"
 FLUSH_BYTES = 256_000_000
 GRAPH_REPEATS = 8
+
+
+def _pacing_ms(name, default, zero_ok=False):
+    """Returns the millisecond value of environment variable name, or default when unset.
+
+    The value must be positive, or zero as well when zero_ok, which disables the feature.
+    """
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        ms = float(value)
+    except ValueError:
+        ms = math.nan
+    if not math.isfinite(ms) or ms < 0 or (ms == 0 and not zero_ok):
+        kind = "a non-negative" if zero_ok else "a positive"
+        raise ValueError(f"{name} must be {kind} number of milliseconds, got {value!r}")
+    return ms
+
+
 # Power capping lowers clocks after about 40 ms of continuous load on B200, and a
-# saturated GPU needs about 100 ms idle to recover.
-POWER_BURST_MS = 30.0
-POWER_REST_MS = 100.0
+# saturated GPU needs about 100 ms idle to recover. GPUs with a shorter uncapped
+# window take a shorter burst from the environment.
+POWER_BURST_MS = _pacing_ms("TILEGYM_POWER_BURST_MS", 30.0)
+POWER_REST_MS = _pacing_ms("TILEGYM_POWER_REST_MS", 100.0)
+# After a rest the clock takes a few milliseconds of work to settle, so the
+# samples covering that much work are run but not recorded; 0 disables it.
+POWER_SETTLE_MS = _pacing_ms("TILEGYM_POWER_SETTLE_MS", 2.0, zero_ok=True)
+# Only work long enough to draw power moves the clock; shorter replays skip settling.
+POWER_SETTLE_MIN_REPLAY_MS = 0.2
 
 TELEMETRY_ENV = "TILEGYM_SAMPLE_TELEMETRY"
 TELEMETRY_MAX_READS = 64
@@ -252,12 +278,28 @@ class _PowerPacer:
         self.rests = 0
 
     def admit(self, duration_ms):
-        if self.busy_ms and self.busy_ms + duration_ms > POWER_BURST_MS:
+        rested = bool(self.busy_ms) and self.busy_ms + duration_ms > POWER_BURST_MS
+        if rested:
             torch.cuda.synchronize()
             time.sleep(POWER_REST_MS / 1000)
             self.busy_ms = 0.0
             self.rests += 1
         self.busy_ms += duration_ms
+        return rested
+
+    def settle_count(self, sample_ms, replay_ms):
+        """Number of unrecorded samples run after each rest before a timed sample.
+
+        Only power-dense replays move the clock, and the settle samples plus the
+        timed one must fit the burst, so short replays and samples longer than
+        half a burst settle with none and the count never exceeds the burst
+        budget. Settle time counts whole samples, preparation included, which
+        bounds the count for short kernels.
+        """
+        if POWER_SETTLE_MS <= 0 or replay_ms < POWER_SETTLE_MIN_REPLAY_MS or 2 * sample_ms > POWER_BURST_MS:
+            return 0
+        sample_ms = max(sample_ms, replay_ms)
+        return min(math.ceil(POWER_SETTLE_MS / sample_ms), math.floor(POWER_BURST_MS / sample_ms) - 1)
 
 
 class _CapturedCall:
@@ -346,10 +388,21 @@ class _CapturedCall:
             # Boundary counters bracket the sample loop alone, so the limiter fractions
             # describe the timed work and its rests, not profiler start-up or parsing.
             counters_start = telemetry.counters()
+            settle_count = pacer.settle_count(sample_ms, replay_ms) if pacer is not None else 0
+            self.settle_samples = 0
             for index in range(count):
                 call = calls[index % len(calls)]
-                if pacer is not None:
-                    pacer.admit(sample_ms)
+                if pacer is not None and pacer.admit(sample_ms):
+                    # The settle samples fit the burst (settle_count guarantees it),
+                    # so they only charge the pacer and cannot be cut by a rest.
+                    for _ in range(settle_count):
+                        with call.input_context():
+                            call.prepare()
+                            torch.cuda.synchronize()
+                            call.graph.replay()
+                            torch.cuda.current_stream().synchronize()
+                        pacer.busy_ms += sample_ms
+                    self.settle_samples += settle_count
                 with call.input_context():
                     call.prepare()
                     torch.cuda.synchronize()
@@ -613,6 +666,7 @@ def benchmark_cuda_graph(
                 "graph_mean_std_ms": graph_std,
                 "graph_mean_rel_std": 100 * graph_std / mean if mean else 0,
                 "power_rests": pacer.rests - initial_rests,
+                "settle_samples": call.settle_samples,
             }
         )
         return result
@@ -689,8 +743,16 @@ def benchmark_eager(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     ) as prof:
         counters_start = telemetry.counters()
+        settle_count = pacer.settle_count(sample_ms, estimate)
+        settle_samples = 0
         for index in range(n_repeat):
-            pacer.admit(sample_ms)
+            if pacer.admit(sample_ms):
+                for _ in range(settle_count):
+                    prepare()
+                    fn()
+                    torch.cuda.synchronize()
+                    pacer.busy_ms += sample_ms
+                settle_samples += settle_count
             prepare()
             torch.cuda.synchronize()
             with torch.profiler.record_function("tilegym.eager.sample"):
@@ -711,6 +773,7 @@ def benchmark_eager(
     _attach_telemetry(profiled, readings, telemetry.status, block)
     result = _summarize(profiled, kernel_filter, EAGER_PROTOCOL, collect_kernel_times, "eager")[0]
     result["power_rests"] = pacer.rests
+    result["settle_samples"] = settle_samples
     return result
 
 
