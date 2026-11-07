@@ -154,7 +154,9 @@ def _kldiv_bwd_ct(
     GT,  # (BT, V) target (probs or log-probs)
     GRADS,  # (BT, V) output gradient
     n_cols: ct.Constant[int],
-    scale,
+    grad_output,
+    normalizer,
+    SCALAR_GRAD: ct.Constant[bool],
     BLOCK_SIZE: ct.Constant[int],
     LOG_TARGET: ct.Constant[int],
     N_FULL_CHUNKS: ct.Constant[int],  # number of full (non-tail) chunks; use check_bounds=False
@@ -162,16 +164,22 @@ def _kldiv_bwd_ct(
     """
     Backward kernel. Grid: (BT, 1, 1).
     Gradient w.r.t. y_pred: -y_true * scale (or -exp(y_true) * scale for log_target).
-    scale fuses grad_output and the reduction normalizer (1/BT or 1/(BT*V)) so that
-    both are applied in a single pass, eliminating post-kernel element-wise ops.
+    scale is the scalar grad_output times the reduction normalizer (1/BT or 1/(BT*V)),
+    or the matching grad_output element for reduction="none", so both are applied in
+    the same pass.
     Full chunks use check_bounds=False (hardware TMA); tail chunk uses check_bounds=True.
     """
+    if SCALAR_GRAD:
+        scale = ct.astype(ct.load(grad_output, (0,), shape=()), ct.float32) * normalizer
     row_idx = ct.bid(0)
 
     # Fast path: full aligned chunks (check_bounds=False -> hardware TMA)
     for ci in range(N_FULL_CHUNKS):
         col_idx = ct.add(ct.arange(BLOCK_SIZE, dtype=ct.int32), ci * BLOCK_SIZE)
         gt = ct.astype(ct.gather(GT, (row_idx, col_idx), check_bounds=False), ct.float32)
+
+        if not SCALAR_GRAD:
+            scale = ct.astype(ct.gather(grad_output, (row_idx, col_idx), check_bounds=False), ct.float32)
 
         if LOG_TARGET:
             res = -ct.exp(gt) * scale
@@ -185,6 +193,9 @@ def _kldiv_bwd_ct(
         ci = N_FULL_CHUNKS
         col_idx = ct.add(ct.arange(BLOCK_SIZE, dtype=ct.int32), ci * BLOCK_SIZE)
         gt = ct.astype(ct.gather(GT, (row_idx, col_idx), check_bounds=True, padding_value=0.0), ct.float32)
+
+        if not SCALAR_GRAD:
+            scale = ct.astype(ct.gather(grad_output, (row_idx, col_idx), padding_value=0.0), ct.float32)
 
         if LOG_TARGET:
             res = -ct.exp(gt) * scale
@@ -245,12 +256,14 @@ def _kldiv_forward_ct(y_pred, y_true, log_target, reduction, eps):
             return row_sums.sum() / (BT * V)
 
 
-def _kldiv_backward_ct(y_true, scale, log_target):
+def _kldiv_backward_ct(y_true, grad_output, log_target, reduction):
     BT, V = y_true.shape
     BLOCK_SIZE = min(MAX_FUSED_SIZE, next_power_of_2(V))
     n_full_chunks = V // BLOCK_SIZE  # full aligned chunks (tail handled separately in kernel)
 
     new_grads = torch.empty_like(y_true)
+    normalizer = 1.0 / BT if reduction == "batchmean" else 1.0 / (BT * V) if reduction == "mean" else 1.0
+    scalar_grad = grad_output.numel() == 1
     grid = (BT, 1, 1)
     ct.launch(
         torch.cuda.current_stream(),
@@ -260,7 +273,9 @@ def _kldiv_backward_ct(y_true, scale, log_target):
             y_true,
             new_grads,
             int(V),
-            float(scale),
+            grad_output.reshape(1) if scalar_grad else grad_output,
+            normalizer,
+            scalar_grad,
             int(BLOCK_SIZE),
             int(log_target),
             int(n_full_chunks),
@@ -285,27 +300,7 @@ class KLDivCuTileFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         (y_true,) = ctx.saved_tensors
-        BT, V = y_true.shape
-
-        # Compute combined scale: fuse grad_output and reduction normalizer into a
-        # single scalar so the kernel can apply both in one pass, eliminating the
-        # extra element-wise kernel launches that existed previously.
-        if grad_output.numel() == 1:
-            scale = grad_output.item()
-        else:
-            scale = 1.0
-
-        if ctx.reduction == "batchmean":
-            scale /= BT
-        elif ctx.reduction == "mean":
-            scale /= BT * V
-
-        derivative = _kldiv_backward_ct(y_true, scale, ctx.log_target)
-
-        # Non-scalar grad_output (rare: only when reduction="none"): apply separately
-        if grad_output.numel() != 1:
-            derivative = derivative * grad_output
-
+        derivative = _kldiv_backward_ct(y_true, grad_output, ctx.log_target, ctx.reduction)
         return derivative, None, None, None, None
 
 

@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Use the CUDA 13.3 / Ubuntu 24.04 base image, which ships a newer default
+# Use the CUDA 13.4 / Ubuntu 24.04 base image, which ships a newer default
 # toolchain (GCC 13) and Python 3.12 for building the user-space environment.
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.3.0-devel-ubuntu24.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.4.3-devel-ubuntu24.04
 
 FROM ${BASE_IMAGE} AS base
 
@@ -47,5 +47,5 @@ RUN uv sync --locked --extra dev && \
 # It is selected only at test time via PYTHONPATH=/opt/triton-cuda-tileir + ENABLE_TILE=1,
 # so the default environment keeps the upstream Triton that torch depends on.
 # The wheel is built for CPython 3.12, matching the Ubuntu 24.04 interpreter.
-ARG TRITON_CUDA_TILEIR_WHEEL=https://github.com/triton-lang/Triton-to-tile-IR/releases/download/cuda_tile_v13.3.0/nvtriton-3.6.0-cp312-cp312-linux_x86_64.whl
+ARG TRITON_CUDA_TILEIR_WHEEL=https://github.com/triton-lang/Triton-to-tile-IR/releases/download/v3.7.1-tileir-13.4.0/triton_tileir-3.7.1%2Btileir13.4.0-cp312-cp312-linux_x86_64.whl
 RUN uv pip install --no-deps --target /opt/triton-cuda-tileir "${TRITON_CUDA_TILEIR_WHEEL}"

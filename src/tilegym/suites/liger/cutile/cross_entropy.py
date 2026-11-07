@@ -14,7 +14,9 @@ from cuda.tile.tune import exhaustive_search
 
 from tilegym.backend import register_impl
 
+from .utils import loss_normalization
 from .utils import next_power_of_2
+from .utils import scale_
 
 ConstFloat = ct.Constant[float]
 ConstInt = ct.Constant[int]
@@ -53,6 +55,10 @@ def _get_tuned_ce_kernel(n_cols, block_size, dtype, device):
     d_f32 = torch.zeros(1, dtype=torch.float32, device=device)
     d_i64 = torch.zeros(1, dtype=torch.int64, device=device)
     d_w = torch.zeros(1, dtype=torch.float32, device=device)
+    count = torch.full((1,), float(tune_rows), device=device)
+    inv_count = count.reciprocal()
+    weight_total = torch.zeros(1, device=device)
+    tune_stream.wait_stream(torch.cuda.current_stream(device))
 
     def args_fn(_cfg):
         return (
@@ -64,9 +70,9 @@ def _get_tuned_ce_kernel(n_cols, block_size, dtype, device):
             d_f32,
             d_i64,
             int(n_cols),
-            1.0,
-            float(tune_rows),
-            0.0,
+            inv_count,
+            count,
+            weight_total,
             -100,
             0.0,
             0.0,
@@ -154,6 +160,9 @@ def _liger_cross_entropy_kernel(
     RETURN_TOKEN_ACCURACY: Whether to store per-token accuracy.
     RETURN_PREDICTED_TOKENS: Whether to store predicted tokens.
     """
+    inv_n_non_ignore = ct.load(inv_n_non_ignore, (0,), shape=())
+    sum_non_ignore_weight = ct.load(sum_non_ignore_weight, (0,), shape=())
+    weight_sum = ct.load(weight_sum, (0,), shape=())
     row_idx = ct.bid(0)
 
     # Load target label (scalar from int64 tensor)
@@ -355,11 +364,9 @@ def _liger_cross_entropy_kernel(
 
 
 def _scale_cross_entropy_backward(_input, grad_output):
-    if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
-        return _input
     if grad_output.ndim > 0:
-        return _input * grad_output.unsqueeze(dim=1)
-    return _input * grad_output
+        return _input.mul_(grad_output.unsqueeze(dim=1))
+    return scale_(_input, grad_output)
 
 
 class CrossEntropyCuTileFunction(torch.autograd.Function):
@@ -406,31 +413,18 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
             torch.full((num_rows,), -1, dtype=torch.int64, device=_input.device) if return_predicted_tokens else None
         )
 
-        target_mask = target != ignore_index
-        n_non_ignore = target_mask.sum().item()
-        assert (target * target_mask).max() < _input.shape[-1], (
-            f"Target {target.max()} is out of bounds. Expected < {_input.shape[-1]}"
-        )
-        assert (target * target_mask).min() >= 0, f"Target {target.min()} is out of bounds. Expected >= 0"
-        inv_n_non_ignore = 1.0 / max(n_non_ignore, 1)
-        reduction_mean = int(reduction == "mean")
-
         has_weight = weight is not None
-        sum_non_ignore_weight = float(n_non_ignore)
-        weight_sum = 0.0
         if has_weight:
             assert weight.shape[0] == vocab_size, f"If given, weight has to be a Tensor of size V. Got: {weight.shape}"
             assert torch.is_floating_point(weight), (
                 f"If given, weight has to be a Tensor of floating point dtype. Got: {weight.dtype}"
             )
-            sum_non_ignore_weight = (
-                torch.gather(weight.float(), dim=0, index=target.masked_select(target_mask)).sum().item()
-                if n_non_ignore > 0
-                else 1.0
-            )
-            weight_sum = weight.float().sum().item()
-            if not weight.is_contiguous():
-                weight = weight.contiguous()
+        n_non_ignore, inv_n_non_ignore, sum_non_ignore_weight, weight_sum = loss_normalization(
+            target, ignore_index, vocab_size, weight
+        )
+        if has_weight:
+            weight = weight.contiguous()
+        reduction_mean = int(reduction == "mean")
 
         has_softcapping = softcap is not None
         softcap_val = float(softcap) if softcap is not None else 0.0
@@ -460,9 +454,9 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
                 token_accuracy_1d if return_token_accuracy else dummy_f32,
                 predicted_tokens_1d if return_predicted_tokens else dummy_i64,
                 int(vocab_size),
-                float(inv_n_non_ignore),
-                float(sum_non_ignore_weight),
-                float(weight_sum),
+                inv_n_non_ignore.reshape(1),
+                sum_non_ignore_weight.reshape(1),
+                weight_sum.reshape(1),
                 int(ignore_index),
                 float(label_smoothing),
                 float(lse_square_scale),
@@ -485,7 +479,7 @@ class CrossEntropyCuTileFunction(torch.autograd.Function):
         else:
             loss = torch.sum(loss_1d)
             z_loss = torch.sum(z_loss_1d) if return_z_loss else None
-            token_accuracy = torch.sum(token_accuracy_1d) / max(n_non_ignore, 1) if return_token_accuracy else None
+            token_accuracy = torch.sum(token_accuracy_1d) / n_non_ignore if return_token_accuracy else None
 
         predicted_tokens = predicted_tokens_1d if return_predicted_tokens else None
 

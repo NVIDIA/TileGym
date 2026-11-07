@@ -35,7 +35,9 @@ import torch
 
 from tilegym.backend import register_impl
 
+from .utils import loss_normalization
 from .utils import next_power_of_2
+from .utils import scale_
 
 _REDUCTION_MODE_NONE = 0
 _REDUCTION_MODE_SUM = 1
@@ -50,6 +52,21 @@ _str_to_reduction_mode = {
 }
 
 
+@ct.function
+def _reduction_scale(scale, n_cols, HAS_LABEL: ct.Constant[int], reduction: ct.Constant[int]):
+    """Scale applied to the loss and gradients.
+
+    For labeled mean/batchmean ``scale`` is a one-element device tensor holding
+    1 / n_non_ignore; otherwise it is a float, 1 / n_rows for mean/batchmean and
+    1.0 for sum/none. Mean additionally divides by ``n_cols``.
+    """
+    if HAS_LABEL and (reduction == _REDUCTION_MODE_MEAN or reduction == _REDUCTION_MODE_BATCHMEAN):
+        scale = ct.load(scale, (0,), shape=())
+    if reduction == _REDUCTION_MODE_MEAN:
+        scale = scale / n_cols
+    return scale
+
+
 @ct.kernel(occupancy=3)
 def _tv_distance_kernel_ct_aligned(
     P,  # (BT, V) first distribution
@@ -57,7 +74,7 @@ def _tv_distance_kernel_ct_aligned(
     LOSS,  # (BT, V) when reduction=none, else (BT,)
     GRADS,  # (BT, V) gradient output
     LABEL,  # (BT,) label tensor, or dummy 1-elem tensor when HAS_LABEL=0
-    scale,  # runtime float: fused reduction scale (1/n_non_ignore etc.); 1.0 for sum/none
+    scale,  # fused reduction scale, see _reduction_scale
     n_rows: ct.Constant[int],
     n_cols: ct.Constant[int],
     ignore_index: ct.Constant[int],
@@ -71,6 +88,7 @@ def _tv_distance_kernel_ct_aligned(
     Uses TMA (ct.load/ct.store) for all 2D accesses.
     Persistent scheduling: each block handles multiple rows.
     """
+    scale = _reduction_scale(scale, n_cols, HAS_LABEL, reduction)
     pid = ct.bid(0)
     num_programs = ct.num_blocks(0)
     n_chunks = n_cols // BLOCK_SIZE
@@ -129,7 +147,7 @@ def _tv_distance_kernel_ct(
     LOSS,  # (BT, V) when reduction=none, else (BT,)
     GRADS,  # (BT, V) gradient output
     LABEL,  # (BT,) label tensor, or dummy 1-elem tensor when HAS_LABEL=0
-    scale,  # runtime float: fused reduction scale (1/n_non_ignore etc.); 1.0 for sum/none
+    scale,  # fused reduction scale, see _reduction_scale
     n_rows: ct.Constant[int],
     n_cols: ct.Constant[int],
     ignore_index: ct.Constant[int],
@@ -144,6 +162,7 @@ def _tv_distance_kernel_ct(
     Uses ct.scatter for GRADS/LOSS writes (bounds-checked for partial last chunk).
     Persistent scheduling: each block handles multiple rows.
     """
+    scale = _reduction_scale(scale, n_cols, HAS_LABEL, reduction)
     pid = ct.bid(0)
     num_programs = ct.num_blocks(0)
     n_chunks = (n_cols + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -205,7 +224,7 @@ def _tv_distance_kernel_ct_gather(
     LOSS,  # (BT, V) when reduction=none, else (BT,)
     GRADS,  # (BT, V) gradient output
     LABEL,  # (BT,) label tensor, or dummy 1-elem tensor when HAS_LABEL=0
-    scale,  # runtime float: fused reduction scale (1/n_non_ignore etc.); 1.0 for sum/none
+    scale,  # fused reduction scale, see _reduction_scale
     n_rows: ct.Constant[int],
     n_cols: ct.Constant[int],
     ignore_index: ct.Constant[int],
@@ -223,6 +242,7 @@ def _tv_distance_kernel_ct_gather(
     halves the barriers and loads and cuts L2 contention on the uncoalesced access — reaching
     ~48% SM throughput and beating the TMA-fallback on odd V.
     """
+    scale = _reduction_scale(scale, n_cols, HAS_LABEL, reduction)
     pid = ct.bid(0)
     num_programs = ct.num_blocks(0)
     n_chunks = (n_cols + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -287,17 +307,12 @@ def _tvd_forward_ct(p, q, shift_labels, reduction, ignore_index, has_label):
 
     label_tensor = shift_labels if has_label else torch.empty(1, device=p.device, dtype=torch.long)
 
-    # Only batchmean/mean need n_non_ignore; skip the .item() sync for sum/none.
-    # The scale is fused into the kernel (grads/loss written pre-scaled), so there is no
-    # host-side grads / n_non_ignore division pass.
-    if reduction_int == _REDUCTION_MODE_BATCHMEAN:
-        n_non_ignore = (shift_labels != ignore_index).sum().item() if has_label else BT
-        scale = 1.0 / n_non_ignore
-    elif reduction_int == _REDUCTION_MODE_MEAN:
-        n_non_ignore = (shift_labels != ignore_index).sum().item() if has_label else BT
-        scale = 1.0 / (n_non_ignore * V)
-    else:  # sum / none
+    if reduction_int not in (_REDUCTION_MODE_BATCHMEAN, _REDUCTION_MODE_MEAN):
         scale = 1.0
+    elif has_label:
+        scale = loss_normalization(shift_labels, ignore_index)[1].reshape(1)
+    else:
+        scale = 1.0 / BT
 
     # empty (not zeros): the kernel writes every position, zeroing ignore rows explicitly.
     grads = torch.empty_like(p)
@@ -316,7 +331,7 @@ def _tvd_forward_ct(p, q, shift_labels, reduction, ignore_index, has_label):
             output_tensor,
             grads,
             label_tensor,
-            float(scale),
+            scale,
             int(BT),
             int(V),
             int(ignore_index),
@@ -352,9 +367,8 @@ class TVDLossCuTileFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         (grads,) = ctx.saved_tensors
-        if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
-            return grads, None, None, None, None
-        return grads * grad_output, None, None, None, None
+        grads = scale_(grads, grad_output) if grad_output.numel() == 1 else grads.mul_(grad_output)
+        return grads, None, None, None, None
 
 
 @register_impl("liger.tvd", backend="cutile")

@@ -343,6 +343,105 @@ class Test_Matmul(common.PyTestCase):
         gc.collect()
 
 
+class Test_SkinnyMatmul(common.PyTestCase):
+    """Performance benchmarks for skinny GEMM shapes (one very large dimension).
+
+    Separated from Test_Matmul because the large-N shapes (N > 90K) take much
+    longer to run than the rest of the matmul suite.
+    """
+
+    reference = staticmethod(Test_Matmul.reference)
+    prepare_data = staticmethod(Test_Matmul.prepare_data)
+
+    _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
+
+    @pytest.mark.parametrize(
+        "m,n,k,offset_a,offset_b,dtype",
+        [
+            (512, 200704, 128, 0, 0, torch.bfloat16),
+            (60328, 1968, 200, 0, 0, torch.bfloat16),
+            (288, 92368, 2416, 0, 0, torch.bfloat16),
+            (3072, 98304, 768, 0, 0, torch.bfloat16),
+            (512, 200704, 128, 0, 0, torch.float32),
+            (60328, 1968, 200, 0, 0, torch.float32),
+            (288, 92368, 2416, 0, 0, torch.float32),
+            (3072, 98304, 768, 0, 0, torch.float32),
+        ],
+        ids=lambda x: str(x) if isinstance(x, list) else x.__name__ if hasattr(x, "__name__") else str(x),
+    )
+    @pytest.mark.parametrize("static_persistent", [True])
+    @pytest.mark.parametrize("use_tma", [True])
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf_skinny(
+        self,
+        m,
+        n,
+        k,
+        offset_a,
+        offset_b,
+        static_persistent,
+        use_tma,
+        dtype,
+        backend,
+        record_property,
+    ):
+        """Performance benchmark for "skinny" GEMM shapes (one very large dimension).
+
+        These shapes have one dimension significantly larger than the other two
+        (e.g. N > 90K), representative of recommendation-system and large-N
+        inference workloads. Tracked to detect regressions and guide optimization.
+        """
+        self.setUp()
+        if torch.cuda.get_device_capability()[0] == 8:
+            pytest.skip("Skip on sm80: no TMA support")
+        if backend == "cutile" and not static_persistent:
+            pytest.skip("CuTile requires static_persistent=True for this test")
+        if dtype == torch.float8_e4m3fn:
+            pytest.skip("FP8 not applicable for skinny shapes test")
+        a, b = self.prepare_data(m, n, k, False, False, offset_a, offset_b, dtype)
+        kernel_kwargs = {
+            "trans_a": False,
+            "trans_b": False,
+            "static_persistent": static_persistent,
+            "use_tma": use_tma,
+        }
+
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(a, b)
+        elif tilegym.is_backend_available(backend):
+            try:
+                tilegym.set_backend(backend)
+            except Exception as e:
+                pytest.skip(f"Backend {backend} is not available: {e}")
+            backend_fn = lambda: tilegym.ops.matmul(a, b, **kernel_kwargs)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+
+        skip_correctness = backend == "pytorch"
+        if not skip_correctness:
+            try:
+                self.assertCorrectness(
+                    backend_fn,
+                    lambda: self.reference(a, b),
+                    kwargs={},
+                    atol=1e-2,
+                    rtol=1e-2,
+                )
+            except torch.OutOfMemoryError as e:
+                pytest.skip(f"OOM during correctness check: {e}")
+
+        try:
+            res = common.benchmark_framework(backend, backend_fn)
+        except torch.OutOfMemoryError as e:
+            pytest.skip(f"OOM during benchmark: {e}")
+        record_property("benchmark", res)
+
+        del a, b, backend_fn
+        torch.cuda.empty_cache()
+        gc.collect()
+
+
 def get_weight_shapes(tp_size=1):
     """Get weight shapes for DeepSeek-V3-like models."""
     # NOTE: The weight shapes only works for DeepSeek-V3.

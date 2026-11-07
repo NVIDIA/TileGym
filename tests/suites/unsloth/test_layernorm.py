@@ -14,6 +14,7 @@ from tilegym.suites.unsloth.ops import layernorm
 DEVICE = "cuda"
 
 _backends = ["cutile"]
+_perf_backends = _backends + ["pytorch"]
 
 
 class Test_Unsloth_Layernorm(common.PyTestCase):
@@ -43,12 +44,12 @@ class Test_Unsloth_Layernorm(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op(self, shape, dtype, framework):
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op(self, shape, dtype, backend):
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         dim = shape[-1]
@@ -74,13 +75,13 @@ class Test_Unsloth_Layernorm(common.PyTestCase):
             ((4, 2048), torch.bfloat16),
         ],
     )
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward(self, shape, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward(self, shape, dtype, backend):
         """Test backward pass via autograd."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         dim = shape[-1]
@@ -97,3 +98,85 @@ class Test_Unsloth_Layernorm(common.PyTestCase):
             rtol=1e-2,
             atol=1e-2,
         )
+
+
+# =============================================================================
+# Per-kernel perf classes
+# =============================================================================
+
+
+class Test_Unsloth_Layernorm_Forward(common.PyTestCase):
+    """Perf for the LayerNorm forward."""
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (4, 256),
+            (32, 4096),
+            (512, 4096),
+            (1024, 4096),
+            (2048, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        dim = shape[-1]
+        X = torch.randn(*shape, dtype=dtype, device=DEVICE)
+        W = torch.randn(dim, dtype=dtype, device=DEVICE)
+        b = torch.randn(dim, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: Test_Unsloth_Layernorm.reference(X, W, b, eps=1e-6)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: layernorm(X, W, b, eps=1e-6)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+
+class Test_Unsloth_Layernorm_Backward(common.PyTestCase):
+    """Perf for the LayerNorm backward."""
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (4, 256),
+            (32, 4096),
+            (512, 4096),
+            (1024, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, backend, record_property):
+        """Benchmark backward pass throughput for LayerNorm."""
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        dim = shape[-1]
+        dout = torch.ones(*shape, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            X = torch.randn(*shape, dtype=dtype, device=DEVICE, requires_grad=True)
+            W = torch.randn(dim, dtype=dtype, device=DEVICE)
+            b = torch.randn(dim, dtype=dtype, device=DEVICE)
+            forward_fn = lambda: Test_Unsloth_Layernorm.reference(X, W, b, eps=1e-06)
+
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            X = torch.randn(*shape, dtype=dtype, device=DEVICE, requires_grad=True)
+            W = torch.randn(dim, dtype=dtype, device=DEVICE)
+            b = torch.randn(dim, dtype=dtype, device=DEVICE)
+            forward_fn = lambda: layernorm(X, W, b, eps=1e-06)
+
+        result = common.benchmark_framework(backend, forward_fn, mode="backward", gradient=dout, grad_to_none=[X])
+        record_property("benchmark", result)

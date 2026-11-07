@@ -136,7 +136,7 @@ class Test_FlashInfer_RopeQuantizeFp8(common.PyTestCase):
     @pytest.mark.parametrize("input_dtype", [torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
     @pytest.mark.parametrize(
-        "framework",
+        "backend",
         [
             "cutile",
         ],
@@ -152,16 +152,16 @@ class Test_FlashInfer_RopeQuantizeFp8(common.PyTestCase):
         is_neox_style,
         input_dtype,
         quant_dtype,
-        framework,
+        backend,
         arch,
     ):
         _impl_fw = ["cutile"]
-        if framework not in _impl_fw:
-            pytest.skip(f"Framework {framework} not supported")
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if backend not in _impl_fw:
+            pytest.skip(f"Backend {backend} not supported")
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         if arch == "sm80" and "float8" in quant_dtype.__repr__():
             pytest.skip("FP8 is not supported on sm80 (Ampere).")
@@ -211,3 +211,94 @@ class Test_FlashInfer_RopeQuantizeFp8(common.PyTestCase):
         )
         torch.testing.assert_close(q_out_f8_ref.float(), q_out.float(), atol=1e-2, rtol=2e-1)
         torch.testing.assert_close(k_out_f8_ref.float(), k_out.float(), atol=1e-2, rtol=2e-1)
+
+    @pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 768])
+    @pytest.mark.parametrize("num_qo_heads", [128])
+    @pytest.mark.parametrize("head_size", [576])
+    @pytest.mark.parametrize("rotary_dim", [64])
+    @pytest.mark.parametrize("max_position_embeddings", [4096])
+    @pytest.mark.parametrize("base", [10000])
+    @pytest.mark.parametrize("is_neox_style", [False])
+    @pytest.mark.parametrize("input_dtype", [torch.float16])
+    @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn])
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "cutile",
+        ],
+    )
+    def test_perf(
+        self,
+        num_tokens,
+        num_qo_heads,
+        head_size,
+        rotary_dim,
+        max_position_embeddings,
+        base,
+        is_neox_style,
+        input_dtype,
+        quant_dtype,
+        backend,
+        record_property,
+    ):
+        self.setUp()
+        if "float8" in str(quant_dtype) and torch.cuda.get_device_capability()[0] < 9:
+            pytest.skip("FP8 requires compute capability 9.0 or newer")
+        device = "cuda:0"
+        # Fixed seed for reproducibility across tests
+        torch.manual_seed(0)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(0)
+        q_in = torch.randn(num_tokens, num_qo_heads, 576, dtype=input_dtype, device=device)
+        k_in = torch.randn(num_tokens, 576, dtype=input_dtype, device=device)
+        pos_ids = torch.arange(num_tokens, device=device)
+
+        # reference implementation
+        rope_flashinfer = RotaryEmbedding(
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            input_dtype,
+            device,
+        )
+        q_out_f16_ref, k_out_f16_ref = rope_flashinfer.forward_native(pos_ids, q_in, k_in)
+        q_out_f8_ref, k_out_f8_ref = map(
+            lambda x: x.to(quant_dtype),
+            (q_out_f16_ref, k_out_f16_ref),
+        )
+
+        # run benchmark
+        q_out = torch.empty_like(q_in, dtype=quant_dtype)
+        k_out = torch.empty_like(k_in, dtype=quant_dtype)
+
+        _impl_fw = ["cutile"]
+        if backend in _impl_fw:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            impl_fn = tilegym_flashinfer_ops.rope_quantize_fp8
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+        framework_fn = lambda: impl_fn(
+            q_in[..., :rotary_dim],
+            k_in[..., :rotary_dim],
+            q_in[..., rotary_dim:],
+            k_in[..., rotary_dim:],
+            rope_flashinfer.cos_sin_cache,
+            pos_ids,
+            is_neox=is_neox_style,
+            q_rope_out=q_out[..., :rotary_dim],
+            k_rope_out=k_out[..., :rotary_dim],
+            q_nope_out=q_out[..., rotary_dim:],
+            k_nope_out=k_out[..., rotary_dim:],
+            quant_scale_q=1.0,
+            quant_scale_kv=1.0,
+        )
+        framework_fn()
+        torch.testing.assert_close(q_out_f8_ref.float(), q_out.float(), atol=1e-2, rtol=2e-1)
+        torch.testing.assert_close(k_out_f8_ref.float(), k_out.float(), atol=1e-2, rtol=2e-1)
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
