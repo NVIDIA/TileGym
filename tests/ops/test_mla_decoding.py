@@ -48,6 +48,16 @@ class Test_MLADecoding(common.PyTestCase):
         """Calculate the default attention scale factor"""
         return 1.0 / (math.sqrt(q.size(-1) + qpe.size(-1)))
 
+    @staticmethod
+    def _make_inputs(num_batch, num_heads, block_d, block_kpe, s_kv, dtype, device):
+        shapes = [
+            (num_batch, num_heads, block_d),
+            (num_batch, num_heads, block_kpe),
+            (num_batch, s_kv, block_d),
+            (num_batch, s_kv, block_kpe),
+        ]
+        return tuple(torch.randn(shape, device=device, dtype=torch.float32).to(dtype) for shape in shapes)
+
     _backends = ["cutile"]
     if is_backend_available("tilecpp"):
         _backends = _backends + ["tilecpp"]
@@ -202,14 +212,7 @@ class Test_MLADecoding(common.PyTestCase):
                 pytest.skip("Skip due to cutile not support float8_e5m2")
 
         device = torch.device("cuda")
-        # Generate test data
-        q = torch.ones(num_batch, num_heads, BLOCK_D, device=device, dtype=torch.float32).to(dtype)
-
-        qpe = torch.ones(num_batch, num_heads, BLOCK_KPE, device=device, dtype=torch.float32).to(dtype)
-
-        kv = torch.ones(num_batch, S_kv, BLOCK_D, device=device, dtype=torch.float32).to(dtype)
-
-        kpe = torch.ones(num_batch, S_kv, BLOCK_KPE, device=device, dtype=torch.float32).to(dtype)
+        q, qpe, kv, kpe = self._make_inputs(num_batch, num_heads, BLOCK_D, BLOCK_KPE, S_kv, dtype, device)
 
         # Calculate proper scale factor
         sm_scale = self._get_sm_scale(q, qpe)
@@ -227,13 +230,6 @@ class Test_MLADecoding(common.PyTestCase):
         else:
             pytest.skip(f"Framework {framework} is not available")
 
-        # Run benchmarks
-        res = common.benchmark_framework(framework, framework_fn)
-
-        # Record results for reporting
-        record_property("benchmark", res)
-
-        # Run after benchmark
         if framework != "pytorch":
             if dtype == torch.float8_e5m2:
                 atol = 0.5
@@ -249,6 +245,9 @@ class Test_MLADecoding(common.PyTestCase):
                 rtol=rtol,
                 multiple_outputs=True,
             )
+
+        res = common.benchmark_framework(framework, framework_fn)
+        record_property("benchmark", res)
 
         # Explicit cleanup to prevent OOM
         del q, qpe, kv, kpe, framework_fn
