@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Use the CUDA 13.4 / Ubuntu 24.04 base image, which ships a newer default
+# Use the CUDA 13.5 / Ubuntu 24.04 base image, which ships a newer default
 # toolchain (GCC 13) and Python 3.12 for building the user-space environment.
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.4.3-devel-ubuntu24.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.5.0-devel-ubuntu24.04
 
 FROM ${BASE_IMAGE} AS base
 
