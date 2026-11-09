@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import functools
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
@@ -13,6 +14,10 @@ from tilegym.suites.fla.cutile._host_utils import _segmented_arange
 from tilegym.suites.fla.cutile._host_utils import _sm_split_threshold
 from tilegym.suites.fla.cutile._host_utils import input_guard
 from tilegym.suites.fla.cutile._normalization import StatefulNormalizeFunction
+from tilegym.suites.fla.cutile._tuning import cached_exhaustive_search
+from tilegym.suites.fla.cutile._tuning import launch_hints
+from tilegym.suites.fla.cutile._tuning import prune_occupancy
+from tilegym.suites.fla.cutile._tuning import shape_bucket
 
 RCP_LN2 = 1.4426950216  # 1/ln(2), fla.ops.utils.constant.RCP_LN2
 
@@ -899,6 +904,27 @@ def _normalization_product_kernel(Q, KC, P, SCALE: ct.Constant[float], BLOCK: Co
     ct.store(P, index=(block,), tile=product)
 
 
+@ct.function
+def _normalization_backward_stages(dd, q, kc, scale):
+    """Return (ds, dq, dk), keeping the bf16 rounding after each eager-backward product."""
+    ds = ct.astype(ct.astype(dd, ct.float32) * scale, dd.dtype)
+    dq = ct.astype(ct.astype(ds, ct.float32) * ct.astype(kc, ct.float32), q.dtype)
+    dk = ct.astype(ct.astype(ds, ct.float32) * ct.astype(q, ct.float32), q.dtype)
+    return ds, dq, dk
+
+
+@ct.kernel
+def _normalization_backward_products_kernel(DD, Q, KC, DQ, DK, SCALE: ct.Constant[float], K: ConstInt, BLOCK: ConstInt):
+    """Fused normalization-backward dq = ds * k_cum and dk = ds * q over flat BLOCK chunks."""
+    idx = ct.bid(0) * BLOCK + ct.arange(BLOCK, dtype=ct.int32)
+    q = ct.gather(Q, (idx,), check_bounds=True, padding_value=0)
+    kc = ct.gather(KC, (idx,), check_bounds=True, padding_value=0)
+    dd = ct.gather(DD, (idx // K,), check_bounds=True, padding_value=0)
+    _, dq, dk = _normalization_backward_stages(dd, q, kc, ct.full((), SCALE, dtype=ct.float32))
+    ct.scatter(DQ, (idx,), dq, check_bounds=True)
+    ct.scatter(DK, (idx,), dk, check_bounds=True)
+
+
 # ===========================================================================
 # Host wrappers
 # ===========================================================================
@@ -1186,6 +1212,16 @@ def _state_tile_kv(K, V, groups, device):
     return (split_k, split_v) if blocks < split_blocks <= sm_count else (BK, BV)
 
 
+BKV_LIST_H = (32, 64)
+
+
+def _state_tile_configs(K, V, base):
+    """State-kernel launch candidates: the heuristic tile first, then the BKV_LIST_H tiles."""
+    kp, vp = max(16, _next_power_of_2(K)), max(16, _next_power_of_2(V))
+    tiles = [base] + [(bk, bv) for bk in BKV_LIST_H for bv in BKV_LIST_H if bk <= kp and bv <= vp]
+    return tuple(dict.fromkeys(tiles))
+
+
 def chunk_fwd_h(
     k,
     v,
@@ -1241,12 +1277,8 @@ def chunk_fwd_h(
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_int(k.device)
     so_arg = split_offsets.to(torch.int32) if is_varlen else _dummy_int(k.device)
 
-    grid = (_cdiv(K, BK), _cdiv(V, BV), N * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_fwd_kernel_h,
-        (
+    def _args(bk, bv):
+        return (
             k,
             v,
             h,
@@ -1259,15 +1291,51 @@ def chunk_fwd_h(
             K,
             V,
             BT,
-            BK,
-            BV,
+            bk,
+            bv,
             use_h0,
             store_ht,
             is_varlen,
             bool(k.dtype is torch.float32),  # USE_IEEE_DOT
             bool(state_fp32_dot),  # STATE_FP32
-        ),
-    )
+        )
+
+    def _grid(bk, bv):
+        return (_cdiv(K, bk), _cdiv(V, bv), N * H)
+
+    if state_fp32_dot:
+        ct.launch(torch.cuda.current_stream(), _grid(BK, BV), chunk_fwd_kernel_h, _args(BK, BV))
+    else:
+        cache_key = (
+            "chunk_fwd_kernel_h",
+            shape_bucket(N),
+            shape_bucket(T),
+            H,
+            K,
+            V,
+            BT,
+            use_h0,
+            store_ht,
+            is_varlen,
+            str(k.dtype),
+            str(h.dtype),
+        )
+        stream = torch.cuda.current_stream()
+        configs = [
+            SimpleNamespace(BK=bk, BV=bv, hints=h)
+            for bk, bv in _state_tile_configs(K, V, (BK, BV))
+            for h in launch_hints()
+        ]
+        cfg, kernel = cached_exhaustive_search(
+            prune_occupancy(configs, lambda c: _grid(c.BK, c.BV)),
+            stream,
+            lambda c: _grid(c.BK, c.BV),
+            chunk_fwd_kernel_h,
+            lambda c: _args(c.BK, c.BV),
+            lambda c: c.hints,
+            cache_key=cache_key,
+        )
+        ct.launch(stream, _grid(cfg.BK, cfg.BV), kernel, _args(cfg.BK, cfg.BV))
     return h, ht
 
 
@@ -1317,12 +1385,8 @@ def chunk_bwd_dh(
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_int(k.device)
     so_arg = split_offsets.to(torch.int32) if is_varlen else _dummy_int(k.device)
 
-    grid = (_cdiv(K, BK), _cdiv(V, BV), N * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_bwd_kernel_dh,
-        (
+    def _args(bk, bv):
+        return (
             q,
             do,
             dh,
@@ -1336,13 +1400,44 @@ def chunk_bwd_dh(
             K,
             V,
             BT,
-            BK,
-            BV,
+            bk,
+            bv,
             store_dh0,
             use_dht,
             is_varlen,
-        ),
+        )
+
+    def _grid(bk, bv):
+        return (_cdiv(K, bk), _cdiv(V, bv), N * H)
+
+    cache_key = (
+        "chunk_bwd_kernel_dh",
+        shape_bucket(N),
+        shape_bucket(T),
+        H,
+        K,
+        V,
+        BT,
+        store_dh0,
+        use_dht,
+        is_varlen,
+        str(q.dtype),
+        str(dh.dtype),
     )
+    stream = torch.cuda.current_stream()
+    configs = [
+        SimpleNamespace(BK=bk, BV=bv, hints=h) for bk, bv in _state_tile_configs(K, V, (BK, BV)) for h in launch_hints()
+    ]
+    cfg, kernel = cached_exhaustive_search(
+        prune_occupancy(configs, lambda c: _grid(c.BK, c.BV)),
+        stream,
+        lambda c: _grid(c.BK, c.BV),
+        chunk_bwd_kernel_dh,
+        lambda c: _args(c.BK, c.BV),
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, _grid(cfg.BK, cfg.BV), kernel, _args(cfg.BK, cfg.BV))
     return dh, dh0
 
 
@@ -1458,29 +1553,31 @@ def chunk_bwd_dv(
     ci_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_int2(q.device)
 
     grid = (_cdiv(V, BV), NT, B * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_bwd_kernel_dv,
-        (
-            q,
-            k,
-            do,
-            dv,
-            dh,
-            cu_arg,
-            ci_arg,
-            float(scale),
-            T,
-            H,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            is_varlen,
-        ),
+    args = (q, k, do, dv, dh, cu_arg, ci_arg, float(scale), T, H, K, V, BT, BK, BV, is_varlen)
+    cache_key = (
+        "chunk_bwd_kernel_dv",
+        shape_bucket(B * NT),
+        H,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        is_varlen,
+        str(q.dtype),
+        str(dh.dtype),
     )
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_bwd_kernel_dv,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, grid, kernel, args)
     return dv
 
 
@@ -1522,32 +1619,31 @@ def chunk_bwd_dqkwg(
     ci_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_int2(q.device)
 
     grid = (_cdiv(K, BK), NT, B * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_bwd_kernel_dqkwg,
-        (
-            q,
-            k,
-            v,
-            h,
-            do,
-            dh,
-            dq,
-            dk,
-            cu_arg,
-            ci_arg,
-            float(scale),
-            T,
-            H,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            is_varlen,
-        ),
+    args = (q, k, v, h, do, dh, dq, dk, cu_arg, ci_arg, float(scale), T, H, K, V, BT, BK, BV, is_varlen)
+    cache_key = (
+        "chunk_bwd_kernel_dqkwg",
+        shape_bucket(B * NT),
+        H,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        is_varlen,
+        str(q.dtype),
+        str(h.dtype),
     )
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_bwd_kernel_dqkwg,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, grid, kernel, args)
     return dq, dk, None, None
 
 
@@ -1882,6 +1978,36 @@ def _normalization_divide_or_eager(o, s, cu_seqlens, z_init, reverse):
     return o / denom, denom
 
 
+def _normalization_backward_products_or_eager(ddenom, q, k_cum, scale, cu_seqlens, has_z_init):
+    """Return the normalization-backward (dq, dk) products, fused on sm_100 dense bf16 inputs.
+
+    Same fused products as the cuTile fused-chunk normalization backward; other
+    inputs fall back to the eager PyTorch expressions.
+    """
+    if (
+        q.dtype == k_cum.dtype == ddenom.dtype == torch.bfloat16
+        and q.shape == k_cum.shape
+        and q.ndim == 4
+        and q.shape[-1] > 0
+        and ddenom.shape == q.shape[:-1] + (1,)
+        and 0 < q.numel() <= 2147483647
+        and all(t.is_contiguous() and t.data_ptr() % 16 == 0 for t in (q, k_cum, ddenom))
+        and cu_seqlens is None
+        and not has_z_init
+        and torch.cuda.get_device_capability(q.device)[0] == 10
+    ):
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(q)
+        ct.launch(
+            torch.cuda.current_stream(),
+            (_cdiv(q.numel(), 1024),),
+            _normalization_backward_products_kernel,
+            (ddenom.view(-1), q.view(-1), k_cum.view(-1), dq.view(-1), dk.view(-1), float(scale), q.shape[-1], 1024),
+        )
+        return dq, dk
+    return ddenom * scale * k_cum, ddenom * scale * q
+
+
 def normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens):
     """Apply running normalization Z_t = sum_{s<=t} k_s (or sum_{s>=t} for reverse)."""
     return StatefulNormalizeFunction.apply(
@@ -1895,6 +2021,7 @@ def normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens):
         chunk_global_cumsum,
         _normalization_product_or_eager,
         _normalization_divide_or_eager,
+        _normalization_backward_products_or_eager,
     )
 
 
