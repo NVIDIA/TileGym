@@ -30,6 +30,11 @@ class Test_RMSNormBackward(common.PyTestCase):
             (31072, 4096, torch.bfloat16),
             (256, 256, torch.float32),
             (2003, 2001, torch.float16),  # testing when dims are not multiples of 2
+            (1, 4096, torch.float16),
+            (128, 2560, torch.bfloat16),
+            (4096, 4096, torch.bfloat16),
+            (8192, 1024, torch.float32),
+            (2048, 8192, torch.bfloat16),
         ],
     )
     @pytest.mark.parametrize("backend", _backends)
@@ -65,7 +70,9 @@ class Test_RMSNormBackward(common.PyTestCase):
                 "weight": weight,
                 "rstd": rstd,
             },
-            rtol=0.0,
+            # dw is an fp32 sum cast to the weight dtype; the kernel's summation order differs from the
+            # reference's, so a value near a rounding boundary can land one bf16/fp16 ulp away.
+            rtol=1e-2,
             atol=5e-2,
             multiple_outputs=True,
         )
@@ -88,6 +95,7 @@ class Test_RMSNormAutogradBackward(common.PyTestCase):
             (256, 256, torch.float16),
             (4096, 256, torch.bfloat16),
             (256, 256, torch.float32),
+            (2048, 4096, torch.bfloat16),
         ],
     )
     @pytest.mark.parametrize("mode", [None, "static_persistent", "multi_wave_reload", "multi_wave_cached"])
