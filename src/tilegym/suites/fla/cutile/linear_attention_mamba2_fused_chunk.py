@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import functools
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
@@ -11,8 +12,9 @@ from tilegym.backend import register_impl
 from tilegym.suites.fla.cutile._host_utils import _segmented_arange
 from tilegym.suites.fla.cutile._host_utils import input_guard
 from tilegym.suites.fla.cutile._host_utils import validate_mamba_chunk_training
-from tilegym.suites.fla.cutile._tuning import hint_configs
-from tilegym.suites.fla.cutile._tuning import tune_launch
+from tilegym.suites.fla.cutile._tuning import cached_exhaustive_search
+from tilegym.suites.fla.cutile._tuning import launch_hints
+from tilegym.suites.fla.cutile._tuning import shape_bucket
 
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
@@ -50,18 +52,7 @@ def _dummy(shape, device, dtype):
     return t
 
 
-def _autotuned_launch(kernel, cache_key, grid, args, occ_choices=(1,), nww_choices=(4, 8), timeout=60):
-    choices, warps = tuple(occ_choices), tuple(nww_choices)
-    tune_launch(
-        kernel,
-        torch.cuda.current_stream(),
-        lambda c: grid,
-        lambda c: args,
-        lambda: hint_configs(choices, warps),
-        cache_key,
-        timeout=timeout,
-        config_key=("hints", choices, warps),
-    )
+_BWD_LATENCIES = (2, 3, 1)  # first entry is the untuned (autotune-disabled) default
 
 
 # torch>=2.4 autocast custom fwd/bwd, bound to cuda.
@@ -261,6 +252,7 @@ def fused_chunk_bwd_dq_kernel(
     USE_G_GAMMA: ConstBool,
     IS_VARLEN: ConstBool,
     USE_INITIAL_STATE: ConstBool,
+    LATENCY: ConstInt,
 ):
     """dq forward sweep of the mamba2 fused-chunk backward (split kernel 1/2).
 
@@ -315,10 +307,10 @@ def fused_chunk_bwd_dq_kernel(
         m_t = o_t < Tloc
         last_idx = min(i_t * BT + BT, Tloc) - 1
 
-        b_k = ct.load(k_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK)).reshape((BT, BK))
-        b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV)).reshape((BT, BV))
+        b_k = ct.load(k_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK), latency=LATENCY).reshape((BT, BK))
+        b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
         b_vt = ct.transpose(b_v)  # [BV, BT]
-        b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV)).reshape((BT, BV))
+        b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
 
         # [BT, BT] = (b_do @ b_v^T) * scale
         acc_ds = ct.zeros((BT, BT), dtype=ct.float32)
@@ -344,7 +336,7 @@ def fused_chunk_bwd_dq_kernel(
                 0.0,
             )
             b_ds = b_ds * b_gs
-            b_q = ct.load(q_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK)).reshape((BT, BK))
+            b_q = ct.load(q_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK), latency=LATENCY).reshape((BT, BK))
             acc_dq = ct.zeros((BT, BK), dtype=ct.float32)
             acc_dq = ct.mma(ct.astype(b_ds, b_k.dtype), b_k, acc_dq)
             acc_dq2 = ct.zeros((BT, BK), dtype=ct.float32)
@@ -417,6 +409,7 @@ def fused_chunk_bwd_dkv_kernel(
     IS_VARLEN: ConstBool,
     USE_INITIAL_STATE: ConstBool,
     USE_FINAL_STATE: ConstBool,
+    LATENCY: ConstInt,
 ):
     """dk/dv reverse sweep of the mamba2 fused-chunk backward (split kernel 2/2).
 
@@ -474,11 +467,11 @@ def fused_chunk_bwd_dkv_kernel(
         m_t = o_t < Tloc
         last_idx = min(i_t * BT + BT, Tloc) - 1
 
-        b_q = ct.load(q_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK)).reshape((BT, BK))
+        b_q = ct.load(q_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK), latency=LATENCY).reshape((BT, BK))
         b_qt = ct.transpose(b_q)  # [BK, BT]
-        b_k = ct.load(k_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK)).reshape((BT, BK))
-        b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV)).reshape((BT, BV))
-        b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV)).reshape((BT, BV))
+        b_k = ct.load(k_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK), latency=LATENCY).reshape((BT, BK))
+        b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
+        b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
 
         # b_s = b_k @ b_q^T  ; b_ds = b_v @ b_do^T   -> [BT, BT]
         acc_s = ct.zeros((BT, BT), dtype=ct.float32)
@@ -551,7 +544,12 @@ def fused_chunk_bwd_dkv_kernel(
             )
 
             if USE_G:
-                _store_dg_partial(dg_seg, i_k, NV, i_v, i_t, i_h, b_dg, m_t, dg.dtype, BT)
+                # Tile store: the token-sliced view clips the partial tail chunk.
+                ct.store(
+                    dg_seg,
+                    index=(i_k * NV + i_v, i_t, i_h),
+                    tile=ct.astype(b_dg, dg.dtype).reshape((1, BT, 1)),
+                )
         else:
             # mask = trans(m_s & (m_t[:,None] & m_t))
             mask2d = ct.transpose(m_s & (m_t[:, None] & m_t[None, :]))
@@ -733,8 +731,8 @@ def fused_chunk_fwd(
         BK,
         BV,
         NK,
-        N,
-        T,
+        shape_bucket(N),
+        shape_bucket(T),
         use_g,
         use_g_gamma,
         use_init,
@@ -742,14 +740,17 @@ def fused_chunk_fwd(
         is_varlen,
         q.dtype,
     )
-    _autotuned_launch(
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         fused_chunk_fwd_kernel,
-        fwd_key,
-        grid,
-        fwd_args,
-        occ_choices=(1, 2, 4),
-        nww_choices=(4, 8),
+        lambda c: fwd_args,
+        lambda c: c.hints,
+        cache_key=fwd_key,
     )
+    ct.launch(stream, grid, kernel, fwd_args)
     if NK > 1:
         o = o.sum(0).to(v)
     return o, ht
@@ -799,13 +800,13 @@ def fused_chunk_bwd(
     use_final = dht is not None
     is_varlen = cu_seqlens is not None
 
-    g_arg = g.reshape(BT_total, H) if use_g else torch.zeros(1, 1, device=q.device, dtype=q.dtype)
-    g_gamma_arg = g_gamma if use_g_gamma else torch.zeros(1, device=q.device, dtype=torch.float32)
-    dg_arg = dg.reshape(NK * NV, BT_total, H).zero_() if use_g else torch.zeros(1, 1, 1, device=q.device, dtype=q.dtype)
-    h0_arg = initial_state.reshape(N * H, K, V) if use_init else torch.zeros(1, 1, 1, device=q.device, dtype=q.dtype)
-    dht_arg = dht.reshape(N * H, K, V) if use_final else torch.zeros(1, 1, 1, device=q.device, dtype=q.dtype)
-    dh0_arg = dh0.reshape(N * H, K, V) if use_init else torch.zeros(1, 1, 1, device=q.device, dtype=q.dtype)
-    cu_arg = cu_seqlens.to(torch.int32) if is_varlen else torch.zeros(1, device=q.device, dtype=torch.int32)
+    g_arg = g.reshape(BT_total, H) if use_g else _dummy((1, 1), q.device, q.dtype)
+    g_gamma_arg = g_gamma if use_g_gamma else _dummy((1,), q.device, torch.float32)
+    dg_arg = dg.reshape(NK * NV, BT_total, H) if use_g else _dummy((1, 1, 1), q.device, q.dtype)
+    h0_arg = initial_state.reshape(N * H, K, V) if use_init else _dummy((1, 1, 1), q.device, q.dtype)
+    dht_arg = dht.reshape(N * H, K, V) if use_final else _dummy((1, 1, 1), q.device, q.dtype)
+    dh0_arg = dh0.reshape(N * H, K, V) if use_init else _dummy((1, 1, 1), q.device, q.dtype)
+    cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy((1,), q.device, torch.int32)
 
     grid = (NV, NK, N * H)
 
@@ -814,7 +815,7 @@ def fused_chunk_bwd(
     if use_g:
         h_final = q.new_empty(N * H * NK * NV, BV, BK, dtype=torch.float)
     else:
-        h_final = torch.zeros(1, 1, 1, device=q.device, dtype=torch.float)
+        h_final = _dummy((1, 1, 1), q.device, torch.float)
 
     # --- split kernel 1/2: dq forward sweep (builds + persists b_h) ---
     dq_args = (
@@ -846,8 +847,8 @@ def fused_chunk_bwd(
     )
     dq_key = (
         "fused_chunk_bwd_dq",
-        N,
-        T,
+        shape_bucket(N),
+        shape_bucket(T),
         H,
         K,
         V,
@@ -862,7 +863,22 @@ def fused_chunk_bwd(
         use_init,
         q.dtype,
     )
-    _autotuned_launch(fused_chunk_bwd_dq_kernel, dq_key, grid, dq_args)
+    stream = torch.cuda.current_stream()
+    configs = [
+        SimpleNamespace(latency=lat, hints=dict(occupancy=1, num_worker_warps=w))
+        for lat in _BWD_LATENCIES
+        for w in (4, 8)
+    ]
+    cfg, kernel = cached_exhaustive_search(
+        configs,
+        stream,
+        lambda c: grid,
+        fused_chunk_bwd_dq_kernel,
+        lambda c: (*dq_args, c.latency),
+        lambda c: c.hints,
+        cache_key=dq_key,
+    )
+    ct.launch(stream, grid, kernel, (*dq_args, cfg.latency))
 
     # --- split kernel 2/2: dk/dv reverse sweep (consumes b_h) ---
     dkv_args = (
@@ -897,8 +913,8 @@ def fused_chunk_bwd(
     )
     dkv_key = (
         "fused_chunk_bwd_dkv",
-        N,
-        T,
+        shape_bucket(N),
+        shape_bucket(T),
         H,
         K,
         V,
@@ -914,7 +930,21 @@ def fused_chunk_bwd(
         use_final,
         q.dtype,
     )
-    _autotuned_launch(fused_chunk_bwd_dkv_kernel, dkv_key, grid, dkv_args)
+    configs = [
+        SimpleNamespace(latency=lat, hints=dict(occupancy=1, num_worker_warps=w))
+        for lat in _BWD_LATENCIES
+        for w in (4, 8)
+    ]
+    cfg, kernel = cached_exhaustive_search(
+        configs,
+        stream,
+        lambda c: grid,
+        fused_chunk_bwd_dkv_kernel,
+        lambda c: (*dkv_args, c.latency),
+        lambda c: c.hints,
+        cache_key=dkv_key,
+    )
+    ct.launch(stream, grid, kernel, (*dkv_args, cfg.latency))
     dq = dq.sum(0) if NV > 1 else dq
     dk = dk.sum(0) if NV > 1 else dk
     dv = dv.sum(0) if NK > 1 else dv
