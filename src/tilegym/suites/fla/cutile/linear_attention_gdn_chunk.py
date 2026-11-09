@@ -14,10 +14,11 @@ import torch.nn.functional as F
 from tilegym.backend import register_impl
 from tilegym.suites.fla.cutile._host_utils import _segmented_arange
 from tilegym.suites.fla.cutile._host_utils import input_guard
-from tilegym.suites.fla.cutile._tuning import OUTPUT_HINT_PAIRS
-from tilegym.suites.fla.cutile._tuning import STATE_HINT_PAIRS
+from tilegym.suites.fla.cutile._tuning import cached_exhaustive_search
+from tilegym.suites.fla.cutile._tuning import launch_hints
 from tilegym.suites.fla.cutile._tuning import output_tile_configs
-from tilegym.suites.fla.cutile._tuning import tune_launch
+from tilegym.suites.fla.cutile._tuning import prune_occupancy
+from tilegym.suites.fla.cutile._tuning import shape_bucket
 
 ConstInt = ct.Constant[int]
 
@@ -59,77 +60,7 @@ def _stream():
     return torch.cuda.current_stream()
 
 
-_LAUNCH_HINT_CONFIGS = ((4, 4), (2, 4), (4, 8), (1, 8), (1, 4))
-
-
-_LAUNCH_HINT_CONFIGS_OCC8 = ((8, 4), (4, 4), (2, 4), (1, 4), (2, 8), (1, 8))
-
-
-def _tuned_launch(kernel, stream, grid, args, cache_key, configs=None):
-    choices = tuple(configs if configs is not None else _LAUNCH_HINT_CONFIGS)
-    tune_launch(
-        kernel,
-        stream,
-        lambda c: grid,
-        lambda c: args,
-        lambda: [SimpleNamespace(occupancy=o, num_worker_warps=w) for o, w in choices],
-        cache_key,
-        timeout=20,
-        config_key=("hints", choices),
-    )
-
-
-def _tuned_launch_dhu(kernel, stream, bv_choices, grid_fn, args_fn, cache_key):
-    choices = tuple(bv_choices)
-    tune_launch(
-        kernel,
-        stream,
-        lambda c: grid_fn(c.BV),
-        lambda c: args_fn(c.BV),
-        lambda: [
-            SimpleNamespace(occupancy=o, num_worker_warps=w, BV=bv) for bv in choices for o, w in STATE_HINT_PAIRS
-        ],
-        cache_key,
-        timeout=40,
-        config_key=(("BV",), choices, STATE_HINT_PAIRS),
-    )
-
-
 _fwd_o_tile_configs = output_tile_configs
-
-
-def _tuned_launch_o(kernel, stream, tile_choices, grid_fn, args_fn, cache_key):
-    choices = tuple(tile_choices)
-    tune_launch(
-        kernel,
-        stream,
-        lambda c: grid_fn(c.BK, c.BV),
-        lambda c: args_fn(c.BK, c.BV),
-        lambda: [
-            SimpleNamespace(occupancy=o, num_worker_warps=w, BK=bk, BV=bv)
-            for bk, bv in choices
-            for o, w in OUTPUT_HINT_PAIRS
-        ],
-        cache_key,
-        timeout=60,
-        config_key=(("BK", "BV"), choices, OUTPUT_HINT_PAIRS),
-    )
-
-
-def _tuned_launch_bt(kernel, stream, bt_choices, grid_fn, args_fn, cache_key):
-    choices = tuple(bt_choices)
-    tune_launch(
-        kernel,
-        stream,
-        lambda c: grid_fn(c.BT),
-        lambda c: args_fn(c.BT),
-        lambda: [
-            SimpleNamespace(occupancy=o, num_worker_warps=w, BT=bt) for bt in choices for o, w in STATE_HINT_PAIRS
-        ],
-        cache_key,
-        timeout=40,
-        config_key=(("BT",), choices, STATE_HINT_PAIRS),
-    )
 
 
 # Device helpers (plain `def` — NOT @ct.kernel)
@@ -2856,14 +2787,20 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
         def _args(bt):
             return (x, y, rstd, float(eps), T, D, BD, bt)
 
-        _tuned_launch_bt(
+        stream = _stream()
+        cfg, kernel = cached_exhaustive_search(
+            prune_occupancy(
+                [SimpleNamespace(BT=bt, hints=h) for bt in bt_choices for h in launch_hints()], lambda c: _grid(c.BT)
+            ),
+            stream,
+            lambda c: _grid(c.BT),
             l2norm_fwd_kernel,
-            _stream(),
-            bt_choices,
-            _grid,
-            _args,
-            cache_key=(T, D, BD, str(x.dtype)),
+            lambda c: _args(c.BT),
+            lambda c: c.hints,
+            cache_key=(shape_bucket(T), D, BD, str(x.dtype)),
+            timeout=40,
         )
+        ct.launch(stream, _grid(cfg.BT), kernel, _args(cfg.BT))
     else:
         ct.launch(_stream(), (T,), l2norm_fwd_kernel1, (x, y, rstd, float(eps), D, BD))
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
@@ -2890,13 +2827,19 @@ def l2norm_bwd(
     if D <= 512:
         BT = 32
         grid = (_cdiv(T, BT),)
-        _tuned_launch(
+        stream = _stream()
+        args = (y, rstd_flat, dy, dy2_arg, dx, float(eps), T, D, BD, BT, int(dy2 is not None))
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints()],
+            stream,
+            lambda c: grid,
             l2norm_bwd_kernel,
-            _stream(),
-            grid,
-            (y, rstd_flat, dy, dy2_arg, dx, float(eps), T, D, BD, BT, int(dy2 is not None)),
+            lambda c: args,
+            lambda c: c.hints,
             cache_key=(D, BD, BT, str(y.dtype), int(dy2 is not None)),
+            timeout=20,
         )
+        ct.launch(stream, grid, kernel, args)
     else:
         ct.launch(
             _stream(),
@@ -3200,23 +3143,38 @@ def recompute_w_u_fwd(k, v, beta, A, g=None, cu_seqlens=None, chunk_indices=None
     g_arg = g.reshape(BTtot, HV) if g is not None else torch.zeros(1, 1, device=dev, dtype=k.dtype)
     cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
     ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
-    _tuned_launch(
+    stream = _stream()
+    grid = (NT, B * HV)
+    args = (
+        k3,
+        v3,
+        beta2,
+        w3,
+        u3,
+        A3,
+        g_arg,
+        cu_arg,
+        ci_arg,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        int(g is not None),
+        int(is_varlen),
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         recompute_w_u_fwd_kernel,
-        _stream(),
-        (NT, B * HV),
-        (
-            k3,
-            v3,
-            beta2,
-            w3,
-            u3,
-            A3,
-            g_arg,
-            cu_arg,
-            ci_arg,
-            T,
-            H,
-            HV,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=(
+            (shape_bucket(NT), shape_bucket(B * HV)),
             K,
             V,
             BT,
@@ -3224,9 +3182,11 @@ def recompute_w_u_fwd(k, v, beta, A, g=None, cu_seqlens=None, chunk_indices=None
             BV,
             int(g is not None),
             int(is_varlen),
+            str(k.dtype),
         ),
-        cache_key=((NT, B * HV), K, V, BT, BK, BV, int(g is not None), int(is_varlen), str(k.dtype)),
+        timeout=20,
     )
+    ct.launch(stream, grid, kernel, args)
     return w, u
 
 
@@ -3254,27 +3214,46 @@ def prepare_wy_repr_bwd(k, v, beta, A, dw, du, g=None, cu_seqlens=None, chunk_in
     _wy_bh = B * HV
     _wy_work = NT * _wy_bh
     _wy_prog = min(_wy_work, torch.cuda.get_device_properties(dev).multi_processor_count * 4)
-    _tuned_launch(
+    stream = _stream()
+    grid = (_wy_prog,)
+    args = (
+        k.contiguous(),
+        v.contiguous(),
+        beta.contiguous(),
+        g_arg,
+        A.contiguous(),
+        dw.contiguous(),
+        du.contiguous(),
+        dk,
+        dv,
+        db,
+        dg_arg,
+        cu_arg,
+        ci_arg,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        int(g is not None),
+        int(is_varlen),
+        _cdiv(K, BK),
+        _cdiv(V, BV),
+        _wy_work,  # NUM_WORK
+        _wy_bh,  # BH_P
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         prepare_wy_repr_bwd_kernel,
-        _stream(),
-        (_wy_prog,),
-        (
-            k.contiguous(),
-            v.contiguous(),
-            beta.contiguous(),
-            g_arg,
-            A.contiguous(),
-            dw.contiguous(),
-            du.contiguous(),
-            dk,
-            dv,
-            db,
-            dg_arg,
-            cu_arg,
-            ci_arg,
-            T,
-            H,
-            HV,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=(
+            (shape_bucket(NT), shape_bucket(B * HV)),
             K,
             V,
             BT,
@@ -3282,13 +3261,11 @@ def prepare_wy_repr_bwd(k, v, beta, A, dw, du, g=None, cu_seqlens=None, chunk_in
             BV,
             int(g is not None),
             int(is_varlen),
-            _cdiv(K, BK),
-            _cdiv(V, BV),
-            _wy_work,  # NUM_WORK
-            _wy_bh,  # BH_P
+            str(k.dtype),
         ),
-        cache_key=((NT, B * HV), K, V, BT, BK, BV, int(g is not None), int(is_varlen), str(k.dtype)),
+        timeout=20,
     )
+    ct.launch(stream, grid, kernel, args)
     if H != HV:
         dk = dk.view(B, T, H, HV // H, K).sum(3)
     return dk, dv, db, dg
@@ -3376,51 +3353,61 @@ def chunk_gated_delta_rule_fwd_h(
         h3 = h.reshape(B * NT * HV, K, V)
         vnew3 = v_new.reshape(BTtot, HV, V)
         BK = _next_power_of_2(K)
-        _tuned_launch(
+        stream = _stream()
+        args = (k3, v3, w3, g2, h3, vnew3, T, H, HV, K, V, BT, BV, BK)
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints()],
+            stream,
+            lambda c: grid,
             chunk_gated_delta_rule_fwd_kernel_h_blockdim64_dense_tma,
-            _stream(),
-            grid,
-            (k3, v3, w3, g2, h3, vnew3, T, H, HV, K, V, BT, BV, BK),
-            cache_key=(grid, K, V, BT, BV, BK, str(k.dtype)),
+            lambda c: args,
+            lambda c: c.hints,
+            cache_key=(tuple(map(shape_bucket, grid)), K, V, BT, BV, BK, str(k.dtype)),
+            timeout=20,
         )
+        ct.launch(stream, grid, kernel, args)
         return h, v_new, final_state
 
     # Multi-dim arrays passed as-is (per-dim indices + real strides).
-    _tuned_launch(
+    stream = _stream()
+    args = (
+        k,
+        u,
+        w,
+        vnew_arg,
+        g_arg,
+        gk_arg,
+        h,
+        h0_arg,
+        ht_arg,
+        cu_arg,
+        co_arg,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BV,
+        _next_power_of_2(K),
+        int(g is not None),
+        int(gk is not None),
+        int(initial_state is not None),
+        int(output_final_state),
+        int(save_new_value),
+        int(state_v_first),
+        int(is_varlen),
+        0,
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
-        _stream(),
-        grid,
-        (
-            k,
-            u,
-            w,
-            vnew_arg,
-            g_arg,
-            gk_arg,
-            h,
-            h0_arg,
-            ht_arg,
-            cu_arg,
-            co_arg,
-            T,
-            H,
-            HV,
-            K,
-            V,
-            BT,
-            BV,
-            _next_power_of_2(K),
-            int(g is not None),
-            int(gk is not None),
-            int(initial_state is not None),
-            int(output_final_state),
-            int(save_new_value),
-            int(state_v_first),
-            int(is_varlen),
-            0,
-        ),
+        lambda c: args,
+        lambda c: c.hints,
         cache_key=(
-            grid,
+            tuple(map(shape_bucket, grid)),
             K,
             V,
             BT,
@@ -3435,7 +3422,9 @@ def chunk_gated_delta_rule_fwd_h(
             int(is_varlen),
             str(k.dtype),
         ),
+        timeout=20,
     )
+    ct.launch(stream, grid, kernel, args)
     return h, v_new, final_state
 
 
@@ -3565,8 +3554,21 @@ def chunk_gated_delta_rule_bwd_dhu(
                 )
 
         bv_choices = [bv for bv in bv_choices if V % bv == 0]
-        dense_key = (N * HV, K, V, BT, BK, str(q.dtype))
-        _tuned_launch_dhu(kern, _stream(), bv_choices, _grid, _args, cache_key=dense_key)
+        dense_key = (shape_bucket(N * HV), K, V, BT, BK, str(q.dtype))
+        stream = _stream()
+        cfg, kernel = cached_exhaustive_search(
+            prune_occupancy(
+                [SimpleNamespace(BV=bv, hints=h) for bv in bv_choices for h in launch_hints()], lambda c: _grid(c.BV)
+            ),
+            stream,
+            lambda c: _grid(c.BV),
+            kern,
+            lambda c: _args(c.BV),
+            lambda c: c.hints,
+            cache_key=dense_key,
+            timeout=40,
+        )
+        ct.launch(stream, _grid(cfg.BV), kernel, _args(cfg.BV))
         return dh, dh0, dv2
     BK = _next_power_of_2(K)
     BV = 16 if K > 128 else 64
@@ -3577,44 +3579,48 @@ def chunk_gated_delta_rule_bwd_dhu(
     dh0_arg = dh0 if dh0 is not None else _dummy(dev)
     cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
     co_arg = _opt_i32(chunk_offsets, dev)
-    _tuned_launch(
+    stream = _stream()
+    args = (
+        q.contiguous(),
+        k.contiguous(),
+        w.contiguous(),
+        g_arg,
+        gk_arg,
+        dht_arg,
+        dh0_arg,
+        do.contiguous(),
+        dh,
+        dv.contiguous(),
+        dv2,
+        cu_arg,
+        co_arg,
+        float(scale),
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BV,
+        BK,
+        int(g is not None),
+        int(gk is not None),
+        int(h0 is not None),
+        int(dht is not None),
+        int(state_v_first),
+        int(is_varlen),
+        0,
+        1,
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64,
-        _stream(),
-        grid,
-        (
-            q.contiguous(),
-            k.contiguous(),
-            w.contiguous(),
-            g_arg,
-            gk_arg,
-            dht_arg,
-            dh0_arg,
-            do.contiguous(),
-            dh,
-            dv.contiguous(),
-            dv2,
-            cu_arg,
-            co_arg,
-            float(scale),
-            T,
-            H,
-            HV,
-            K,
-            V,
-            BT,
-            BV,
-            BK,
-            int(g is not None),
-            int(gk is not None),
-            int(h0 is not None),
-            int(dht is not None),
-            int(state_v_first),
-            int(is_varlen),
-            0,
-            1,
-        ),
+        lambda c: args,
+        lambda c: c.hints,
         cache_key=(
-            grid,
+            tuple(map(shape_bucket, grid)),
             K,
             V,
             BT,
@@ -3626,7 +3632,9 @@ def chunk_gated_delta_rule_bwd_dhu(
             int(is_varlen),
             str(q.dtype),
         ),
+        timeout=20,
     )
+    ct.launch(stream, grid, kernel, args)
     return dh, dh0, dv2
 
 
@@ -3702,15 +3710,20 @@ def chunk_fwd_o(
             int(is_varlen),
         )
 
-    _tuned_launch_o(
+    stream = _stream()
+    cfg, kernel = cached_exhaustive_search(
+        prune_occupancy(
+            [SimpleNamespace(BK=bk, BV=bv, hints=h) for bk, bv in tile_choices for h in launch_hints()],
+            lambda c: _grid(c.BK, c.BV),
+        ),
+        stream,
+        lambda c: _grid(c.BK, c.BV),
         chunk_fwd_kernel_o,
-        _stream(),
-        tile_choices,
-        _grid,
-        _args,
+        lambda c: _args(c.BK, c.BV),
+        lambda c: c.hints,
         cache_key=(
-            B,
-            NT,
+            shape_bucket(B),
+            shape_bucket(NT),
             HV,
             K,
             V,
@@ -3722,6 +3735,7 @@ def chunk_fwd_o(
             str(q.dtype),
         ),
     )
+    ct.launch(stream, _grid(cfg.BK, cfg.BV), kernel, _args(cfg.BK, cfg.BV))
     return o
 
 
@@ -3787,47 +3801,51 @@ def chunk_bwd_dqkwg(
     use_dw = int(dw is not None and dv is not None and not split_dw)
     if split_dw:
         dw3 = _dummy(dev, k.dtype)
-    _tuned_launch(
+    stream = _stream()
+    args = (
+        q3,
+        k3,
+        v3,
+        g_arg,
+        gg_arg,
+        h3,
+        do3,
+        dh3,
+        dq3,
+        dk3,
+        dw3,
+        dv3,
+        dg3,
+        cu_arg,
+        ci_arg,
+        float(scale),
+        B,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        int(g is not None),
+        int(g_gamma is not None),
+        use_dw,
+        int(state_v_first),
+        int(is_varlen),
+        _cdiv(V, BV),
+        _num_work,  # NUM_WORK (persistent loop bound)
+        NT,  # NT_DECODE (decode i_t,i_k from linear work id)
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         chunk_bwd_kernel_dqkwg,
-        _stream(),
-        grid,
-        (
-            q3,
-            k3,
-            v3,
-            g_arg,
-            gg_arg,
-            h3,
-            do3,
-            dh3,
-            dq3,
-            dk3,
-            dw3,
-            dv3,
-            dg3,
-            cu_arg,
-            ci_arg,
-            float(scale),
-            B,
-            T,
-            H,
-            HV,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            int(g is not None),
-            int(g_gamma is not None),
-            use_dw,
-            int(state_v_first),
-            int(is_varlen),
-            _cdiv(V, BV),
-            _num_work,  # NUM_WORK (persistent loop bound)
-            NT,  # NT_DECODE (decode i_t,i_k from linear work id)
-        ),
+        lambda c: args,
+        lambda c: c.hints,
         cache_key=(
-            grid,
+            tuple(map(shape_bucket, grid)),
             K,
             V,
             BT,
@@ -3840,31 +3858,37 @@ def chunk_bwd_dqkwg(
             int(is_varlen),
             str(q.dtype),
         ),
+        timeout=20,
     )
+    ct.launch(stream, grid, kernel, args)
     if split_dw:
-        _tuned_launch(
+        stream = _stream()
+        args = (
+            h.contiguous(),
+            dv.contiguous(),
+            dw,
+            cu_arg,
+            ci_arg,
+            T,
+            HV,
+            K,
+            V,
+            BT,
+            BK,
+            BV,
+            int(state_v_first),
+            int(is_varlen),
+        )
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints()],
+            stream,
+            lambda c: grid,
             chunk_bwd_kernel_dw,
-            _stream(),
-            grid,
-            (
-                h.contiguous(),
-                dv.contiguous(),
-                dw,
-                cu_arg,
-                ci_arg,
-                T,
-                HV,
-                K,
-                V,
-                BT,
-                BK,
-                BV,
-                int(state_v_first),
-                int(is_varlen),
-            ),
+            lambda c: args,
+            lambda c: c.hints,
             cache_key=(
                 "dw",
-                grid,
+                tuple(map(shape_bucket, grid)),
                 K,
                 V,
                 BT,
@@ -3874,7 +3898,9 @@ def chunk_bwd_dqkwg(
                 int(is_varlen),
                 str(q.dtype),
             ),
+            timeout=20,
         )
+        ct.launch(stream, grid, kernel, args)
     if H != HV:
         dq = dq.view(B, T, H, HV // H, K).sum(3)
         dk = dk.view(B, T, H, HV // H, K).sum(3)
@@ -3906,38 +3932,42 @@ def chunk_bwd_dv_local(
     cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
     ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
     scale_val = float(scale) if scale is not None else 0.0
-    _tuned_launch(
+    stream = _stream()
+    args = (
+        q.contiguous(),
+        k.contiguous(),
+        g_arg,
+        gg_arg,
+        A_arg,
+        do.contiguous(),
+        dv,
+        cu_arg,
+        ci_arg,
+        scale_val,
+        T,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        int(g is not None),
+        int(g_gamma is not None),
+        int(A is not None),
+        int(is_varlen),
+        _dvl_work,  # NUM_WORK
+        _dvl_bh,  # BH_P
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
         chunk_bwd_kernel_dv_local,
-        _stream(),
-        grid,
-        (
-            q.contiguous(),
-            k.contiguous(),
-            g_arg,
-            gg_arg,
-            A_arg,
-            do.contiguous(),
-            dv,
-            cu_arg,
-            ci_arg,
-            scale_val,
-            T,
-            H,
-            HV,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            int(g is not None),
-            int(g_gamma is not None),
-            int(A is not None),
-            int(is_varlen),
-            _dvl_work,  # NUM_WORK
-            _dvl_bh,  # BH_P
-        ),
+        lambda c: args,
+        lambda c: c.hints,
         cache_key=(
-            grid,
+            tuple(map(shape_bucket, grid)),
             K,
             V,
             BT,
@@ -3949,7 +3979,9 @@ def chunk_bwd_dv_local(
             int(is_varlen),
             str(q.dtype),
         ),
+        timeout=20,
     )
+    ct.launch(stream, grid, kernel, args)
     return dv
 
 
@@ -3977,56 +4009,79 @@ def chunk_gated_delta_rule_fwd_intra(k, v, g=None, beta=None, cu_seqlens=None, c
     ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
     if not use_full_kernel:
         BC = 16
-        _tuned_launch(
+        stream = _stream()
+        grid = (NT, B * HV)
+        args = (
+            k,
+            g_arg,
+            beta,
+            A,
+            cu_arg,
+            ci_arg,
+            T,
+            H,
+            HV,
+            K,
+            BT,
+            BC,
+            BK,
+            int(g is not None),
+            int(is_varlen),
+        )
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints()],
+            stream,
+            lambda c: grid,
             chunk_gated_delta_rule_fwd_kkt_solve_kernel,
-            _stream(),
-            (NT, B * HV),
-            (
-                k,
-                g_arg,
-                beta,
-                A,
-                cu_arg,
-                ci_arg,
-                T,
-                H,
-                HV,
+            lambda c: args,
+            lambda c: c.hints,
+            cache_key=(
+                shape_bucket(NT),
+                shape_bucket(B * HV),
                 K,
                 BT,
                 BC,
                 BK,
                 int(g is not None),
                 int(is_varlen),
+                str(k.dtype),
             ),
-            cache_key=(NT, B * HV, K, BT, BC, BK, int(g is not None), int(is_varlen), str(k.dtype)),
+            timeout=20,
         )
+        ct.launch(stream, grid, kernel, args)
     else:
         BC = 32
         k_flat = k.reshape(-1)
         beta_flat = beta.reshape(-1)
         A_flat = A.reshape(-1)
         g_flat = g.reshape(-1) if g is not None else g_arg
-        _tuned_launch(
-            chunk_gated_delta_rule_fwd_kkt_solve_2block_full_kernel,
-            _stream(),
-            (NT, B * HV),
-            (
-                k_flat,
-                g_flat,
-                beta_flat,
-                A_flat,
-                T,
-                H,
-                HV,
-                K,
-                BT,
-                BC,
-                BK,
-                int(g is not None),
-            ),
-            cache_key=(NT, B * HV, K, BT, BC, BK, int(g is not None), str(k.dtype)),
-            configs=_LAUNCH_HINT_CONFIGS_OCC8,
+        stream = _stream()
+        grid = (NT, B * HV)
+        args = (
+            k_flat,
+            g_flat,
+            beta_flat,
+            A_flat,
+            T,
+            H,
+            HV,
+            K,
+            BT,
+            BC,
+            BK,
+            int(g is not None),
         )
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints(occupancy=(1, 2, 4, 8))],
+            stream,
+            lambda c: grid,
+            chunk_gated_delta_rule_fwd_kkt_solve_2block_full_kernel,
+            lambda c: args,
+            lambda c: c.hints,
+            cache_key=(shape_bucket(NT), shape_bucket(B * HV), K, BT, BC, BK, int(g is not None), str(k.dtype)),
+            timeout=20,
+        )
+        ct.launch(stream, grid, kernel, args)
     w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=g, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     return w, u, A
 

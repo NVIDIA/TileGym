@@ -411,7 +411,7 @@ def test_op_shared_tuning_failure_retry_and_device_cache(disabled, monkeypatch):
     from types import SimpleNamespace
 
     tuning = importlib.import_module("tilegym.suites.fla.cutile._tuning")
-    current, attempts, launches = [0], [], []
+    current, attempts, chosen = [0], [], []
     cache = {}
 
     class Kernel:
@@ -419,33 +419,37 @@ def test_op_shared_tuning_failure_retry_and_device_cache(disabled, monkeypatch):
             return (self, tuple(kwargs.items()))
 
     kernel = Kernel()
-    configs = tuning.hint_configs([1, 2])
+    configs = [SimpleNamespace(hints=dict(occupancy=o, num_worker_warps=w)) for o in (1, 2) for w in (4, 8)]
 
-    def search(*args):
+    def search(*args, **kwargs):
         attempts.append(current[0])
         if len(attempts) == 1:
             raise RuntimeError("invalid device context")
         return SimpleNamespace(best=SimpleNamespace(config=args[0][1]))
 
-    ct = SimpleNamespace(compiler_timeout=lambda _: nullcontext(), launch=lambda *args: launches.append(args))
+    ct = SimpleNamespace(compiler_timeout=lambda _: nullcontext())
     monkeypatch.setattr(tuning, "_runtime", lambda: (ct, search))
     monkeypatch.setattr(tuning, "_ensure_cuda_context", lambda: None)
-    monkeypatch.setattr(tuning, "_cache", cache)
+    monkeypatch.setattr(tuning, "_search_cache", cache)
     monkeypatch.setattr(tuning, "device_cache_key", lambda: (current[0], (10, 0)))
-    monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "0")
     monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "1" if disabled else "0")
     for device in (0, 0, 0, 1, 0):
         current[0] = device
-        tuning.tune_launch(kernel, None, lambda c: (c.occupancy,), lambda c: (), configs, ("shape",))
+        chosen.append(
+            tuning.cached_exhaustive_search(
+                configs, None, lambda c: (1,), kernel, lambda c: (), lambda c: c.hints, cache_key=("shape",)
+            )
+        )
+    assert len(chosen) == 5
     if disabled:
         assert not attempts and not cache
-        assert all(call[2] is kernel for call in launches)
+        assert all(cfg is configs[0] and k is kernel for cfg, k in chosen)
     else:
         assert attempts == [0, 0, 1]
         assert len(cache) == 2
-        assert launches[0][2] is kernel
-        assert launches[1][2] is not kernel
-    assert len(launches) == 5
+        assert chosen[0] == (configs[0], kernel)
+        assert chosen[1] == (configs[1], (kernel, (("occupancy", 1), ("num_worker_warps", 8))))
+        assert chosen[2] is chosen[4]
 
 
 def test_op_state_tiles_use_grid_capacity_and_safe_device_fallback(monkeypatch):
@@ -465,44 +469,34 @@ def test_op_state_tiles_use_grid_capacity_and_safe_device_fallback(monkeypatch):
     assert module._state_tile_kv(128, 128, 32, 0) == (128, 128)
 
 
-def test_op_tuning_cache_hit_skips_candidate_construction(monkeypatch):
+def test_op_tuning_cache_keys_on_search_space(monkeypatch):
     import importlib
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     tuning = importlib.import_module("tilegym.suites.fla.cutile._tuning")
-    constructed, searches = [], []
+    searches = []
 
     class Kernel:
         def replace_hints(self, **kwargs):
             return object()
 
-    def candidates(occupancies):
-        constructed.append(tuple(occupancies))
-        return tuning.hint_configs(occupancies, (4,))
-
-    def search(configs, *args):
+    def search(configs, *args, **kwargs):
         searches.append(1)
         return SimpleNamespace(best=SimpleNamespace(config=configs[-1]))
 
-    ct = SimpleNamespace(compiler_timeout=lambda _: nullcontext(), launch=lambda *args: None)
+    ct = SimpleNamespace(compiler_timeout=lambda _: nullcontext())
     monkeypatch.setattr(tuning, "_runtime", lambda: (ct, search))
     monkeypatch.setattr(tuning, "_ensure_cuda_context", lambda: None)
-    monkeypatch.setattr(tuning, "_cache", {})
+    monkeypatch.setattr(tuning, "_search_cache", {})
     monkeypatch.setattr(tuning, "device_cache_key", lambda: (0, (10, 0)))
     monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", "0")
     kernel = Kernel()
-    for choices in ((1, 2), (1, 2), (1, 4)):
-        tuning.tune_launch(
-            kernel,
-            None,
-            lambda c: (1,),
-            lambda c: (),
-            lambda: candidates(choices),
-            ("shape",),
-            config_key=("hints", choices, (4,)),
+    for occupancies in ((1, 2), (1, 2), (1, 4)):
+        configs = [SimpleNamespace(BV=64, hints=dict(occupancy=o, num_worker_warps=4)) for o in occupancies]
+        tuning.cached_exhaustive_search(
+            configs, None, lambda c: (1,), kernel, lambda c: (), lambda c: c.hints, cache_key=("shape",)
         )
-    assert constructed == [(1, 2), (1, 4)]
     assert len(searches) == 2
 
 
@@ -512,28 +506,31 @@ def test_op_tuning_public_switch_overrides_a_warm_cache(monkeypatch):
     from types import SimpleNamespace
 
     tuning = importlib.import_module("tilegym.suites.fla.cutile._tuning")
-    launches, searches = [], []
+    kernels, searches = [], []
 
     class Kernel:
         def replace_hints(self, **kwargs):
             return object()
 
     kernel = Kernel()
-    configs = tuning.hint_configs([1], (4,))
+    configs = [SimpleNamespace(hints=dict(occupancy=1, num_worker_warps=4))]
 
-    def search(candidates, *args):
+    def search(candidates, *args, **kwargs):
         searches.append(1)
         return SimpleNamespace(best=SimpleNamespace(config=candidates[0]))
 
-    ct = SimpleNamespace(compiler_timeout=lambda _: nullcontext(), launch=lambda *args: launches.append(args[2]))
+    ct = SimpleNamespace(compiler_timeout=lambda _: nullcontext())
     monkeypatch.setattr(tuning, "_runtime", lambda: (ct, search))
     monkeypatch.setattr(tuning, "_ensure_cuda_context", lambda: None)
-    monkeypatch.setattr(tuning, "_cache", {})
+    monkeypatch.setattr(tuning, "_search_cache", {})
     monkeypatch.setattr(tuning, "device_cache_key", lambda: (0, (10, 0)))
     for flag in ("0", "1", "0"):
         monkeypatch.setenv("TILEGYM_DISABLE_AUTOTUNE", flag)
-        tuning.tune_launch(kernel, None, lambda c: (1,), lambda c: (), configs, ("shape",))
+        _, tuned = tuning.cached_exhaustive_search(
+            configs, None, lambda c: (1,), kernel, lambda c: (), lambda c: c.hints, cache_key=("shape",)
+        )
+        kernels.append(tuned)
     assert len(searches) == 1
-    assert launches[0] is launches[2]
-    assert launches[1] is kernel
-    assert launches[0] is not kernel
+    assert kernels[0] is kernels[2]
+    assert kernels[1] is kernel
+    assert kernels[0] is not kernel

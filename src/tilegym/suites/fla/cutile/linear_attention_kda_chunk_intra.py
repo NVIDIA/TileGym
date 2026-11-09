@@ -17,34 +17,15 @@ import torch
 
 from tilegym.suites.fla.cutile._host_utils import _segmented_arange
 from tilegym.suites.fla.cutile._host_utils import input_guard
-from tilegym.suites.fla.cutile._tuning import tune_launch
+from tilegym.suites.fla.cutile._tuning import cached_exhaustive_search
+from tilegym.suites.fla.cutile._tuning import launch_hints
+from tilegym.suites.fla.cutile._tuning import shape_bucket
 
 __all__ = ["chunk_kda_fwd_intra", "chunk_kda_bwd_intra"]
 
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
-
-
-# Default (occ=1/nww=4) is listed first so exhaustive_search always has the
-# safe baseline as a candidate; occ up to 4 and nww in {4,8} sweep the space.
-_INTER_SOLVE_HINTS = ((1, 4), (2, 8), (2, 4), (3, 8), (4, 8), (4, 4), (1, 8))
-
-# Loop-scatter kernels cap occupancy at two to avoid compilation stalls.
-_RECOMPUTE_WU_HINTS = ((1, 4), (2, 8), (2, 4), (1, 8))
-
-
-def _tuned_launch_hints(kernel, stream, grid, args, cache_key, hint_configs):
-    choices = tuple(hint_configs)
-    tune_launch(
-        kernel,
-        stream,
-        lambda c: grid,
-        lambda c: args,
-        lambda: [SimpleNamespace(occupancy=o, num_worker_warps=w) for o, w in choices],
-        cache_key,
-        config_key=("hints", choices),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1657,10 +1638,6 @@ def chunk_kda_bwd_kernel_intra(
 # ======================== Wrapper Functions ========================
 
 
-def _launch_fwd_full(stream, grid, args, cache_key):
-    _tuned_launch_hints(chunk_kda_fwd_kernel_intra_wu_fused_full, stream, grid, args, cache_key, _RECOMPUTE_WU_HINTS)
-
-
 def _launch_bwd_intra(stream, grid, args):
     ct.launch(stream, grid, chunk_kda_bwd_kernel_intra, args)
 
@@ -1788,38 +1765,44 @@ def recompute_w_u_fwd(
         cs = _cached_dummy(k.device, torch.int32, 1)
 
     grid = (NT, B * HV, 1)
-    _tuned_launch_hints(
-        recompute_w_u_fwd_kda_kernel,
-        torch.cuda.current_stream(),
-        grid,
-        (
-            q3,
-            k3,
-            qg3,
-            kg3,
-            v3,
-            beta2,
-            w3,
-            u3,
-            A3,
-            gk3,
-            ci,
-            cs,
-            T,
-            HV,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            G,
-            STORE_QG,
-            STORE_KG,
-            IS_VARLEN,
-        ),
-        (T, HV, K, V, BT, BK, BV, G, STORE_QG, STORE_KG, IS_VARLEN),
-        _RECOMPUTE_WU_HINTS,
+    stream = torch.cuda.current_stream()
+    args = (
+        q3,
+        k3,
+        qg3,
+        kg3,
+        v3,
+        beta2,
+        w3,
+        u3,
+        A3,
+        gk3,
+        ci,
+        cs,
+        T,
+        HV,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        G,
+        STORE_QG,
+        STORE_KG,
+        IS_VARLEN,
     )
+    # Occupancy capped at 2: these kernels scatter inside their loops, and higher
+    # occupancy hints risk compile stalls / hangs.
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints(occupancy=(1, 2))],
+        stream,
+        lambda c: grid,
+        recompute_w_u_fwd_kda_kernel,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=(shape_bucket(T), HV, K, V, BT, BK, BV, G, STORE_QG, STORE_KG, IS_VARLEN),
+    )
+    ct.launch(stream, grid, kernel, args)
     return w, u, qg, kg
 
 
@@ -1890,39 +1873,47 @@ def chunk_kda_fwd_intra(
         qgf = qg.reshape(-1) if STORE_QG else _cached_dummy(k.device, k.dtype, 1)
         grid = (NT, B * HV, 1)
         _check_flat_addressing(q, k, gk, beta, v, Aqk, Akk, w, u, kg)
-        _launch_fwd_full(
-            torch.cuda.current_stream(),
-            grid,
-            (
-                qf,
-                k.contiguous().reshape(-1),
-                gk.contiguous().reshape(-1),
-                beta.contiguous().reshape(-1),
-                v.contiguous().reshape(-1),
-                Aqk.reshape(-1),
-                Akk.reshape(-1),
-                w.reshape(-1),
-                u.reshape(-1),
-                qgf,
-                kg.reshape(-1),
-                ci.reshape(-1),
-                cs.reshape(-1),
-                scale,
-                T,
-                HV,
-                K,
-                V,
-                BT,
-                BC,
-                BK_FF,
-                BV,
-                G,
-                STORE_QG,
-                IS_VARLEN,
-                IS_TF32_SUPPORTED,
-            ),
-            (T, HV, K, V, BT, BC, BK_FF, BV, G, STORE_QG, IS_VARLEN, IS_TF32_SUPPORTED),
+        stream = torch.cuda.current_stream()
+        args = (
+            qf,
+            k.contiguous().reshape(-1),
+            gk.contiguous().reshape(-1),
+            beta.contiguous().reshape(-1),
+            v.contiguous().reshape(-1),
+            Aqk.reshape(-1),
+            Akk.reshape(-1),
+            w.reshape(-1),
+            u.reshape(-1),
+            qgf,
+            kg.reshape(-1),
+            ci.reshape(-1),
+            cs.reshape(-1),
+            scale,
+            T,
+            HV,
+            K,
+            V,
+            BT,
+            BC,
+            BK_FF,
+            BV,
+            G,
+            STORE_QG,
+            IS_VARLEN,
+            IS_TF32_SUPPORTED,
         )
+        # Occupancy capped at 2: these kernels scatter inside their loops, and higher
+        # occupancy hints risk compile stalls / hangs.
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints(occupancy=(1, 2))],
+            stream,
+            lambda c: grid,
+            chunk_kda_fwd_kernel_intra_wu_fused_full,
+            lambda c: args,
+            lambda c: c.hints,
+            cache_key=(shape_bucket(T), HV, K, V, BT, BC, BK_FF, BV, G, STORE_QG, IS_VARLEN, IS_TF32_SUPPORTED),
+        )
+        ct.launch(stream, grid, kernel, args)
         return w, u, qg, kg, Aqk, Akk
 
     # Separate fp32 buffer for diagonal 16x16 blocks (precision in solve_tril).
@@ -2012,31 +2003,55 @@ def chunk_kda_fwd_intra(
             qf = _cached_dummy(k.device, k.dtype, 1)
             qgf = _cached_dummy(k.device, k.dtype, 1)
         _check_flat_addressing(q, k, gk, beta, v, Akk, w, u, kg)
-        _tuned_launch_hints(
+        stream = torch.cuda.current_stream()
+        args = (
+            q3,
+            k3,
+            g3,
+            beta2,
+            Aqk3,
+            Akkd3,
+            qf,
+            k3.reshape(-1),
+            g3.reshape(-1),
+            beta2.reshape(-1),
+            vf,
+            Akk3.reshape(-1),
+            wf,
+            uf,
+            qgf,
+            kgf,
+            ci,
+            cs,
+            scale,
+            T,
+            HV,
+            K,
+            V,
+            BT,
+            BC,
+            BK_F,
+            BKW,
+            BV,
+            G,
+            STORE_QG,
+            IS_VARLEN,
+            use_solved_diagonal,
+            IS_TF32_SUPPORTED,
+        )
+        # Occupancy capped at 2: these kernels scatter inside their loops, and higher
+        # occupancy hints risk compile stalls / hangs.
+        _, kernel = cached_exhaustive_search(
+            [SimpleNamespace(hints=h) for h in launch_hints(occupancy=(1, 2))],
+            stream,
+            lambda c: grid,
             chunk_kda_fwd_kernel_inter_solve_wu_fused,
-            torch.cuda.current_stream(),
-            grid,
-            (
-                q3,
-                k3,
-                g3,
-                beta2,
-                Aqk3,
-                Akkd3,
-                qf,
-                k3.reshape(-1),
-                g3.reshape(-1),
-                beta2.reshape(-1),
-                vf,
-                Akk3.reshape(-1),
-                wf,
-                uf,
-                qgf,
-                kgf,
-                ci,
-                cs,
-                scale,
-                T,
+            lambda c: args,
+            lambda c: c.hints,
+            # cache_key = the compile-affecting ConstInt/ConstBool args (occ/nww
+            # is tuned per unique kernel instantiation).
+            cache_key=(
+                shape_bucket(T),
                 HV,
                 K,
                 V,
@@ -2051,45 +2066,46 @@ def chunk_kda_fwd_intra(
                 use_solved_diagonal,
                 IS_TF32_SUPPORTED,
             ),
-            # cache_key = the compile-affecting ConstInt/ConstBool args (occ/nww
-            # is tuned per unique kernel instantiation).
-            (T, HV, K, V, BT, BC, BK_F, BKW, BV, G, STORE_QG, IS_VARLEN, use_solved_diagonal, IS_TF32_SUPPORTED),
-            _RECOMPUTE_WU_HINTS,
         )
+        ct.launch(stream, grid, kernel, args)
         return w, u, qg, kg, Aqk, Akk
 
-    _tuned_launch_hints(
+    stream = torch.cuda.current_stream()
+    args = (
+        q3,
+        k3,
+        g3,
+        beta2,
+        Aqk3,
+        Akkd3,
+        Akk3,
+        ci,
+        cs,
+        scale,
+        T,
+        HV,
+        K,
+        BT,
+        BC,
+        NC,
+        BK,
+        G,
+        IS_VARLEN,
+        use_solved_diagonal,
+        IS_TF32_SUPPORTED,
+    )
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints(occupancy=(1, 2, 3, 4))],
+        stream,
+        lambda c: grid,
         chunk_kda_fwd_kernel_inter_solve_fused,
-        torch.cuda.current_stream(),
-        grid,
-        (
-            q3,
-            k3,
-            g3,
-            beta2,
-            Aqk3,
-            Akkd3,
-            Akk3,
-            ci,
-            cs,
-            scale,
-            T,
-            HV,
-            K,
-            BT,
-            BC,
-            NC,
-            BK,
-            G,
-            IS_VARLEN,
-            use_solved_diagonal,
-            IS_TF32_SUPPORTED,
-        ),
+        lambda c: args,
+        lambda c: c.hints,
         # cache_key = the compile-affecting ConstInt/ConstBool args (occ/nww is
         # tuned per unique kernel instantiation).
-        (T, HV, K, BT, BC, NC, BK, G, IS_VARLEN, use_solved_diagonal, IS_TF32_SUPPORTED),
-        _INTER_SOLVE_HINTS,
+        cache_key=(shape_bucket(T), HV, K, BT, BC, NC, BK, G, IS_VARLEN, use_solved_diagonal, IS_TF32_SUPPORTED),
     )
+    ct.launch(stream, grid, kernel, args)
 
     w, u, qg, kg = recompute_w_u_fwd(
         k=k,
