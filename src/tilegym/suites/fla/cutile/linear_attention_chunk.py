@@ -1199,6 +1199,10 @@ def _tile_kv(K, V):
     return BK, BV
 
 
+def _is_sm12x(device):
+    return torch.cuda.get_device_capability(device)[0] == 12
+
+
 def _state_tile_kv(K, V, groups, device):
     """Split independent state tiles when the wider grid fits within one SM wave."""
     BK, BV = _tile_kv(K, V)
@@ -1254,6 +1258,8 @@ def chunk_fwd_h(
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
 
     BK, BV = _state_tile_kv(K, V, N * H, k.device)
+    if state_fp32_dot and _is_sm12x(k.device):
+        BK = min(BK, 64)
 
     if (
         k.dtype == v.dtype == torch.bfloat16
@@ -1453,6 +1459,11 @@ def _o_kernel_occ4():
     return chunk_fwd_kernel_o.replace_hints(occupancy=4)
 
 
+@functools.lru_cache(maxsize=None)
+def _o_kernel_sm12x_fp32_state():
+    return chunk_fwd_kernel_o.replace_hints(occupancy=1, num_worker_warps=8)
+
+
 def _o_kernel_for_tile(BK, BV):
     # Larger tiles retain the default occupancy to limit register spills.
     if BK == 64 and BV == 64:
@@ -1489,6 +1500,10 @@ def chunk_fwd_o(
     o = torch.empty_like(v, dtype=out_dtype) if out_dtype is not None else torch.empty_like(v)
 
     BK, BV = _tile_kv(K, V)
+    kernel = _o_kernel_for_tile(BK, BV)
+    if state_fp32_dot and _is_sm12x(q.device):
+        BK, BV = min(BK, 64), min(BV, 128 if V > 128 else 64)
+        kernel = _o_kernel_sm12x_fp32_state()
     is_varlen = cu_seqlens is not None
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_int(q.device)
     ci_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_int2(q.device)
@@ -1497,7 +1512,7 @@ def chunk_fwd_o(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        _o_kernel_for_tile(BK, BV),
+        kernel,
         (
             q,
             k,
