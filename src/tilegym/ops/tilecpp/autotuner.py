@@ -197,6 +197,7 @@ class TileCppAutotuner:
         seed: int = 0,
         force_retune: bool = False,
         restore_tensors: Sequence[torch.Tensor] = (),
+        select: Callable[[list], list] | None = None,
     ) -> TunedResult:
         """
         Run the autotuned kernel and return its result.
@@ -229,6 +230,10 @@ class TileCppAutotuner:
                 Inputs modified in place. Preserve their values during search;
                 reset before each candidate outside timing and the cache flush.
                 Cache hits launch directly without copying these inputs.
+            select:
+                Called with the ``(index, config, grid)`` entries that passed the
+                pre-compile phase; returns the ones to time. If it narrows them
+                to a single entry, that entry is used without timing.
 
         Returns:
             TunedResult with the best configuration.
@@ -287,6 +292,11 @@ class TileCppAutotuner:
 
                 # Synchronize to ensure all compilations are complete
                 stream.synchronize()
+                untimed = False
+                if select is not None:
+                    selected = select(valid_configs)
+                    untimed = len(selected) == 1 < len(valid_configs)
+                    valid_configs = selected
                 if verbose:
                     logger.info(
                         f"[TileCpp Autotuner] Pre-compilation done. Timing {len(valid_configs)} valid configs..."
@@ -295,6 +305,8 @@ class TileCppAutotuner:
                 # Phase 2: Time each pre-compiled configuration
                 best_time_ms, best_idx, best_grid = float("inf"), None, None
                 last_failure = ""
+                if untimed:
+                    (best_idx, _, best_grid), valid_configs = valid_configs[0], []
 
                 for cfg_idx, cfg, grid in valid_configs:
                     try:
