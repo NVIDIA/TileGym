@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -277,15 +278,21 @@ _compiler_fingerprints: Dict[str, str] = {}
 def _compiler_fingerprint() -> str:
     """Identify the nvcc in NVCC_PATH so cached cubins are not reused across compilers.
 
-    Uses ``nvcc --version`` (falling back to the resolved path when it cannot run),
-    so switching TILECPP_NVCC_PATH or upgrading the toolkit's nvcc misses the cache.
+    Uses ``nvcc --version``, so switching TILECPP_NVCC_PATH or upgrading the toolkit's
+    nvcc misses the cache. When that cannot run or exits nonzero, falls back to the
+    resolved path of the executable found on PATH, or to NVCC_PATH itself if none is.
     """
     if NVCC_PATH not in _compiler_fingerprints:
         try:
-            identity = subprocess.run([NVCC_PATH, "--version"], capture_output=True, text=True, timeout=10).stdout
+            identity = subprocess.run(
+                [NVCC_PATH, "--version"], capture_output=True, text=True, timeout=10, check=True
+            ).stdout
         except (OSError, subprocess.SubprocessError):
             identity = ""
-        _compiler_fingerprints[NVCC_PATH] = identity or os.path.realpath(NVCC_PATH)
+        if not identity:
+            executable = shutil.which(NVCC_PATH)
+            identity = os.path.realpath(executable) if executable else NVCC_PATH
+        _compiler_fingerprints[NVCC_PATH] = identity
     return _compiler_fingerprints[NVCC_PATH]
 
 
