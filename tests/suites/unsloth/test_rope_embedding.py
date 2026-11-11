@@ -15,6 +15,7 @@ from tilegym.suites.unsloth.ops import rope_embedding_qk
 DEVICE = "cuda"
 
 _backends = ["cutile"]
+_perf_backends = _backends + ["pytorch"]
 
 
 def _apply_rope_reference(x, cos, sin):
@@ -63,12 +64,12 @@ class Test_Unsloth_RoPE_Embedding(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op(self, batch, seq_len, n_heads, head_dim, dtype, framework):
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op(self, batch, seq_len, n_heads, head_dim, dtype, backend):
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         Q = torch.randn(batch, seq_len, n_heads, head_dim, dtype=dtype, device=DEVICE)
@@ -93,17 +94,17 @@ class Test_Unsloth_RoPE_Embedding(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_non_power_of_2_head_dim(self, batch, seq_len, n_heads, head_dim, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_non_power_of_2_head_dim(self, batch, seq_len, n_heads, head_dim, dtype, backend):
         """Test RoPE with non-power-of-2 head_dim (e.g. Phi-3 head_dim=96).
 
         When half_head_dim is not a power of 2, TILE_HD is rounded up and
         out-of-range lanes must be masked to avoid corrupting adjacent heads.
         """
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         Q = torch.randn(batch, seq_len, n_heads, head_dim, dtype=dtype, device=DEVICE)
@@ -128,13 +129,13 @@ class Test_Unsloth_RoPE_Embedding(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward(self, batch, seq_len, n_heads, head_dim, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward(self, batch, seq_len, n_heads, head_dim, dtype, backend):
         """Test backward pass: verify Q gradient VALUES against PyTorch reference."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         half = head_dim // 2
@@ -197,12 +198,12 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, backend):
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
@@ -229,18 +230,18 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_nonstandard_cos_stride(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_nonstandard_cos_stride(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, backend):
         """Test QK RoPE with cos shape (seq_len, head_dim) instead of (seq_len, head_dim//2).
 
         HuggingFace LLaMA uses cos shape (seq_len, head_dim) where the second half
         duplicates the first. This test verifies the kernel correctly uses cos_row_stride
         (= head_dim) rather than hardcoding half_head_dim for cos/sin row indexing.
         """
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
@@ -273,17 +274,17 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("q_dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_mixed_precision(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, q_dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_mixed_precision(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, q_dtype, backend):
         """Test QK RoPE with bf16/fp16 Q/K + fp32 cos/sin (Gemma configuration).
 
         Gemma models force RoPE math in fp32 while Q/K stay in bf16.
         The kernel must upcast Q/K to fp32 before rotation, then downcast back.
         """
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         half = head_dim // 2
@@ -311,17 +312,17 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_non_power_of_2_head_dim(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_non_power_of_2_head_dim(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, backend):
         """Test QK RoPE with non-power-of-2 head_dim (e.g. Phi-3 head_dim=96).
 
         When half_head_dim is not a power of 2, TILE_HD is rounded up and
         out-of-range lanes must be masked to avoid corrupting adjacent heads.
         """
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
@@ -348,13 +349,13 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, dtype, backend):
         """Test backward pass: verify Q and K gradient VALUES against PyTorch reference."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         half = head_dim // 2
@@ -381,3 +382,84 @@ class Test_Unsloth_RoPE_Embedding_QK(common.PyTestCase):
         assert K_test.grad is not None, "Gradient should flow back to K"
         torch.testing.assert_close(Q_test.grad, Q_grad_ref, rtol=5e-2, atol=2e-2, msg="Q gradient mismatch")
         torch.testing.assert_close(K_test.grad, K_grad_ref, rtol=5e-2, atol=2e-2, msg="K gradient mismatch")
+
+
+# =============================================================================
+# Per-kernel perf classes
+# =============================================================================
+
+
+class Test_Unsloth_RoPE_Embedding_QK_Forward(common.PyTestCase):
+    """Perf for joint Q+K RoPE (forward)."""
+
+    @pytest.mark.parametrize(
+        "batch, n_heads_Q, n_heads_K, seq_len, head_dim",
+        [
+            (2, 8, 8, 64, 64),
+            (4, 16, 4, 32, 64),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        K = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        half = head_dim // 2
+        cos = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+        sin = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: Test_Unsloth_RoPE_Embedding_QK.reference(Q.clone(), K.clone(), cos, sin)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: rope_embedding_qk(Q.clone(), K.clone(), cos, sin)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+
+class Test_Unsloth_RoPE_Embedding_QK_Backward(common.PyTestCase):
+    """Perf for joint Q+K RoPE (backward)."""
+
+    @pytest.mark.parametrize(
+        "batch, n_heads_Q, n_heads_K, seq_len, head_dim",
+        [
+            (2, 8, 8, 64, 64),
+            (4, 16, 4, 32, 64),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, batch, n_heads_Q, n_heads_K, seq_len, head_dim, backend, record_property):
+        """Benchmark backward pass throughput for joint Q+K RoPE."""
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        half = head_dim // 2
+        cos = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+        sin = torch.randn(seq_len, half, dtype=dtype, device=DEVICE)
+        dQ_out = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE)
+        dK_out = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE, requires_grad=True)
+            K = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=dtype, device=DEVICE, requires_grad=True)
+            forward_fn = lambda: Test_Unsloth_RoPE_Embedding_QK.reference(Q, K, cos, sin)
+
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            Q = torch.randn(batch, n_heads_Q, seq_len, head_dim, dtype=dtype, device=DEVICE, requires_grad=True)
+            K = torch.randn(batch, n_heads_K, seq_len, head_dim, dtype=dtype, device=DEVICE, requires_grad=True)
+            forward_fn = lambda: rope_embedding_qk(Q, K, cos, sin)
+
+        result = common.benchmark_framework(
+            backend, forward_fn, mode="backward", gradient=[dQ_out, dK_out], grad_to_none=[Q, K]
+        )
+        record_property("benchmark", result)

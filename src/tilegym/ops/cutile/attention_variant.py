@@ -57,6 +57,7 @@ def _fmha_variant_autotune_configs():
         # Priority order: larger tiles first for better compute efficiency
         yield SimpleNamespace(TILE_M=256, TILE_N=128, num_ctas=1, occupancy=1)
         yield SimpleNamespace(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=2)
+        yield SimpleNamespace(TILE_M=128, TILE_N=128, num_ctas=1, occupancy=1)
         yield SimpleNamespace(TILE_M=128, TILE_N=64, num_ctas=1, occupancy=2)
         yield SimpleNamespace(TILE_M=64, TILE_N=128, num_ctas=1, occupancy=2)
         yield SimpleNamespace(TILE_M=64, TILE_N=64, num_ctas=1, occupancy=4)

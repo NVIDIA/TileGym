@@ -153,3 +153,72 @@ class Test_FlashInfer_MaskedBMM(common.PyTestCase):
         for i in range(num_groups):
             c[i, m_mask[i] :, :] = 0
         torch.testing.assert_close(ref_c, c, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize(
+        "num_groups, max_m, expected_m_per_group, n, k",
+        [
+            (
+                case["num_groups"],
+                case["max_m"],
+                case["expected_m_per_group"],
+                case["n"],
+                case["k"],
+            )
+            for case in list(enumerate_m_grouped_masked())[:1]
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16])
+    @pytest.mark.parametrize("trans_a", [False, True])
+    @pytest.mark.parametrize("trans_b", [False, True])
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "cutile",
+            "pytorch",
+        ],
+    )
+    def test_perf(
+        self,
+        num_groups,
+        max_m,
+        expected_m_per_group,
+        n,
+        k,
+        dtype,
+        trans_a,
+        trans_b,
+        backend: str,
+        record_property,
+    ):
+        self.setUp()
+        _impl_fw = ["cutile"]
+        if backend in _impl_fw:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+
+        torch.manual_seed(0)
+        random.seed(0)
+        a_ref, b_ref, a_impl, b_impl, m_mask = self.prepare_data(
+            num_groups, max_m, expected_m_per_group, n, k, trans_a, trans_b, dtype
+        )
+        c = torch.rand((num_groups, max_m, n), device=a_ref.device, dtype=dtype)
+        ref_c = torch.rand((num_groups, max_m, n), device=a_ref.device, dtype=dtype)
+
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(a_ref, b_ref, m_mask, trans_a, trans_b)
+        elif backend in _impl_fw:
+            backend_fn = lambda: flashinfer.ops.masked_bmm(a_impl, b_impl, m_mask, trans_a, trans_b)
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        res = common.benchmark_framework(backend, backend_fn)
+        record_property("benchmark", res)
+
+        ref_c = self.reference(a_ref, b_ref, m_mask, trans_a, trans_b)
+        c = flashinfer.ops.masked_bmm(a_impl, b_impl, m_mask, trans_a, trans_b)
+
+        for i in range(num_groups):
+            c[i, m_mask[i] :, :] = 0
+        torch.testing.assert_close(ref_c, c, atol=1e-2, rtol=1e-2)

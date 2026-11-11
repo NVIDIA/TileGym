@@ -294,3 +294,78 @@ class Test_FlashInfer_RaggedBMM(common.PyTestCase):
             atol=1e-2,
             rtol=1e-2,
         )
+
+    @pytest.mark.parametrize("num_groups", [16])
+    @pytest.mark.parametrize("m", [128, 256, 512])
+    @pytest.mark.parametrize("n", [4096, 8192])
+    @pytest.mark.parametrize("k", [4096, 8192])
+    @pytest.mark.parametrize(
+        "dtype, out_dtype", [(torch.bfloat16, torch.bfloat16), (torch.float8_e4m3fn, torch.bfloat16)]
+    )
+    @pytest.mark.parametrize("trans_a", [False])
+    @pytest.mark.parametrize("trans_b", [True])
+    @pytest.mark.parametrize("use_max_m_device", [False])
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "cutile",
+        ],
+    )
+    def test_perf(
+        self,
+        num_groups,
+        m,
+        n,
+        k,
+        dtype,
+        out_dtype,
+        trans_a,
+        trans_b,
+        use_max_m_device,
+        backend: str,
+        record_property,
+    ):
+        self.setUp()
+        if "float8" in str(dtype) and torch.cuda.get_device_capability()[0] < 9:
+            pytest.skip("FP8 requires compute capability 9.0 or newer")
+        _impl_fw = ["cutile"]
+        if backend in _impl_fw:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+
+        torch.manual_seed(0)
+        random.seed(0)
+        a, b, max_m, segment_offsets = self.prepare_data(num_groups, m, n, k, trans_a, trans_b, dtype, backend)
+
+        if backend == "pytorch":
+            backend_fn = lambda: self.reference(a, b, segment_offsets, trans_a, trans_b, out_dtype)
+        elif backend in _impl_fw:
+            backend_fn = lambda: flashinfer.ops.ragged_bmm(
+                a,
+                b,
+                segment_offsets,
+                max_m,
+                torch.tensor([max_m], dtype=torch.int32).cuda() if use_max_m_device else None,
+                transpose_a=trans_a,
+                transpose_b=trans_b,
+                out_dtype=out_dtype,
+            )
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        if backend != "pytorch":
+            # Outputs reach magnitude ~k/4, where one out_dtype ulp is ~0.8%
+            # relative error for bfloat16, so benign 1-2 ulp rounding
+            # differences between tile configs exceed rtol=1e-2. Allow 3 ulps.
+            self.assertCorrectness(
+                backend_fn,
+                lambda: self.reference(a, b, segment_offsets, trans_a, trans_b, out_dtype),
+                kwargs={},
+                atol=1e-2,
+                rtol=max(1e-2, 3 * torch.finfo(out_dtype).eps),
+            )
+
+        res = common.benchmark_framework(backend, backend_fn)
+        record_property("benchmark", res)

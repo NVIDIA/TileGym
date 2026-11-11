@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
-
 """
 Dynamic Tanh (DyT) activation kernel (cuTile backend).
 
@@ -9,6 +8,7 @@ Formula: y = tanh(alpha * x) * gamma + beta
 
 Reference:
 https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/dyt.py
+
 """
 
 import cuda.tile as ct
@@ -33,16 +33,9 @@ def _dyt_fwd_kernel(
     CHECK_BOUNDS: ct.Constant[bool],
     BLOCK_N: ct.Constant[int],
 ):
-    """
-    DyT forward kernel.
-
-    Grid: (num_col_blocks, M, 1).
-    CHECK_BOUNDS=False fast path (BLOCK_N==N, power-of-2, num_col_blocks==1) avoids
-    predicate-mask instructions on every gather/scatter — ~9-11% faster.
-    """
+    """DyT forward; CHECK_BOUNDS=False requires BLOCK_N == N and a single column block."""
     row_id = ct.bid(1)
-    # Aligned path (CHECK_BOUNDS=False): single col-block, no col offset, no padding_value.
-    # CuTile DCE collapses the unused branch since CHECK_BOUNDS is a compile-time Constant.
+
     if CHECK_BOUNDS:
         col_indices = ct.arange(BLOCK_N, dtype=ct.int32) + ct.bid(0) * BLOCK_N
         gamma = ct.astype(ct.gather(gamma_tensor, col_indices, check_bounds=True, padding_value=0.0), ct.float32)
@@ -80,13 +73,7 @@ def _dyt_bwd_kernel(
     BLOCK_N: ct.Constant[int],
     NUM_SMS: ct.Constant[int],
 ):
-    """
-    DyT backward kernel (persistent 2D grid).
-
-    Grid: (num_col_blocks, NUM_SMS)
-    Block (col_block, start_row_id) strides over rows: start_row_id, start_row_id+NUM_SMS, ...
-    Writes DG/DB/DA to unique (start_row_id, col) so no atomics; host sums.
-    """
+    """DyT backward with per-block gradient partials reduced by the host."""
     col_block = ct.bid(0)
     start_row_id = ct.bid(1)
     col_start = col_block * BLOCK_N
@@ -95,39 +82,44 @@ def _dyt_bwd_kernel(
     alpha = ct.astype(ct.load(alpha_tensor, 0, shape=()), ct.float32)
     gamma = ct.astype(ct.gather(gamma_tensor, col_indices, check_bounds=True, padding_value=0.0), ct.float32)
 
-    da_acc = ct.full((BLOCK_N,), 0.0, dtype=ct.float32)  # tile accumulator, reduce once at end
+    da_acc = ct.full((BLOCK_N,), 0.0, dtype=ct.float32)
     dg_acc = ct.full((BLOCK_N,), 0.0, dtype=ct.float32)
     if HAVE_BETA:
         db_acc = ct.full((BLOCK_N,), 0.0, dtype=ct.float32)
 
-    # Stride over rows assigned to this block: start_row_id, start_row_id+NUM_SMS, ...
-    num_iters = (M + NUM_SMS - 1) // NUM_SMS
+    num_iters = (M + 2 * NUM_SMS - 1) // (2 * NUM_SMS)
     for i in range(num_iters):
-        row_id = start_row_id + i * NUM_SMS
-        if row_id < M:
-            x = ct.astype(ct.gather(x_input, (row_id, col_indices), check_bounds=True, padding_value=0.0), ct.float32)
-            dy = ct.astype(ct.gather(dy_input, (row_id, col_indices), check_bounds=True, padding_value=0.0), ct.float32)
+        row_a = start_row_id + i * (2 * NUM_SMS)
+        row_b = row_a + NUM_SMS
+        x_a = ct.astype(ct.gather(x_input, (row_a, col_indices), check_bounds=True, padding_value=0.0), ct.float32)
+        dy_a = ct.astype(ct.gather(dy_input, (row_a, col_indices), check_bounds=True, padding_value=0.0), ct.float32)
+        x_b = ct.astype(ct.gather(x_input, (row_b, col_indices), check_bounds=True, padding_value=0.0), ct.float32)
+        dy_b = ct.astype(ct.gather(dy_input, (row_b, col_indices), check_bounds=True, padding_value=0.0), ct.float32)
 
-            # APPROX tanh: ~1.6x faster, 2-4 ULP off; well within bwd tolerance 1e-2.
-            tanh_x = ct.tanh(alpha * x, rounding_mode=RMd.APPROX)
-            sech2_x = ct.full((BLOCK_N,), 1.0, dtype=ct.float32) - tanh_x * tanh_x
-
+        # Padded rows must not accumulate tanh(inf * 0) NaNs.
+        if row_a < M:
+            tanh_a = ct.tanh(alpha * x_a, rounding_mode=RMd.APPROX)
+            tmp_a = (ct.full((BLOCK_N,), 1.0, dtype=ct.float32) - tanh_a * tanh_a) * dy_a * gamma
             if HAVE_BETA:
-                db_acc = db_acc + dy
+                db_acc = db_acc + dy_a
+            dg_acc = dg_acc + dy_a * tanh_a
+            da_acc = da_acc + x_a * tmp_a
+            ct.scatter(dx_output, (row_a, col_indices), ct.astype(alpha * tmp_a, dx_output.dtype), check_bounds=True)
 
-            dg_acc = dg_acc + dy * tanh_x
+        if row_b < M:
+            tanh_b = ct.tanh(alpha * x_b, rounding_mode=RMd.APPROX)
+            tmp_b = (ct.full((BLOCK_N,), 1.0, dtype=ct.float32) - tanh_b * tanh_b) * dy_b * gamma
+            if HAVE_BETA:
+                db_acc = db_acc + dy_b
+            dg_acc = dg_acc + dy_b * tanh_b
+            da_acc = da_acc + x_b * tmp_b
+            ct.scatter(dx_output, (row_b, col_indices), ct.astype(alpha * tmp_b, dx_output.dtype), check_bounds=True)
 
-            tmp = sech2_x * dy * gamma
-            da_acc = da_acc + x * tmp
-            dx = alpha * tmp
-            ct.scatter(dx_output, (row_id, col_indices), ct.astype(dx, dx_output.dtype), check_bounds=True)
-
-    # Write to unique (start_row_id, col) so host can sum over dim 0
     row_idx_tile = ct.full((BLOCK_N,), start_row_id, dtype=ct.int32)
     ct.scatter(dg_partial, (row_idx_tile, col_indices), dg_acc, check_bounds=True)
     if HAVE_BETA:
         ct.scatter(db_partial, (row_idx_tile, col_indices), db_acc, check_bounds=True)
-    # DA: one scalar per block at (start_row_id, col_block) — single reduction at end
+
     da_scalar = ct.full((1,), ct.sum(da_acc, 0, keepdims=False), dtype=ct.float32)
     ct.scatter(
         da_partial,
@@ -136,8 +128,8 @@ def _dyt_bwd_kernel(
     )
 
 
-# nww=8 (256 threads) on this bwd kernel.
-_dyt_bwd_kernel_nww8 = _dyt_bwd_kernel.replace_hints(num_worker_warps=8)
+_dyt_bwd_kernel_narrow = _dyt_bwd_kernel.replace_hints(num_worker_warps=4)
+_dyt_bwd_kernel_wide = _dyt_bwd_kernel.replace_hints(num_worker_warps=8, occupancy=4)
 
 
 def _dyt_forward_ct(x, alpha, gamma, beta):
@@ -148,8 +140,7 @@ def _dyt_forward_ct(x, alpha, gamma, beta):
 
     BLOCK_N = min(MAX_FUSED_SIZE, next_power_of_2(N))
     num_col_blocks = (N + BLOCK_N - 1) // BLOCK_N
-    # Aligned fast path: single col-block + N is power-of-2 → all gathers/scatters
-    # are in-bounds, kernel compiles with check_bounds=False (no predicate masks).
+
     check_bounds = not ((BLOCK_N == N) and (num_col_blocks == 1))
 
     y = torch.empty_like(x_2d)
@@ -172,11 +163,12 @@ def _dyt_backward_ct(dy, x, alpha, gamma, beta):
     M, N = x_2d.shape
 
     NUM_SMS = torch.cuda.get_device_properties(x.device).multi_processor_count
-    BLOCK_N = min(next_power_of_2(N), 1024)
+    narrow = N <= 2048
+    BLOCK_N = min(next_power_of_2(N), 256 if narrow else 1024)
     num_col_blocks = (N + BLOCK_N - 1) // BLOCK_N
 
     dx = torch.empty_like(dy_2d)
-    # Per-block partials: host reduces over dim 0
+
     da_partial = torch.zeros(NUM_SMS, num_col_blocks, dtype=torch.float32, device=x.device)
     dg_partial = torch.empty(NUM_SMS, N, dtype=torch.float32, device=x.device)
     db_partial = torch.empty(NUM_SMS, N, dtype=torch.float32, device=x.device) if HAVE_BETA else None
@@ -186,7 +178,7 @@ def _dyt_backward_ct(dy, x, alpha, gamma, beta):
     ct.launch(
         torch.cuda.current_stream(),
         (num_col_blocks, NUM_SMS, 1),
-        _dyt_bwd_kernel_nww8,
+        _dyt_bwd_kernel_narrow if narrow else _dyt_bwd_kernel_wide,
         (
             dy_2d,
             dx,

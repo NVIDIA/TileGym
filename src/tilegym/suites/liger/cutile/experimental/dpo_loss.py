@@ -90,9 +90,9 @@ def _row_logp_(logits, target, ignore_index, write_grad, dummies):
             dummy_f32,  # token_accuracy
             dummy_i64,  # predicted_tokens
             int(V),
-            1.0,  # inv_n_non_ignore (unused: REDUCTION_MEAN=0)
-            1.0,  # sum_non_ignore_weight (unused)
-            0.0,  # weight_sum (unused)
+            dummy_f32,  # inv_n_non_ignore (unused: REDUCTION_MEAN=0)
+            dummy_f32,  # sum_non_ignore_weight (unused)
+            dummy_f32,  # weight_sum (unused)
             int(ignore_index),
             0.0,  # label_smoothing
             0.0,  # lse_square_scale

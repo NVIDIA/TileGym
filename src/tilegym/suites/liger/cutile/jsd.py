@@ -11,7 +11,9 @@ import torch
 
 from tilegym.backend import register_impl
 
+from .utils import loss_normalization
 from .utils import next_power_of_2
+from .utils import scale_
 
 ConstFloat = ct.Constant[float]
 ConstInt = ct.Constant[int]
@@ -58,6 +60,8 @@ def _jsd_kernel(
       beta == 1.0  →  reverse KL:  KL(Q || P)
       else         →  generalized JSD
     """
+    if HAS_LABEL:
+        inv_n_non_ignore = ct.load(inv_n_non_ignore, (0,), shape=())
     row_idx = ct.bid(0)
 
     if HAS_LABEL:
@@ -127,15 +131,10 @@ def _jsd_forward(_input, target, shift_labels, beta, ignore_index, has_label):
     loss = torch.zeros(_input.shape, dtype=torch.float32, device=_input.device)
     dx = torch.empty_like(_input)
 
-    if has_label:
-        n_non_ignore = (shift_labels != ignore_index).sum().item()
-    else:
-        n_non_ignore = num_rows
+    if num_rows == 0:
+        return torch.zeros((), device=_input.device, dtype=_input.dtype), torch.zeros_like(_input)
 
-    if n_non_ignore == 0:
-        return torch.tensor(0.0, device=_input.device, dtype=_input.dtype), torch.zeros_like(_input)
-
-    inv_n_non_ignore = 1.0 / n_non_ignore
+    inv_n_non_ignore = loss_normalization(shift_labels, ignore_index)[1].reshape(1) if has_label else 1.0 / num_rows
 
     # ct.launch does not accept None; pass a dummy 1-element tensor when no labels.
     label_tensor = shift_labels if has_label else torch.empty(1, device=_input.device, dtype=torch.int64)
@@ -150,7 +149,7 @@ def _jsd_forward(_input, target, shift_labels, beta, ignore_index, has_label):
             dx,
             label_tensor,
             float(beta),
-            float(inv_n_non_ignore),
+            inv_n_non_ignore,
             int(ignore_index),
             int(vocab_size),
             int(BLOCK_SIZE),
@@ -162,9 +161,7 @@ def _jsd_forward(_input, target, shift_labels, beta, ignore_index, has_label):
 
 
 def _jsd_backward(dx, grad_output):
-    if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
-        return dx
-    return grad_output * dx
+    return scale_(dx, grad_output)
 
 
 class JSDCuTileFunction(torch.autograd.Function):

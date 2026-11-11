@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import tilegym
 from tests import common
 from tilegym.suites.liger.ops import cross_entropy
+from tilegym.suites.liger.ops import fused_linear_cross_entropy
 
 
 class Test_Liger_CrossEntropy(common.PyTestCase):
@@ -375,3 +376,88 @@ class Test_Liger_CrossEntropy(common.PyTestCase):
         assert torch.all(predicted_tokens_test == predicted_ref), (
             f"predicted_tokens mismatch:\ntest={predicted_tokens_test}\nref={predicted_ref}"
         )
+
+    @pytest.mark.parametrize("backend", _backends)
+    @pytest.mark.parametrize("fused", [False, True])
+    @pytest.mark.parametrize("weighted", [False, True])
+    @pytest.mark.parametrize("rows,vocab", [(16, 64), (2053, 513), (16, 2053)])
+    def test_op_graph_replay(self, backend, fused, weighted, rows, vocab, monkeypatch):
+        self.setUp()
+        monkeypatch.setenv("DISABLE_FALLBACK", "1")
+        if not tilegym.is_backend_available(backend):
+            pytest.skip(f"Backend {backend} is not available")
+        try:
+            tilegym.set_backend(backend)
+        except Exception as error:
+            pytest.skip(f"Backend is not supported: {error}")
+
+        hidden = 32
+        data = torch.randn(rows, hidden if fused else vocab, device="cuda") * 0.1
+        projection = torch.randn(vocab, hidden, device="cuda") * 0.1
+        target = torch.arange(rows, device="cuda", dtype=torch.int64).remainder(vocab)
+        weights = (torch.rand(vocab * 2, device="cuda") + 0.5)[::2] if weighted else None
+        scale = torch.ones((), device="cuda")
+
+        def run():
+            x = data.clone().requires_grad_(True)
+            if fused:
+                loss = fused_linear_cross_entropy(x, projection, target, ce_weight=weights, label_smoothing=0.1)
+            else:
+                loss = cross_entropy(x, target, weight=weights, label_smoothing=0.1)
+            gradient = torch.autograd.grad(loss, x, grad_outputs=scale)[0]
+            return loss, gradient
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual_loss, actual_gradient = run()
+
+        for ignored, multiplier in [(0, 2.5), (5, 0.5), (rows, -0.25)]:
+            target.copy_(torch.arange(rows, device="cuda", dtype=torch.int64).remainder(vocab))
+            target[:ignored] = -100
+            scale.fill_(multiplier)
+            if weighted:
+                weights.uniform_(0.001, 0.005)
+            graph.replay()
+
+            if ignored == rows:
+                torch.testing.assert_close(actual_loss, torch.zeros_like(actual_loss))
+                torch.testing.assert_close(actual_gradient, torch.zeros_like(actual_gradient))
+                continue
+            ref_input = data.clone().requires_grad_(True)
+            logits = ref_input @ projection.t() if fused else ref_input
+            expected_loss = F.cross_entropy(logits, target, weight=weights, label_smoothing=0.1)
+            expected_gradient = torch.autograd.grad(expected_loss, ref_input, grad_outputs=scale)[0]
+            torch.testing.assert_close(actual_loss, expected_loss, atol=2e-4, rtol=2e-4)
+            torch.testing.assert_close(actual_gradient, expected_gradient, atol=2e-4, rtol=2e-4)
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("backend", ["cutile"])  # scale_ exists only in the cuTile backend
+    def test_op_scale_chunked(self, dtype, backend, monkeypatch):
+        """scale_ splits big tensors into several launches; every chunk must be scaled exactly once."""
+        self.setUp()
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
+        else:
+            pytest.skip(f"Backend {backend} is not available")
+        from tilegym.suites.liger.cutile import utils
+
+        # Use a small chunk so a small tensor needs several launches, as a > 2**31 element
+        # tensor does with the real chunk. 7 x 4113 = 28791 elements -> 4 launches, the
+        # last one partial and not a multiple of the 4096 block.
+        monkeypatch.setattr(utils, "_SCALE_CHUNK", 2 * 4096)
+        launches = []
+        launch = utils.ct.launch
+        monkeypatch.setattr(utils.ct, "launch", lambda *args: launches.append(args) or launch(*args))
+        x = torch.randn(7, 4113, dtype=dtype, device="cuda")
+        scale = torch.tensor(-2.5, device="cuda")
+        expected = (x.float() * scale).to(dtype)
+        out = utils.scale_(x, scale)
+        assert out is x
+        torch.testing.assert_close(x, expected, atol=0, rtol=0)
+        assert len(launches) == 4

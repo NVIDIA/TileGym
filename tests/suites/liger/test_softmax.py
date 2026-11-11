@@ -19,6 +19,7 @@ def _reference_softmax(x):
 
 class Test_Liger_Softmax(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @pytest.mark.parametrize(
         "shape, dtype",
@@ -78,3 +79,50 @@ class Test_Liger_Softmax(common.PyTestCase):
         y.sum().backward()
 
         assert x.grad is not None
+
+    @pytest.mark.parametrize(
+        "shape, dtype",
+        [
+            ((4096, 1024), torch.float32),
+            ((4096, 2048), torch.float32),
+            ((4096, 4096), torch.float32),
+            ((4096, 8192), torch.float32),
+            ((4096, 16384), torch.float32),
+            ((4096, 1024), torch.bfloat16),
+            ((4096, 2048), torch.bfloat16),
+            ((4096, 4096), torch.bfloat16),
+            ((4096, 8192), torch.bfloat16),
+            ((4096, 16384), torch.bfloat16),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, dtype, backend, record_property, monkeypatch):
+        self.setUp()
+        device = torch.device("cuda")
+        x = torch.randn(*shape, dtype=dtype, device=device, requires_grad=True)
+
+        if backend in self._backends:
+            if not tilegym.is_backend_available(backend):
+                pytest.skip(f"Backend {backend} not available")
+            tilegym.set_backend(backend)
+            framework_fn = lambda: softmax(x.clone())
+        elif backend == "pytorch":
+            framework_fn = lambda: _reference_softmax(x)
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        if backend != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: _reference_softmax(x),
+                kwargs={},
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+        del x, framework_fn
+        torch.cuda.empty_cache()
+        gc.collect()

@@ -15,6 +15,7 @@ from tilegym.suites.liger.ops import group_norm
 
 class Test_Liger_GroupNorm(common.PyTestCase):
     _backends = ["cutile"]
+    _perf_backends = _backends + ["pytorch"]
 
     @staticmethod
     def reference(X, num_channels, num_groups, W, B, eps=1e-5):
@@ -108,3 +109,54 @@ class Test_Liger_GroupNorm(common.PyTestCase):
         assert torch.allclose(B_test.grad.float(), B_ref.grad.float(), atol=atol, rtol=rtol), (
             f"dB mismatch: max_diff={((B_test.grad.float() - B_ref.grad.float()).abs().max()).item():.6f}"
         )
+
+    @pytest.mark.parametrize(
+        "shape, dtype",
+        [
+            ((128, 32, 512), torch.float32),
+            ((128, 64, 512), torch.float32),
+            ((128, 128, 512), torch.float32),
+            ((128, 256, 512), torch.float32),
+            ((128, 512, 512), torch.float32),
+            ((128, 1024, 512), torch.float32),
+            ((128, 2048, 512), torch.float32),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, dtype, backend, record_property, monkeypatch):
+        self.setUp()
+        device = torch.device("cuda")
+        M, C, H = shape
+        num_channels = C
+        num_groups = C
+        hidden_size = H
+
+        X = torch.randn(M, num_channels, hidden_size, dtype=dtype, device=device, requires_grad=True)
+        W = torch.randn(num_channels, dtype=dtype, device=device)
+        B = torch.randn(num_channels, dtype=dtype, device=device)
+
+        if backend in self._backends:
+            if not tilegym.is_backend_available(backend):
+                pytest.skip(f"Backend {backend} not available")
+            tilegym.set_backend(backend)
+            framework_fn = lambda: group_norm(X, num_channels, num_groups, W, B)
+        elif backend == "pytorch":
+            framework_fn = lambda: self.reference(X, num_channels, num_groups, W, B)
+        else:
+            pytest.skip(f"Backend {backend} not supported")
+
+        if backend != "pytorch":
+            self.assertCorrectness(
+                framework_fn,
+                lambda: self.reference(X, num_channels, num_groups, W, B),
+                kwargs={},
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+        del X, W, B, framework_fn
+        torch.cuda.empty_cache()
+        gc.collect()

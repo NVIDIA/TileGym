@@ -14,6 +14,7 @@ from tilegym.suites.unsloth.ops import rms_layernorm
 DEVICE = "cuda"
 
 _backends = ["cutile"]
+_perf_backends = _backends + ["pytorch"]
 
 
 class Test_Unsloth_RMSLayernorm(common.PyTestCase):
@@ -47,13 +48,13 @@ class Test_Unsloth_RMSLayernorm(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_standard(self, shape, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_standard(self, shape, dtype, backend):
         """Test standard RMS LayerNorm (gemma=False)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         dim = shape[-1]
@@ -77,13 +78,13 @@ class Test_Unsloth_RMSLayernorm(common.PyTestCase):
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_gemma(self, shape, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_gemma(self, shape, dtype, backend):
         """Test Gemma variant: (W + 1) * norm(X)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         dim = shape[-1]
@@ -108,13 +109,13 @@ class Test_Unsloth_RMSLayernorm(common.PyTestCase):
             ((4, 2048), torch.bfloat16),
         ],
     )
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward(self, shape, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward(self, shape, dtype, backend):
         """Test backward pass via autograd."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         dim = shape[-1]
@@ -140,13 +141,13 @@ class Test_Unsloth_RMSLayernorm(common.PyTestCase):
             ((2, 4, 512), torch.bfloat16),
         ],
     )
-    @pytest.mark.parametrize("framework", _backends)
-    def test_op_backward_gemma(self, shape, dtype, framework):
+    @pytest.mark.parametrize("backend", _backends)
+    def test_op_backward_gemma(self, shape, dtype, backend):
         """Test backward pass for Gemma variant: (W + 1) * norm(X)."""
-        if tilegym.is_backend_available(framework):
-            tilegym.set_backend(framework)
+        if tilegym.is_backend_available(backend):
+            tilegym.set_backend(backend)
         else:
-            pytest.skip(f"Backend {framework} is not available")
+            pytest.skip(f"Backend {backend} is not available")
 
         torch.manual_seed(42)
         dim = shape[-1]
@@ -162,3 +163,77 @@ class Test_Unsloth_RMSLayernorm(common.PyTestCase):
             rtol=1e-2,
             atol=1e-2,
         )
+
+
+# =============================================================================
+# Per-kernel perf classes — each maps to one kernel entry point.
+# Separated so each variant is measured and reported independently.
+# =============================================================================
+
+
+class Test_Unsloth_RMSLayernorm_Forward(common.PyTestCase):
+    """Perf for the RMS LayerNorm forward (standard, gemma=False)."""
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (4, 256),
+            (32, 4096),
+            (512, 4096),
+            (1024, 4096),
+            (2048, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, backend, record_property):
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        dim = shape[-1]
+        X = torch.randn(*shape, dtype=dtype, device=DEVICE)
+        W = torch.randn(dim, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: Test_Unsloth_RMSLayernorm.reference(X, W, eps=1e-6)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: rms_layernorm(X, W, eps=1e-6, gemma=False)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
+
+
+class Test_Unsloth_RMSLayernorm_Gemma_Forward(common.PyTestCase):
+    """Perf for the RMS LayerNorm forward (Gemma variant, gemma=True)."""
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (4, 256),
+            (32, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("backend", _perf_backends)
+    def test_perf(self, shape, backend, record_property):
+        """Benchmark forward pass for Gemma variant: (W + 1) * norm(X)."""
+        self.setUp()
+        torch.manual_seed(42)
+        dtype = torch.bfloat16
+        dim = shape[-1]
+        X = torch.randn(*shape, dtype=dtype, device=DEVICE)
+        W = torch.randn(dim, dtype=dtype, device=DEVICE)
+
+        if backend == "pytorch":
+            framework_fn = lambda: Test_Unsloth_RMSLayernorm.reference(X, W, eps=1e-6, gemma=True)
+        else:
+            if tilegym.is_backend_available(backend):
+                tilegym.set_backend(backend)
+            else:
+                pytest.skip(f"Backend {backend} is not available")
+            framework_fn = lambda: rms_layernorm(X, W, eps=1e-6, gemma=True)
+
+        result = common.benchmark_framework(backend, framework_fn)
+        record_property("benchmark", result)
