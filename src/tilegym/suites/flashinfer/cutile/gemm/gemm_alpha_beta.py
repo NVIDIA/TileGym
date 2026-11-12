@@ -267,7 +267,7 @@ def _gemm_alpha_beta_autotune_configs(num_sms=None):
                     )
 
 
-def _get_default_kernel_configs():
+def _get_default_kernel_configs(shape, num_sms=None, dtypes=None):
     """
     Get GPU-specific default kernel configs for non-autotune path.
     """
@@ -283,6 +283,21 @@ def _get_default_kernel_configs():
             "num_ctas": 2,
             "occupancy": 2,
             "EPILOGUE_SUBTILE": 1,
+        }
+    elif (
+        gpu_capability == (10, 3)
+        and num_sms == 1
+        and dtypes in ({torch.float16}, {torch.bfloat16})
+        and all(size >= block and size % block == 0 for size, block in zip(shape, (128, 256, 64)))
+    ):
+        return {
+            "BLOCK_M": 128,
+            "BLOCK_N": 256,
+            "BLOCK_K": 64,
+            "GROUP_SIZE_M": 8,
+            "num_ctas": 1,
+            "occupancy": 1,
+            "EPILOGUE_SUBTILE": 0,
         }
     elif gpu_capability[0] >= 10:
         # SM10x / SM12x – conservative default (autotuner finds best)
@@ -457,7 +472,7 @@ def gemm_alpha_beta(
 
     else:
         # Fallback to non-autotune path
-        default_configs = _get_default_kernel_configs()
+        default_configs = _get_default_kernel_configs((M, N, K), num_sms, {a.dtype, b.dtype, c.dtype})
         kernel_configs = get_kernel_configs(default_configs, kwargs.get("kernel_configs"))
 
         BLOCK_M = kernel_configs.get("BLOCK_M")
