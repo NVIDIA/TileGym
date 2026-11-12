@@ -19,7 +19,7 @@ from tilegym.suites.fla.cutile._tuning import launch_hints
 from tilegym.suites.fla.cutile._tuning import prune_occupancy
 from tilegym.suites.fla.cutile._tuning import shape_bucket
 
-RCP_LN2 = 1.4426950216  # 1/ln(2), fla.ops.utils.constant.RCP_LN2
+RCP_LN2 = 1.4426950216  # 1/ln(2)
 
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
@@ -56,19 +56,7 @@ def _next_power_of_2(n: int) -> int:
 
 
 def _cdiv_kernel(a, b):
-    # In-kernel ceil-div over compile-time constants. Plain Python arithmetic on
-    # ConstInt is fine for static loop bounds.
     return (a + b - 1) // b
-
-
-# ===========================================================================
-# CuTile Kernels
-# ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# fla.ops.utils.cumsum -- local / global cumulative sum, scalar (3D) variants.
-# ---------------------------------------------------------------------------
 
 
 @ct.function
@@ -94,8 +82,7 @@ def chunk_local_cumsum_scalar_kernel(
 ):
     """Per-chunk inclusive cumulative sum along time (scalar / no feature dim).
 
-    grid = (NT, B * H). Layout is HEAD_FIRST=False ([B, T, H]) only -- the
-    linear-attn entry never uses head_first.
+    grid = (NT, B * H). Layout [B, T, H].
     """
     i_t = ct.bid(0)
     i_bh = ct.bid(1)
@@ -151,7 +138,7 @@ def chunk_local_cumsum_vector_kernel(
 ):
     """Per-chunk inclusive cumulative sum along time for a vector feature dim S.
 
-    grid = (cdiv(S, BS), NT, B * H). Layout [B, T, H, S] (head_first=False).
+    grid = (cdiv(S, BS), NT, B * H). Layout [B, T, H, S].
     """
     i_s = ct.bid(0)
     i_t = ct.bid(1)
@@ -324,14 +311,6 @@ def chunk_global_cumsum_vector_kernel(
         b_z = b_z + ct.sum(b_s, axis=0)
 
 
-# ---------------------------------------------------------------------------
-# fla.ops.common.chunk_h -- forward state h, backward state-gradient dh.
-# Layout: k,v are [B, T, H, K]/[B, T, H, V]; h is [B, NS, H, K, V]
-# (STATE_V_FIRST=False). USE_G/GK/GV and GQA paths are not reached by the
-# linear-attn entry, so they are omitted (see module header).
-# ---------------------------------------------------------------------------
-
-
 @ct.kernel
 def chunk_fwd_kernel_h(
     k,  # [B, T, H, K]
@@ -356,8 +335,8 @@ def chunk_fwd_kernel_h(
 ):
     """Forward chunk state recurrence: b_h += k_chunk^T @ v_chunk per chunk.
 
-    grid = (cdiv(K, BK), cdiv(V, BV), N * H). The state written for chunk i_t is
-    the running state BEFORE that chunk's contribution (prefix), matching fla.
+    grid = (cdiv(K, BK), cdiv(V, BV), N * H). The state stored for chunk i_t is
+    the running state before that chunk's contribution.
     """
     i_k = ct.bid(0)
     i_v = ct.bid(1)
@@ -365,8 +344,8 @@ def chunk_fwd_kernel_h(
     i_n = i_nh // H
     i_h = i_nh % H
 
-    # h is [B, NS, H, K, V]: dense -> (i_n, chunk_in_batch); varlen (B==1) ->
-    # (0, split_offsets[i_n] + chunk). BS == BT here so chunk_in_batch == i_t.
+    # h is [B, NS, H, K, V]: dense indexes (i_n, i_t); varlen (B == 1) indexes
+    # (0, split_offsets[i_n] + i_t).
     if IS_VARLEN:
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
@@ -385,7 +364,6 @@ def chunk_fwd_kernel_h(
 
     b_h = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
-        # h0 : [B, H, K, V]; load [BK, BV] block at tile (i_n, i_h, i_k, i_v).
         b_h0 = ct.load(h0, index=(i_n, i_h, i_k, i_v), shape=(1, 1, BK, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
             (BK, BV)
         )
@@ -394,7 +372,6 @@ def chunk_fwd_kernel_h(
     for i_t in range(NT):
         t_local = i_t * BT + ct.arange(BT, dtype=ct.int32)
         m_t = t_local < Tloc
-        # Store the running prefix state for this chunk (h: [B, NS, H, K, V]).
         o_chunk = boh + i_t
         ct.store(
             h,
@@ -402,10 +379,8 @@ def chunk_fwd_kernel_h(
             tile=ct.astype(b_h, h.dtype).reshape((1, 1, 1, BK, BV)),
         )
 
-        # b_k : [BK, BT]  (transposed),  b_v : [BT, BV]
-        # Batch block index is h_b (== i_n for dense, 0 for varlen/B==1). The
-        # slice on axis=1 only windows T, so the batch dim must be selected here
-        # rather than hardcoded to 0 (otherwise every batch reads batch 0's k/v).
+        # b_k : [BT, BK], b_v : [BT, BV]. The time slice only windows axis 1, so
+        # the batch index h_b must be selected here.
         b_k = ct.load(
             k_seg, index=(h_b, i_t, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
         ).reshape((BT, BK))
@@ -469,7 +444,7 @@ def chunk_bwd_kernel_dh(
     i_n = i_nh // H
     i_h = i_nh % H
 
-    # dh is [B, NS, H, K, V]: dense -> (i_n, chunk); varlen (B==1) -> (0, boh+chunk).
+    # dh is [B, NS, H, K, V]: dense indexes (i_n, i_t); varlen (B == 1) indexes (0, boh + i_t).
     if IS_VARLEN:
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
@@ -528,13 +503,6 @@ def chunk_bwd_kernel_dh(
             index=(i_n, i_h, i_k, i_v),
             tile=ct.astype(b_dh, dh0.dtype).reshape((1, 1, BK, BV)),
         )
-
-
-# ---------------------------------------------------------------------------
-# fla.ops.common.chunk_o -- forward output o, backward dq/dk, backward dv.
-# Layout [B, T, H, *]; h is [B, NS, H, K, V]. HV == H, state_v_first=False,
-# USE_G=False for the linear-attn entry.
-# ---------------------------------------------------------------------------
 
 
 @ct.kernel(occupancy=2, num_worker_warps=4)
@@ -757,7 +725,6 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < Tloc
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
 
-    # no-gate branch
     b_ds = ct.where(m_A, b_ds, ct.zeros((BT, BT), dtype=ct.float32))
     b_dsk = ct.astype(b_ds, b_k.dtype)
     dsa = ct.astype(b_dsk, ct.tfloat32) if b_dsk.dtype == ct.float32 else b_dsk
@@ -925,11 +892,6 @@ def _normalization_backward_products_kernel(DD, Q, KC, DQ, DK, SCALE: ct.Constan
     ct.scatter(DK, (idx,), dk, check_bounds=True)
 
 
-# ===========================================================================
-# Host wrappers
-# ===========================================================================
-
-
 @functools.lru_cache(maxsize=None)
 def _dummy_int(device):
     return torch.zeros(1, device=device, dtype=torch.int32)
@@ -943,11 +905,6 @@ def _dummy_int2(device):
 @functools.lru_cache(maxsize=None)
 def _dummy_state(device, dtype):
     return torch.zeros(1, 1, 1, 1, device=device, dtype=dtype)
-
-
-# ---------------------------------------------------------------------------
-# Cumsum wrappers (fla.ops.utils.cumsum)
-# ---------------------------------------------------------------------------
 
 
 def chunk_local_cumsum_scalar(
@@ -1188,11 +1145,6 @@ def chunk_local_cumsum(
         raise ValueError(f"Unsupported input shape {g.shape}")
 
 
-# ---------------------------------------------------------------------------
-# chunk_h wrappers (fla.ops.common.chunk_h)
-# ---------------------------------------------------------------------------
-
-
 def _tile_kv(K, V):
     BK = min(max(_next_power_of_2(K), 16), 128)
     BV = min(max(_next_power_of_2(V), 16), 128)
@@ -1204,7 +1156,7 @@ def _is_sm12x(device):
 
 
 def _state_tile_kv(K, V, groups, device):
-    """Split independent state tiles when the wider grid fits within one SM wave."""
+    """Return the (BK, BV) state tile, halved when the split grid still fits the SM count."""
     BK, BV = _tile_kv(K, V)
     split_k, split_v = max(16, BK // 2), max(16, BV // 2)
     blocks = _cdiv(K, BK) * _cdiv(V, BV) * groups
@@ -1447,13 +1399,7 @@ def chunk_bwd_dh(
     return dh, dh0
 
 
-# ---------------------------------------------------------------------------
-# chunk_o wrappers (fla.ops.common.chunk_o)
-# ---------------------------------------------------------------------------
-
-
-# Cache the occupancy-4 `replace_hints` variant of chunk_fwd_kernel_o (its JIT
-# cache lives on the hinted-kernel object, so reuse one instance per process).
+# The JIT cache lives on the hinted-kernel object, so reuse one instance per process.
 @functools.lru_cache(maxsize=None)
 def _o_kernel_occ4():
     return chunk_fwd_kernel_o.replace_hints(occupancy=4)
@@ -1465,7 +1411,6 @@ def _o_kernel_sm12x_fp32_state():
 
 
 def _o_kernel_for_tile(BK, BV):
-    # Larger tiles retain the default occupancy to limit register spills.
     if BK == 64 and BV == 64:
         return _o_kernel_occ4()
     return chunk_fwd_kernel_o
@@ -1660,11 +1605,6 @@ def chunk_bwd_dqkwg(
     )
     ct.launch(stream, grid, kernel, args)
     return dq, dk, None, None
-
-
-# ===========================================================================
-# fla.ops.simple_gla.chunk -- forward/backward orchestration (pure PyTorch)
-# ===========================================================================
 
 
 def chunk_simple_gla_fwd(
@@ -1923,11 +1863,6 @@ def chunk_simple_gla(
     return o, final_state
 
 
-# ===========================================================================
-# fla.ops.linear_attn.utils -- running normalization (pure PyTorch)
-# ===========================================================================
-
-
 def _normalization_product_or_eager(o, q, k_cum, scale, cu_seqlens, z_init, reverse):
     if (
         q.dtype == k_cum.dtype == o.dtype == torch.bfloat16
@@ -1994,10 +1929,9 @@ def _normalization_divide_or_eager(o, s, cu_seqlens, z_init, reverse):
 
 
 def _normalization_backward_products_or_eager(ddenom, q, k_cum, scale, cu_seqlens, has_z_init):
-    """Return the normalization-backward (dq, dk) products, fused on sm_100 dense bf16 inputs.
+    """Return the normalization-backward (dq, dk) products.
 
-    Same fused products as the cuTile fused-chunk normalization backward; other
-    inputs fall back to the eager PyTorch expressions.
+    Inputs outside the fused-kernel guard use the eager PyTorch expressions.
     """
     if (
         q.dtype == k_cum.dtype == ddenom.dtype == torch.bfloat16
@@ -2040,11 +1974,6 @@ def normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens):
     )
 
 
-# ===========================================================================
-# fla.ops.linear_attn.chunk (entry)
-# ===========================================================================
-
-
 @register_impl("fla.linear_attention_chunk", backend="cutile")
 @torch.compiler.disable
 def chunk_linear_attn(
@@ -2057,8 +1986,7 @@ def chunk_linear_attn(
     normalize: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""Chunked linear attention. Behavior identical to
-    ``fla.ops.linear_attn.chunk.chunk_linear_attn`` (cuTile backend)."""
+    """Chunked linear attention."""
     if normalize and isinstance(initial_state, tuple):
         kv_init, z_init = initial_state
     else:

@@ -10,8 +10,6 @@ import torch
 from tilegym.autotune import is_autotune_disabled
 from tilegym.suites.fla.cutile._host_utils import device_cache_key
 
-# Launch-hint candidates (``replace_hints`` kwargs, in search order) for serial
-# state-scan kernels and for output/elementwise kernels.
 logger = logging.getLogger(__name__)
 
 

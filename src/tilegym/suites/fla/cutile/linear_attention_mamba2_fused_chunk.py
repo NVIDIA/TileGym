@@ -20,7 +20,7 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
 
-# Approximate value of 1/ln(2), used for log/exp base conversion (matches source).
+# 1/ln(2), for converting natural-log gates to base 2.
 RCP_LN2 = 1.4426950216
 
 
@@ -32,14 +32,8 @@ def _cdiv(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
-# ---------------------------------------------------------------------------
-# Cached dummy placeholders for the unused-feature kernel arguments.
-#
-# The public Mamba-2 entry always drives a single feature combination (USE_G,
-# no g_gamma / initial / final / varlen), so the kernels still receive small
-# zero placeholders for inactive arguments. These tensors are not written by
-# the kernels, so cache them by device, dtype and shape.
-# ---------------------------------------------------------------------------
+# Zero placeholders for inactive kernel arguments. Kernels never write them, so
+# they are shared per (shape, device, dtype).
 _dummy_cache: dict = {}
 
 
@@ -55,12 +49,8 @@ def _dummy(shape, device, dtype):
 _BWD_LATENCIES = (2, 3, 1)  # first entry is the untuned (autotune-disabled) default
 
 
-# torch>=2.4 autocast custom fwd/bwd, bound to cuda.
 autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
 autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
-
-
-# ======================== In-kernel helper functions ========================
 
 
 @ct.function
@@ -70,17 +60,13 @@ def _exp2(x):
 
 @ct.function
 def _store_dg_partial(dg_seg, i_k, NV, i_v, i_t, i_h, b_dg_t, m_t, out_dtype, BT: ConstInt):
-    """Store the [BT] dg partial for partial-group (i_k*NV + i_v) at chunk i_t.
+    """Store the [BT] dg partial of group (i_k*NV + i_v) for chunk i_t.
 
-    Only reached when USE_G. The dg buffer is [NK*NV, B*T, H]; here `dg_seg` is
-    already token-sliced to [NK*NV, Tloc, H].
+    `dg_seg` is the token-sliced [NK*NV, Tloc, H] view of dg.
     """
     o_t = i_t * BT + ct.arange(BT, dtype=ct.int32)
     grp = i_k * NV + i_v
     ct.scatter(dg_seg, (grp, o_t, i_h), ct.astype(b_dg_t, out_dtype), mask=m_t, check_bounds=True)
-
-
-# ======================== cuTile Kernels ========================
 
 
 @ct.kernel
@@ -133,7 +119,6 @@ def fused_chunk_fwd_kernel(
     # [BT, BT] lower-triangular (causal) mask.
     m_s = o_i[:, None] >= o_i[None, :]
 
-    # decay scaffolding (USE_G_GAMMA computes per-head fixed decay up front)
     b_gamma = ct.zeros((1,), dtype=ct.float32)
     b_g = ct.zeros((BT,), dtype=ct.float32)
     b_gq = ct.ones((BT,), dtype=ct.float32)
@@ -144,7 +129,6 @@ def fused_chunk_fwd_kernel(
         b_g = b_gamma * (ct.astype(o_i, ct.float32) + 1.0)
         b_gq = _exp2(b_g)
 
-    # Per-segment token window views (zero-copy, TMA-compatible).
     q_seg = q.slice(axis=0, start=bos, stop=eos)
     k_seg = k.slice(axis=0, start=bos, stop=eos)
     v_seg = v.slice(axis=0, start=bos, stop=eos)
@@ -166,13 +150,12 @@ def fused_chunk_fwd_kernel(
         # [BT, BK]
         b_q = ct.load(q_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK)).reshape((BT, BK))
         b_q = ct.astype(ct.astype(b_q, ct.float32) * scale, b_q.dtype)
-        # [BT, BK] (k loaded natural, transposed to [BK, BT] in the mma below)
+        # [BT, BK]
         b_k = ct.load(k_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK)).reshape((BT, BK))
         b_kt = ct.transpose(b_k)
         # [BT, BV]
         b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV)).reshape((BT, BV))
 
-        # [BT, BT] = b_q @ b_k^T
         acc_s = ct.zeros((BT, BT), dtype=ct.float32)
         b_s = ct.mma(b_q, b_kt, acc_s)
 
@@ -196,7 +179,6 @@ def fused_chunk_fwd_kernel(
                 0.0,
             )
             b_s = b_s * b_gs
-            # [BT, BV] = b_s @ b_v + (b_q @ b_h) * b_gq
             acc_o = ct.zeros((BT, BV), dtype=ct.float32)
             acc_o = ct.mma(ct.astype(b_s, b_q.dtype), b_v, acc_o)
             acc_h = ct.zeros((BT, BV), dtype=ct.float32)
@@ -211,7 +193,6 @@ def fused_chunk_fwd_kernel(
             acc_h = ct.mma(b_q, ct.astype(b_h, b_q.dtype), acc_h)
             b_o = acc_o + acc_h
 
-        # b_h (+= or decayed) b_k^T @ b_v   (state update: [BK, BV])
         if USE_G or USE_G_GAMMA:
             b_h = b_h * b_gn
         b_h = ct.mma(b_kt, b_v, b_h)
@@ -254,13 +235,11 @@ def fused_chunk_bwd_dq_kernel(
     USE_INITIAL_STATE: ConstBool,
     LATENCY: ConstInt,
 ):
-    """dq forward sweep of the mamba2 fused-chunk backward (split kernel 1/2).
+    """dq forward sweep of the fused-chunk backward (split kernel 1/2).
 
     Computes dq and the dg partial (USE_G) while building the [BV, BK] running
     state b_h. The final b_h is stored to ``h_final`` so the dk/dv kernel can
-    seed its dg running-last scalar (USE_G). Holding only ONE running state per
-    kernel (vs the monolithic two-pass kernel's b_h + b_dh + all score tiles)
-    roughly halves live registers/SMEM, raising blocks/SM and SM utilisation.
+    seed its dg running-last scalar (USE_G).
     """
     i_v = ct.bid(0)
     i_k = ct.bid(1)
@@ -297,7 +276,7 @@ def fused_chunk_bwd_dq_kernel(
     # [BV, BK] running state for the dq pass.
     b_h = ct.zeros((BV, BK), dtype=ct.float32)
     if USE_INITIAL_STATE:
-        # h0 stored [K, V]; load and transpose to [V, K].
+        # h0 is stored [K, V]; the running state is [V, K].
         b_h = ct.transpose(
             ct.astype(ct.load(h0, index=(i_nh, i_k, i_v), shape=(1, BK, BV)).reshape((BK, BV)), ct.float32)
         )
@@ -312,7 +291,6 @@ def fused_chunk_bwd_dq_kernel(
         b_vt = ct.transpose(b_v)  # [BV, BT]
         b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
 
-        # [BT, BT] = (b_do @ b_v^T) * scale
         acc_ds = ct.zeros((BT, BT), dtype=ct.float32)
         b_ds = ct.mma(b_do, b_vt, acc_ds) * scale
 
@@ -350,7 +328,6 @@ def fused_chunk_bwd_dq_kernel(
                 dg_seg = dg.slice(axis=1, start=bos, stop=eos)
                 b_dg_t = ct.sum(ct.astype(b_q, ct.float32) * b_dq, axis=1)
                 _store_dg_partial(dg_seg, i_k, NV, i_v, i_t, i_h, b_dg_t, m_t, dg.dtype, BT)
-            # b_h = b_h * b_gn + b_v^T @ (b_k * b_gk)
             b_h = b_h * b_gn
             b_kg = ct.astype(ct.astype(b_k, ct.float32) * b_gk[:, None], b_k.dtype)
             b_h = ct.mma(b_vt, b_kg, b_h)
@@ -365,7 +342,6 @@ def fused_chunk_bwd_dq_kernel(
                 acc_dq2,
             )
             b_dq = acc_dq + acc_dq2
-            # b_h += b_v^T @ b_k
             b_h = ct.mma(b_vt, b_k, b_h)
 
         if NV > 1:
@@ -373,7 +349,7 @@ def fused_chunk_bwd_dq_kernel(
         else:
             ct.store(dq_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((BT, 1, BK)))
 
-    # Persist the final b_h state for the dk/dv kernel (USE_G dg seed).
+    # The dk/dv kernel reads this back with the same i_hf index.
     if USE_G:
         i_hf = i_nh * (NK * NV) + i_k * NV + i_v
         ct.store(h_final, index=(i_hf, 0, 0), tile=b_h.reshape((1, BV, BK)))
@@ -411,7 +387,7 @@ def fused_chunk_bwd_dkv_kernel(
     USE_FINAL_STATE: ConstBool,
     LATENCY: ConstInt,
 ):
-    """dk/dv reverse sweep of the mamba2 fused-chunk backward (split kernel 2/2).
+    """dk/dv reverse sweep of the fused-chunk backward (split kernel 2/2).
 
     Computes dk, dv (and the dg cumsum tail for USE_G) while building the
     [BK, BV] running state b_dh. The USE_G dg running-last scalar is seeded from
@@ -453,8 +429,7 @@ def fused_chunk_bwd_dkv_kernel(
     if USE_FINAL_STATE:
         b_dh = b_dh + ct.astype(ct.load(dht, index=(i_nh, i_k, i_v), shape=(1, BK, BV)).reshape((BK, BV)), ct.float32)
 
-    # dg running-last scalar (only meaningful for USE_G), seeded from the final
-    # b_h state of the dq kernel: b_dg_last = sum(trans(b_h) * b_dh).
+    # dg running-last scalar (USE_G), seeded from the final b_h of the dq kernel.
     b_dg_last = ct.zeros((1,), dtype=ct.float32)
     if USE_G:
         i_hf = i_nh * (NK * NV) + i_k * NV + i_v
@@ -473,7 +448,6 @@ def fused_chunk_bwd_dkv_kernel(
         b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
         b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), latency=LATENCY).reshape((BT, BV))
 
-        # b_s = b_k @ b_q^T  ; b_ds = b_v @ b_do^T   -> [BT, BT]
         acc_s = ct.zeros((BT, BT), dtype=ct.float32)
         b_s = ct.mma(b_k, b_qt, acc_s)
         acc_ds = ct.zeros((BT, BT), dtype=ct.float32)
@@ -495,7 +469,6 @@ def fused_chunk_bwd_dkv_kernel(
                 b_gk = _exp2(b_g_last - b_g)
                 b_gn = _exp2(b_g_last)
 
-            # b_gs = trans(where(m_s & (m_t[:,None] & m_t), exp2(b_g[:,None]-b_g[None,:]), 0)) * scale
             b_gs = (
                 ct.transpose(
                     ct.where(
@@ -510,7 +483,6 @@ def fused_chunk_bwd_dkv_kernel(
             b_s = b_s * b_gs
             b_ds = b_ds * b_gs
 
-            # b_dk = b_ds @ b_q + (b_v @ b_dh^T) * b_gk
             acc_dk = ct.zeros((BT, BK), dtype=ct.float32)
             acc_dk = ct.mma(ct.astype(b_ds, b_k.dtype), b_q, acc_dk)
             acc_dk2 = ct.zeros((BT, BK), dtype=ct.float32)
@@ -518,7 +490,7 @@ def fused_chunk_bwd_dkv_kernel(
             b_dk = acc_dk + acc_dk2 * b_gk[:, None]
 
             if USE_G:
-                # dg_t = where(m_t, dg_prev - sum(b_k * b_dk, 1), 0); then prefix.
+                # dg_seg holds the dq kernel's partial here; the final value overwrites it below.
                 dg_prev = ct.astype(
                     ct.load(dg_seg, index=(i_k * NV + i_v, i_t, i_h), shape=(1, BT, 1)).reshape((BT,)),
                     ct.float32,
@@ -527,14 +499,12 @@ def fused_chunk_bwd_dkv_kernel(
                 b_dg_last = b_dg_last + ct.sum(b_dg_t, axis=0)
                 b_dg = b_dg_last + b_dg_t - ct.cumsum(b_dg_t, axis=0)
 
-            # b_dv = b_s @ b_do + (b_k @ b_dh) * b_gk
             acc_dv = ct.zeros((BT, BV), dtype=ct.float32)
             acc_dv = ct.mma(ct.astype(b_s, b_do.dtype), b_do, acc_dv)
             acc_dv2 = ct.zeros((BT, BV), dtype=ct.float32)
             acc_dv2 = ct.mma(b_k, ct.astype(b_dh, b_k.dtype), acc_dv2)
             b_dv = acc_dv + acc_dv2 * b_gk[:, None]
 
-            # b_dh = b_dh * b_gn + b_q^T @ (b_do * b_gq * scale)
             b_dh = b_dh * b_gn
             acc_dh = ct.zeros((BK, BV), dtype=ct.float32)
             b_dh = b_dh + ct.mma(
@@ -551,27 +521,23 @@ def fused_chunk_bwd_dkv_kernel(
                     tile=ct.astype(b_dg, dg.dtype).reshape((1, BT, 1)),
                 )
         else:
-            # mask = trans(m_s & (m_t[:,None] & m_t))
             mask2d = ct.transpose(m_s & (m_t[:, None] & m_t[None, :]))
             maskf = ct.astype(mask2d, ct.float32)
             b_s = ct.astype(b_s * scale * maskf, b_do.dtype)
             b_ds = ct.astype(b_ds * scale * maskf, b_q.dtype)
 
-            # b_dk = b_ds @ b_q + b_v @ b_dh^T
             acc_dk = ct.zeros((BT, BK), dtype=ct.float32)
             acc_dk = ct.mma(b_ds, b_q, acc_dk)
             acc_dk2 = ct.zeros((BT, BK), dtype=ct.float32)
             acc_dk2 = ct.mma(b_v, ct.astype(ct.transpose(b_dh), b_v.dtype), acc_dk2)
             b_dk = acc_dk + acc_dk2
 
-            # b_dv = b_s @ b_do + b_k @ b_dh
             acc_dv = ct.zeros((BT, BV), dtype=ct.float32)
             acc_dv = ct.mma(b_s, b_do, acc_dv)
             acc_dv2 = ct.zeros((BT, BV), dtype=ct.float32)
             acc_dv2 = ct.mma(b_k, ct.astype(b_dh, b_k.dtype), acc_dv2)
             b_dv = acc_dv + acc_dv2
 
-            # b_dh += b_q^T @ (b_do * scale)
             acc_dh = ct.zeros((BK, BV), dtype=ct.float32)
             b_dh = b_dh + ct.mma(b_qt, ct.astype(ct.astype(b_do, ct.float32) * scale, b_do.dtype), acc_dh)
 
@@ -602,10 +568,9 @@ def chunk_local_cumsum_scalar_kernel(
     HAS_SCALE: ConstBool,
     IS_VARLEN: ConstBool,
 ):
-    """cuTile equivalent of the non-head-first chunk_local_cumsum_scalar_kernel.
+    """Chunk-local cumsum (no carry across chunks) of the scalar gate along the time axis.
 
-    grid = (NT, B*H). Chunk-LOCAL cumsum (no carry across chunks) along the time
-    axis for the scalar gate g of shape [B, T, H] (head_first=False layout).
+    grid = (NT, B*H); g is laid out [B, T, H].
     """
     i_t = ct.bid(0)
     i_bh = ct.bid(1)
@@ -628,9 +593,8 @@ def chunk_local_cumsum_scalar_kernel(
     o_i = ct.arange(BT, dtype=ct.int32)
     m_t = (i_t * BT + o_i) < Tloc
 
-    # [BT, 1] -> [BT]
     b_s = ct.astype(ct.load(s_seg, index=(i_t, i_h), shape=(BT, 1)).reshape((BT,)), ct.float32)
-    # zero out the padded tail so it does not pollute the running sum / cumsum
+    # Zero the padded tail so it does not enter the cumsum.
     b_s = ct.where(m_t, b_s, 0.0)
 
     b_o = ct.cumsum(b_s, axis=0)
@@ -641,9 +605,6 @@ def chunk_local_cumsum_scalar_kernel(
         b_o = b_o * scale
 
     ct.store(o_seg, index=(i_t, i_h), tile=ct.astype(b_o, o.dtype).reshape((BT, 1)), allow_tma=False)
-
-
-# ======================== Host Wrappers ========================
 
 
 def fused_chunk_fwd(
@@ -717,11 +678,6 @@ def fused_chunk_fwd(
         store_final,
         is_varlen,
     )
-    # Launch-hint autotune (occupancy x num_worker_warps), shape-keyed so it is
-    # tuned once per shape and the default config (occ=1, nww=4) equals the base
-    # @ct.kernel launch -- non-improving shapes therefore keep original perf.
-    # Helps low-head / long-T grids (e.g. N*H small, NT large) raise SM
-    # utilisation by spreading the per-chunk MMA across more worker warps.
     fwd_key = (
         "fused_chunk_fwd",
         H,
@@ -810,14 +766,11 @@ def fused_chunk_bwd(
 
     grid = (NV, NK, N * H)
 
-    # Scratch holding the final b_h state of the dq sweep so the dk/dv kernel can
-    # seed its dg running-last scalar (USE_G only). Tiny ([N*H*NK*NV, BV, BK]).
     if use_g:
         h_final = q.new_empty(N * H * NK * NV, BV, BK, dtype=torch.float)
     else:
         h_final = _dummy((1, 1, 1), q.device, torch.float)
 
-    # --- split kernel 1/2: dq forward sweep (builds + persists b_h) ---
     dq_args = (
         q3,
         k3,
@@ -880,7 +833,6 @@ def fused_chunk_bwd(
     )
     ct.launch(stream, grid, kernel, (*dq_args, cfg.latency))
 
-    # --- split kernel 2/2: dk/dv reverse sweep (consumes b_h) ---
     dkv_args = (
         q3,
         k3,
@@ -952,11 +904,6 @@ def fused_chunk_bwd(
         dg = dg.sum(0).to(g)
 
     return dq, dk, dv, dg, dh0
-
-
-# ===========================================================================
-# chunk_local_cumsum machinery (needed when g is not None)
-# ===========================================================================
 
 
 def _prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
@@ -1044,11 +991,6 @@ def chunk_local_cumsum(
         )
     else:
         raise ValueError(f"Unsupported input shape {g.shape}")
-
-
-# ===========================================================================
-# Autograd Function + public entry points
-# ===========================================================================
 
 
 class FusedChunkFunction(torch.autograd.Function):
@@ -1188,11 +1130,6 @@ def fused_chunk_simple_gla(
     return o, final_state
 
 
-# ===========================================================================
-# Public entry point
-# ===========================================================================
-
-
 @torch.compiler.disable
 def fused_chunk_mamba2(
     q: torch.Tensor,
@@ -1221,5 +1158,4 @@ def fused_chunk_mamba2(
     )
 
 
-# --- TileGym dispatch registration ---------------------------------------
 register_impl("fla.linear_attention_mamba2_fused_chunk", backend="cutile")(fused_chunk_mamba2)

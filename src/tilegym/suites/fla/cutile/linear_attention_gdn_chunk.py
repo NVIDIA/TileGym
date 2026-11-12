@@ -2,9 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-# cuTile port of `chunk_gated_delta_rule` (chunked Gated DeltaNet, GDN) from
-# flash-linear-attention; registers the single op `fla.linear_attention_gdn_chunk`.
-
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -63,9 +60,6 @@ def _stream():
 _fwd_o_tile_configs = output_tile_configs
 
 
-# Device helpers (plain `def` — NOT @ct.kernel)
-
-
 def exp(x):
     return ct.exp(ct.astype(x, ct.float32))
 
@@ -75,7 +69,6 @@ def exp2(x):
 
 
 def softplus(x):
-    # TODO(cutile): softplus_nv inline-asm replaced with log1p formula.
     return ct.where(x < 20.0, ct.log(1.0 + ct.exp(x)), x)
 
 
@@ -100,8 +93,7 @@ def scatter_flat(raw, off, value, *, mask=None, check_bounds=False):
 
 
 def _array_numel(arr):
-    # Total element count; rank statically unrolled (<=5) since a Python for over
-    # arr.shape is captured as a device loop and rejected. K<=256 bounds the rank.
+    # Rank is unrolled statically (ndim <= 5): device code cannot loop over arr.shape.
     s = arr.shape
     nd = arr.ndim
     n = s[0]
@@ -116,8 +108,7 @@ def _array_numel(arr):
     return n
 
 
-# Bounds-checked flat access: 1-D bounds mask `0 <= off < numel` AND-ed with any
-# caller mask. Pass `numel = _array_numel(arr)`.
+# Flat access masked to `0 <= off < numel`; pass `numel = _array_numel(arr)`.
 def gather_flat_cb(raw, off, numel, *, mask=None, padding_value=0):
     inb = (off >= 0) & (off < numel)
     m = inb if mask is None else (mask & inb)
@@ -130,12 +121,8 @@ def scatter_flat_cb(raw, off, value, numel, *, mask=None):
     raw.store_offset(off, value, mask=m)
 
 
-# fla.modules.l2norm kernels
-
-
 @ct.kernel
 def l2norm_fwd_kernel1(x, y, rstd, eps, D, BD: ConstInt):
-    # D > 512 path: one row per program, row length D.
     i_t = ct.bid(0)
     cols = ct.arange(BD, dtype=ct.int32)
     mask = cols < D
@@ -157,7 +144,7 @@ def l2norm_bwd_kernel1(y, rstd, dy, dy2, dx, eps, D, BD: ConstInt, HAS_DY2: Cons
     b_dy = ct.astype(ct.gather(dy, (i_t, cols), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
     if HAS_DY2:
         b_dy2 = ct.astype(ct.gather(dy2, (i_t, cols), mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
-        # Preserve bf16 `dk.add_(dk2)` rounding before the fp32 normalization math.
+        # Round dy + dy2 to dy's dtype first: the reference adds them in that dtype before normalizing.
         b_dy = ct.astype(ct.astype(b_dy + b_dy2, dy.dtype), ct.float32)
     b_rstd = ct.astype(ct.gather(rstd, (i_t,), check_bounds=False, padding_value=0.0), ct.float32).item()
 
@@ -167,8 +154,6 @@ def l2norm_bwd_kernel1(y, rstd, dy, dy2, dx, eps, D, BD: ConstInt, HAS_DY2: Cons
 
 @ct.kernel
 def l2norm_fwd_kernel(x, y, rstd, eps, T, D: ConstInt, BD: ConstInt, BT: ConstInt):
-    # D <= 512 path: BT rows per block, BD power-of-2 cols. Block-aligned ->
-    # ct.load with block index + ZERO padding (faithful to make_block_ptr).
     i_t = ct.bid(0)
     b_x = ct.astype(ct.load(x, index=(i_t, 0), shape=(BT, BD), padding_mode=ct.PaddingMode.ZERO), ct.float32)
     b_rstd = ct.rsqrt(ct.sum(b_x * b_x, axis=1) + eps)
@@ -191,9 +176,6 @@ def l2norm_bwd_kernel(y, rstd, dy, dy2, dx, eps, T, D: ConstInt, BD: ConstInt, B
     ct.store(dx, index=(i_t, 0), tile=ct.astype(b_dx, dx.dtype))
 
 
-# fla.ops.common.gate (fused_beta_sigmoid)
-
-
 @ct.kernel
 def fused_beta_sigmoid_fwd_kernel(x, y, scale, n_elements, BLOCK_SIZE: ConstInt):
     pid = ct.bid(0)
@@ -214,9 +196,6 @@ def fused_beta_sigmoid_bwd_kernel(x, dy, dx, scale, n_elements, BLOCK_SIZE: Cons
     b_y = 1.0 / (1.0 + ct.exp(-b_x))
     b_dx = b_dy * scale * b_y * (1.0 - b_y)
     ct.scatter(dx, offs, ct.astype(b_dx, dx.dtype), mask=mask, check_bounds=False)
-
-
-# fla.ops.utils.cumsum (scalar chunk_local_cumsum, used for the gate g)
 
 
 @ct.kernel
@@ -251,8 +230,7 @@ def chunk_local_cumsum_scalar_kernel(
     offs = ct.arange(BT, dtype=ct.int32)
     row = i_t * BT + offs
     mask = row < T_eff
-    # s/o are (B, T, H); HEAD_FIRST is a transposed head-major access via raw
-    # element offsets (unused on the gated-delta-rule path).
+    # s/o are (B, T, H), or head-major (B, H, T) addressed by raw element offsets when HEAD_FIRST.
     if IS_VARLEN:
         bt_batch = 0
         t_idx = bos + row
@@ -277,9 +255,6 @@ def chunk_local_cumsum_scalar_kernel(
         o.get_raw_memory().store_offset(idx, ct.astype(b_o, o.dtype), mask=mask)
     else:
         ct.scatter(o, (bt_batch, t_idx, i_h), ct.astype(b_o, o.dtype), mask=mask, check_bounds=False)
-
-
-# fla.ops.gated_delta_rule.gate (gdn_gate_chunk_cumsum / gdn_gate_bwd)
 
 
 @ct.kernel
@@ -366,13 +341,7 @@ def gdn_gate_bwd_kernel(g, A_log, dt_bias, dyg, dg, dA, T, H: ConstInt, BT: Cons
     ct.scatter(dA, i_t * H + i_h, b_dA)
 
 
-# fla.ops.common.chunk_scaled_dot_kkt + fla.ops.utils.solve_tril +
-# fla.ops.gated_delta_rule.chunk_fwd (fused kkt + blockwise triangular solve)
-
-
 def _split_kkt_32(block):
-    # Split a row-major [32,32] tile into 16x16 quadrants:
-    #   b_00 = block[0:16, 0:16], b_10 = block[16:32, 0:16], b_11 = block[16:32, 16:32]
     b_00 = ct.extract(block, index=(0, 0), shape=(16, 16))
     b_10 = ct.extract(block, index=(1, 0), shape=(16, 16))
     b_11 = ct.extract(block, index=(1, 1), shape=(16, 16))
@@ -391,326 +360,6 @@ def _solve_kkt_16_block_full_skip1(b_A):
     return b_Ai + ct.astype(m_I, ct.float32)
 
 
-def _load_blk16(A, base, row0, col0, H: ConstInt, BT: ConstInt, T):
-    o16 = ct.arange(16, dtype=ct.int32)
-    rows = row0 + o16
-    cols = col0 + o16
-    off = base + ct.expand_dims(rows, 1) * (H * BT) + ct.expand_dims(cols, 0)
-    mask = ct.expand_dims(rows < T, 1) & ct.expand_dims(cols < BT, 0)
-    return ct.astype(ct.gather(A, off, mask=mask, check_bounds=False, padding_value=0.0), ct.float32)
-
-
-def _store_blk16(Ai, base, row0, col0, blk, H: ConstInt, BT: ConstInt, T):
-    # TODO(cutile): fp_downcast_rounding="rtne" not representable
-    o16 = ct.arange(16, dtype=ct.int32)
-    rows = row0 + o16
-    cols = col0 + o16
-    off = base + ct.expand_dims(rows, 1) * (H * BT) + ct.expand_dims(cols, 0)
-    mask = ct.expand_dims(rows < T, 1) & ct.expand_dims(cols < BT, 0)
-    ct.scatter(Ai, off, ct.astype(blk, Ai.dtype), mask=mask, check_bounds=False)
-
-
-# chunk_scaled_dot_kkt_fwd_kernel  -- beta * K @ K^T (lower-tri)
-@ct.kernel
-def chunk_scaled_dot_kkt_fwd_kernel(
-    k,
-    g,
-    beta,
-    A,
-    cu_seqlens,
-    chunk_indices,
-    T,
-    H: ConstInt,
-    HV: ConstInt,
-    K: ConstInt,
-    BT: ConstInt,
-    BK: ConstInt,
-    IS_VARLEN: ConstInt,
-    USE_G: ConstInt,
-):
-    i_t = ct.bid(0)
-    i_bh = ct.bid(1)
-    i_b = i_bh // HV
-    i_h = i_bh % HV
-
-    bos = 0
-    if IS_VARLEN:
-        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
-        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
-        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
-        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
-        T = eos - bos
-    else:
-        bos = i_b * T
-
-    o_t = i_t * BT + ct.arange(BT, dtype=ct.int32)
-    m_t = o_t < T
-
-    beta_base = bos * HV + i_h
-    b_off = beta_base + o_t * HV
-    b_b = ct.astype(ct.gather(beta, b_off, mask=m_t, check_bounds=False, padding_value=0.0), ct.float32)
-
-    k_base = (bos * H + i_h // (HV // H)) * K
-    rows = i_t * BT + ct.arange(BT, dtype=ct.int32)
-    m_rows = rows < T
-
-    b_A = ct.zeros((BT, BT), dtype=ct.float32)
-    num_k = ct.cdiv(K, BK)
-    for i_k in range(num_k):
-        cols = i_k * BK + ct.arange(BK, dtype=ct.int32)
-        m_cols = cols < K
-        k_off = ct.expand_dims(rows, 1) * (H * K) + ct.expand_dims(cols, 0)
-        k_mask = ct.expand_dims(m_rows, 1) & ct.expand_dims(m_cols, 0)
-        b_k = ct.gather(k, k_base + k_off, mask=k_mask, check_bounds=False, padding_value=0.0)
-        b_A = ct.mma(b_k, ct.transpose(b_k), b_A)  # b_A += b_k @ b_k^T
-
-    if USE_G:
-        b_g = ct.astype(ct.gather(g, b_off, mask=m_t, check_bounds=False, padding_value=0.0), ct.float32)
-        b_g_diff = ct.expand_dims(b_g, 1) - ct.expand_dims(b_g, 0)
-        b_A = b_A * ct.exp2(ct.astype(b_g_diff, ct.float32))
-    b_A = b_A * ct.expand_dims(b_b, 1)
-
-    m_A = (ct.expand_dims(o_t, 1) > ct.expand_dims(o_t, 0)) & (ct.expand_dims(m_t, 1) & ct.expand_dims(m_t, 0))
-    b_A = ct.where(m_A, b_A, 0.0)
-
-    A_base = (bos * HV + i_h) * BT
-    out_rows = i_t * BT + ct.arange(BT, dtype=ct.int32)
-    out_cols = ct.arange(BT, dtype=ct.int32)
-    A_off = A_base + ct.expand_dims(out_rows, 1) * (BT * HV) + ct.expand_dims(out_cols, 0)
-    m_out = ct.broadcast_to(ct.expand_dims(out_rows < T, 1), (BT, BT))
-    ct.scatter(A, A_off, ct.astype(b_A, A.dtype), mask=m_out, check_bounds=False)
-
-
-# solve_tril_16x16_kernel
-@ct.kernel
-def solve_tril_16x16_kernel(
-    A,
-    Ai,
-    cu_seqlens,
-    chunk_indices,
-    T,
-    H: ConstInt,
-    BT: ConstInt,
-    IS_VARLEN: ConstInt,
-):
-    i_t = ct.bid(0)
-    i_bh = ct.bid(1)
-    i_b = i_bh // H
-    i_h = i_bh % H
-
-    bos = 0
-    if IS_VARLEN:
-        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
-        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
-        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
-        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
-        T = eos - bos
-    else:
-        bos = i_b * T
-
-    o_i = ct.arange(16, dtype=ct.int32)
-    m_A = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
-    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
-
-    A_base = (bos * H + i_h) * BT
-    Ai_base = (bos * H + i_h) * 16
-
-    offset = (i_t * 16) % BT
-    rows = i_t * 16 + ct.arange(16, dtype=ct.int32)
-    cols = offset + ct.arange(16, dtype=ct.int32)
-    a_off = A_base + ct.expand_dims(rows, 1) * (H * BT) + ct.expand_dims(cols, 0)
-    a_mask = ct.expand_dims(rows < T, 1) & ct.expand_dims(cols < BT, 0)
-    b_A = ct.astype(ct.gather(A, a_off, mask=a_mask, check_bounds=False, padding_value=0.0), ct.float32)
-    b_A = ct.where(m_A, b_A, 0.0)
-    b_A = -b_A
-
-    for i in range(2, min(16, T - i_t * 16)):
-        row_off = A_base + (i_t * 16 + i) * (H * BT) + (o_i + offset)
-        b_a = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a = ct.where(o_i < i, b_a, 0.0)
-        b_a = b_a + ct.sum(ct.expand_dims(b_a, 1) * b_A, axis=0)
-        b_A = ct.where(ct.expand_dims(o_i == i, 1), b_a, b_A)
-    b_A = b_A + ct.astype(m_I, ct.float32)
-
-    out_rows = i_t * 16 + ct.arange(16, dtype=ct.int32)
-    out_cols = ct.arange(16, dtype=ct.int32)
-    ai_off = Ai_base + ct.expand_dims(out_rows, 1) * (H * 16) + ct.expand_dims(out_cols, 0)
-    ai_mask = ct.broadcast_to(ct.expand_dims(out_rows < T, 1), (16, 16))
-    # TODO(cutile): fp_downcast_rounding="rtne" not representable
-    ct.scatter(Ai, ai_off, ct.astype(b_A, Ai.dtype), mask=ai_mask, check_bounds=False)
-
-
-# merge_16x16_to_32x32_inverse_kernel
-@ct.kernel
-def merge_16x16_to_32x32_inverse_kernel(
-    A,
-    Ai,
-    cu_seqlens,
-    chunk_indices,
-    T,
-    H: ConstInt,
-    BT: ConstInt,
-    IS_VARLEN: ConstInt,
-):
-    # input_precision="ieee" (full fp32) on the merge dots -> kept in fp32.
-    i_t = ct.bid(0)
-    i_bh = ct.bid(1)
-    i_b = i_bh // H
-    i_h = i_bh % H
-
-    bos = 0
-    if IS_VARLEN:
-        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
-        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
-        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
-        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
-        T = eos - bos
-    else:
-        bos = i_b * T
-
-    o_i = ct.arange(16, dtype=ct.int32)
-    m_A = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
-    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
-    A_base = (bos * H + i_h) * BT
-    Ai_base = (bos * H + i_h) * BT
-
-    b_Ai_11 = _load_blk16(A, A_base, i_t * BT, 0, H, BT, T)
-    b_Ai_22 = _load_blk16(A, A_base, i_t * BT + 16, 16, H, BT, T)
-
-    b_Ai_11 = -ct.where(m_A, b_Ai_11, 0.0)
-    b_Ai_22 = -ct.where(m_A, b_Ai_22, 0.0)
-
-    for i in range(2, min(16, T - i_t * BT)):
-        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i
-        b_a_11 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a_11 = b_a_11 + ct.sum(ct.expand_dims(b_a_11, 1) * b_Ai_11, axis=0)
-        b_Ai_11 = ct.where(ct.expand_dims(o_i == i, 1), b_a_11, b_Ai_11)
-    for i in range(16 + 2, min(32, T - i_t * BT)):
-        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 16
-        b_a_22 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a_22 = b_a_22 + ct.sum(ct.expand_dims(b_a_22, 1) * b_Ai_22, axis=0)
-        b_Ai_22 = ct.where(ct.expand_dims(o_i == i - 16, 1), b_a_22, b_Ai_22)
-
-    b_Ai_11 = b_Ai_11 + ct.astype(m_I, ct.float32)
-    b_Ai_22 = b_Ai_22 + ct.astype(m_I, ct.float32)
-
-    b_A_21 = _load_blk16(A, A_base, i_t * BT + 16, 0, H, BT, T)
-
-    # b_Ai_21 = -(b_Ai_22 @ b_A_21) @ b_Ai_11
-    # TODO(cutile): input_precision=ieee not representable; fp32 kept in fp32.
-    b_Ai_21 = -ct.matmul(ct.matmul(b_Ai_22, b_A_21), b_Ai_11)
-
-    _store_blk16(Ai, Ai_base, i_t * BT, 0, b_Ai_11, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 16, 16, b_Ai_22, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 16, 0, b_Ai_21, H, BT, T)
-
-
-# merge_16x16_to_64x64_inverse_kernel
-@ct.kernel
-def merge_16x16_to_64x64_inverse_kernel(
-    A,
-    Ai,
-    cu_seqlens,
-    chunk_indices,
-    T,
-    H: ConstInt,
-    BT: ConstInt,
-    IS_VARLEN: ConstInt,
-):
-    # input_precision="ieee" (full fp32) on every merge dot -> kept in fp32.
-    i_t = ct.bid(0)
-    i_bh = ct.bid(1)
-    i_b = i_bh // H
-    i_h = i_bh % H
-
-    bos = 0
-    if IS_VARLEN:
-        i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=False).item()
-        i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=False).item()
-        bos = ct.gather(cu_seqlens, (i_n,), check_bounds=False).item()
-        eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=False).item()
-        T = eos - bos
-    else:
-        bos = i_b * T
-
-    o_i = ct.arange(16, dtype=ct.int32)
-    m_A = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
-    m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
-    A_base = (bos * H + i_h) * BT
-    Ai_base = (bos * H + i_h) * BT
-
-    b_Ai_11 = _load_blk16(A, A_base, i_t * BT, 0, H, BT, T)
-    b_Ai_22 = _load_blk16(A, A_base, i_t * BT + 16, 16, H, BT, T)
-    b_Ai_33 = _load_blk16(A, A_base, i_t * BT + 32, 32, H, BT, T)
-    b_Ai_44 = _load_blk16(A, A_base, i_t * BT + 48, 48, H, BT, T)
-
-    b_Ai_11 = -ct.where(m_A, b_Ai_11, 0.0)
-    b_Ai_22 = -ct.where(m_A, b_Ai_22, 0.0)
-    b_Ai_33 = -ct.where(m_A, b_Ai_33, 0.0)
-    b_Ai_44 = -ct.where(m_A, b_Ai_44, 0.0)
-
-    for i in range(2, min(16, T - i_t * BT)):
-        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i
-        b_a_11 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a_11 = ct.where(o_i < i, b_a_11, 0.0)
-        b_a_11 = b_a_11 + ct.sum(ct.expand_dims(b_a_11, 1) * b_Ai_11, axis=0)
-        b_Ai_11 = ct.where(ct.expand_dims(o_i == i, 1), b_a_11, b_Ai_11)
-    for i in range(16 + 2, min(32, T - i_t * BT)):
-        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 16
-        b_a_22 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a_22 = ct.where(o_i < i - 16, b_a_22, 0.0)
-        b_a_22 = b_a_22 + ct.sum(ct.expand_dims(b_a_22, 1) * b_Ai_22, axis=0)
-        b_Ai_22 = ct.where(ct.expand_dims(o_i == i - 16, 1), b_a_22, b_Ai_22)
-    for i in range(32 + 2, min(48, T - i_t * BT)):
-        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 32
-        b_a_33 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a_33 = ct.where(o_i < i - 32, b_a_33, 0.0)
-        b_a_33 = b_a_33 + ct.sum(ct.expand_dims(b_a_33, 1) * b_Ai_33, axis=0)
-        b_Ai_33 = ct.where(ct.expand_dims(o_i == i - 32, 1), b_a_33, b_Ai_33)
-    for i in range(48 + 2, min(64, T - i_t * BT)):
-        row_off = A_base + (i_t * BT + i) * (H * BT) + o_i + 48
-        b_a_44 = -ct.astype(ct.gather(A, row_off, check_bounds=False, padding_value=0.0), ct.float32)
-        b_a_44 = ct.where(o_i < i - 48, b_a_44, 0.0)
-        b_a_44 = b_a_44 + ct.sum(ct.expand_dims(b_a_44, 1) * b_Ai_44, axis=0)
-        b_Ai_44 = ct.where(ct.expand_dims(o_i == i - 48, 1), b_a_44, b_Ai_44)
-
-    b_Ai_11 = b_Ai_11 + ct.astype(m_I, ct.float32)
-    b_Ai_22 = b_Ai_22 + ct.astype(m_I, ct.float32)
-    b_Ai_33 = b_Ai_33 + ct.astype(m_I, ct.float32)
-    b_Ai_44 = b_Ai_44 + ct.astype(m_I, ct.float32)
-
-    b_A_21 = _load_blk16(A, A_base, i_t * BT + 16, 0, H, BT, T)
-    b_A_31 = _load_blk16(A, A_base, i_t * BT + 32, 0, H, BT, T)
-    b_A_32 = _load_blk16(A, A_base, i_t * BT + 32, 16, H, BT, T)
-    b_A_41 = _load_blk16(A, A_base, i_t * BT + 48, 0, H, BT, T)
-    b_A_42 = _load_blk16(A, A_base, i_t * BT + 48, 16, H, BT, T)
-    b_A_43 = _load_blk16(A, A_base, i_t * BT + 48, 32, H, BT, T)
-
-    # TODO(cutile): input_precision=ieee not representable; fp32 kept in fp32.
-    b_Ai_21 = -ct.matmul(ct.matmul(b_Ai_22, b_A_21), b_Ai_11)
-    b_Ai_32 = -ct.matmul(ct.matmul(b_Ai_33, b_A_32), b_Ai_22)
-    b_Ai_43 = -ct.matmul(ct.matmul(b_Ai_44, b_A_43), b_Ai_33)
-
-    b_Ai_31 = -ct.matmul(b_Ai_33, ct.matmul(b_A_31, b_Ai_11) + ct.matmul(b_A_32, b_Ai_21))
-    b_Ai_42 = -ct.matmul(b_Ai_44, ct.matmul(b_A_42, b_Ai_22) + ct.matmul(b_A_43, b_Ai_32))
-    b_Ai_41 = -ct.matmul(
-        b_Ai_44,
-        ct.matmul(b_A_41, b_Ai_11) + ct.matmul(b_A_42, b_Ai_21) + ct.matmul(b_A_43, b_Ai_31),
-    )
-
-    _store_blk16(Ai, Ai_base, i_t * BT, 0, b_Ai_11, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 16, 16, b_Ai_22, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 32, 32, b_Ai_33, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 48, 48, b_Ai_44, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 16, 0, b_Ai_21, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 32, 0, b_Ai_31, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 32, 16, b_Ai_32, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 48, 0, b_Ai_41, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 48, 16, b_Ai_42, H, BT, T)
-    _store_blk16(Ai, Ai_base, i_t * BT + 48, 32, b_Ai_43, H, BT, T)
-
-
-# chunk_gated_delta_rule_fwd_kkt_solve_kernel  (fused kkt + solve, 4 sub-chunks)
 @ct.kernel
 def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     k,
@@ -807,7 +456,6 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
             ct.float32,
         )
 
-    # -- Step 1: 10 lower-tri [BC,BC] blocks of K @ K^T --
     b_A00 = ct.zeros((BC, BC), dtype=ct.float32)
     b_A11 = ct.zeros((BC, BC), dtype=ct.float32)
     b_A22 = ct.zeros((BC, BC), dtype=ct.float32)
@@ -878,7 +526,6 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
                     b_A31 = ct.mma(b_k3, ct.transpose(b_k1), b_A31)
                     b_A32 = ct.mma(b_k3, ct.transpose(b_k2), b_A32)
 
-    # -- Step 2: gate + beta scaling --
     m_d = ct.expand_dims(o_i, 1) > ct.expand_dims(o_i, 0)
     m_I = ct.expand_dims(o_i, 1) == ct.expand_dims(o_i, 0)
 
@@ -951,7 +598,6 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     b_A31 = b_A31 * ct.expand_dims(b_b3, 1)
     b_A32 = b_A32 * ct.expand_dims(b_b3, 1)
 
-    # -- Step 3: forward substitution on diagonal blocks --
     b_Ai00 = -b_A00
     b_Ai11 = -b_A11
     b_Ai22 = -b_A22
@@ -983,8 +629,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     b_Ai22 = b_Ai22 + ct.astype(m_I, ct.float32)
     b_Ai33 = b_Ai33 + ct.astype(m_I, ct.float32)
 
-    # -- Step 4: block merge --
-    # TODO(cutile): input_precision=ieee not representable; fp32 kept in fp32.
+    # Plain ct.matmul keeps the block merge in IEEE fp32; safe_matmul would downcast to tf32.
     b_Ai10 = -ct.matmul(ct.matmul(b_Ai11, b_A10), b_Ai00)
     b_Ai21 = -ct.matmul(ct.matmul(b_Ai22, b_A21), b_Ai11)
     b_Ai32 = -ct.matmul(ct.matmul(b_Ai33, b_A32), b_Ai22)
@@ -995,7 +640,6 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
         ct.matmul(b_A30, b_Ai00) + ct.matmul(b_A31, b_Ai10) + ct.matmul(b_A32, b_Ai20),
     )
 
-    # -- Step 5: store full (I+A)^{-1} --
     cBC = ct.arange(BC, dtype=ct.int32)
     rA0 = i_tc0 + cBC
     rA1 = i_tc1 + cBC
@@ -1232,11 +876,6 @@ def chunk_gated_delta_rule_fwd_kkt_solve_2block_full_kernel(
     ct.scatter(A, off0hi, ct.astype(ct.zeros((BC, BC), dtype=ct.float32), A.dtype), mask=sm_r0, check_bounds=False)
 
 
-# fla.ops.gated_delta_rule.wy_fast (recompute_w_u / prepare_wy_repr_bwd)
-# TMA: (B,T,HV,D) reshaped host-side to (B*T,HV,D); block-indexed ct.load issues a
-# native TMA descriptor load of one head column. k uses the H-head layout (i_kh).
-
-
 @ct.kernel
 def recompute_w_u_fwd_kernel(
     k,  # [B*T, H, K]
@@ -1275,7 +914,6 @@ def recompute_w_u_fwd_kernel(
         bos = i_b * T
         eos = bos + T
 
-    # Per-sequence contiguous slabs -> block-indexed (TMA) loads.
     k_seg = k.slice(axis=0, start=bos, stop=eos)
     v_seg = v.slice(axis=0, start=bos, stop=eos)
     w_seg = w.slice(axis=0, start=bos, stop=eos)
@@ -1286,6 +924,7 @@ def recompute_w_u_fwd_kernel(
     Z = ct.PaddingMode.ZERO
     b_b = ct.load(beta_seg, index=(i_t_loc, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,))
     b_A = ct.load(A_seg, index=(i_t_loc, i_h, 0), shape=(BT, 1, BT), padding_mode=Z).reshape((BT, BT))
+
     for i_v in range(ct.cdiv(V, BV)):
         b_v = ct.load(v_seg, index=(i_t_loc, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
         b_vb = ct.astype(b_v * b_b[:, None], b_v.dtype)
@@ -1303,7 +942,6 @@ def recompute_w_u_fwd_kernel(
         )
         b_g = exp2(b_g_val)
 
-    # w = A @ (k * beta * g)
     for i_k in range(ct.cdiv(K, BK)):
         b_k = ct.load(k_seg, index=(i_t_loc, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
         b_kb = b_k * b_b[:, None]
@@ -1339,9 +977,7 @@ def prepare_wy_repr_bwd_kernel(
     BV: ConstInt,
     USE_G: ConstInt,
     IS_VARLEN: ConstInt,
-    # NK/NV = cdiv(K,BK)/cdiv(V,BV) as RUNTIME ints so the K/V tile loops roll
-    # instead of unrolling (unrolled 4-trip loops spill regs at K=256). K/V/BK/BV
-    # stay ConstInt so offset arithmetic and tile shapes stay specialized.
+    # NK = cdiv(K, BK) and NV = cdiv(V, BV), passed as runtime ints.
     NK,
     NV,
     NUM_WORK,  # persistent: total work-items (NT*BH)
@@ -1526,14 +1162,7 @@ def prepare_wy_repr_bwd_kernel(
             scatter_flat(dg_flat, row_hv, ct.astype(b_dg, dg_flat.dtype), mask=m_t)
 
 
-# fla.ops.common.chunk_delta_h (fwd_h state recurrence + bwd dhu)
-# The recurrent hidden state (K x V) is carried across chunks in a Python for-loop
-# as a single full-width (BK, BV)/(BV, BK) tile (BK=next_pow2(K)); general for any K.
-# (The bk128 dense variant below keeps its own 128-wide 2-block split, K<=256.)
-
-
 def ct_min(a, b):
-    # scalar/tile min for runtime ints (builtin `min` is whitelisted; `hasattr` is not).
     return min(a, b)
 
 
@@ -1557,7 +1186,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    BK: ConstInt,  # next_pow2(K)
     USE_G: ConstInt,
     USE_GK: ConstInt,
     USE_INITIAL_STATE: ConstInt,
@@ -1567,14 +1196,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     IS_VARLEN: ConstInt,
     USE_TMA: ConstInt,
 ):
-    # State loads and stores use masked gather/scatter.
-    #
-    # The KV state is carried as a SINGLE full-width tile ((BV, BK) when
-    # STATE_V_FIRST else (BK, BV), BK=next_pow2(K)) instead of a 4-way 64-wide
-    # sub-block unroll, so the kernel is general for ANY K (no K<=256 cap). Every
-    # gather/scatter over the K axis uses oK=arange(BK) with a `(oK < K)` mask, so
-    # rows/cols [K:BK] are zero on load, contribute 0 to every MMA, and stay 0 in
-    # the state; gk padding loads as 0 so exp2(0)=1 multiplies the zero state rows.
+    # K-axis gathers/scatters use oK = arange(BK) masked by `oK < K`: lanes [K:BK] load as
+    # zero, add 0 to every MMA and stay zero in the state.
     i_v = ct.bid(0)
     i_nh = ct.bid(1)
     i_n = i_nh // HV
@@ -1592,7 +1215,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         NT = ct.cdiv(T, BT)
         boh = i_n * NT
 
-    # State tile b_h: (BV, BK) when V-first else (BK, BV).
     if STATE_V_FIRST:
         b_h = ct.zeros((BV, BK), dtype=ct.float32)
     else:
@@ -1616,7 +1238,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     m_v_lane = (i_v * BV + o_bv) < V
     m_k_lane = oK < K
 
-    # --- Load initial state h0 -> b_h ---
     if USE_INITIAL_STATE:
         if STATE_V_FIRST:
             row = (i_v * BV + o_bv)[:, None]
@@ -1633,14 +1254,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 ct.float32,
             )
 
-    # --- Recurrent state-carry loop over chunks (kept as Python for) ---
     for i_t in range(NT):
         if IS_VARLEN:
             hc_idx = boh + i_t
         else:
             hc_idx = i_t
 
-        # Store current state b_h to h[.., i_t, ..]
         if STATE_V_FIRST:
             row = (i_v * BV + o_bv)[:, None]
             hm1 = ct.broadcast_to(m_v_lane[:, None] & m_k_lane[None, :], (BV, BK))
@@ -1662,7 +1281,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 check_bounds=True,
             )
 
-        # --- b_v = b_w @ b_h (single full-width K MMA) ---
         w_time = (t_base + i_t * BT + o_bt)[:, None]
         wmask_r = (i_t * BT + o_bt) < T
         bw1 = ct.gather(
@@ -1680,7 +1298,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         bmat = ct.astype(bmat, ct.tfloat32) if bmat.dtype == ct.float32 else bmat
         b_v = ct.mma(a, bmat, b_v)
 
-        # b_v = load(v) - b_v
         v_col = (i_v * BV + o_bv)[None, :]
         vmask_c = (i_v * BV + o_bv) < V
         v_time = (t_base + i_t * BT + o_bt)[:, None]
@@ -1706,7 +1323,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         last_idx = ct_min((i_t + 1) * BT, T) - 1
 
-        # --- USE_G gate decay ---
         if USE_G:
             m_t = (i_t * BT + o_bt) < T
             b_g_last = ct.astype(
@@ -1721,11 +1337,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_g_last = exp2(b_g_last)
             b_h = b_h * b_g_last
 
-        # --- USE_GK per-key gate decay ---
         if USE_GK:
             gk_time = t_base + last_idx
-            # ZERO-padded gk load: lanes [K:BK] -> 0 -> exp2(0)=1, multiplying the
-            # already-zero state rows/cols (no inf*0=nan).
+            # Masked gk lanes [K:BK] load as 0, so exp2 gives 1 there and the zero state lanes stay zero.
             b_gk1 = ct.astype(
                 ct.gather(gk, (bt_batch, gk_time, i_h, oK), mask=m_k_lane, check_bounds=True, padding_value=0.0),
                 ct.float32,
@@ -1737,7 +1351,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         b_v = ct.astype(b_v, k.dtype)
 
-        # --- b_h += b_k @ b_v   (b_k is (BK, BT) transposed load of k) ---
         k_time = (t_base + i_t * BT + o_bt)[None, :]
         kmask = (oK[:, None] < K) & ((i_t * BT + o_bt)[None, :] < T)
         bk1 = ct.gather(
@@ -1756,7 +1369,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         else:
             b_h = b_h + prod1
 
-    # --- Store final state ht <- b_h  (ht (N, HV, *), per-sequence state) ---
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
             row = (i_v * BV + o_bv)[:, None]
@@ -1783,17 +1395,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_dense_tma(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    BK: ConstInt,  # next_pow2(K)
 ):
-    """Dense aligned state scan (contiguous tensors, tile-aligned T/K/V, scalar
-    gate, K-major state) using block-indexed TMA accesses.
+    """Dense aligned state scan: contiguous tensors, tile-aligned T/K/V, scalar gate, K-major state.
 
-    The KV state is carried as a SINGLE full-width ``(BK, BV)`` tile (``BK =
-    next_pow2(K)``) instead of a 4-way 64-wide sub-block unroll, so the kernel is
-    general for ANY ``K`` (no ``K<=256`` cap). ``w``/``k`` are K-contiguous, so a
-    single block-indexed ``ct.load(..., shape=(BT, 1, BK), padding_mode=ZERO)``
-    reads cols ``[0:K]`` and zero-pads ``[K:BK]``; padded columns / state rows
-    contribute 0 to every MMA."""
+    The state is one ``(BK, BV)`` tile with ``BK = next_pow2(K)``. ``w``/``k`` loads zero-pad
+    columns ``[K:BK]``, so the padded lanes contribute 0 to every MMA."""
     i_v = ct.bid(0)
     i_nh = ct.bid(1)
     i_n = i_nh // HV
@@ -1850,7 +1457,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    BK: ConstInt,  # next_pow2(K)
     USE_G: ConstInt,
     USE_GK: ConstInt,
     USE_INITIAL_STATE: ConstInt,
@@ -1860,14 +1467,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     USE_TMA: ConstInt,
     occupancy: ConstInt = 1,
 ):
-    # State loads and stores use masked gather/scatter.
-    #
-    # dh state is a SINGLE full-width tile ((BV, BK) when STATE_V_FIRST else
-    # (BK, BV), BK=next_pow2(K)) instead of a 4-way 64-wide sub-block unroll, so
-    # the kernel is general for ANY K (no K<=256 cap). Every flat gather/scatter
-    # over the K axis uses oK=arange(BK) with a `(oK < K)` mask, so rows/cols
-    # [K:BK] are zero on load, contribute 0 to every MMA, and are masked out on
-    # store; gk padding loads as 0 so exp2(0)=1 multiplies the zero state rows.
+    # K-axis flat gathers/scatters use oK = arange(BK) masked by `oK < K`: lanes [K:BK] load
+    # as zero, add 0 to every MMA and are skipped on store.
     i_v = ct.bid(0)
     i_nh = ct.bid(1)
     i_n = i_nh // HV
@@ -1901,7 +1502,6 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     dh0_base = i_nh * K * V
     dht_base = i_nh * K * V
 
-    # Raw flat handles + element counts for 1-D flat gather/scatter (cuTile 1.4.0).
     dhtf = dht.get_raw_memory()
     dht_n = _array_numel(dht)
     dhf = dh.get_raw_memory()
@@ -1930,7 +1530,6 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     o_bv = ct.arange(BV, dtype=ct.int32)
     m_k_lane = oK < K
 
-    # --- Load final-state gradient dht -> b_dh ---
     if USE_FINAL_STATE_GRADIENT:
         if STATE_V_FIRST:
             row = (i_v * BV + o_bv)[:, None]
@@ -1946,13 +1545,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     v_col = (i_v * BV + o_bv)[None, :]
     vmask_c = (i_v * BV + o_bv) < V
 
-    # --- Reverse recurrent loop over chunks ---
     for i_rev in range(NT):
         i_t = NT - 1 - i_rev
         dh_chunk = dh_base + i_t * HV * K * V
 
-        # Store b_dh -> dh[i_t]. Mask BK-wide K rows and BV-wide V cols; flat numel
-        # check alone would let over-range K rows spill into the next chunk's dh slot.
+        # Mask K rows and V cols explicitly: the flat numel check alone lets lanes [K:BK] land in
+        # the next chunk's dh slot.
         if STATE_V_FIRST:
             row = (i_v * BV + o_bv)[:, None]
             vmask = ((i_v * BV + o_bv) < V)[:, None]
@@ -1993,8 +1591,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         b_do = gather_flat_cb(dof, do_off, do_n, padding_value=0.0)
         b_do = ct.where(do_full, b_do, ct.zeros((BT, BV), dtype=b_do.dtype))
 
-        # b_dv = b_k @ b_dh  (single full-width K MMA). K-mask the gather: an oK>=K
-        # flat offset would read the NEXT head's in-bounds (numel-ok) K data.
+        # K-mask the gather: a flat offset with oK >= K is in bounds and reads the next head's K data.
         k_row = (i_t * BT + o_bt)[:, None]
         kmask_r = (i_t * BT + o_bt) < T
         bk_full = kmask_r[:, None] & m_k_lane[None, :]
@@ -2028,9 +1625,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         dv2_off = dv2_base + (i_t * BT + o_bt)[:, None] * (HV * V) + v_col
         scatter_flat_cb(dv2f, dv2_off, ct.astype(b_dv, dv2.dtype), dv2_n, mask=do_full)
 
-        # --- b_dh += trans?(q@do*scale - w@dv)  (single full-width K MMA) ---
-        # b_w/b_q are (BK, BT) transposed loads; K-rows [K:BK] are zeroed by the
-        # `wmask` where (the gather itself may touch in-bounds neighbor data).
+        # K rows [K:BK] of the transposed b_w/b_q loads are zeroed with `wmask`; the gather alone
+        # may read in-bounds neighbor data.
         time = (i_t * BT + o_bt)[None, :]
         tmask = (i_t * BT + o_bt)[None, :] < T
         b_dv_cast = ct.astype(b_dv, ct.float32)
@@ -2061,10 +1657,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         else:
             b_dh = b_dh + upd1
 
-    # --- Store initial-state gradient dh0 <- b_dh ---
     if USE_INITIAL_STATE:
-        # Mask both the BK-wide K rows and BV-wide V cols; flat numel check alone
-        # would let an over-range K row spill into the next head's dh0 slot.
+        # Mask K rows and V cols explicitly: the flat numel check alone lets lanes [K:BK] land in
+        # the next head's dh0 slot.
         if STATE_V_FIRST:
             row = (i_v * BV + o_bv)[:, None]
             vmask = ((i_v * BV + o_bv) < V)[:, None]
@@ -2105,18 +1700,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_dense_tma(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general for any K)
+    BK: ConstInt,  # next_pow2(K)
     occupancy: ConstInt = 1,
 ):
-    # Dense/aligned variant (STATE_V_FIRST=False, USE_G=True, no varlen/gk/state-grad,
-    # T%BT==0): no boundary masking. q/k/w/do/dv/dv2 reshaped host-side to (B*T,*,D)
-    # and dh to (B*NT*HV,K,V); block-indexed ct.load/ct.store -> native TMA (transposed
-    # (K,T) q/w loaded as (BT,BK) blocks then ct.transpose).
-    # dh state is a SINGLE full-width (BK, BV) tile (BK=next_pow2(K)) -> general for
-    # ANY K (no 64-wide sub-block unroll / K<=256 cap). q/k/w are K-contiguous, so a
-    # single block-indexed ct.load(shape=(BT,1,BK), padding_mode=ZERO) reads cols
-    # [0:K] and zero-pads [K:BK]; padded cols / state rows contribute 0 to every MMA.
-    # TODO(cutile): `occupancy` kept for signature parity; unused in body.
+    # Requires STATE_V_FIRST=False, a scalar gate, no varlen/gk/state gradients and T % BT == 0:
+    # nothing is masked. Inputs are (B*T, *, D) slabs and dh is (B*NT*HV, K, V); ZERO-padded
+    # loads zero lanes [K:BK], which then add 0 to every MMA.
     i_v = ct.bid(0)
     i_nh = ct.bid(1)
     i_n = i_nh // HV
@@ -2139,6 +1728,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_dense_tma(
         b_g = ct.astype(ct.load(g, index=(rt, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,)), ct.float32)
         bg_last_exp = exp2(bg_last)
         b_g_exp = exp2(b_g)
+
         b_do = ct.load(do, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
         bk1 = ct.load(k, index=(rt, i_kh, 0), shape=(BT, 1, BK), padding_mode=Z, latency=3).reshape((BT, BK))
 
@@ -2151,6 +1741,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_dense_tma(
             ct.float32,
         )
         ct.store(dv2, index=(rt, i_h, i_v), tile=ct.astype(b_dv, dv2.dtype).reshape((BT, 1, BV)))
+
         dvb = ct.astype(b_dv, w.dtype)
         doa = ct.astype(b_do, w.dtype)
 
@@ -2187,9 +1778,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma(
     BV: ConstInt,
     occupancy: ConstInt = 1,
 ):
-    # bk128 dense variant: K split into 128-wide blocks (dense/aligned, USE_G only).
-    # Same reshape/TMA recipe as the bk64 dense_tma variant.
-    # TODO(cutile): `occupancy` kept for signature parity; unused in body.
+    # Same preconditions as the bk64 dense_tma kernel, plus K in {128, 256}: K is split into
+    # fixed 128-wide blocks.
     i_v = ct.bid(0)
     i_nh = ct.bid(1)
     i_n = i_nh // HV
@@ -2215,6 +1805,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma(
         b_g = ct.astype(ct.load(g, index=(rt, i_h), shape=(BT, 1), padding_mode=Z).reshape((BT,)), ct.float32)
         bg_last_exp = exp2(bg_last)
         b_g_exp = exp2(b_g)
+
         b_do = ct.load(do, index=(rt, i_h, i_v), shape=(BT, 1, BV), padding_mode=Z, latency=3).reshape((BT, BV))
         bk1 = ct.load(k, index=(rt, i_kh, 0), shape=(BT, 1, 128), padding_mode=Z, latency=3).reshape((BT, 128))
 
@@ -2230,6 +1821,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma(
             ct.float32,
         )
         ct.store(dv2, index=(rt, i_h, i_v), tile=ct.astype(b_dv, dv2.dtype).reshape((BT, 1, BV)))
+
         doa = ct.astype(b_do, w.dtype)
         dvb = ct.astype(b_dv, w.dtype)
 
@@ -2258,9 +1850,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma(
             b_dh2 = b_dh2 + (qdo * scale - wdv)
 
 
-# fla.ops.common.chunk_o (fwd o, bwd dqkwg / dw / dv_local)
-
-safe_dot = safe_matmul  # alias: non-accumulating dot with fp32->tf32 guard
+safe_dot = safe_matmul
 
 
 @ct.kernel
@@ -2307,8 +1897,7 @@ def chunk_fwd_kernel_o(
         bos = i_b * T
         eos = bos + T
 
-    # q/k/v/o reshaped host-side to (B*T,*,D) slabs, h to (B*NT*HV,*,*);
-    # block-indexed ct.load -> TMA.
+    # q/k/v/o are (B*T, *, D) slabs; h is (B*NT*HV, *, *).
     i_kh = i_h // (HV // H)
     i_hc = i_tg * HV + i_h
 
@@ -2330,11 +1919,9 @@ def chunk_fwd_kernel_o(
         b_k = ct.load(k_seg, index=(i_t, i_kh, i_k), shape=(BT, 1, BK), padding_mode=Z, latency=2).reshape((BT, BK))
 
         if STATE_V_FIRST:
-            # b_h (BV, BK), o += q @ h^T
             b_h = ct.load(h, index=(i_hc, i_v, i_k), shape=(1, BV, BK), padding_mode=Z, latency=2).reshape((BV, BK))
             b_o = safe_mma(b_q, ct.transpose(b_h), b_o)
         else:
-            # b_h (BK, BV), o += q @ h
             b_h = ct.load(h, index=(i_hc, i_k, i_v), shape=(1, BK, BV), padding_mode=Z, latency=2).reshape((BK, BV))
             b_o = safe_mma(b_q, b_h, b_o)
         b_A = safe_mma(b_q, ct.transpose(b_k), b_A)
@@ -2393,7 +1980,7 @@ def chunk_bwd_kernel_dqkwg(
     USE_DW: ConstInt,
     STATE_V_FIRST: ConstInt,
     IS_VARLEN: ConstInt,
-    NV,  # runtime cdiv(V,BV) -> rolled V-loop (avoids unroll reg-spill at K=256)
+    NV,  # cdiv(V, BV)
     NUM_WORK,  # persistent: total work-items (NK*NT*BH)
     NT_DECODE,  # persistent: NT used to decode (i_t, i_k) from linear id
 ):
@@ -2452,7 +2039,6 @@ def chunk_bwd_kernel_dqkwg(
         b_dw = ct.zeros((BT, BK), dtype=ct.float32)
 
         for i_v in range(NV):
-            # h/dh state tiles: (BV,BK) when V-first; else load (BK,BV) and transpose.
             if STATE_V_FIRST:
                 b_h = ct.load(h, index=(i_hc, i_v, i_k), shape=(1, BV, BK), padding_mode=Z, latency=2).reshape((BV, BK))
                 b_dh = ct.load(dh, index=(i_hc, i_v, i_k), shape=(1, BV, BK), padding_mode=Z, latency=2).reshape(
@@ -2706,14 +2292,9 @@ def chunk_bwd_kernel_dv_local(
                 b_A = b_A + safe_dot(b_k, b_q) * scale
 
             if USE_G or USE_G_GAMMA:
-                # Numerically stable decay: a single exp2 of the pairwise difference.
-                # The factored form exp2(g_j - g_ref) * exp2(g_ref - g_i) produced
-                # 0 * inf = NaN on the causal diagonal when the intra-chunk cumsum of
-                # g is very negative (~-2000 in log2 for random-init gates): with
-                # g_ref = g[chunk_start], exp2(g_end - g_ref)=0 and exp2(g_ref - g_end)=inf.
-                # exp2(g_j - g_i) is mathematically identical (g_ref cancels); causal
-                # entries (i<=j) give g_j - g_i <= 0 so exp2 in (0,1], and non-causal
-                # entries (possibly inf) are masked to 0 by m_A below.
+                # Decay is one exp2 of the pairwise difference. The factored form
+                # exp2(g_j - g_ref) * exp2(g_ref - g_i) gives 0 * inf = NaN when the chunk cumsum of g
+                # is very negative. Causal entries have g_j - g_i <= 0; the rest are masked by m_A below.
                 b_A = b_A * exp2(b_g[None, :] - b_g[:, None])
 
         m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
@@ -2730,14 +2311,8 @@ def chunk_bwd_kernel_dv_local(
             scatter_flat(dvf, dv_off, ct.astype(b_dv, dv.dtype), mask=do_mask)
 
 
-# Host wrappers (compute grid + fixed tile sizes, then ct.launch)
-# cuTile never accepts None; optional tensors are passed as a 1-element dummy +
-# an integer flag (USE_*/IS_VARLEN/HAS_*).
-
-
-# Per-(device, dtype) cache of the read-only 1-element placeholder for None optional
-# args (always paired with a flag==0). Caching avoids a torch.zeros(1) FillFunctor
-# launch per call, which otherwise serializes on the CPU -> GPU idle.
+# Kernels do not accept None: an absent optional tensor is passed as this read-only
+# 1-element placeholder together with a zero flag (USE_*/IS_VARLEN/HAS_*).
 _DUMMY_CACHE: dict = {}
 
 
@@ -2767,7 +2342,6 @@ def _opt_i32(t, device):
     return _i32(t)
 
 
-# l2norm
 def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.reshape(-1, x.shape[-1]).contiguous()
@@ -2850,7 +2424,6 @@ def l2norm_bwd(
     return dx.view(y_shape_og)
 
 
-# fused_beta_sigmoid
 _BETA_SIGMOID_BLOCK_SIZE = 2048
 
 
@@ -2901,7 +2474,6 @@ def fused_beta_sigmoid(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     return BetaSigmoidFunction.apply(x, scale)
 
 
-# chunk_local_cumsum (scalar gate) / gdn_gate_chunk_cumsum / gdn_gate_bwd
 def chunk_local_cumsum_scalar(
     g,
     chunk_size,
@@ -3051,75 +2623,6 @@ def gdn_gate_bwd(g, A_log, dt_bias, dyg):
     return dg, dA, dbias
 
 
-# chunk_scaled_dot_kkt + solve_tril
-def chunk_scaled_dot_kkt_fwd(
-    k, g=None, beta=None, cu_seqlens=None, chunk_size=64, output_dtype=torch.float32, chunk_indices=None
-):
-    B, T, H, K, HV = *k.shape, beta.shape[2]
-    BT = chunk_size
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    A = torch.empty(B, T, HV, BT, device=k.device, dtype=output_dtype)
-    is_varlen = cu_seqlens is not None
-    dev = k.device
-    BK = 64
-    g_arg = _opt(g, dev)
-    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
-    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
-    ct.launch(
-        _stream(),
-        (NT, B * HV),
-        chunk_scaled_dot_kkt_fwd_kernel,
-        (
-            # flat element offsets require rank-1 Arrays.
-            k.contiguous().reshape(-1),
-            g_arg.reshape(-1),
-            beta.contiguous().reshape(-1),
-            A.reshape(-1),
-            cu_arg,
-            ci_arg,
-            T,
-            H,
-            HV,
-            K,
-            BT,
-            BK,
-            int(is_varlen),
-            int(g is not None),
-        ),
-    )
-    return A
-
-
-def solve_tril(A, cu_seqlens=None, chunk_indices=None, output_dtype=torch.float):
-    assert A.shape[-1] in [16, 32, 64]
-    output_dtype = A.dtype if output_dtype is None else output_dtype
-    B, T, H, BT = A.shape
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = len(chunk_indices) if cu_seqlens is not None else _cdiv(T, BT)
-    Ai = torch.zeros_like(A, dtype=output_dtype)
-    if BT == 16:
-        kern = solve_tril_16x16_kernel
-    elif BT == 32:
-        kern = merge_16x16_to_32x32_inverse_kernel
-    else:
-        kern = merge_16x16_to_64x64_inverse_kernel
-    is_varlen = cu_seqlens is not None
-    dev = A.device
-    cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
-    ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
-    ct.launch(
-        _stream(),
-        (NT, B * H),
-        kern,
-        (A.contiguous(), Ai, cu_arg, ci_arg, T, H, BT, int(is_varlen)),
-    )
-    return Ai
-
-
-# recompute_w_u_fwd / prepare_wy_repr_bwd
 def recompute_w_u_fwd(k, v, beta, A, g=None, cu_seqlens=None, chunk_indices=None):
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = A.shape[-1]
@@ -3132,7 +2635,6 @@ def recompute_w_u_fwd(k, v, beta, A, g=None, cu_seqlens=None, chunk_indices=None
     u = torch.empty_like(v)
     is_varlen = cu_seqlens is not None
     dev = k.device
-    # Reshape (B, T, *) -> (B*T, *) so per-sequence slabs are block-indexable (TMA).
     BTtot = B * T
     k3 = k.reshape(BTtot, H, K)
     v3 = v.reshape(BTtot, HV, V)
@@ -3209,8 +2711,6 @@ def prepare_wy_repr_bwd(k, v, beta, A, dw, du, g=None, cu_seqlens=None, chunk_in
     dg_arg = dg if dg is not None else _dummy(dev)
     cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
     ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
-    # Persistent scheduling (see chunk_bwd_dqkwg): ~#SMs*4 resident blocks, each
-    # loops a strided range over the NT*(B*HV) work-items.
     _wy_bh = B * HV
     _wy_work = NT * _wy_bh
     _wy_prog = min(_wy_work, torch.cuda.get_device_properties(dev).multi_processor_count * 4)
@@ -3271,7 +2771,6 @@ def prepare_wy_repr_bwd(k, v, beta, A, dw, du, g=None, cu_seqlens=None, chunk_in
     return dk, dv, db, dg
 
 
-# chunk_gated_delta_rule_fwd_h / bwd_dhu
 def chunk_gated_delta_rule_fwd_h(
     k,
     w,
@@ -3295,8 +2794,6 @@ def chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = B, _cdiv(T, BT), None
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
-    # State fwd_h kernel carries a full-width (BK, BV) tile (BK=next_pow2(K)),
-    # so it is general for any K (no 64-wide sub-block unroll / K<=256 cap).
 
     if state_v_first:
         h = k.new_empty(B, NT, HV, V, K)
@@ -3315,6 +2812,7 @@ def chunk_gated_delta_rule_fwd_h(
     ht_arg = final_state if final_state is not None else _dummy(dev)
     cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
     co_arg = _opt_i32(chunk_offsets, dev)
+
     BV = 64
     if V % 32 == 0:
         try:
@@ -3323,11 +2821,7 @@ def chunk_gated_delta_rule_fwd_h(
         except Exception:  # noqa: BLE001
             sm_count = 0
         grid_blocks = _cdiv(V, 64) * (N * HV)
-        # Split only when the doubled BV=32 grid still fits within one wave
-        # (grid_blocks*2 <= SMs); otherwise the halved MMA width is a net loss.
         if sm_count and grid_blocks * 2 <= sm_count:
-            # Grid-saturation split (all arches): halve BV to double CTAs when the
-            # BV=64 grid under-occupies (V-lanes independent -> no extra serial work).
             BV = 32
     grid = (_cdiv(V, BV), N * HV)
 
@@ -3368,7 +2862,6 @@ def chunk_gated_delta_rule_fwd_h(
         ct.launch(stream, grid, kernel, args)
         return h, v_new, final_state
 
-    # Multi-dim arrays passed as-is (per-dim indices + real strides).
     stream = _stream()
     args = (
         k,
@@ -3446,8 +2939,6 @@ def chunk_gated_delta_rule_bwd_dhu(
 ):
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
-    # State dhu kernel carries a full-width (BK, BV) tile (BK=next_pow2(K)), so it
-    # is general for any K (no 64-wide sub-block unroll / K<=256 cap).
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     if cu_seqlens is None:
@@ -3465,9 +2956,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     is_varlen = cu_seqlens is not None
     dev = q.device
 
-    # Fast path (dense_tma): gate present, no gk/state-grad/varlen, K-major state,
-    # 64-aligned dims -> dense branch-free reverse-scan dhu kernel (dominant bwd
-    # kernel). bk128 split (M=128 MMA) when K % 128 == 0.
+    # The dense_tma kernels do no boundary masking; this guard is their precondition.
     use_dense = (
         g is not None
         and gk is None
@@ -3482,8 +2971,6 @@ def chunk_gated_delta_rule_bwd_dhu(
         and V % 64 == 0
     )
     if use_dense:
-        # TMA slab reshapes: (B, T, *) -> (B*T, *) and dh -> (B*NT*HV, K, V) so the
-        # dhu kernels block-index them (native TMA). BV is autotuned below.
         BTtot = B * T
         q3 = q.contiguous().reshape(BTtot, H, K)
         k3 = k.contiguous().reshape(BTtot, H, K)
@@ -3499,10 +2986,8 @@ def chunk_gated_delta_rule_bwd_dhu(
 
         BK = _next_power_of_2(K)
 
-        # BV autotune candidates ({32,64} for bk64, {32,64,128} for bk128);
-        # default-first (BV=64) so a tuning failure keeps fixed-BV behavior.
-        # bk128 (2 fixed 128-wide blocks) caps at K<=256; K>256 falls through to
-        # the generalized (full-width BK tile) bk64 dense_tma kernel.
+        # The default candidate (BV=64) comes first so a tuning failure keeps a valid config.
+        # The bk128 kernel has two fixed 128-wide blocks, so it only covers K in {128, 256}.
         if 128 <= K <= 256 and K % 128 == 0:
             kern = chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_bk128_dense_tma
             bv_choices = [64, 32, 128]
@@ -3525,7 +3010,7 @@ def chunk_gated_delta_rule_bwd_dhu(
                     V,
                     BT,
                     bv,
-                    1,  # occupancy ConstInt (signature parity; real hint via replace_hints)
+                    1,  # occupancy
                 )
         else:
             kern = chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_dense_tma
@@ -3550,7 +3035,7 @@ def chunk_gated_delta_rule_bwd_dhu(
                     BT,
                     bv,
                     BK,
-                    1,  # occupancy ConstInt (signature parity; real hint via replace_hints)
+                    1,  # occupancy
                 )
 
         bv_choices = [bv for bv in bv_choices if V % bv == 0]
@@ -3638,7 +3123,6 @@ def chunk_gated_delta_rule_bwd_dhu(
     return dh, dh0, dv2
 
 
-# chunk_fwd_o / chunk_bwd_dqkwg / chunk_bwd_dv_local
 def chunk_fwd_o(
     q,
     k,
@@ -3666,7 +3150,6 @@ def chunk_fwd_o(
     gg_arg = _opt(g_gamma, dev)
     cu_arg = _opt_i32(cu_seqlens if is_varlen else None, dev)
     ci_arg = _opt_i32(chunk_indices if is_varlen else None, dev)
-    # Reshape to (B*T,*,D) / (B*NT*HV,*,*) slabs for block-indexed TMA.
     BTtot = B * T
     q3 = q.reshape(BTtot, H, K)
     k3 = k.reshape(BTtot, H, K)
@@ -3677,8 +3160,6 @@ def chunk_fwd_o(
     else:
         h3 = h.reshape(B * NT * HV, K, V)
 
-    # The first candidate is the padded baseline; the remaining candidates
-    # cover square and asymmetric tiles.
     tile_choices = _fwd_o_tile_configs(K, V)
 
     def _grid(bk, bv):
@@ -3775,7 +3256,6 @@ def chunk_bwd_dqkwg(
     _n_sm = torch.cuda.get_device_properties(dev).multi_processor_count
     _num_prog = min(_num_work, _n_sm * 4)
     grid = (_num_prog,)
-    # Reshape to (B*T,*,D) / (B*NT*HV,*,*) / (NK,B*T,HV) slabs for block-indexed TMA.
     BTtot = B * T
     q3 = q.contiguous().reshape(BTtot, H, K)
     k3 = k.contiguous().reshape(BTtot, H, K)
@@ -3985,7 +3465,6 @@ def chunk_bwd_dv_local(
     return dv
 
 
-# fused intra (kkt + solve_tril + recompute_w_u)
 def chunk_gated_delta_rule_fwd_intra(k, v, g=None, beta=None, cu_seqlens=None, chunk_size=64, chunk_indices=None):
     B, T, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
@@ -4084,9 +3563,6 @@ def chunk_gated_delta_rule_fwd_intra(k, v, g=None, beta=None, cu_seqlens=None, c
         ct.launch(stream, grid, kernel, args)
     w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=g, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     return w, u, A
-
-
-# fla.ops.gated_delta_rule.chunk (forward / backward drivers + entry)
 
 
 def chunk_gated_delta_rule_fwd(
@@ -4409,9 +3885,7 @@ def chunk_gated_delta_rule(
     dt_bias=None,
     **kwargs,
 ):
-    r"""Chunked Gated DeltaNet (GDN). cuTile port of
-    ``fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule``.
-    Returns ``(o, final_state)``."""
+    r"""Chunked Gated DeltaNet (GDN). Returns ``(o, final_state)``."""
     assert cp_context is None, "context-parallel not supported in this port"
 
     if "transpose_state_layout" in kwargs:
@@ -4473,7 +3947,6 @@ def chunk_gated_delta_rule(
 chunk_gdn = chunk_gated_delta_rule
 
 
-# TileGym dispatch registration (single op)
 @register_impl("fla.linear_attention_gdn_chunk", backend="cutile")
 @input_guard
 def linear_attention_gdn_chunk(
