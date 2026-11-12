@@ -52,10 +52,16 @@ try:
     from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
     from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
     from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+    from tilegym.kernel_inventory.schema import CustomInput
+    from tilegym.kernel_inventory.schema import ToleranceSpec
+    from tilegym.kernel_inventory.schema import resolve_tensor_shape
     from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
 finally:
     if _original_tilegym is None:
         sys.modules.pop("tilegym", None)
+
+
+_DEFAULT_TOLERANCE = ToleranceSpec(max_atol=2e-2, max_rtol=2e-2, required_matched_ratio=1.0)
 
 
 class _CapturedReferenceReturn:
@@ -92,11 +98,23 @@ def workload_runtime_cases_for_submodule(submodule: str | Path | None) -> list[A
                         definition_path,
                         solution_path,
                         id=_runtime_case_id(record, definition_path, solution_path),
+                        marks=_unsupported_runtime_row_marks(record),
                     )
                 )
     if search_root != REPO_ROOT and not cases:
         raise ValueError(f"Kernel submodule has no Workload/Definition/Solution triples: {search_root}")
     return cases
+
+
+def _unsupported_runtime_row_marks(record: WorkloadRecord) -> tuple[Any, ...]:
+    """Skip rows whose inputs the local runtime cannot materialize."""
+    if any(not isinstance(value, int) for value in record.workload.axes.values()):
+        reason = "local runtime does not sample dynamic axes"
+    elif any(isinstance(descriptor, CustomInput) for descriptor in record.workload.inputs.values()):
+        reason = "local runtime does not call custom_inputs_entrypoint"
+    else:
+        return ()
+    return (pytest.mark.skip(reason=reason),)
 
 
 def _runtime_case_id(record: WorkloadRecord, definition_path: str | Path, solution_path: str | Path) -> str:
@@ -225,7 +243,9 @@ def _run_definition_solution_workload_runtime(
     _xfail_if_host_arch_tagged(definition)
 
     with installed_reference_modules(definition, definition_path):
-        reference_fn = _load_reference(definition, definition_path)
+        reference_namespace = _load_reference_namespace(definition, definition_path)
+        reference_fn = reference_namespace["run"]
+        custom_comparator = _load_custom_comparator(definition, reference_namespace)
         solution_fn = _load_solution_entry(solution)
         previous_backend = None
         if solution.get("launch") is None:
@@ -259,6 +279,9 @@ def _run_definition_solution_workload_runtime(
                 mutated_inputs,
                 tolerance=workload_record.workload.tolerance,
                 case_label=workload_record.source_label,
+                skip_correctness=workload_record.workload.eval_mode == "benchmark_only",
+                custom_comparator=custom_comparator,
+                custom_correctness_kwargs=workload_record.workload.custom_correctness_kwargs or None,
             )
         finally:
             if previous_backend is not None:
@@ -322,16 +345,25 @@ def _run_runtime_branch(
     *,
     tolerance: Any | None = None,
     case_label: str | None = None,
+    skip_correctness: bool = False,
+    custom_comparator: Any | None = None,
+    custom_correctness_kwargs: dict[str, Any] | None = None,
 ) -> None:
-    """Compare reference and Solution for one concrete Workload row."""
+    """Compare reference and Solution for one concrete Workload row.
+
+    ``skip_correctness`` (``eval_mode='benchmark_only'`` rows) still executes
+    both sides once and enforces the return structure, output shapes and
+    dtypes, destination-passing output writes, and input mutation contract,
+    but skips every numerical comparison: these rows are perf/instability
+    probes whose selection semantics are ill-conditioned at the captured
+    boundary (for example near-tie discrete top-k picks)."""
     reference_inputs = {name: _clone_value(value) for name, value in inputs.items()}
     solution_inputs = {name: _clone_value(value) for name, value in inputs.items()}
     reference_before = {name: _clone_value(value) for name, value in reference_inputs.items()}
     solution_before = {name: _clone_value(value) for name, value in solution_inputs.items()}
     branch = case_label or _boolean_branch_label(inputs)
-    rtol = float(tolerance.max_rtol) if tolerance is not None else 2e-2
-    atol = float(tolerance.max_atol) if tolerance is not None else 2e-2
-    matched_ratio = float(tolerance.required_matched_ratio) if tolerance is not None else 1.0
+    if tolerance is None:
+        tolerance = _DEFAULT_TOLERANCE
 
     if "runtime:unsupported" in definition.get("tags", []):
         _assert_unsupported_solution_matches_reference(
@@ -360,11 +392,18 @@ def _run_runtime_branch(
         reference_result = _call_entry_strictly(reference_fn, reference_inputs, "Definition.reference")
     finally:
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = _ref_reduced
-    if solution.get("launch") is None:
+    if _is_python_dps_solution(solution):
+        torch.manual_seed(2026)
+        solution_result = _call_python_dps_solution(
+            definition, solution_fn, solution_inputs, axes, reference_result, torch, require_written=skip_correctness
+        )
+    elif solution.get("launch") is None:
         torch.manual_seed(2026)
         solution_result = _call_entry_strictly(solution_fn, solution_inputs, "Solution entry point")
     else:
-        solution_result = _launch_raw_solution(definition, solution, solution_fn, solution_inputs, axes, torch)
+        solution_result = _launch_raw_solution(
+            definition, solution, solution_fn, solution_inputs, axes, torch, require_written=skip_correctness
+        )
     if any(getattr(value, "is_cuda", False) for value in solution_inputs.values()):
         torch.cuda.synchronize()
 
@@ -379,39 +418,28 @@ def _run_runtime_branch(
         axes,
         torch,
         f"{definition['name']} {branch}",
-        rtol=rtol,
-        atol=atol,
-        matched_ratio=matched_ratio,
+        tolerance=tolerance,
+        correctness_fn=custom_comparator,
+        entrypoint_name=definition.get("custom_correctness_entrypoint"),
+        custom_correctness_kwargs=custom_correctness_kwargs,
+        compare=not skip_correctness,
     )
 
     for name in mutated_inputs:
-        # Integer destination-passed mutations share the row's matched-ratio
-        # semantics; floating and bool mutations keep the full assert_close
-        # tolerance (booleans have no partial-credit semantics).
-        mutated_value = solution_inputs[name]
-        if (
-            matched_ratio < 1.0
-            and isinstance(mutated_value, torch.Tensor)
-            and not mutated_value.is_floating_point()
-            and mutated_value.dtype is not torch.bool
-        ):
-            _assert_matched_ratio(
-                mutated_value,
-                reference_inputs[name],
-                torch,
-                f"{definition['name']} {branch} mutated input {name}",
-                rtol=rtol,
-                atol=atol,
-                matched_ratio=matched_ratio,
+        if reference_inputs[name] is None or solution_inputs[name] is None:
+            assert reference_inputs[name] is solution_inputs[name] is None, (
+                f"{definition['name']} {branch} mutated input {name}: tensor/None mismatch"
             )
-        else:
-            torch.testing.assert_close(
-                mutated_value,
-                reference_inputs[name],
-                rtol=rtol,
-                atol=atol,
-                msg=lambda msg: f"{definition['name']} {branch} mutated input {name} mismatch\n{msg}",
-            )
+            continue
+        _assert_outputs_correct(
+            [reference_inputs[name]],
+            [solution_inputs[name]],
+            [name],
+            torch,
+            f"{definition['name']} {branch} mutated input {name}",
+            tolerance=tolerance,
+            compare=not skip_correctness,
+        )
     for name in sorted(set(definition["inputs"]) - set(mutated_inputs)):
         if not hasattr(inputs[name], "shape"):
             continue
@@ -431,6 +459,101 @@ def _run_runtime_branch(
         )
 
 
+def _is_python_dps_solution(solution: dict[str, Any]) -> bool:
+    """Launch-less Solutions using the destination-passing ``run(*inputs, *outputs)`` convention."""
+    return solution.get("launch") is None and solution.get("spec", {}).get("destination_passing_style") is True
+
+
+def _call_python_dps_solution(
+    definition: dict[str, Any],
+    solution_fn: Any,
+    inputs: dict[str, Any],
+    axes: dict[str, int],
+    reference_result: Any,
+    torch: Any,
+    *,
+    require_written: bool = False,
+) -> Any:
+    """Allocate poisoned outputs, call ``run(*inputs, *outputs)``, and shape them like the reference return.
+
+    ``require_written`` rejects outputs left bit-identical to their poison when
+    no numerical comparison will run.
+    """
+    from tilegym.kernel_inventory.correctness import poison_output_
+
+    device = next((value.device for value in inputs.values() if isinstance(value, torch.Tensor)), torch.device("cuda"))
+    outputs = {}
+    for name, spec in definition["outputs"].items():
+        shape = resolve_tensor_shape(spec["shape"], axes)
+        dtype = resolve_torch_dtype(spec["dtype"], torch)
+        outputs[name] = poison_output_(torch.empty(shape, dtype=dtype, device=device))
+    returned = solution_fn(*(inputs[name] for name in definition["inputs"]), *outputs.values())
+    assert returned is None, f"{definition['name']}: destination-passing Solution must return None"
+    if require_written:
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        _assert_poisoned_outputs_written(definition, outputs, torch, "destination-passing")
+    contract = reference_result.contract if isinstance(reference_result, _CapturedReferenceReturn) else None
+    covered: list[str] = []
+
+    def shaped(node: Any) -> Any:
+        if node is None:
+            return None
+        if isinstance(node, tuple):
+            return tuple(shaped(item) for item in node)
+        covered.append(node)
+        return outputs[node]
+
+    result = shaped(contract)
+    assert sorted(covered) == sorted(outputs), (
+        f"{definition['name']}: destination-passing comparison requires Definition.reference to return every "
+        f"output exactly once; returned {covered}, declared {list(outputs)}"
+    )
+    return result
+
+
+def _assert_poisoned_outputs_written(
+    definition: dict[str, Any], outputs: dict[str, Any], torch: Any, kind: str
+) -> None:
+    """Reject outputs left bit-identical to the harness poison.
+
+    Outputs whose poison is NaN are checked per element, since computation does not produce that bit pattern.
+    Other poisons are values a correct kernel may write, so those outputs are rejected only when left entirely
+    poisoned.
+    """
+    from tilegym.kernel_inventory.correctness import poison_output_
+
+    same_width_ints = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
+    for name, output in outputs.items():
+        if output.numel() == 0:
+            continue
+        poison = poison_output_(torch.empty_like(output))
+        bits = same_width_ints.get(output.element_size())
+        if bits is not None and _is_nan_poison(output.dtype, torch):
+            unwritten = int((output.view(bits) == poison.view(bits)).sum().item())
+            assert unwritten == 0, (
+                f"{definition['name']}: {kind} Solution left output {name} unwritten "
+                f"({unwritten} of {output.numel()} elements)"
+            )
+            continue
+        assert not torch.equal(output.reshape(-1).view(torch.uint8), poison.reshape(-1).view(torch.uint8)), (
+            f"{definition['name']}: {kind} Solution left output {name} unwritten"
+        )
+
+
+def _is_nan_poison(dtype: Any, torch: Any) -> bool:
+    from tilegym.kernel_inventory.correctness import poison_output_
+
+    if not dtype.is_floating_point:
+        return False
+    # On CPU an unsupported cast raises; on CUDA it can trip a device-side assert.
+    poison = poison_output_(torch.empty((1,), dtype=dtype))
+    try:
+        return bool(torch.isnan(poison.to(torch.float32)).item())
+    except (RuntimeError, TypeError, NotImplementedError):
+        return False
+
+
 def _launch_raw_solution(
     definition: dict[str, Any],
     solution: dict[str, Any],
@@ -438,10 +561,28 @@ def _launch_raw_solution(
     inputs: dict[str, Any],
     axes: dict[str, int],
     torch: Any,
+    *,
+    require_written: bool = False,
 ) -> Any:
-    """Allocate Definition outputs and invoke one raw Triton or cuTile kernel."""
+    """Allocate Definition outputs and invoke one raw Triton or cuTile kernel.
+
+    ``require_written`` requires every output to be initialized as ``empty``, poisons the outputs, and rejects
+    any left unwritten.
+    """
+    from tilegym.kernel_inventory.correctness import poison_output_
+
     launch = RawKernelLaunch.model_validate(solution["launch"])
     output_bindings = {binding.name: binding for binding in launch.arguments if binding.kind == "output"}
+    if require_written:
+        preset = sorted(
+            name
+            for name, binding in output_bindings.items()
+            if binding.initialize_from is not None or (binding.initialize or "empty") != "empty"
+        )
+        assert not preset, (
+            f"{definition['name']}: benchmark_only cannot verify that raw-launch outputs {preset} are written "
+            "because they are not initialized as 'empty'; use eval_mode 'full' or 'correctness_only'"
+        )
     device = next(value.device for value in inputs.values() if hasattr(value, "device"))
 
     def allocator(*, name, shape, dtype, spec):
@@ -455,9 +596,13 @@ def _launch_raw_solution(
                     "does not match the declared output shape and dtype"
                 )
             return seed.clone()
-        factory = getattr(torch, binding.initialize or "empty")
-        return factory(shape, dtype=resolve_torch_dtype(dtype, torch), device=device)
+        initialize = binding.initialize or "empty"
+        output = getattr(torch, initialize)(shape, dtype=resolve_torch_dtype(dtype, torch), device=device)
+        if require_written:
+            poisoned[name] = poison_output_(output)
+        return output
 
+    poisoned: dict[str, Any] = {}
     outputs = allocate_definition_outputs(definition, axes, allocator)
     context = make_launch_context(definition, inputs, outputs=outputs, axes=axes)
     language = solution["spec"]["language"]
@@ -505,6 +650,10 @@ def _launch_raw_solution(
     else:
         raise ValueError(f"Raw launch is unsupported for Solution language {language!r}")
 
+    if poisoned:
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        _assert_poisoned_outputs_written(definition, poisoned, torch, "raw-launch")
     result = tuple(outputs[name] for name in definition["outputs"])
     return result[0] if len(result) == 1 else result
 
@@ -623,7 +772,7 @@ def _assert_output_matches_spec(value: Any, spec: dict[str, Any], axes: dict[str
     if spec["shape"] is None:
         _assert_scalar_output_matches_spec(value, spec, torch, label)
         return
-    expected_shape = tuple(axes[axis] for axis in spec["shape"])
+    expected_shape = resolve_tensor_shape(spec["shape"], axes)
     assert tuple(value.shape) == expected_shape, (
         f"{label} has shape {tuple(value.shape)}; Definition declares {expected_shape}"
     )
@@ -640,11 +789,42 @@ def _assert_return_contract(
     torch: Any,
     label: str,
     *,
-    rtol: float = 2e-2,
-    atol: float = 2e-2,
-    matched_ratio: float = 1.0,
+    tolerance: Any | None = None,
+    correctness_fn: Any | None = None,
+    entrypoint_name: str | None = None,
+    custom_correctness_kwargs: dict[str, Any] | None = None,
+    compare: bool = True,
 ) -> None:
-    """Recursively compare values using the executed reference return-name tree."""
+    """Check the executed return-name tree, then compare every named output at once."""
+    leaves: list[tuple[str, Any, Any]] = []
+    _collect_return_leaves(actual, expected, contract, output_specs, axes, torch, label, leaves)
+    names = [name for name, _, _ in leaves]
+    assert len(set(names)) == len(names), f"{label}: reference return names repeat an output: {names}"
+    _assert_outputs_correct(
+        [expected_value for _, _, expected_value in leaves],
+        [actual_value for _, actual_value, _ in leaves],
+        names,
+        torch,
+        label,
+        tolerance=tolerance,
+        correctness_fn=correctness_fn,
+        entrypoint_name=entrypoint_name,
+        custom_correctness_kwargs=custom_correctness_kwargs,
+        compare=compare,
+    )
+
+
+def _collect_return_leaves(
+    actual: Any,
+    expected: Any,
+    contract: Any,
+    output_specs: dict[str, dict[str, Any]],
+    axes: dict[str, int],
+    torch: Any,
+    label: str,
+    leaves: list[tuple[str, Any, Any]],
+) -> None:
+    """Validate return structure, shapes, and dtypes; collect comparable named tensors."""
     if contract is None:
         assert actual is expected is None, f"{label}: expected matching None return values"
         return
@@ -658,17 +838,8 @@ def _assert_return_contract(
         for index, (actual_item, expected_item, item_contract) in enumerate(
             zip(actual, expected, contract, strict=True)
         ):
-            _assert_return_contract(
-                actual_item,
-                expected_item,
-                item_contract,
-                output_specs,
-                axes,
-                torch,
-                f"{label}[{index}]",
-                rtol=rtol,
-                atol=atol,
-                matched_ratio=matched_ratio,
+            _collect_return_leaves(
+                actual_item, expected_item, item_contract, output_specs, axes, torch, f"{label}[{index}]", leaves
             )
         return
 
@@ -677,75 +848,57 @@ def _assert_return_contract(
         assert actual is expected is None, f"{label} output {contract}: tensor/None mismatch"
         return
     spec = output_specs[contract]
-    if spec["shape"] is None:
-        # Scalar outputs compare strictly, independent of the row's matched-ratio
-        # knob: iteration counts and other scalars have no partial-credit semantics.
-        if actual is None or expected is None:
-            assert actual is expected is None, f"{label} output {contract}: scalar/None mismatch"
-            return
-        _assert_output_matches_spec(actual, spec, axes, torch, f"Solution entry point output {contract}")
-        _assert_output_matches_spec(expected, spec, axes, torch, f"Definition.reference output {contract}")
-        actual_value = actual.item() if isinstance(actual, torch.Tensor) else actual
-        expected_value = expected.item() if isinstance(expected, torch.Tensor) else expected
-        assert actual_value == expected_value, (
-            f"{label} output {contract}: scalar mismatch {actual_value!r} != {expected_value!r}"
-        )
-        return
     _assert_output_matches_spec(actual, spec, axes, torch, f"Solution entry point output {contract}")
     _assert_output_matches_spec(expected, spec, axes, torch, f"Definition.reference output {contract}")
-    # The matched-ratio relaxation applies only to non-floating, non-boolean tensor
-    # outputs: floating and bool outputs keep the full assert_close tolerance contract
-    # (boolean outputs have no partial-credit semantics).
-    strict_output = matched_ratio >= 1.0 or (
-        isinstance(actual, torch.Tensor) and (actual.is_floating_point() or actual.dtype is torch.bool)
-    )
-    if strict_output:
-        torch.testing.assert_close(
-            actual,
-            expected,
-            rtol=rtol,
-            atol=atol,
-            msg=lambda msg: f"{label} output {contract} mismatch\n{msg}",
-        )
-        return
-    _assert_matched_ratio(
-        actual,
-        expected,
-        torch,
-        f"{label} output {contract}",
-        rtol=rtol,
-        atol=atol,
-        matched_ratio=matched_ratio,
-    )
+    if spec["shape"] is None:
+        dtype = resolve_torch_dtype(spec["dtype"], torch)
+        actual = actual if isinstance(actual, torch.Tensor) else torch.tensor(actual, dtype=dtype)
+        expected = expected if isinstance(expected, torch.Tensor) else torch.tensor(expected, dtype=dtype)
+        actual, expected = actual.cpu(), expected.cpu()
+    leaves.append((contract, actual, expected))
 
 
-def _assert_matched_ratio(
-    actual: Any,
-    expected: Any,
+def _assert_outputs_correct(
+    ref_outputs: list[Any],
+    user_outputs: list[Any],
+    output_names: list[str],
     torch: Any,
     label: str,
     *,
-    rtol: float,
-    atol: float,
-    matched_ratio: float,
+    tolerance: Any | None = None,
+    correctness_fn: Any | None = None,
+    entrypoint_name: str | None = None,
+    custom_correctness_kwargs: dict[str, Any] | None = None,
+    compare: bool = True,
 ) -> None:
-    """Require a per-element matched fraction instead of an exact assertion.
+    """Check output shapes and dtypes, then run the numerical output comparison unless ``compare`` is False."""
+    from tilegym.kernel_inventory.correctness import compare_outputs
 
-    Mirrors ``torch.testing.assert_close`` element-wise bounds
-    ``|actual - expected| <= atol + rtol * |expected|`` and requires that at
-    least ``matched_ratio`` of the elements satisfy them. Exact-match behavior
-    is preserved for ``required_matched_ratio == 1.0`` rows.
-    """
-    if actual.numel() == 0:
+    for name, ref_output, user_output in zip(output_names, ref_outputs, user_outputs, strict=True):
+        assert tuple(user_output.shape) == tuple(ref_output.shape), (
+            f"{label} output {name}: shape {tuple(user_output.shape)} != reference {tuple(ref_output.shape)}"
+        )
+        assert user_output.dtype == ref_output.dtype, (
+            f"{label} output {name}: dtype {user_output.dtype} != reference {ref_output.dtype}"
+        )
+    if not compare:
         return
-    actual_cmp = actual if actual.is_floating_point() else actual.to(torch.float64)
-    expected_cmp = expected if expected.is_floating_point() else expected.to(torch.float64)
-    difference = (actual_cmp - expected_cmp).abs()
-    bound = atol + rtol * expected_cmp.abs()
-    matched = difference <= bound
-    observed = matched.to(torch.float64).mean().item()
-    assert observed >= matched_ratio, (
-        f"{label} matched ratio {observed:.6f} is below the required {matched_ratio:.6f} (atol={atol}, rtol={rtol})"
+    try:
+        results = compare_outputs(
+            ref_outputs,
+            user_outputs,
+            _DEFAULT_TOLERANCE if tolerance is None else tolerance,
+            output_names,
+            correctness_fn,
+            entrypoint_name,
+            custom_correctness_kwargs=custom_correctness_kwargs or None,
+        )
+    except ValueError as exc:
+        pytest.fail(f"{label}: output comparison failed: {exc}")
+    failed = [result for result in results if not result.passed]
+    assert not failed, f"{label}: outputs rejected: " + "; ".join(
+        f"{result.output_name} (has_nan={result.has_nan}, has_inf={result.has_inf}, metadata={result.metadata})"
+        for result in failed
     )
 
 
@@ -807,8 +960,8 @@ def _current_compute_capability_label(torch: Any) -> str:
     return f"SM{major}{minor}"
 
 
-def _load_reference(definition: dict[str, Any], definition_path: Path) -> Any:
-    """Compile an AST-instrumented Definition reference ``run`` callable."""
+def _load_reference_namespace(definition: dict[str, Any], definition_path: Path) -> dict[str, Any]:
+    """Execute the AST-instrumented Definition reference once and return its module namespace."""
     module = instrument_reference_returns(
         definition["reference"],
         list(definition["outputs"]),
@@ -818,7 +971,25 @@ def _load_reference(definition: dict[str, Any], definition_path: Path) -> Any:
         CAPTURE_RETURN_NAME: lambda value, contract: _CapturedReferenceReturn(value, contract),
     }
     exec(compile(module, str(definition_path), "exec"), namespace)
-    return namespace["run"]
+    return namespace
+
+
+def _load_reference(definition: dict[str, Any], definition_path: Path) -> Any:
+    """Compile an AST-instrumented Definition reference ``run`` callable."""
+    return _load_reference_namespace(definition, definition_path)["run"]
+
+
+def _load_custom_comparator(definition: dict[str, Any], reference_namespace: dict[str, Any]) -> Any | None:
+    """Return the Definition's custom correctness comparator from the loaded reference namespace, if declared."""
+    name = definition.get("custom_correctness_entrypoint")
+    if not name:
+        return None
+    comparator = reference_namespace.get(name)
+    if comparator is None or not callable(comparator):
+        pytest.fail(
+            f"Definition declares custom_correctness_entrypoint={name!r} but the reference source does not define it"
+        )
+    return comparator
 
 
 def _load_solution_entry(solution: dict[str, Any]) -> Any:
@@ -873,6 +1044,15 @@ def _assert_matching_entry_signatures(
     """Require the Solution to implement the Definition input call contract."""
     reference_signature = _call_signature(reference_fn)
     solution_signature = _call_signature(solution_fn)
+    if _is_python_dps_solution(solution):
+        assert _dps_signature_matches(
+            _signature_tuple(reference_signature), _signature_tuple(solution_signature), definition
+        ), (
+            f"{definition['name']}: destination-passing Solution entry point {solution['spec']['entry_point']} "
+            f"signature {solution_signature} must be the reference inputs followed by outputs "
+            f"{list(definition['outputs'])}"
+        )
+        return
     assert _solution_accepts_reference_signature(
         reference_signature,
         solution_signature,
@@ -906,6 +1086,13 @@ def _assert_matching_entry_signatures_static(
     )
     reference_signature = _ast_call_signature(reference_run.args)
     solution_signature = _ast_call_signature(solution_run.args)
+    if _is_python_dps_solution(solution):
+        assert _dps_signature_matches(reference_signature, solution_signature, definition), (
+            f"{definition['name']}: destination-passing Solution entry point {solution['spec']['entry_point']} "
+            f"signature {solution_signature} must be the reference inputs followed by outputs "
+            f"{list(definition['outputs'])}"
+        )
+        return
     assert _ast_solution_accepts_reference_signature(
         reference_signature,
         solution_signature,
@@ -913,6 +1100,36 @@ def _assert_matching_entry_signatures_static(
     ), (
         f"{definition['name']}: Definition.reference run signature {reference_signature} does not match "
         f"Solution entry point {solution['spec']['entry_point']} signature {solution_signature}"
+    )
+
+
+def _signature_tuple(signature: inspect.Signature) -> tuple[tuple[str, str, str | None], ...]:
+    return tuple(
+        (name, parameter.kind.name.lower(), None if parameter.default is inspect.Parameter.empty else "default")
+        for name, parameter in signature.parameters.items()
+    )
+
+
+def _dps_signature_matches(
+    reference_signature: tuple[tuple[str, str, str | None], ...],
+    solution_signature: tuple[tuple[str, str, str | None], ...],
+    definition: dict[str, Any],
+) -> bool:
+    """DPS entries take exactly the reference positionals followed by the Definition outputs."""
+    reference_positionals = [
+        name for name, kind, _ in reference_signature if kind in {"positional_only", "positional_or_keyword"}
+    ]
+    solution_positionals = [
+        name for name, kind, _ in solution_signature if kind in {"positional_only", "positional_or_keyword"}
+    ]
+    required_keyword_only = [
+        name for name, kind, default in solution_signature if kind == "keyword_only" and default is None
+    ]
+    return (
+        reference_positionals == list(definition["inputs"])
+        and solution_positionals == [*definition["inputs"], *definition["outputs"]]
+        and not required_keyword_only
+        and not any(kind == "var_positional" for _, kind, _ in solution_signature)
     )
 
 

@@ -19,17 +19,18 @@ from typing import Any
 from typing import Literal
 from typing import Sequence
 
-from flashinfer_bench.data import AxisConst
-from flashinfer_bench.data import AxisVar
-from flashinfer_bench.data import Definition
 from flashinfer_bench.data import Solution
 from flashinfer_bench.data import SupportedLanguages
-from flashinfer_bench.data import TensorSpec
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
 from pydantic import model_validator
 
+from tilegym.kernel_inventory._definition_schema_compat import AxisConst
+from tilegym.kernel_inventory._definition_schema_compat import AxisExpr
+from tilegym.kernel_inventory._definition_schema_compat import AxisVar
+from tilegym.kernel_inventory._definition_schema_compat import Definition
+from tilegym.kernel_inventory._definition_schema_compat import TensorSpec
 from tilegym.kernel_inventory.composition import _RESERVED_INCLUDE_NAMES
 from tilegym.kernel_inventory.launch import RawKernelLaunch
 from tilegym.kernel_inventory.source_contract import SourceRepository as SourceRepository
@@ -58,7 +59,10 @@ class TileGymSourceFile(BaseModel):
 
 
 class TileGymDefinition(Definition):
-    """FIB Definition extended with local leaf-Definition includes."""
+    """Inventory Definition extended with local leaf-Definition includes.
+
+    Checked-in Definitions follow the FIB-compatible inventory contract.
+    """
 
     include: list[str] = Field(default_factory=list)
 
@@ -81,7 +85,7 @@ class TileGymDefinition(Definition):
         return self
 
     def to_fib_definition(self) -> Definition:
-        """Validate and return the base FIB Definition without TileGym extensions."""
+        """Validate and return the base inventory Definition without TileGym extensions."""
         return Definition.model_validate(self.model_dump(mode="python", exclude={"include"}))
 
 
@@ -227,6 +231,11 @@ def axis_const(value: int, description: str | None = None) -> AxisConst:
     return AxisConst(value=value, description=description)
 
 
+def axis_expr(expression: str, description: str | None = None) -> AxisExpr:
+    """Create an expression axis evaluated from const/var axes."""
+    return AxisExpr(expression=expression, description=description)
+
+
 def tensor(shape: Sequence[str] | None, dtype: str, description: str | None = None) -> TensorSpec:
     """Create a FIB tensor specification."""
     return TensorSpec(shape=list(shape) if shape is not None else None, dtype=dtype, description=description)
@@ -244,6 +253,8 @@ def make_definition(
     description: str | None = None,
     constraints: Sequence[str] | None = None,
     include: Sequence[str] | None = None,
+    custom_inputs_entrypoint: str | None = None,
+    custom_correctness_entrypoint: str | None = None,
 ) -> TileGymDefinition:
     """Create a Definition after enforcing TileGym's source permalink contract."""
     validate_reference_source_contract(reference)
@@ -258,6 +269,8 @@ def make_definition(
         description=description,
         constraints=list(constraints or []),
         include=list(include or []),
+        custom_inputs_entrypoint=custom_inputs_entrypoint,
+        custom_correctness_entrypoint=custom_correctness_entrypoint,
     )
 
 

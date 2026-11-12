@@ -27,6 +27,9 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import model_validator
 
+from tilegym.kernel_inventory.schema import resolve_definition_axes
+from tilegym.kernel_inventory.schema import resolve_tensor_shape
+
 BindingKind = Literal["input", "output", "axis", "tensor_shape", "tensor_stride", "tensor_numel", "literal"]
 OutputInitialization = Literal["empty", "zeros", "ones"]
 TensorView = Literal["flatten"]
@@ -252,6 +255,12 @@ def make_launch_context(
         for axis_name, extent in zip(shape_spec, runtime_shape):
             if not isinstance(axis_name, str):
                 raise LaunchContractError(f"Definition shape for '{name}' contains non-axis value {axis_name!r}")
+            if axis_name.isdigit():
+                if int(extent) != int(axis_name):
+                    raise LaunchContractError(
+                        f"Runtime input '{name}' has extent {int(extent)} where the Definition requires {axis_name}"
+                    )
+                continue
             _merge_axis(resolved_axes, axis_name, int(extent), f"runtime input '{name}'")
 
     for axis_name, extent in (axes or {}).items():
@@ -261,6 +270,18 @@ def make_launch_context(
     unknown_axes = sorted(set(resolved_axes) - set(declared_axes))
     if unknown_axes:
         raise LaunchContractError(f"Resolved axes are not declared by the Definition: {unknown_axes}")
+
+    axis_types = {name: _field(axis, "type") for name, axis in declared_axes.items()}
+    if "expr" in axis_types.values():
+        var_axes = {name: extent for name, extent in resolved_axes.items() if axis_types[name] == "var"}
+        unresolved = [name for name, axis_type in axis_types.items() if axis_type == "var" and name not in var_axes]
+        try:
+            all_axes = resolve_definition_axes(dict(data), var_axes, unresolved_axes=unresolved)
+        except (TypeError, ValueError) as exc:
+            raise LaunchContractError(str(exc)) from exc
+        for name, axis_type in axis_types.items():
+            if axis_type == "expr" and name in all_axes:
+                _merge_axis(resolved_axes, name, int(all_axes[name]), f"Definition expression axis '{name}'")
 
     return LaunchContext(
         definition_name=str(_field(data, "name")),
@@ -289,7 +310,10 @@ def allocate_definition_outputs(
     for name in requested:
         spec = _as_mapping(output_specs[name], f"Definition output '{name}'")
         shape_spec = _field(spec, "shape")
-        shape = () if shape_spec is None else tuple(_axis_extent(axis, axes, name) for axis in shape_spec)
+        try:
+            shape = resolve_tensor_shape(shape_spec, axes)
+        except KeyError as exc:
+            raise LaunchContractError(f"Definition output '{name}' uses unresolved axis '{exc.args[0]}'") from exc
         dtype = _field(spec, "dtype")
         if not isinstance(dtype, str) or not dtype:
             raise LaunchContractError(f"Definition output '{name}' has no valid dtype")
@@ -885,12 +909,6 @@ def _merge_axis(axes: dict[str, int], name: str, extent: int, source: str) -> No
     if name in axes and axes[name] != extent:
         raise LaunchContractError(f"Axis '{name}' is {axes[name]} but {source} resolved it to {extent}")
     axes[name] = extent
-
-
-def _axis_extent(axis: Any, axes: Mapping[str, int], output_name: str) -> int:
-    if not isinstance(axis, str) or axis not in axes:
-        raise LaunchContractError(f"Definition output '{output_name}' uses unresolved axis '{axis}'")
-    return int(axes[axis])
 
 
 def _runtime_shape(value: Any, name: str) -> tuple[int, ...]:

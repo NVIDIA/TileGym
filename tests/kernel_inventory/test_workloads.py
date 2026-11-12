@@ -120,7 +120,10 @@ def test_load_workload_jsonl_rejects_noncanonical_physical_lines(tmp_path, conte
         (lambda payload: payload["tolerance"].pop("max_error_cap"), "tolerance fields mismatch"),
         (lambda payload: payload["tolerance"].update(max_atol=0.01), "migration policy"),
         (lambda payload: payload["tolerance"].update(required_matched_ratio=0.97), "migration policy"),
-        (lambda payload: payload.update(eval_mode="correctness_only"), "eval_mode must be 'full'"),
+        (
+            lambda payload: payload.update(eval_mode="dynamic"),
+            "eval_mode must be 'full', 'correctness_only', or 'benchmark_only'",
+        ),
         (lambda payload: payload.update(uuid="not-a-uuid"), "UUIDv4"),
         (lambda payload: payload.update(uuid="00000000-0000-1000-8000-000000000000"), "UUIDv4"),
         (
@@ -136,6 +139,53 @@ def test_checked_in_workload_policy_is_stricter_than_schema(tmp_path, mutate, ma
 
     with pytest.raises(KernelWorkloadError, match=match):
         load_workload_jsonl(path)
+
+
+@pytest.mark.parametrize("eval_mode", ["benchmark_only", "correctness_only"])
+def test_checked_in_workload_policy_allows_non_full_eval_modes(tmp_path, eval_mode):
+    payload = _payload()
+    payload["eval_mode"] = eval_mode
+    path = _write_jsonl(tmp_path / f"{eval_mode}.jsonl", payload)
+
+    records = load_workload_jsonl(path)
+
+    assert len(records) == 1
+    assert records[0].workload.eval_mode == eval_mode
+
+
+def test_checked_in_correctness_only_policy_still_requires_uuid4(tmp_path):
+    payload = _payload(uuid="00000000-0000-1000-8000-000000000000", eval_mode="correctness_only")
+    path = _write_jsonl(tmp_path / "correctness_only.jsonl", payload)
+
+    with pytest.raises(KernelWorkloadError, match="UUIDv4"):
+        load_workload_jsonl(path)
+
+
+def test_materialize_resolves_definition_expression_axes(tmp_path):
+    torch = pytest.importorskip("torch")
+    definition = _definition()
+    definition["axes"]["NK"] = {"type": "expr", "expression": "N * K // 2"}
+    definition["inputs"]["x"]["shape"] = ["NK"]
+    definition["constraints"] = ["NK == N * 2"]
+    path = _write_jsonl(tmp_path / "expr.jsonl", _payload())
+    record = load_workload_jsonl(path)[0]
+
+    validate_workload_against_definition(record, definition, tmp_path / "definition.json")
+    axes, inputs = materialize_workload_inputs(record, definition, torch=torch, device="cpu")
+
+    assert axes["NK"] == 16
+    assert tuple(inputs["x"].shape) == (16,)
+
+
+def test_expression_axis_constraint_violation_is_rejected(tmp_path):
+    definition = _definition()
+    definition["axes"]["NK"] = {"type": "expr", "expression": "N * K"}
+    definition["constraints"] = ["NK <= 16"]
+    path = _write_jsonl(tmp_path / "expr.jsonl", _payload())
+    record = load_workload_jsonl(path)[0]
+
+    with pytest.raises(KernelWorkloadError, match="NK <= 16"):
+        validate_workload_against_definition(record, definition, tmp_path / "definition.json")
 
 
 def test_checked_in_workload_policy_allows_relaxed_matched_ratio(tmp_path):
@@ -157,6 +207,118 @@ def test_checked_in_workload_policy_rejects_boolean_matched_ratio(tmp_path, rati
 
     with pytest.raises(KernelWorkloadError, match="booleans and non-numeric values are rejected"):
         load_workload_jsonl(path)
+
+
+def test_load_workload_jsonl_accepts_custom_inputs_kwargs_and_benchmark_cudagraph(tmp_path):
+    payload = _payload(custom_inputs_kwargs={"block": 4, "mode": "dense"}, benchmark_cudagraph=True)
+
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "fields.jsonl", payload))[0]
+
+    assert record.workload.custom_inputs_kwargs == {"block": 4, "mode": "dense"}
+    assert record.workload.benchmark_cudagraph is True
+
+
+@pytest.mark.parametrize(
+    ("updates", "match"),
+    [
+        ({"benchmark_cudagraph": "true"}, "Workload schema invalid"),
+        ({"benchmark_cudagraph": 1}, "Workload schema invalid"),
+        ({"custom_inputs_kwargs": [1]}, "Workload schema invalid"),
+        ({"custom_inputs_kwargs": {"scale": float("inf")}}, "numbers must be finite"),
+        ({"custom_inputs_kwargs": {"blob": "x" * (256 * 1024)}}, "Workload schema invalid"),
+    ],
+)
+def test_load_workload_jsonl_rejects_invalid_custom_inputs_kwargs_and_benchmark_cudagraph(tmp_path, updates, match):
+    path = _write_jsonl(tmp_path / "invalid.jsonl", _payload(**updates))
+
+    with pytest.raises(KernelWorkloadError, match=match):
+        load_workload_jsonl(path)
+
+
+def _dynamic_axis_definition() -> dict[str, Any]:
+    definition = _definition()
+    definition["axes"]["NMAX"] = {"type": "const", "value": 64}
+    definition["constraints"] = ["N >= K", "N == 8", "enabled is False"]
+    return definition
+
+
+def test_correctness_only_dynamic_axes_validate_against_definition(tmp_path):
+    payload = _payload(axes={"N": {"min": "K", "max": "NMAX", "multiple_of": 4}}, eval_mode="correctness_only")
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
+
+    validate_workload_against_definition(record, _dynamic_axis_definition(), tmp_path / "definition.json")
+
+
+@pytest.mark.parametrize(
+    ("axis", "match"),
+    [
+        ({"min": "M", "max": 8}, "'M', which is not a const Definition axis"),
+        ({"min": 4, "max": "N"}, "'N', which is not a const Definition axis"),
+        ({"min": 16, "max": "K"}, "min must be <= max"),
+        ({"min": 5, "max": 7, "multiple_of": 8}, "no values divisible by multiple_of=8"),
+        ({"min": 0, "max": 8}, "bounds must be positive|Workload schema invalid"),
+    ],
+)
+def test_correctness_only_dynamic_axes_reject_unresolvable_ranges(tmp_path, axis, match):
+    payload = _payload(axes={"N": axis}, eval_mode="correctness_only")
+
+    with pytest.raises(KernelWorkloadError, match=match):
+        record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
+        validate_workload_against_definition(record, _dynamic_axis_definition(), tmp_path / "definition.json")
+
+
+def test_correctness_only_dynamic_axes_reject_safetensors_inputs(tmp_path):
+    payload = _payload(axes={"N": {"min": 4, "max": 8}}, eval_mode="correctness_only")
+    payload["inputs"]["x"] = {"type": "safetensors", "path": "x.safetensors", "tensor_key": "x"}
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
+
+    with pytest.raises(KernelWorkloadError, match="cannot be combined with safetensors inputs"):
+        validate_workload_against_definition(record, _dynamic_axis_definition(), tmp_path / "definition.json")
+
+
+def test_materialize_rejects_dynamic_axes_explicitly(tmp_path):
+    torch = pytest.importorskip("torch")
+    payload = _payload(axes={"N": {"min": 4, "max": 8}}, eval_mode="correctness_only")
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
+
+    with pytest.raises(KernelWorkloadError, match="does not yet support dynamic axes"):
+        materialize_workload_inputs(record, _dynamic_axis_definition(), torch=torch, device="cpu")
+
+
+def _expression_axis_definition(constraints: list[str]) -> dict[str, Any]:
+    definition = _definition()
+    definition["axes"]["HALF"] = {"type": "expr", "expression": "N // 2"}
+    definition["axes"]["KK"] = {"type": "expr", "expression": "K * 2"}
+    definition["constraints"] = constraints
+    return definition
+
+
+def test_unresolvable_expression_axis_is_reported_instead_of_skipping_constraints(tmp_path):
+    definition = _expression_axis_definition(["GROUPS >= 1"])
+    definition["axes"]["GROUPS"] = {"type": "expr", "expression": "K // (N - 8)"}
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "op.jsonl", _payload()))[0]
+
+    with pytest.raises(KernelWorkloadError, match="Definition 'op' cannot resolve expression axis 'GROUPS'"):
+        validate_workload_against_definition(record, definition, tmp_path / "op.json")
+
+
+@pytest.mark.parametrize(
+    ("constraints", "match"),
+    [
+        (["KK == 8", "HALF >= 100"], None),
+        (["KK == 6"], "violates Definition constraint: KK == 6"),
+    ],
+)
+def test_dynamic_axes_skip_only_dependent_expression_axes(tmp_path, constraints, match):
+    payload = _payload(axes={"N": {"min": 4, "max": 8}}, eval_mode="correctness_only")
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
+    definition = _expression_axis_definition(constraints)
+
+    if match is None:
+        validate_workload_against_definition(record, definition, tmp_path / "op.json")
+    else:
+        with pytest.raises(KernelWorkloadError, match=match):
+            validate_workload_against_definition(record, definition, tmp_path / "op.json")
 
 
 def test_validate_workload_against_definition_accepts_exact_axes_inputs_and_constraint(tmp_path):
@@ -287,6 +449,68 @@ def test_materialize_workload_inputs_loads_safetensors_relative_to_workload(tmp_
 
     assert torch.equal(inputs["x"], tensor)
     assert inputs["x"].is_contiguous()
+
+
+def test_custom_correctness_kwargs_require_definition_entrypoint(tmp_path):
+    record = load_workload_jsonl(
+        _write_jsonl(tmp_path / "op.jsonl", _payload(custom_correctness_kwargs={"threshold": 1}))
+    )[0]
+    definition = _definition()
+
+    with pytest.raises(KernelWorkloadError, match="custom_correctness_kwargs require"):
+        validate_workload_against_definition(record, definition, tmp_path / "op.json")
+
+    definition["custom_correctness_entrypoint"] = "check"
+    validate_workload_against_definition(record, definition, tmp_path / "op.json")
+
+
+def test_custom_inputs_kwargs_require_custom_inputs(tmp_path):
+    definition = _definition()
+    definition["custom_inputs_entrypoint"] = "make_inputs"
+    rows = _write_jsonl(
+        tmp_path / "op.jsonl",
+        _payload(custom_inputs_kwargs={"block": 4}),
+        _payload(
+            uuid="5f0b8f1e-2c55-4c43-9a8e-6a0f3b1d2e47",
+            inputs={name: {"type": "custom"} for name in definition["inputs"]},
+            custom_inputs_kwargs={"block": 4},
+        ),
+    )
+    plain_row, custom_row = load_workload_jsonl(rows)
+
+    with pytest.raises(KernelWorkloadError, match="custom_inputs_kwargs require custom inputs"):
+        validate_workload_against_definition(plain_row, definition, tmp_path / "op.json")
+
+    validate_workload_against_definition(custom_row, definition, tmp_path / "op.json")
+
+
+def test_materialize_random_input_with_integer_literal_dimension(tmp_path):
+    torch = pytest.importorskip("torch")
+    record = load_workload_jsonl(
+        _write_jsonl(tmp_path / "op.jsonl", _payload(axes={"N": 2}, inputs={"x": {"type": "random"}}))
+    )[0]
+    definition = {"axes": {"N": {"type": "var"}}, "inputs": {"x": {"shape": ["N", "4"], "dtype": "float32"}}}
+
+    _, inputs = materialize_workload_inputs(record, definition, torch=torch, device=torch.device("cpu"))
+
+    assert inputs["x"].shape == (2, 4)
+
+
+def test_materialize_safetensors_input_with_integer_literal_dimension(tmp_path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    safetensors.save_file({"x": tensor}, tmp_path / "input.safetensors")
+    payload = _payload(
+        axes={"N": 2},
+        inputs={"x": {"type": "safetensors", "path": "input.safetensors", "tensor_key": "x"}},
+    )
+    record = load_workload_jsonl(_write_jsonl(tmp_path / "op.jsonl", payload))[0]
+    definition = {"axes": {"N": {"type": "var"}}, "inputs": {"x": {"shape": ["N", "4"], "dtype": "float32"}}}
+
+    _, inputs = materialize_workload_inputs(record, definition, torch=torch, device=torch.device("cpu"))
+
+    assert torch.equal(inputs["x"], tensor)
 
 
 def test_materialize_workload_inputs_rejects_non_basename_safetensors_path(tmp_path):
