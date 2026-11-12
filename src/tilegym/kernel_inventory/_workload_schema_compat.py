@@ -2,17 +2,17 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Public compatibility models for the Kernel Factory Workload contract.
+"""Public compatibility models for the Workload schema.
 
-Internal builds validate against the pinned canonical schema directly.
-Public TileGym releases cannot depend on that private package, so this module
-implements the documented Workload subset used by the checked-in inventory.
+This module implements the documented Workload subset used by the
+checked-in inventory.
 Project-specific file and Definition compatibility rules intentionally live
 outside these schema models.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from enum import Enum
 from typing import Annotated
@@ -167,6 +167,9 @@ class ToleranceSpec(BaseModel):
     allow_negative_inf: bool = False
 
 
+MAX_CUSTOM_INPUTS_KWARGS_BYTES = 256 * 1024
+
+
 def _validate_finite_json(value: Any, path: str = "custom_correctness_kwargs") -> None:
     if value is None or isinstance(value, str | bool | int):
         return
@@ -188,15 +191,17 @@ def _validate_finite_json(value: Any, path: str = "custom_correctness_kwargs") -
 
 
 class Workload(BaseModel):
-    """Concrete Kernel Factory-compatible workload configuration."""
+    """Concrete workload configuration."""
 
     axes: dict[str, Annotated[int, Field(ge=0)] | DynamicAxis]
     inputs: dict[str, InputSpec]
     uuid: str = Field(min_length=1)
     tolerance: ToleranceSpec = Field(default_factory=ToleranceSpec)
     custom_correctness_kwargs: dict[str, Any] = Field(default_factory=dict)
+    custom_inputs_kwargs: dict[str, Any] = Field(default_factory=dict)
     eval_mode: EvalMode = EvalMode.FULL
     weight: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
+    benchmark_cudagraph: StrictBool = False
 
     @field_validator("axes")
     @classmethod
@@ -209,6 +214,18 @@ class Workload(BaseModel):
     @classmethod
     def _validate_custom_correctness_kwargs(cls, value: dict[str, Any]) -> dict[str, Any]:
         _validate_finite_json(value)
+        return value
+
+    @field_validator("custom_inputs_kwargs")
+    @classmethod
+    def _validate_custom_inputs_kwargs(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_finite_json(value, "custom_inputs_kwargs")
+        size = len(json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        if size > MAX_CUSTOM_INPUTS_KWARGS_BYTES:
+            raise ValueError(
+                f"custom_inputs_kwargs serializes to {size} bytes; the cap is "
+                f"{MAX_CUSTOM_INPUTS_KWARGS_BYTES} bytes per workload"
+            )
         return value
 
     @model_validator(mode="after")
