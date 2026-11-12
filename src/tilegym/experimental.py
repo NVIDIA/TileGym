@@ -65,12 +65,17 @@ def experimental_kernel(message_or_kernel=None):
     return decorator
 
 
-def _patched_launch(stream, grid, kernel, kernel_args, /):
+def _patched_launch(stream, grid, kernel, kernel_args, /, *args, **kwargs):
+    # Must transparently forward extra launch arguments: cuda-tile >= 1.7
+    # launches may carry keywords such as programmatic_dependent_launch=True
+    # (PDL). Dropping or rejecting them breaks kernels in any process that
+    # imports tilegym (the inventory runtime harness is unaffected because it
+    # isolates the tilegym package, but real integrations are not).
     msg = getattr(kernel, "_tracked_message", None)
     if msg:
         warn_once(msg, "EXPERIMENTAL")
         kernel._tracked_message = None  # Mark as printed
-    return _original_launch(stream, grid, kernel, kernel_args)
+    return _original_launch(stream, grid, kernel, kernel_args, *args, **kwargs)
 
 
 def _apply_patch():

@@ -965,6 +965,59 @@ def test_context_rejects_axis_conflicts_and_output_allocator_rejects_unresolved_
         allocate_definition_outputs(definition, {"N": 8}, lambda **kwargs: kwargs)
 
 
+def test_output_allocator_resolves_integer_literal_dimensions():
+    definition = {"outputs": {"y": {"shape": ["M", "8"], "dtype": "float32"}}}
+
+    outputs = allocate_definition_outputs(definition, {"M": 3}, lambda **kwargs: kwargs["shape"])
+
+    assert outputs == {"y": (3, 8)}
+
+
+def test_launch_context_checks_integer_literal_input_dimensions():
+    definition = {
+        "name": "op",
+        "axes": {"M": {"type": "var"}},
+        "inputs": {"x": {"shape": ["M", "8"], "dtype": "float32"}},
+        "outputs": {"y": {"shape": ["M", "8"], "dtype": "float32"}},
+    }
+
+    assert make_launch_context(definition, {"x": FakeTensor((3, 8))}).axes == {"M": 3}
+    with pytest.raises(LaunchContractError, match="requires 8"):
+        make_launch_context(definition, {"x": FakeTensor((3, 4))})
+
+
+def test_launch_context_resolves_expression_axes(tmp_path):
+    definition = {
+        "name": "op",
+        "axes": {
+            "M": {"type": "var"},
+            "K": {"type": "var"},
+            "N": {"type": "const", "value": 8},
+            "HALF": {"type": "expr", "expression": "M // 2"},
+            "KN": {"type": "expr", "expression": "K * N"},
+        },
+        "inputs": {"x": {"shape": ["M", "N"], "dtype": "float32"}},
+        "outputs": {"y": {"shape": ["HALF", "N"], "dtype": "float32"}},
+    }
+    launch = RawKernelLaunch(
+        grid=[1],
+        arguments=[
+            {"parameter": "x", "kind": "input", "name": "x"},
+            {"parameter": "half", "kind": "axis", "name": "HALF"},
+        ],
+    )
+
+    context = make_launch_context(definition, {"x": FakeTensor((6, 8))})
+
+    assert context.axes == {"M": 6, "N": 8, "HALF": 3}
+    assert materialize_launch(launch, context, tmp_path).arguments["half"] == 3
+
+    definition["inputs"]["h"] = {"shape": ["HALF"], "dtype": "float32"}
+    assert make_launch_context(definition, {"x": FakeTensor((6, 8)), "h": FakeTensor((3,))}).axes["HALF"] == 3
+    with pytest.raises(LaunchContractError, match="Axis 'HALF' is 4 but Definition expression axis 'HALF'"):
+        make_launch_context(definition, {"x": FakeTensor((6, 8)), "h": FakeTensor((4,))})
+
+
 def test_solution_preserves_launch_while_transient_fib_view_omits_it(tmp_path):
     source = tmp_path / "kernel.py"
     source.write_text("def kernel(input, output):\n    pass\n", encoding="utf-8")

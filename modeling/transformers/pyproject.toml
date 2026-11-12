@@ -15,7 +15,7 @@ dependencies = [
   "accelerate==1.13.0",
   "cuda-bindings>=13.2.0",
   "cuda-core>=0.7.0",
-  "cuda-tile[tileiras]>=1.6.0,<1.7",
+  "cuda-tile[tileiras]==1.7.0",
   "filelock>=4.2.1",
   "huggingface-hub",
   "matplotlib",
@@ -66,8 +66,8 @@ override-dependencies = [
   "tokenizers==0.23.3",
   "triton==3.7.1",
   "cuda-toolkit[tileiras,nvcc,nvvm]==13.4.3",
-  "nvidia-cuda-runtime>=13.3,<14",
-  "nvidia-nvjitlink>=13.3,<14",
+  "nvidia-cuda-runtime>=13.4.92,<13.5",
+  "nvidia-nvjitlink>=13.4.92,<13.5",
 ]
 
 [[tool.uv.index]]
