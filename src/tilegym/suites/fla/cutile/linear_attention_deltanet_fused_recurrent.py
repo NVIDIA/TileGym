@@ -18,13 +18,6 @@ def _next_power_of_2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
-# =============================================================================
-# L2 normalization (used only when use_qk_l2norm_in_kernel=True).
-# One program per row of the flattened [T, D] view, gathering the whole
-# D-vector.
-# =============================================================================
-
-
 @ct.kernel
 def l2norm_fwd_kernel_ct(
     x,  # [T, D]
@@ -136,16 +129,14 @@ def fused_recurrent_delta_rule_fwd_kernel_ct(
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
         Tloc = eos - bos
-        # varlen inputs are pre-flattened to [1, total_T, H, *]: the batch dim is
-        # always 0 and the per-sequence offset lives in the time index (gt = bos + t).
+        # Varlen inputs are flattened to [1, total_T, H, *]: the batch index is 0
+        # and the sequence offset lives in the time index.
         b = 0
     else:
         bos = 0
         Tloc = T
-        # non-varlen inputs are [B, T, H, *]: index the real batch on dim 0 and the
-        # real timestep on dim 1 (gt = t). Folding the batch into the time index
-        # (gt = i_n*T + t) overflows dim 1 for i_n >= 1, so the bounds-checked
-        # gather reads padding (0) and the scatter is dropped (uninit output).
+        # Dense inputs are [B, T, H, *]: the batch is indexed on dim 0. Folding it
+        # into the time index would run past dim 1.
         b = i_n
 
     o_k = i_k * BK + ct.arange(BK, dtype=ct.int32)
@@ -157,7 +148,6 @@ def fused_recurrent_delta_rule_fwd_kernel_ct(
 
     b_h = ct.zeros((BV, BK), dtype=ct.float32)
     if USE_INITIAL_STATE:
-        # h0 [N, H, K, V] -> [BV, BK] tile: K along cols, V along rows.
         b_h0 = ct.gather(
             h0,
             (i_n, i_h, o_k[None, :], o_v[:, None]),
@@ -175,7 +165,6 @@ def fused_recurrent_delta_rule_fwd_kernel_ct(
         b_q = ct.astype(ct.gather(q, (b, gt, i_h, o_k), mask=m_k, check_bounds=False, padding_value=0.0), ct.float32)
         b_q = b_q * scale
 
-        # b_v_minus = sum(b_h * b_k[None, :], axis=1)  -> [BV]
         b_v_minus = ct.sum(b_h * b_k[None, :], axis=1)
         b_v = b_v - b_v_minus
 
@@ -186,14 +175,12 @@ def fused_recurrent_delta_rule_fwd_kernel_ct(
         else:
             b_beta = ct.astype(ct.gather(beta, (b, gt, i_h), check_bounds=False, padding_value=0.0), ct.float32)
 
-        # u = b_v (delta correction, before beta scaling)
+        # u is stored before beta scaling.
         ct.scatter(u, (b, gt, i_h, o_v), ct.astype(b_v, u.dtype), mask=m_v, check_bounds=False)
 
         b_v = b_v * b_beta
-        # b_h += b_k[None, :] * b_v[:, None]  -> [BV, BK]
         b_h = b_h + b_k[None, :] * b_v[:, None]
 
-        # b_o = sum(b_h * b_q[None, :], axis=1)  -> [BV]
         b_o = ct.sum(b_h * b_q[None, :], axis=1)
         ct.scatter(o, (i_k, b, gt, i_h, o_v), ct.astype(b_o, o.dtype), mask=m_v, check_bounds=False)
 
@@ -247,16 +234,14 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
         Tloc = eos - bos
-        # varlen inputs are pre-flattened to [1, total_T, H, *]: the batch dim is
-        # always 0 and the per-sequence offset lives in the time index (gt = bos + t).
+        # Varlen inputs are flattened to [1, total_T, H, *]: the batch index is 0
+        # and the sequence offset lives in the time index.
         b = 0
     else:
         bos = 0
         Tloc = T
-        # non-varlen inputs are [B, T, H, *]: index the real batch on dim 0 and the
-        # real timestep on dim 1 (gt = t). Folding the batch into the time index
-        # (gt = i_n*T + t) overflows dim 1 for i_n >= 1, so the bounds-checked
-        # gather reads padding (0) and the scatter is dropped (uninit output).
+        # Dense inputs are [B, T, H, *]: the batch is indexed on dim 0. Folding it
+        # into the time index would run past dim 1.
         b = i_n
 
     o_k = i_k * BK + ct.arange(BK, dtype=ct.int32)
@@ -266,7 +251,7 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
     # state orientation [BK, BV]: rows = K, cols = V
     m_h = m_k[:, None] & m_v[None, :]
 
-    # ----- reverse sweep: accumulate b_dh, emit dk / dv / db -----
+    # Reverse sweep: accumulate b_dh and write dk / dv / db.
     b_dh = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_FINAL_STATE_GRADIENT:
         b_dht = ct.gather(
@@ -294,12 +279,9 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
         else:
             b_beta = ct.astype(ct.gather(beta, (b, gt, i_h), check_bounds=False, padding_value=0.0), ct.float32)
 
-        # b_dh += b_q[:, None] * b_do[None, :]  -> [BK, BV]
         b_dh = b_dh + b_q[:, None] * b_do[None, :]
-        # b_dk = sum(b_dh * (b_v * b_beta)[None, :], axis=1)  -> [BK]
         b_vb = b_v * b_beta
         b_dk = ct.sum(b_dh * b_vb[None, :], axis=1)
-        # b_dv = sum(b_dh * b_k[:, None], axis=0)  -> [BV]
         b_dv = ct.sum(b_dh * b_k[:, None], axis=0)
 
         if COMPUTE_DB:
@@ -319,7 +301,6 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
             else:
                 ct.scatter(db_scalar, (i_v, b, gt, i_h), ct.astype(b_db, db_scalar.dtype), check_bounds=True)
 
-        # b_dh -= b_k[:, None] * b_dv[None, :]
         b_dh = b_dh - b_k[:, None] * b_dv[None, :]
 
     if COMPUTE_INITIAL_STATE_GRAD:
@@ -331,7 +312,7 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
             check_bounds=True,
         )
 
-    # ----- forward sweep: rebuild b_h, correct dk, produce dq -----
+    # Forward sweep: rebuild b_h, correct the dk written above, and write dq.
     b_h = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
         b_h0 = ct.gather(
@@ -352,7 +333,6 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
         b_dv = ct.astype(
             ct.gather(dv, (i_k, b, gt, i_h, o_v), mask=m_v, check_bounds=True, padding_value=0.0), ct.float32
         )
-        # b_dk -= sum(b_dv[None, :] * b_h, axis=1)  (b_h [BK, BV]) -> [BK]
         b_dk = b_dk - ct.sum(b_dv[None, :] * b_h, axis=1)
         ct.scatter(dk, (i_v, b, gt, i_h, o_k), ct.astype(b_dk, dk.dtype), mask=m_k, check_bounds=True)
 
@@ -367,14 +347,9 @@ def fused_recurrent_delta_rule_bwd_kernel_ct(
             b_beta = ct.astype(ct.gather(beta, (b, gt, i_h), check_bounds=False, padding_value=0.0), ct.float32)
         b_v = b_v * b_beta
 
-        # b_h += b_k[:, None] * b_v[None, :]  -> [BK, BV]
         b_h = b_h + b_k[:, None] * b_v[None, :]
-        # d_q = sum(b_h * b_do[None, :], axis=1) * scale  -> [BK]
         d_q = ct.sum(b_h * b_do[None, :], axis=1) * scale
         ct.scatter(dq, (i_v, b, gt, i_h, o_k), ct.astype(d_q, dq.dtype), mask=m_k, check_bounds=True)
-
-
-# ======================== Wrapper Functions ========================
 
 
 def fused_recurrent_delta_rule_fwd(
@@ -408,7 +383,7 @@ def fused_recurrent_delta_rule_fwd(
     store_final = final_state is not None
     is_varlen = cu_seqlens is not None
 
-    # cuTile launch args cannot be None: substitute dummy tensors + flags.
+    # Launch arguments cannot be None: unused tensors are one-element dummies gated by flags.
     h0_arg = initial_state if use_initial else q.new_empty(1, 1, 1, 1, dtype=torch.float32)
     ht_arg = final_state if store_final else q.new_empty(1, 1, 1, 1, dtype=torch.float32)
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else torch.empty(1, device=q.device, dtype=torch.int32)

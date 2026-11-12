@@ -22,18 +22,12 @@ ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
 
 
-# autocast custom fwd/bwd (assume torch >= 2.4 with cuda).
 autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
 autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
 
 
 def _next_power_of_2(n: int) -> int:
     return 1 << (n - 1).bit_length()
-
-
-# ---------------------------------------------------------------------------
-# Device helper (inlined, @ct.function -- NOT @ct.kernel).
-# ---------------------------------------------------------------------------
 
 
 @ct.function
@@ -69,9 +63,6 @@ def _use_chunked_fast_path(
         and not state_v_first
         and cu_seqlens is None
     )
-
-
-# ======================== cuTile Kernels ========================
 
 
 @ct.kernel
@@ -119,7 +110,6 @@ def fused_recurrent_fwd_kernel(
 
     b_h = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
-        # h0 layout [N, H, K, V]; load [BK, BV] head/state slice.
         b_h0 = ct.gather(
             h0,
             (i_n, i_h, o_k[:, None], o_v[None, :]),
@@ -140,16 +130,14 @@ def fused_recurrent_fwd_kernel(
         b_k = ct.astype(b_k, ct.float32)
         b_v = ct.astype(b_v, ct.float32)
 
-        # per-token scalar gate decays the carried state BEFORE the update.
+        # The gate decays the carried state before the update.
         if USE_G:
             b_g = ct.astype(ct.gather(g, (row, i_h), check_bounds=True, padding_value=0.0), ct.float32)
             b_h = b_h * _exp(b_g)
 
-        # outer-product state update, then weighted sum over K -> [BV]
         b_h = b_h + b_k[:, None] * b_v[None, :]
         b_o = ct.sum(b_h * b_q[:, None], axis=0)
 
-        # o layout [NK, B*T, H, V]
         ct.scatter(
             o,
             (i_k, row, i_h, o_v),
@@ -219,7 +207,7 @@ def fused_recurrent_bwd_kernel(
     m_v = o_v < V
     m_h = m_k[:, None] & m_v[None, :]
 
-    # ---- forward sweep: build state, emit dq ----
+    # Forward sweep: build the state and write dq.
     b_h = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
         b_h0 = ct.gather(
@@ -251,7 +239,7 @@ def fused_recurrent_bwd_kernel(
 
         ct.scatter(dq, (i_v, row, i_h, o_k), ct.astype(b_dq, dq.dtype), mask=m_k, check_bounds=True)
 
-    # ---- reverse sweep: build state-gradient, emit dk / dv / dg ----
+    # Reverse sweep: accumulate the state gradient and write dk / dv / dg.
     b_dh = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_FINAL_STATE_GRADIENT:
         b_dht = ct.gather(
@@ -270,8 +258,7 @@ def fused_recurrent_bwd_kernel(
             b_dg_acc = ct.full((), 0.0, ct.float32)
 
     for step in range(Tloc):
-        # Reverse direction of the forward sweep. Forward visited t in
-        # [0..T-1] (or reversed); the second sweep walks the opposite way.
+        # Walk in the opposite direction to the first sweep.
         t = step if REVERSE else (Tloc - 1 - step)
         row = bos + t
 
@@ -297,7 +284,7 @@ def fused_recurrent_bwd_kernel(
                 b_dg_acc = b_dg_acc + ct.sum(b_q * b_dq - b_k * b_dk)
             b_dh = b_dh * _exp(b_g)
             if STORE_DG:
-                # dg layout [NK*NV, B*T, H]; the (i_k*NV + i_v) partial is summed host-side.
+                # dg is [NK*NV, B*T, H]; the host sums the (i_k*NV + i_v) partials.
                 ct.scatter(dg, (i_k * NV + i_v, row, i_h), ct.astype(b_dg_acc, dg.dtype), check_bounds=True)
 
         ct.scatter(dk, (i_v, row, i_h, o_k), ct.astype(b_dk, dk.dtype), mask=m_k, check_bounds=True)
@@ -311,9 +298,6 @@ def fused_recurrent_bwd_kernel(
             mask=m_h,
             check_bounds=True,
         )
-
-
-# ======================== Wrapper Functions ========================
 
 
 def fused_recurrent_fwd(
@@ -354,6 +338,7 @@ def fused_recurrent_fwd(
 
     h0_arg = initial_state if use_initial_state else q.new_empty(1, 1, 1, 1, dtype=torch.float32)
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else torch.empty(1, device=q.device, dtype=torch.int32)
+
     BT = B * T
     q3 = q.reshape(BT, H, K)
     k3 = k.reshape(BT, H, K)
@@ -435,7 +420,6 @@ def fused_recurrent_bwd(
     dht_arg = dht if use_final_state_gradient else q.new_empty(1, 1, 1, 1, dtype=torch.float32)
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else torch.empty(1, device=q.device, dtype=torch.int32)
 
-    # Flatten (B, T) -> (B*T) for direct token-axis indexing.
     BT = B * T
     q3 = q.reshape(BT, H, K)
     k3 = k.reshape(BT, H, K)
@@ -667,11 +651,6 @@ def fused_recurrent_simple_gla(
         state_v_first=state_v_first,
     )
     return o, final_state
-
-
-# =============================================================================
-# Public API.
-# =============================================================================
 
 
 def fused_recurrent_mamba2(

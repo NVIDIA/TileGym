@@ -15,7 +15,7 @@ ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
 ConstFloat = ct.Constant[float]
 
-# Approximate value of 1/ln(2), used for log/exp base conversion (matches source).
+# 1/ln(2)
 RCP_LN2 = 1.4426950216
 
 
@@ -40,12 +40,8 @@ def _dummy(device: torch.device, dtype: torch.dtype, shape: tuple[int, ...]) -> 
     return value
 
 
-# torch>=2.4 autocast custom fwd/bwd, bound to cuda.
 autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
 autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
-
-
-# ======================== In-kernel helper functions ========================
 
 
 @ct.function
@@ -57,15 +53,11 @@ def _exp2(x):
 def _store_dg_partial(dg_seg, i_k, NV, i_v, i_t, i_h, b_dg_t, m_t, out_dtype, BT: ConstInt):
     """Store the [BT] dg partial for partial-group (i_k*NV + i_v) at chunk i_t.
 
-    Only reached when USE_G (never from the public API). The dg buffer is
-    [NK*NV, B*T, H]; here `dg_seg` is already token-sliced to [NK*NV, Tloc, H].
+    `dg_seg` is the [NK*NV, B*T, H] dg buffer token-sliced to [NK*NV, Tloc, H].
     """
     o_t = i_t * BT + ct.arange(BT, dtype=ct.int32)
     grp = i_k * NV + i_v
     ct.scatter(dg_seg, (grp, o_t, i_h), ct.astype(b_dg_t, out_dtype), mask=m_t, check_bounds=True)
-
-
-# ======================== cuTile Kernels ========================
 
 
 @ct.kernel
@@ -118,7 +110,6 @@ def fused_chunk_fwd_kernel(
     # [BT, BT] lower-triangular (causal) mask.
     m_s = o_i[:, None] >= o_i[None, :]
 
-    # decay scaffolding (USE_G_GAMMA computes per-head fixed decay up front)
     b_gamma = ct.zeros((1,), dtype=ct.float32)
     b_g = ct.zeros((BT,), dtype=ct.float32)
     b_gq = ct.ones((BT,), dtype=ct.float32)
@@ -129,7 +120,6 @@ def fused_chunk_fwd_kernel(
         b_g = b_gamma * (ct.astype(o_i, ct.float32) + 1.0)
         b_gq = _exp2(b_g)
 
-    # Per-segment token window views (zero-copy, TMA-compatible).
     q_seg = q.slice(axis=0, start=bos, stop=eos)
     k_seg = k.slice(axis=0, start=bos, stop=eos)
     v_seg = v.slice(axis=0, start=bos, stop=eos)
@@ -153,7 +143,7 @@ def fused_chunk_fwd_kernel(
             (BT, BK)
         )
         b_q = ct.astype(ct.astype(b_q, ct.float32) * scale, b_q.dtype)
-        # [BT, BK] (k loaded natural, transposed to [BK, BT] in the mma below)
+        # [BT, BK]
         b_k = ct.load(k_seg, index=(i_t, i_h, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
             (BT, BK)
         )
@@ -256,8 +246,7 @@ def fused_chunk_bwd_kernel(
 
     Two passes over the chunk loop: forward sweep computes dq while building the
     [BV, BK] state b_h; reverse sweep computes dk/dv while building the [BK, BV]
-    state b_dh. Only the no-gate path is exercised by the public API, but the
-    USE_G / USE_G_GAMMA math is ported for parity.
+    state b_dh.
     """
     i_v = ct.bid(0)
     i_k = ct.bid(1)
@@ -390,7 +379,7 @@ def fused_chunk_bwd_kernel(
         else:
             ct.store(dq_seg, index=(i_t, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((BT, 1, BK)))
 
-    # ---- reverse sweep: dk / dv ----
+    # Reverse sweep: dk / dv.
     dk_seg = dk.slice(axis=1 if NV > 1 else 0, start=bos, stop=eos)
     dv_seg = dv.slice(axis=1 if NK > 1 else 0, start=bos, stop=eos)
 
@@ -496,7 +485,6 @@ def fused_chunk_bwd_kernel(
             acc_dh = ct.zeros((BK, BV), dtype=ct.float32)
             b_dh = b_dh * b_gn + ct.mma(b_qt, b_do_s, acc_dh)
         else:
-            # mask = trans(m_s & (m_t[:,None] & m_t))
             mask2d = ct.transpose(m_s & (m_t[:, None] & m_t[None, :]))
             maskf = ct.astype(mask2d, ct.float32)
             b_s = ct.astype(b_s * scale * maskf, b_do.dtype)
@@ -749,8 +737,7 @@ def fused_chunk_bwd_reduce_kernel(
     NP: ConstInt,
     BLOCK: ConstInt,
 ):
-    # index is a TILE index: dim0 tile size 1 (-> element p), dim1 tile size
-    # BLOCK (-> element i*BLOCK). Pass i, NOT i*BLOCK.
+    # ct.load / ct.store take a tile index: pass i, not i * BLOCK.
     i = ct.bid(0)
     b_y = ct.zeros((BLOCK,), dtype=ct.float32)
     for p in range(NP):
@@ -797,7 +784,7 @@ def _reduce_partials(
 
 @ct.kernel
 def chunk_global_cumsum_vector_kernel(
-    s,  # [B*T, H, S] (or head_first [B*H*T, S] handled by host reshape)
+    s,  # [B*T, H, S]
     o,  # [B*T, H, S] output
     cu_seqlens,  # [N+1] int (dummy [1] when not IS_VARLEN)
     scale: ConstFloat,
@@ -810,8 +797,7 @@ def chunk_global_cumsum_vector_kernel(
     HAS_SCALE: ConstBool,
     IS_VARLEN: ConstBool,
 ):
-    """Global vector cumulative sum
-    (HEAD_FIRST=False layout: [B, T, H, S]).
+    """Global vector cumulative sum over [B*T, H, S].
 
     grid = (cdiv(S, BS), N*H). Running prefix-sum along the time axis, in
     BT-sized chunks, carrying the running total b_z across chunks.
@@ -871,8 +857,7 @@ def chunk_local_cumsum_scalar_kernel(
     HAS_SCALE: ConstBool,
     IS_VARLEN: ConstBool,
 ):
-    """cuTile equivalent of chunk_local_cumsum_scalar_kernel
-    (HEAD_FIRST=False layout: [B, T, H], REVERSE=False).
+    """Per-chunk scalar cumulative sum over [B*T, H] (forward only).
 
     grid = (N*H,). Prefix-sum along the time axis that restarts at every
     BT-sized chunk boundary of each sequence.
@@ -903,9 +888,6 @@ def chunk_local_cumsum_scalar_kernel(
         ct.store(o_seg, index=(i_t, i_h), tile=ct.astype(b_o, o.dtype).reshape((BT, 1)))
 
 
-# ======================== Host Wrappers ========================
-
-
 def fused_chunk_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -920,8 +902,6 @@ def fused_chunk_fwd(
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
-    # A 128-wide tile keeps 128-wide heads in one block. Head-dimension
-    # masks cover smaller and non-power-of-two dimensions.
     BK = min(max(_next_power_of_2(K), 16), 128)
     BV = min(max(_next_power_of_2(V), 16), 128)
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -1281,11 +1261,6 @@ def fused_chunk_simple_gla(
     return o, final_state
 
 
-# ===========================================================================
-# Global cumsum (vector) host wrappers
-# ===========================================================================
-
-
 @input_guard
 def chunk_global_cumsum_vector(
     s: torch.Tensor,
@@ -1301,8 +1276,6 @@ def chunk_global_cumsum_vector(
         B, T, H, S = s.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BS = min(32, _next_power_of_2(S))
-    # The D64 suffix scan is latency-bound; the narrower tile cuts its loop-carried
-    # cumsum cost, while forward scans and wider feature dims benefit from BT=128.
     BT = 32 if reverse and S == 64 else 128
 
     z = torch.empty_like(s, dtype=output_dtype or s.dtype)
@@ -1523,11 +1496,6 @@ def normalize_with_z_state(
     )
 
 
-# ===========================================================================
-# Public entry point
-# ===========================================================================
-
-
 @torch.compiler.disable
 def fused_chunk_linear_attn(
     q: torch.Tensor,
@@ -1589,5 +1557,4 @@ def fused_chunk_linear_attn(
     return o, final_state
 
 
-# --- TileGym dispatch registration ---------------------------------------
 register_impl("fla.linear_attention_fused_chunk", backend="cutile")(fused_chunk_linear_attn)

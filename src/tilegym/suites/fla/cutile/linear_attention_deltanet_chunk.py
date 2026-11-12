@@ -76,11 +76,6 @@ def _ck(a, b):
     return (a + b - 1) // b
 
 
-# ===========================================================================
-# fla.modules.l2norm
-# ===========================================================================
-
-
 @ct.kernel
 def l2norm_fwd_kernel(
     x,  # [T, D]
@@ -95,9 +90,6 @@ def l2norm_fwd_kernel(
     cols = ct.arange(BD, dtype=ct.int32)
     rows = ct.arange(BT, dtype=ct.int32)
     col_mask = cols < D
-    # Gather a [BT, BD] tile of rows starting at i_t*BT. ct.gather/scatter index
-    # a multi-dim Array with a per-axis index tuple (Arrays have no .reshape),
-    # so pass (row, col) indices broadcast to [BT, BD] rather than flat indices.
     row_idx = i_t * BT + rows
     idx2d = (row_idx[:, None], cols[None, :])
     mask = (row_idx[:, None] < x.shape[0]) & col_mask[None, :]
@@ -173,11 +165,6 @@ def l2norm_bwd(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float
         (y, rstd, dy, dx, float(eps), D, BD, BT),
     )
     return dx.reshape(y_shape_og)
-
-
-# ===========================================================================
-# fla.ops.common.chunk_scaled_dot_kkt
-# ===========================================================================
 
 
 @ct.kernel
@@ -356,14 +343,12 @@ def solve_tril_kernel(
         Ainv = _invert_16_skip1(_get_block16(b_full, 0, 0))
     elif NB == 2:
         Ainv = _invert_32(b_full, 0, 0, mm)
-    else:  # NB == 4 (BT=64, the DeltaNet fwd hot path)
-        # Two 32x32 diagonal blocks of the 64x64 tile (tile-space 16x16 quads).
+    else:  # NB == 4
         b_Ai00 = _invert_32(b_full, 0, 0, mm)  # rows/cols 0:32 (32-tile (0,0))
         b_Ai11 = _invert_32(b_full, 1, 1, mm)  # rows/cols 32:64 (32-tile (1,1))
         # Off-diagonal 32x32 sub-block A10 = b_full[32:64, 0:32].
         b_A10 = _get_block32(b_full, 1, 0)
-        # Merge: Ai10 = -Ai11 @ A10 @ Ai00 (two 32x32 fp32/ieee matmuls). Keep
-        # the fp32 result so it cats with the fp32 diag blocks.
+        # Ai10 = -Ai11 @ A10 @ Ai00 in IEEE fp32.
         b_Ai10 = ct.astype(
             -ct.matmul(
                 ct.astype(ct.matmul(ct.astype(b_Ai11, mm), ct.astype(b_A10, mm)), mm),
@@ -388,13 +373,11 @@ def _get_block32(mat, ib, jb):
 
 
 def _invert_16_skip1(b_blk):
-    """Inverse of (I + strict_lower(b_blk)) for a 16x16 fp32 tile.
+    """Inverse of (I + b_blk) for a strictly lower-triangular 16x16 fp32 tile.
 
-    Column-reduction forward substitution (mirrors GDN
-    ``_solve_kkt_16_block_full_skip1``): ``b_Ai`` starts as
-    ``-strict_lower(b_blk)`` (the upper triangle of ``b_blk`` is structurally
-    zero in this solve, so an unconditional negate is exact) and each row
-    i = 1..15 is corrected by the already-solved rows above it. Each row uses ct.sum reductions over the resident 16-wide tile.
+    Forward substitution: ``b_Ai`` starts as ``-b_blk`` (exact only because the
+    diagonal and upper triangle of ``b_blk`` are zero) and each row i = 1..15 is
+    corrected by the already-solved rows above it.
     """
     o = ct.arange(16, dtype=ct.int32)
     m_I = o[:, None] == o[None, :]
@@ -419,7 +402,6 @@ def _invert_32(b_full, ib, jb, dtype):
     b11 = _get_block16(b_full, 2 * ib + 1, 2 * jb + 1)
     b_Ai00 = _invert_16_skip1(b00)
     b_Ai11 = _invert_16_skip1(b11)
-    # Keep the fp32 result so it cats with the fp32 blocks.
     b_Ai10 = ct.astype(
         -ct.matmul(
             ct.astype(ct.matmul(ct.astype(b_Ai11, dtype), ct.astype(b10, dtype)), dtype),
@@ -473,11 +455,6 @@ def solve_tril(
     )
     ct.launch(stream, grid, kernel, args)
     return Ai
-
-
-# ===========================================================================
-# fla.ops.delta_rule.wy_fast
-# ===========================================================================
 
 
 @ct.kernel
@@ -831,9 +808,9 @@ def chunk_gated_delta_rule_fwd_kernel_h(
     v,  # [B, T, HV, V]   (= u)
     w,  # [B, T, HV, K]
     v_new,  # [B, T, HV, V] (output)
-    h,  # [B*NT, HV, K, V]  (output)
-    h0,  # [N, HV, K, V]     (dummy when not USE_INITIAL_STATE)
-    ht,  # [N, HV, K, V]     (dummy when not STORE_FINAL_STATE)
+    h,  # [B*NT, HV, K_pad, V_pad] (output); K_pad = BK, V_pad = cdiv(V, BV) * BV
+    h0,  # [N, HV, K_pad, V_pad] (dummy when not USE_INITIAL_STATE)
+    ht,  # [N, HV, K_pad, V_pad] (dummy when not STORE_FINAL_STATE)
     cu_seqlens,
     chunk_offsets,  # [N] int  (dummy when not IS_VARLEN)
     T,
@@ -843,7 +820,7 @@ def chunk_gated_delta_rule_fwd_kernel_h(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general over K)
+    BK: ConstInt,  # next_pow2(K)
     HVH: ConstInt,  # HV // H
     NT_FIXED: ConstInt,  # NT for the fixed-length case (static loop upper bound)
     USE_INITIAL_STATE: ConstBool,
@@ -876,9 +853,8 @@ def chunk_gated_delta_rule_fwd_kernel_h(
     w_seg = w.slice(axis=1, start=bos, stop=eos)
     vnew_seg = v_new.slice(axis=1, start=bos, stop=eos)
 
-    # Running KV state carried as a SINGLE full-width (BK, BV) tile (BK =
-    # next_pow2(K)), general for ANY K (no 64-wide sub-block unroll / K<=256 cap).
-    # h0 is [N, HV, BK, V]; rows [K:BK] are zero-padded on load and stay 0.
+    # The state is one (BK, BV) tile with BK = next_pow2(K); rows [K:BK] load as
+    # zero and stay zero.
     b_h1 = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
         b_h1 = ct.astype(
@@ -891,12 +867,9 @@ def chunk_gated_delta_rule_fwd_kernel_h(
     # Static loop upper bound NT_FIXED; runtime `if i_t < NT` skips the varlen tail.
     for i_t in range(NT_FIXED):
         if i_t < NT:
-            # store current state h[i_t] (single full-width [BK, BV] tile; the
-            # block-indexed store masks rows [K:BK] for non-pow2 K)
             ct.store(h, index=(boh + i_t, i_h, 0, i_v), tile=ct.astype(b_h1, h.dtype).reshape((1, 1, BK, BV)))
 
-            # v_new = v - w @ h        (single full-width w[BT,BK] @ h[BK,BV] MMA;
-            # padded w columns / h rows [K:BK] are zero -> contribute 0)
+            # v_new = v - w @ h; the zero-padded w columns and h rows [K:BK] contribute 0.
             acc = ct.zeros((BT, BV), dtype=ct.float32)
             b_w1 = ct.load(
                 w_seg, index=(i_row, i_t, i_h, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
@@ -957,13 +930,11 @@ def chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BV = min(max(_next_power_of_2(V), 16), 64)
-    # Full-width state/K tile: general for ANY K (no 64-wide sub-block unroll).
     BK = _next_power_of_2(K)
-    # Pad K and V dimensions to tile-aligned sizes so the kernel's fixed-size
-    # (BK, BV) loads/stores never exceed buffer bounds (ct.store has no
-    # padding_mode, unlike ct.load).
-    K_pad = BK  # e.g. K=32 -> 32, K=48 -> 64, K=96 -> 128, K=192 -> 256, K=320 -> 512
-    V_pad = BV * _cdiv(V, BV)  # e.g. V=48, BV=64 -> 64; V=64, BV=64 -> 64
+    # Pad K and V to tile-aligned sizes: ct.store has no padding mode, so the
+    # fixed-size (BK, BV) stores must stay in bounds.
+    K_pad = BK
+    V_pad = BV * _cdiv(V, BV)
 
     h = k.new_empty(B * NT, HV, K_pad, V_pad)
     final_state = k.new_zeros(N, HV, K_pad, V_pad, dtype=torch.float32) if output_final_state else None
@@ -974,7 +945,6 @@ def chunk_gated_delta_rule_fwd_h(
     w3 = w.reshape(B, T, HV, K)
     USE_INIT = initial_state is not None
     if USE_INIT:
-        # Pad initial_state from [N, HV, K, V] to [N, HV, K_pad, V_pad]
         h0 = k.new_zeros(N, HV, K_pad, V_pad, dtype=torch.float32)
         h0[:, :, :K, :V] = initial_state
     else:
@@ -1055,10 +1025,10 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
     q,  # [B, T, H, K]
     k,  # [B, T, H, K]
     w,  # [B, T, HV, K]
-    dht,  # [N, HV, K, V] (dummy when not USE_FINAL_STATE_GRADIENT)
-    dh0,  # [N, HV, K, V] (dummy when not USE_INITIAL_STATE)
+    dht,  # [N, HV, K_pad, V_pad] (dummy when not USE_FINAL_STATE_GRADIENT)
+    dh0,  # [N, HV, K_pad, V_pad] (dummy when not USE_INITIAL_STATE)
     do,  # [B, T, HV, V]
-    dh,  # [B*NT, HV, K, V] (output)
+    dh,  # [B*NT, HV, K_pad, V_pad] (output)
     dv,  # [B, T, HV, V]
     dv2,  # [B, T, HV, V] (output)
     cu_seqlens,
@@ -1071,7 +1041,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general over K)
+    BK: ConstInt,  # next_pow2(K)
     HVH: ConstInt,
     NT_FIXED: ConstInt,
     USE_INITIAL_STATE: ConstBool,
@@ -1105,9 +1075,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
     dv_seg = dv.slice(axis=1, start=bos, stop=eos)
     dv2_seg = dv2.slice(axis=1, start=bos, stop=eos)
 
-    # State gradient carried as a SINGLE full-width (BK, BV) tile (BK =
-    # next_pow2(K)), general for ANY K (no 64-wide sub-block unroll / K<=256 cap).
-    # dht is [N, HV, BK, V]; rows [K:BK] are zero-padded on load and stay 0.
+    # The state gradient is one (BK, BV) tile with BK = next_pow2(K); rows
+    # [K:BK] load as zero and stay zero.
     b_dh1 = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_FINAL_STATE_GRADIENT:
         b_dh1 = b_dh1 + ct.astype(
@@ -1122,8 +1091,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
         if i_t < NT:
             ct.store(dh, index=(boh + i_t, i_h, 0, i_v), tile=ct.astype(b_dh1, dh.dtype).reshape((1, 1, BK, BV)))
 
-            # b_dv = k @ dh           (single full-width k[BT,BK] @ dh[BK,BV] MMA;
-            # padded k columns / dh rows [K:BK] are zero -> contribute 0)
+            # b_dv = k @ dh; the zero-padded k columns and dh rows [K:BK] contribute 0.
             acc = ct.zeros((BT, BV), dtype=ct.float32)
             b_k1 = ct.load(
                 k_seg, index=(i_row, i_t, i_kvh, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
@@ -1185,9 +1153,8 @@ def chunk_gated_delta_rule_bwd_dhu(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BV = min(max(_next_power_of_2(V), 16), 128)
-    # Full-width state/K tile: general for ANY K (same as fwd kernel).
     BK = _next_power_of_2(K)
-    # Pad K and V dimensions to tile-aligned sizes (same as fwd kernel).
+    # Pad K and V to tile-aligned sizes so the fixed-size (BK, BV) stores stay in bounds.
     K_pad = BK
     V_pad = BV * _cdiv(V, BV)
 
@@ -1207,7 +1174,6 @@ def chunk_gated_delta_rule_bwd_dhu(
     else:
         dh0_padded = torch.empty((1, 1, K_pad, BV), device=q.device, dtype=torch.float32)
     if USE_DHT:
-        # Pad dht from [N, HV, K, V] to [N, HV, K_pad, V_pad]
         dht_padded = q.new_zeros(N, HV, K_pad, V_pad, dtype=dht.dtype)
         dht_padded[:, :, :K, :V] = dht
     else:
@@ -1281,14 +1247,6 @@ def chunk_gated_delta_rule_bwd_dhu(
     return dh, dh0, dv2
 
 
-# ===========================================================================
-# fla.ops.common.chunk_o
-# ===========================================================================
-#
-# DeltaNet path uses g=g_gamma=None and STATE_V_FIRST=False, so the gated
-# branches collapse. h is [B*NT, HV, K, V].
-
-
 @ct.kernel
 def chunk_fwd_kernel_o(
     q,  # [B, T, H, K]
@@ -1351,7 +1309,6 @@ def chunk_fwd_kernel_o(
         b_k = ct.load(
             k_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO, latency=3
         ).reshape((BT, BK))
-        # b_h block: [BK, BV] from h[h_row, i_h, i_k*BK:(i_k+1)*BK, i_v*BV:...]
         b_h = ct.load(
             h, index=(h_row, i_h, i_k, i_v), shape=(1, 1, BK, BV), padding_mode=ct.PaddingMode.ZERO, latency=3
         ).reshape((BK, BV))
@@ -1411,8 +1368,6 @@ def chunk_fwd_o(
 
     NT_fixed = _cdiv(T, BT) if cu_seqlens is None else NT
 
-    # The first candidate is the padded baseline; the remaining candidates
-    # cover square and asymmetric tiles.
     tile_choices = _fwd_o_tile_configs(K, V)
 
     def _grid(bk, bv):
@@ -1481,7 +1436,7 @@ def chunk_bwd_kernel_dv_local(
     do_seg = do.slice(axis=1, start=bos, stop=eos)
     dv_seg = dv.slice(axis=1, start=bos, stop=eos)
 
-    # recompute path (A=None, g=None): b_A = sum_k (k @ q^T) * scale
+    # b_A = sum_k (k @ q^T) * scale
     b_A = ct.zeros((BT, BT), dtype=ct.float32)
     for i_k in range(_ck(K, BK)):
         b_q = ct.load(
@@ -1645,7 +1600,7 @@ def chunk_bwd_kernel_dqkwg(
         b_do = ct.load(
             do_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
         ).reshape((BT, BV))
-        # h/dh blocks [BV, BK] (non state_v_first: stored [K, V], load (i_k, i_v) -> [BK, BV], transpose)
+        # h/dh are stored [K, V]: load [BK, BV] and transpose to [BV, BK].
         b_h = ct.transpose(
             ct.load(h, index=(h_row, i_h, i_k, i_v), shape=(1, 1, BK, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
                 (BK, BV)
@@ -1683,7 +1638,7 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < seqlen
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
 
-    # g=None / g_gamma=None branch:
+    # No-gate math:
     #   b_ds = tril_incl(b_ds)
     #   b_dq += b_ds @ b_k          ;  b_dq *= scale
     #   b_dk += (b_ds^T @ b_q) * scale   (only the new term is scaled)
@@ -1809,11 +1764,6 @@ def chunk_bwd_dqkwg(
     return dq, dk, dw, None
 
 
-# ===========================================================================
-# fla.ops.delta_rule.chunk (entry)
-# ===========================================================================
-
-
 def chunk_delta_rule_fwd(
     q,
     k,
@@ -1825,7 +1775,7 @@ def chunk_delta_rule_fwd(
     cu_seqlens=None,
     chunk_indices=None,
 ):
-    # obtain WY representation. u is actually the new v.
+    # WY representation; u is the updated v.
     w, u, A = prepare_wy_repr_fwd(k=k, v=v, beta=beta, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -1979,8 +1929,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
 
 
 def ct_astype_torch(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Host-side tensor dtype cast (torch). cuTile `ct.astype` only applies to
-    in-kernel tiles; on the host we use the regular torch cast."""
+    """Cast a host tensor to ``dtype``; returns ``x`` itself when the dtype already matches."""
     return x if x.dtype == dtype else x.to(dtype)
 
 
@@ -1998,8 +1947,7 @@ def chunk_delta_rule(
     cu_seqlens_cpu: torch.Tensor | None = None,
     **kwargs,
 ):
-    r"""Chunked DeltaNet. Behavior identical to
-    ``fla.ops.delta_rule.chunk.chunk_delta_rule``.
+    r"""Chunked DeltaNet.
 
     Args:
         q, k: queries/keys of shape ``[B, T, H, K]``.
@@ -2013,7 +1961,7 @@ def chunk_delta_rule(
         cu_seqlens_cpu: CPU copy of ``cu_seqlens`` to avoid device sync.
 
     Returns:
-        ``(o, final_state)`` mirroring fla's shapes/semantics.
+        ``(o, final_state)``.
     """
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkDeltaRuleFunction does not support float32. Please use bfloat16."
