@@ -2,10 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Port of the flash-linear-attention fused_recurrent_gated_delta_rule op.
-# Dense BF16 calls use the shared chunk implementation; other supported
-# configurations use the general fused-recurrent kernels.
-
 import warnings
 from typing import Optional
 
@@ -28,9 +24,6 @@ def _cdiv(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
-# Device helpers
-
-
 @ct.function
 def _exp(x):
     return ct.exp(ct.astype(x, ct.float32))
@@ -49,7 +42,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel_ct(
     g,  # [B, T, HV]   (dummy [1] when not USE_G)
     gk,  # [B, T, HV, K] (dummy [1] when not USE_GK)
     gv,  # [B, T, HV, V] (dummy [1] when not USE_GV)
-    beta,  # [B, T, HV] scalar or [B, T, HV, V] headwise
+    beta,  # [B, T, HV] if IS_BETA_HEADWISE else [B, T, HV, V]
     A_log,  # [HV]  (dummy [1] when not USE_GATE_IN_KERNEL)
     dt_bias,  # [HV]  (dummy [1] when not HAS_DT_BIAS)
     o,  # [B, T, HV, V] output
@@ -85,7 +78,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel_ct(
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
-        # varlen packs all sequences into batch dim 0: q is [1, sum(T), H, K].
+        # Varlen inputs are packed along time with batch size 1: q is [1, sum(T), H, K].
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
         Tloc = eos - bos
@@ -120,7 +113,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel_ct(
         b_h = b_h + ct.astype(b_h0, ct.float32)
 
     for t in range(0, Tloc):
-        # global time index into the (B, T, ...) tensors (varlen: bos = cu_seqlens[i_n]).
         gt = bos + t
 
         b_q = ct.astype(ct.gather(q, (b, gt, i_h, o_k), mask=mask_k, check_bounds=True, padding_value=0.0), ct.float32)
@@ -132,10 +124,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel_ct(
         b_q = b_q * scale
 
         if IS_BETA_HEADWISE:
-            # scalar/per-head beta [B, T, HV]: single value
             b_beta = ct.astype(ct.gather(beta, (b, gt, i_hv), check_bounds=True, padding_value=0.0), ct.float32)
         else:
-            # vector beta [B, T, HV, V]: per-V-channel
             b_beta = ct.astype(
                 ct.gather(beta, (b, gt, i_hv, o_v), mask=mask_v, check_bounds=True, padding_value=0.0), ct.float32
             )
@@ -172,12 +162,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel_ct(
                 b_h = b_h * _exp(b_gv[None, :])
 
         if STATE_V_FIRST:
-            # b_v = beta * (v - sum(h * k[None, :], axis=1))  -> [BV]
             b_v = b_beta * (b_v - ct.sum(b_h * b_k[None, :], axis=1))
             b_h = b_h + b_v[:, None] * b_k[None, :]
             b_o = ct.sum(b_h * b_q[None, :], axis=1)
         else:
-            # b_v = beta * (v - sum(h * k[:, None], axis=0))  -> [BV]
             b_v = b_beta * (b_v - ct.sum(b_h * b_k[:, None], axis=0))
             b_h = b_h + b_k[:, None] * b_v
             b_o = ct.sum(b_h * b_q[:, None], axis=0)
@@ -192,9 +180,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel_ct(
             ct.scatter(
                 ht, (i_n, i_hv, o_k[:, None], o_v[None, :]), ct.astype(b_h, ht.dtype), mask=mask_h, check_bounds=True
             )
-
-
-# Wrapper Functions
 
 
 @input_guard
@@ -241,7 +226,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     use_gate_in_kernel = A_log is not None
     has_dt_bias = dt_bias is not None
 
-    # cuTile launch args cannot be None: substitute dummy tensors + flags.
+    # Launch args cannot be None: unused optional tensors pass a dummy plus a flag.
     def _dummy(*shape, dtype=q.dtype):
         return q.new_empty(*shape, dtype=dtype)
 
@@ -398,7 +383,7 @@ def fused_recurrent_gated_delta_rule(
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
         scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, HV, K, V]` for `N` input sequences.
@@ -549,9 +534,6 @@ def fused_recurrent_gated_delta_rule(
 
 
 fused_recurrent_gdn = fused_recurrent_gated_delta_rule
-
-
-# TileGym dispatch registration
 
 
 @register_impl("fla.linear_attention_gdn_fused_recurrent", backend="cutile")

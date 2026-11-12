@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Self-contained port of `fla.ops.gated_delta_rule.gate`.
-
 import functools
 
 import cuda.tile as ct
@@ -21,9 +19,6 @@ def _dummy_i32(device, n: int, m: int = 0):
     return torch.zeros(n, device=device, dtype=torch.int32)
 
 
-# Sequence metadata
-
-
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return torch.diff(cu_seqlens)
 
@@ -37,9 +32,6 @@ def prepare_chunk_indices(
     chunk_counts = (prepare_lens(src) + (chunk_size - 1)).div(chunk_size, rounding_mode="floor")
     seg_id, intra_chunk_idx = _segmented_arange(chunk_counts)
     return torch.stack([seg_id, intra_chunk_idx], 1).to(cu_seqlens)
-
-
-# CuTile Kernels
 
 
 @ct.function
@@ -80,7 +72,6 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
     in_h = h_offs < H
 
     if IS_VARLEN:
-        # chunk_indices is [NT, 2] -> (i_n, intra_chunk_idx); varlen layout is [1, total_T, H].
         i_n = ct.gather(chunk_indices, (i_t, 0), check_bounds=True, padding_value=0).item()
         i_t = ct.gather(chunk_indices, (i_t, 1), check_bounds=True, padding_value=0).item()
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
@@ -95,7 +86,6 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
         t_local = i_t * BT + ct.arange(BT, dtype=ct.int32)
         glob_t = t_local
 
-    # Mask out positions past the (sub-)sequence length (OOB padding).
     in_t = t_local < Tloc
     mask = in_t[:, None] & in_h[None, :]
 
@@ -108,7 +98,7 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
     b_A = ct.astype(ct.gather(A_log, (h_offs,), mask=in_h, check_bounds=True, padding_value=0.0), ct.float32)
     b_gate = -ct.exp(b_A)[None, :] * _gdn_gate_softplus(b_g)
 
-    # Zero the padded tail so it does not pollute the cumsum / sum.
+    # softplus(0) != 0: padded rows must be zeroed before the cumsum / sum.
     b_gate = ct.where(in_t[:, None], b_gate, 0.0)
 
     b_o = ct.cumsum(b_gate, axis=0)
@@ -197,19 +187,14 @@ def gdn_gate_bwd_kernel(
 
     b_neg_expA = -ct.exp(b_A)[None, :]
     b_yg = b_neg_expA * _gdn_gate_softplus(b_g)
-    # sigmoid(x) = 1 / (1 + exp(-x))  (no ct.sigmoid)
     b_sig = 1.0 / (1.0 + ct.exp(-b_g))
     b_dg = b_neg_expA * (b_dyg * b_sig)
 
-    # zero padded tail so the reduction for dA is clean
     b_prod = ct.where(in_t[:, None], b_dyg * b_yg, 0.0)
     b_dA = ct.sum(b_prod, axis=0)
 
     ct.scatter(dg, (t_offs[:, None], h_offs[None, :]), ct.astype(b_dg, dg.dtype), mask=mask, check_bounds=True)
     ct.scatter(dA, (i_t, h_offs), b_dA, mask=in_h, check_bounds=True)
-
-
-# Wrapper Functions
 
 
 @input_guard
@@ -235,10 +220,9 @@ def gdn_gate_chunk_cumsum(
     is_varlen = cu_seqlens is not None
     has_bias = dt_bias is not None
     has_scale = scale is not None
-    # Head-wide tile: process all H heads in one [BT, BH] tile.
     BH = H
 
-    # cuTile launch args cannot be None: substitute dummy tensors + flags.
+    # Launch args cannot be None: unused optional tensors pass a dummy plus a flag.
     dt_bias_arg = dt_bias if has_bias else _dummy_i32(g.device, 1).view(torch.float32)
     cu_seqlens_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_i32(g.device, 1)
     chunk_indices_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_i32(g.device, 1, 2)
@@ -260,7 +244,7 @@ def gdn_gate_chunk_cumsum(
             H,
             BT,
             BH,
-            0,  # REVERSE (always False from this entry point)
+            0,  # REVERSE
             int(has_bias),
             int(has_scale),
             int(is_varlen),
@@ -279,7 +263,6 @@ def gdn_gate_fwd(
     H = g.shape[-1]
     T = g.numel() // H
     BT = 64
-    # Head-wide tile: process all H heads in one [BT, BH] tile.
     BH = H
 
     g2d = g.contiguous().view(T, H)
@@ -320,7 +303,6 @@ def gdn_gate_bwd(
     T = g.numel() // H
     BT = 32
     NT = ct.cdiv(T, BT)
-    # Head-wide tile: process all H heads in one [BT, BH] tile.
     BH = H
 
     g2d = g.contiguous().view(T, H)
