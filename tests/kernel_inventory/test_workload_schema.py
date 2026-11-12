@@ -75,6 +75,11 @@ _ACCEPTED_WORKLOADS = [
     pytest.param(_workload(inputs={"x": {"type": "custom"}}), id="custom"),
     pytest.param(_workload(weight=3.5), id="positive-weight"),
     pytest.param(
+        _workload(inputs={"x": {"type": "custom"}}, custom_inputs_kwargs={"mode": "stress", "n": [1, 2]}),
+        id="custom-inputs-kwargs",
+    ),
+    pytest.param(_workload(benchmark_cudagraph=True), id="benchmark-cudagraph"),
+    pytest.param(
         {
             "uuid": "52bedf2e-bdbc-4618-9f38-a592a4de71aa",
             "axes": {"B": 2},
@@ -129,6 +134,9 @@ _REJECTED_WORKLOADS = [
     pytest.param(_workload(weight=0.0), id="zero-weight"),
     pytest.param(_workload(weight=float("inf")), id="infinite-weight"),
     pytest.param(_workload(custom_correctness_kwargs={"threshold": float("nan")}), id="nonfinite-kwargs"),
+    pytest.param(_workload(custom_inputs_kwargs={"threshold": float("inf")}), id="nonfinite-inputs-kwargs"),
+    pytest.param(_workload(custom_inputs_kwargs={"blob": "x" * (256 * 1024)}), id="oversized-inputs-kwargs"),
+    pytest.param(_workload(benchmark_cudagraph="true"), id="non-strict-benchmark-cudagraph"),
 ]
 
 
@@ -146,7 +154,7 @@ def test_public_compat_workload_rejects_invalid_contract(payload):
 
 def test_schema_adapter_uses_fallback_when_canonical_dependency_is_absent():
     if USING_CANONICAL_WORKLOAD_SCHEMA:
-        pytest.skip("internal environment has the canonical schema package")
+        pytest.skip("reference schema package is installed")
 
     workload = workload_model_validate(_BASE_WORKLOAD)
 

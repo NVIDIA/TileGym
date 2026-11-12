@@ -31,6 +31,8 @@ from tilegym.kernel_inventory.schema import SafetensorsInput
 from tilegym.kernel_inventory.schema import ScalarInput
 from tilegym.kernel_inventory.schema import StringInput
 from tilegym.kernel_inventory.schema import Workload
+from tilegym.kernel_inventory.schema import resolve_definition_axes
+from tilegym.kernel_inventory.schema import resolve_tensor_shape
 from tilegym.kernel_inventory.schema import workload_model_validate
 
 _WORKLOAD_FIELDS = {
@@ -39,8 +41,10 @@ _WORKLOAD_FIELDS = {
     "uuid",
     "tolerance",
     "custom_correctness_kwargs",
+    "custom_inputs_kwargs",
     "eval_mode",
     "weight",
+    "benchmark_cudagraph",
 }
 _REQUIRED_EXPLICIT_FIELDS = {"axes", "inputs", "uuid", "tolerance", "eval_mode"}
 _TOLERANCE_FIELDS = {
@@ -132,8 +136,13 @@ def validate_workload_against_definition(
         missing = sorted(variable_axes - workload_axes)
         unknown = sorted(workload_axes - variable_axes)
         raise KernelWorkloadError(f"{label}: Workload axes mismatch: missing={missing}, unknown_or_constant={unknown}")
-    if any(type(value) is not int or value < 0 for value in record.workload.axes.values()):
-        raise KernelWorkloadError(f"{label}: full-evaluation Workload axes must be concrete non-negative integers")
+    dynamic_axes = _dynamic_axes(record)
+    if any(type(value) is not int or value < 0 for value in _concrete_axes(record).values()):
+        raise KernelWorkloadError(f"{label}: Workload axes must be concrete non-negative integers")
+    for name, axis_range in dynamic_axes.items():
+        _validate_dynamic_axis(name, axis_range, axes, label)
+    if dynamic_axes and any(isinstance(descriptor, SafetensorsInput) for descriptor in record.workload.inputs.values()):
+        raise KernelWorkloadError(f"{label}: dynamic axes cannot be combined with safetensors inputs")
 
     workload_inputs = set(record.workload.inputs)
     definition_inputs = set(inputs)
@@ -141,6 +150,14 @@ def validate_workload_against_definition(
         missing = sorted(definition_inputs - workload_inputs)
         unknown = sorted(workload_inputs - definition_inputs)
         raise KernelWorkloadError(f"{label}: Workload inputs mismatch: missing={missing}, unknown={unknown}")
+    if record.workload.custom_correctness_kwargs and not definition.get("custom_correctness_entrypoint"):
+        raise KernelWorkloadError(
+            f"{label}: custom_correctness_kwargs require Definition.custom_correctness_entrypoint"
+        )
+    if record.workload.custom_inputs_kwargs and not any(
+        isinstance(descriptor, CustomInput) for descriptor in record.workload.inputs.values()
+    ):
+        raise KernelWorkloadError(f"{label}: custom_inputs_kwargs require custom inputs")
 
     none_defaults = _reference_none_defaults(definition.get("reference", ""))
     for name, descriptor in record.workload.inputs.items():
@@ -237,13 +254,17 @@ def materialize_workload_inputs(
     device: Any,
 ) -> tuple[dict[str, int], dict[str, Any]]:
     """Materialize concrete axes and inputs for one validated Workload row."""
-    definition_axes = _require_mapping(definition.get("axes"), "Definition.axes")
-    axes = {
-        name: spec["value"]
-        for name, spec in definition_axes.items()
-        if isinstance(spec, dict) and spec.get("type") == "const"
-    }
-    axes.update({name: int(value) for name, value in record.workload.axes.items()})
+    _require_mapping(definition.get("axes"), "Definition.axes")
+    if _dynamic_axes(record):
+        raise KernelWorkloadError(
+            f"{record.source_label}: TileGym runtime materialization does not yet support dynamic axes"
+        )
+    try:
+        axes = resolve_definition_axes(definition, {name: int(value) for name, value in record.workload.axes.items()})
+    except (TypeError, ValueError) as exc:
+        raise KernelWorkloadError(
+            f"{record.source_label}: Definition {definition.get('name')!r} cannot resolve {exc}"
+        ) from exc
 
     definition_inputs = _require_mapping(definition.get("inputs"), "Definition.inputs")
     materialized = {}
@@ -261,7 +282,7 @@ def materialize_workload_inputs(
             raise KernelWorkloadError(
                 f"{record.source_label}: TileGym runtime materialization does not yet support custom inputs"
             )
-        else:  # pragma: no cover - selected schema union prevents this
+        else:  # pragma: no cover - the InputSpec union prevents this
             raise KernelWorkloadError(f"{record.source_label}: unsupported input descriptor for {name!r}")
     return axes, materialized
 
@@ -385,7 +406,7 @@ def _resolved_shape(spec: dict[str, Any], axes: dict[str, int]) -> tuple[int, ..
     if not isinstance(shape, list):
         raise KernelWorkloadError(f"Tensor input requires a list shape, got {shape!r}")
     try:
-        return tuple(axes[dimension] for dimension in shape)
+        return resolve_tensor_shape(shape, axes)
     except KeyError as exc:
         raise KernelWorkloadError(f"Tensor shape references unresolved axis {exc.args[0]!r}") from exc
 
@@ -423,8 +444,8 @@ def _validate_checked_in_policy(payload: dict[str, Any], label: str) -> None:
             f"(only required_matched_ratio may relax to one of {sorted(_MATCHED_RATIO_POLICY)}; "
             "booleans and non-numeric values are rejected even though True == 1.0 in Python)"
         )
-    if payload["eval_mode"] != "full":
-        raise KernelWorkloadError(f"{label}: eval_mode must be 'full'")
+    if payload["eval_mode"] not in ("full", "correctness_only", "benchmark_only"):
+        raise KernelWorkloadError(f"{label}: eval_mode must be 'full', 'correctness_only', or 'benchmark_only'")
 
     try:
         uuid = UUID(payload.get("uuid", ""))
@@ -485,7 +506,14 @@ def _validate_resolvable_constraints(
         for name, spec in definition_axes.items()
         if isinstance(spec, dict) and spec.get("type") == "const"
     }
-    context.update(record.workload.axes)
+    concrete_axes = _concrete_axes(record)
+    context.update(concrete_axes)
+    try:
+        context.update(resolve_definition_axes(definition, concrete_axes, unresolved_axes=_dynamic_axes(record)))
+    except (TypeError, ValueError) as exc:
+        raise KernelWorkloadError(
+            f"{record.source_label}: Definition {definition.get('name')!r} cannot resolve {exc}"
+        ) from exc
     context.update(
         {
             name: descriptor.value
@@ -512,6 +540,41 @@ def _validate_resolvable_constraints(
             continue
         if not holds:
             raise KernelWorkloadError(f"{record.source_label}: Workload violates Definition constraint: {constraint}")
+
+
+def _dynamic_axes(record: WorkloadRecord) -> dict[str, Any]:
+    return {name: value for name, value in record.workload.axes.items() if not isinstance(value, int)}
+
+
+def _concrete_axes(record: WorkloadRecord) -> dict[str, Any]:
+    return {name: value for name, value in record.workload.axes.items() if isinstance(value, int)}
+
+
+def _validate_dynamic_axis(name: str, axis_range: Any, definition_axes: dict[str, Any], label: str) -> None:
+    """Resolve one correctness-only dynamic axis range to positive integer bounds with at least one valid value."""
+
+    def resolve(field: str) -> int:
+        value = getattr(axis_range, field)
+        if isinstance(value, int):
+            return value
+        referenced = definition_axes.get(value)
+        if not isinstance(referenced, dict) or referenced.get("type") != "const":
+            raise KernelWorkloadError(
+                f"{label}: dynamic axis {name!r} {field} references {value!r}, which is not a const Definition axis"
+            )
+        return referenced["value"]
+
+    low, high, multiple_of = resolve("min"), resolve("max"), resolve("multiple_of")
+    if multiple_of <= 0:
+        raise KernelWorkloadError(f"{label}: dynamic axis {name!r} multiple_of must be positive, got {multiple_of}")
+    if low <= 0 or high <= 0:
+        raise KernelWorkloadError(f"{label}: dynamic axis {name!r} bounds must be positive, got min={low}, max={high}")
+    if low > high:
+        raise KernelWorkloadError(f"{label}: dynamic axis {name!r} min must be <= max, got min={low}, max={high}")
+    if -(-low // multiple_of) * multiple_of > high:
+        raise KernelWorkloadError(
+            f"{label}: dynamic axis {name!r} range has no values divisible by multiple_of={multiple_of}"
+        )
 
 
 def _require_mapping(value: Any, label: str) -> dict[str, Any]:
