@@ -134,14 +134,12 @@ def fmha_kernel_impl(
 
         # Moving qk_scale multiplication after reduce_max is to improve performance.
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
-        # Rows with every key masked so far keep m_ij == -inf; subtract 0 instead.
-        m_ij_safe = ct.where(m_ij == -math.inf, 0.0, m_ij)  # [TILE_M, 1]
-        qk = qk * qk_scale - m_ij_safe  # [TILE_M, TILE_N]
+        qk = qk * qk_scale - m_ij  # [TILE_M, TILE_N]
 
         # Attention weights
         p = ct.exp2(qk, flush_to_zero=True)  # [TILE_M, TILE_N]
         l_ij = ct.sum(p, axis=-1, keepdims=True)  # [TILE_M, 1]
-        alpha = ct.exp2(m_i - m_ij_safe, flush_to_zero=True)  # [TILE_M, 1]
+        alpha = ct.exp2(m_i - m_ij, flush_to_zero=True)  # [TILE_M, 1]
         # Update m_i and l_i
         l_i = l_i * alpha + l_ij  # [TILE_M, 1]
         # Scale acc
@@ -157,8 +155,7 @@ def fmha_kernel_impl(
         acc = ct.mma(p, v, acc)  # [TILE_M, TILE_N]
         m_i = m_ij  # [TILE_M, 1]
 
-    # Rows that see no key (causal, query before key position 0) have l_i == 0 and output 0.
-    acc = ct.truediv(acc, ct.where(l_i == 0.0, 1.0, l_i), flush_to_zero=True, rounding_mode=RMd.APPROX)
+    acc = ct.truediv(acc, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, TILE_M, TILE_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
 
@@ -324,12 +321,11 @@ def _fmha_fwd_kernel_with_lse(
             qk += mask
 
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
-        m_ij_safe = ct.where(m_ij == -math.inf, 0.0, m_ij)
-        qk = qk * qk_scale - m_ij_safe
+        qk = qk * qk_scale - m_ij
 
         p = ct.exp2(qk, flush_to_zero=True)
         l_ij = ct.sum(p, axis=-1, keepdims=True)
-        alpha = ct.exp2(m_i - m_ij_safe, flush_to_zero=True)
+        alpha = ct.exp2(m_i - m_ij, flush_to_zero=True)
 
         l_i = l_i * alpha + l_ij
         acc = acc * alpha
@@ -344,8 +340,8 @@ def _fmha_fwd_kernel_with_lse(
         acc = ct.mma(p, v, acc)
         m_i = m_ij
 
-    # Final normalization; rows that see no key have l_i == 0 and output 0, LSE -inf.
-    acc = ct.truediv(acc, ct.where(l_i == 0.0, 1.0, l_i), flush_to_zero=True, rounding_mode=RMd.APPROX)
+    # Final normalization
+    acc = ct.truediv(acc, l_i, flush_to_zero=True, rounding_mode=RMd.APPROX)
     acc = acc.reshape((1, 1, TILE_M, TILE_D)).astype(Out.dtype)
     ct.store(Out, index=(batch_idx, head_idx, bid_x, 0), tile=acc)
 
@@ -627,7 +623,7 @@ def _fmha_bwd_dq_kernel(
     # Determine loop bounds based on causal masking
     if CAUSAL:
         # Only process K/V tiles where k_pos <= q_pos (at least partially)
-        end_n = ct.cdiv(max(min(input_pos + (bid_m + 1) * TILE_M, k_seqlen), 0), TILE_N)
+        end_n = ct.cdiv(min(input_pos + (bid_m + 1) * TILE_M, k_seqlen), TILE_N)
     else:
         end_n = ct.cdiv(k_seqlen, TILE_N)
 
@@ -887,6 +883,16 @@ def _tile_prefill_fmha(q, k, v, sm_scale, is_causal=True, kernel_configs=None):
     )
 
 
+def _check_fmha_lengths(q, k, is_causal):
+    # K/V always include the query tokens (self-attention, KV-cache decode, chunked
+    # prefill), so S_kv > 0 and, when causal, S_kv >= S_qo. The kernels rely on this:
+    # each causal query attends to at least key 0, so no row has an all-masked softmax.
+    assert k.shape[2] > 0, "cuTile FMHA requires S_kv > 0 (empty K/V is unsupported)"
+    assert not is_causal or k.shape[2] >= q.shape[2], (
+        "cuTile FMHA with is_causal=True requires S_kv >= S_qo (K/V must include the query tokens)"
+    )
+
+
 @register_impl("fmha", backend="cutile")
 def tile_fmha(
     q,
@@ -896,6 +902,7 @@ def tile_fmha(
     is_causal=True,
     **kwargs,
 ):
+    _check_fmha_lengths(q, k, is_causal)
     if scaling is None:
         scaling = 1.0 / math.sqrt(q.size(-1))
     if torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad):
@@ -919,6 +926,7 @@ def fmha_forward_with_lse(
         output: Attention output
         lse: Log-sum-exp tensor for backward
     """
+    _check_fmha_lengths(q, k, is_causal)
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
