@@ -177,3 +177,51 @@ def test_compile_creates_missing_output_dir(compiler_inputs, monkeypatch):
     output = output.parent / "missing" / "kernel.cubin"
     assert _cuda_utils.compile_cuda_to_cubin(header, output) == output
     assert output.read_bytes() == b"cubin"
+
+
+def test_cubin_cache_is_keyed_on_compiler(tmp_path, monkeypatch):
+    """A cubin cached by one nvcc must not be returned after switching to another."""
+    monkeypatch.setattr(_cuda_utils, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(_cuda_utils, "should_save_source", lambda: False)
+    monkeypatch.setattr(_cuda_utils, "is_cache_disabled", lambda: False)
+    monkeypatch.delenv("TILECPP_COMPILE_TIMEOUT_S", raising=False)
+    header = tmp_path / "kernel.cuh"
+    header.write_text("")
+    kernel = _cuda_utils.TileCppKernel(source_path=header, kernel_name="kernel")
+    for version in ("13.3", "13.4"):
+        compiler = tmp_path / f"nvcc-{version}"
+        write_compiler(
+            compiler,
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"if '--version' in sys.argv:\n    print('Cuda compilation tools, release {version}')\n    sys.exit(0)\n"
+            f"Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'{version}')\n",
+        )
+        monkeypatch.setattr(_cuda_utils, "NVCC_PATH", str(compiler))
+        cubin, _ = kernel.compile_artifact(_cuda_utils.torch.float32, [], "{T}*", 90)
+        assert cubin == version.encode()
+
+
+def test_compiler_fingerprint_ignores_failed_version_query(tmp_path, monkeypatch):
+    """An nvcc whose --version exits nonzero is identified by its path, not by that output."""
+    monkeypatch.setattr(_cuda_utils, "_compiler_fingerprints", {})
+    compiler = tmp_path / "nvcc"
+    write_compiler(compiler, "print('Cuda compilation tools, release 13.3')\nraise SystemExit(1)\n")
+    monkeypatch.setattr(_cuda_utils, "NVCC_PATH", str(compiler))
+    assert _cuda_utils._compiler_fingerprint() == os.path.realpath(compiler)
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_compiler_fingerprint_looks_up_bare_name_on_path(tmp_path, monkeypatch, installed):
+    """The path fallback finds a bare NVCC_PATH on PATH and never resolves it against the working directory."""
+    monkeypatch.setattr(_cuda_utils, "_compiler_fingerprints", {})
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if installed:
+        write_compiler(bin_dir / "nvcc-13.3", "raise SystemExit(1)\n")
+        (bin_dir / "nvcc").symlink_to("nvcc-13.3")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_cuda_utils, "NVCC_PATH", "nvcc")
+    expected = os.path.realpath(bin_dir / "nvcc-13.3") if installed else "nvcc"
+    assert _cuda_utils._compiler_fingerprint() == expected

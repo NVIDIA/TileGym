@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -269,6 +270,30 @@ def ptr_alignment(tensor: torch.Tensor) -> int:
 def get_source_hash(source: str) -> str:
     """Get hash of source code for caching."""
     return hashlib.md5(source.encode()).hexdigest()[:16]
+
+
+_compiler_fingerprints: Dict[str, str] = {}
+
+
+def _compiler_fingerprint() -> str:
+    """Identify the nvcc in NVCC_PATH so cached cubins are not reused across compilers.
+
+    Uses ``nvcc --version``, so switching TILECPP_NVCC_PATH or upgrading the toolkit's
+    nvcc misses the cache. When that cannot run or exits nonzero, falls back to the
+    resolved path of the executable found on PATH, or to NVCC_PATH itself if none is.
+    """
+    if NVCC_PATH not in _compiler_fingerprints:
+        try:
+            identity = subprocess.run(
+                [NVCC_PATH, "--version"], capture_output=True, text=True, timeout=10, check=True
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            identity = ""
+        if not identity:
+            executable = shutil.which(NVCC_PATH)
+            identity = os.path.realpath(executable) if executable else NVCC_PATH
+        _compiler_fingerprints[NVCC_PATH] = identity
+    return _compiler_fingerprints[NVCC_PATH]
 
 
 def compile_cuda_to_cubin(
@@ -540,7 +565,7 @@ class TileCppKernel:
         cpp_type, _ = get_dtype_info(dtype)
         all_params = _format_template_params(cpp_type, template_params)
         template_key = "_".join(all_params)
-        source_hash = get_source_hash(self.source_hash + template_key)
+        source_hash = get_source_hash(self.source_hash + template_key + _compiler_fingerprint())
         cubin_path = self._make_cubin_path(template_key, arch, source_hash)
         if is_cache_disabled():
             return self._compile_kernel(cubin_path, all_params, signature, cpp_type, arch), cubin_path
