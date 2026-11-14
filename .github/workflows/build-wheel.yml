@@ -17,10 +17,10 @@ on:
         type: string
         default: ''
       python-versions:
-        description: 'JSON array of Python versions to build (e.g., ["3.10", "3.11", "3.12"])'
+        description: 'JSON array of Python versions to build (e.g., ["3.11", "3.12", "3.13"])'
         required: false
         type: string
-        default: '["3.10"]'
+        default: '["3.12"]'
       architectures:
         description: 'JSON array of architectures to build (e.g., ["x86_64", "arm64"])'
         required: false
@@ -110,11 +110,6 @@ jobs:
 
       - name: Audit dependencies for CVEs
         if: ${{ inputs.run-pip-audit }}
-        env:
-          # Python 3.10 only: no fixed release of these packages supports 3.10 (Pillow >= 13.0.0
-          # and filelock >= 4.1.1 require Python >= 3.11). Their advisories are listed but do not
-          # fail the job there; every other package is still audited on 3.10.
-          WAIVED_PACKAGES: ${{ matrix.python-version == '3.10' && 'pillow filelock' || '' }}
         run: |
           pip install pip-audit
           # Extract installable deps from wheel metadata, keeping environment markers
@@ -146,7 +141,7 @@ jobs:
             --ignore-vuln PYSEC-2026-2290 \
             --ignore-vuln CVE-2026-9856 \
             --ignore-vuln CVE-2026-80047 || true
-          python .github/scripts/check_pip_audit.py pip-audit.json $WAIVED_PACKAGES
+          python .github/scripts/check_pip_audit.py pip-audit.json
 
       - name: Test import
         if: ${{ !inputs.skip-import-test }}
@@ -163,7 +158,7 @@ jobs:
 
           # Versioned name with arch (for upload)
           PY_VERSION="${{ matrix.python-version }}"
-          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.10 -> py310
+          PY_SUFFIX="py${PY_VERSION//./}"  # e.g., 3.12 -> py312
           ARCH="${{ matrix.arch }}"
           VERSIONED_NAME="${BASE_NAME}-${PY_SUFFIX}-${ARCH}"
           echo "versioned-name=${VERSIONED_NAME}" >> $GITHUB_OUTPUT

@@ -167,8 +167,8 @@ jobs:
       package-name: tilegym
       # Artifact naming: PR builds -> tilegym-pr-wheel-{sha}, Main -> tilegym-wheel-{sha}
       artifact-suffix: ${{ needs.config.outputs.is_pr == 'true' && '-pr' || '' }}
-      python-versions: '["3.10", "3.11", "3.12"]'  # Build for multiple Python versions
-      architectures: '["x86_64", "arm64"]'  # Build for both architectures (6 wheels total)
+      python-versions: '["3.11", "3.12", "3.13", "3.14", "3.15"]'  # Same CPython range as cuda-tile (>=3.11,<3.16)
+      architectures: '["x86_64", "arm64"]'  # Build for both architectures (10 wheels total)
       retention-days: 7  # All wheels kept for 7 days; only tested wheel gets -verified (30 days)
       skip-import-test: true  # TileGym requires CUDA, test in Docker instead
       run-pip-audit: true
@@ -181,17 +181,17 @@ jobs:
     needs: [config, build-wheel]
     if: needs.config.outputs.build == 'true'
     runs-on: ubuntu-latest
-    # Note: Wheels are built for Python 3.10/3.11/3.12 and x86_64/arm64 (6 wheels total)
-    # However, Docker build and tests only use Python 3.10 x86_64 wheel
-    # Only the tested wheel (py310-x86_64) gets marked as "-verified" after tests pass
+    # Note: Wheels are built for Python 3.11-3.15 and x86_64/arm64 (10 wheels total)
+    # The Docker image runs Python 3.12 (Ubuntu 24.04) on x86_64, so the tests cover that wheel
+    # Only the tested wheel (py312-x86_64) gets marked as "-verified" after tests pass
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download TileGym wheel (Python 3.10, x86_64)
+      - name: Download TileGym wheel (Python 3.12, x86_64)
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build-wheel.outputs.artifact-name }}-py310-x86_64
+          name: ${{ needs.build-wheel.outputs.artifact-name }}-py312-x86_64
           path: ./wheel
 
       - name: Set image variables
@@ -263,15 +263,16 @@ jobs:
       (needs.build-wheel.result == 'success' || needs.build-wheel.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Python 3.10
+      # Lowest supported Python: dependency resolution differs most from the 3.12 Docker env here.
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Download wheel (Python 3.10, x86_64)
+      - name: Download wheel (Python 3.11, x86_64)
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build-wheel.outputs.artifact-name }}-py310-x86_64
+          name: ${{ needs.build-wheel.outputs.artifact-name }}-py311-x86_64
           path: ./wheel
 
       - name: pip check
@@ -1059,12 +1060,12 @@ jobs:
       needs.test-ops.result == 'success' &&
       needs.test-transformer-kernel-inventory.result == 'success' &&
       needs.test-benchmark.result == 'success'
-    # Note: Only marks the py310-x86_64 wheel as "verified" because that's the wheel
-    # actually tested in Docker. Other wheels (py311, py312, arm64) are available but unverified.
+    # Note: Only marks the py312-x86_64 wheel as "verified" because the Docker tests run on
+    # Python 3.12. Other wheels (py311, py313-py315, arm64) are available but unverified.
     uses: ./.github/workflows/publish-wheel.yml
     with:
       artifact-name: ${{ needs.build-wheel.outputs.artifact-name }}
-      python-versions: '["3.10"]'  # Only verify the wheel actually tested in Docker
+      python-versions: '["3.12"]'  # Only verify the wheel actually tested in Docker
       architectures: '["x86_64"]'  # Only verify the x86_64 wheel used in Docker tests
       retention-days: 30  # Verified wheel kept longer than initial builds (7 days)
       publish-to-pypi: false  # Set to true and add PYPI_TOKEN secret when ready

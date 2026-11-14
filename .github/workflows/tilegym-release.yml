@@ -41,7 +41,7 @@ jobs:
     with:
       artifact-workflow: tilegym-ci.yml
       # Match only the verified tilegym wheel artifacts, e.g.:
-      #   tilegym-wheel-<sha>-py310-x86_64-verified
+      #   tilegym-wheel-<sha>-py312-x86_64-verified
       #   tilegym-wheel-<sha>-py311-arm64-verified
       # Excludes tilegym-pr-wheel-* PR builds (leading tilegym-pr- won't match).
       artifact-pattern: '^tilegym-wheel-[0-9a-f]+-py[0-9]+-[a-z0-9_]+-verified$'

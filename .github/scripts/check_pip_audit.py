@@ -6,10 +6,10 @@
 """
 Gate a pip-audit JSON report.
 
-Every reported vulnerability fails the check, except those in packages passed as
-waived: they are still listed in the log and summarized as a warning, but do not fail.
+Every reported vulnerability fails the check. A missing or unreadable report, which is what a
+dependency resolution error leaves behind, fails it too.
 
-Usage: check_pip_audit.py <pip-audit JSON report> [waived-package ...]
+Usage: check_pip_audit.py <pip-audit JSON report>
 """
 
 import json
@@ -17,8 +17,10 @@ import sys
 
 
 def main():
-    report_path, *waived_args = sys.argv[1:]
-    waived_packages = {name.lower() for name in waived_args}
+    if len(sys.argv) != 2:
+        print("usage: check_pip_audit.py <pip-audit JSON report>", file=sys.stderr)
+        return 2
+    report_path = sys.argv[1]
 
     try:
         with open(report_path) as f:
@@ -27,25 +29,18 @@ def main():
         print(f"::error title=pip-audit::no usable report at {report_path} ({e}); see pip-audit output above")
         return 1
 
-    blocking, waived = [], []
+    blocking = []
     for dep in report["dependencies"]:
         for vuln in dep.get("vulns", []):
             fixes = ", ".join(vuln["fix_versions"]) or "none"
-            line = f"{dep['name']} {dep['version']} {vuln['id']} (fix: {fixes})"
-            (waived if dep["name"].lower() in waived_packages else blocking).append(line)
+            blocking.append(f"{dep['name']} {dep['version']} {vuln['id']} (fix: {fixes})")
 
     for line in blocking:
         print(f"BLOCKING  {line}")
-    for line in waived:
-        print(f"WAIVED    {line}")
-    if waived:
-        print(
-            f"::warning title=pip-audit::{len(waived)} vulnerabilities waived in: {', '.join(sorted(waived_packages))}"
-        )
     if blocking:
         print(f"::error title=pip-audit::{len(blocking)} blocking vulnerabilities")
         return 1
-    print(f"No blocking vulnerabilities ({len(waived)} waived)")
+    print("No blocking vulnerabilities")
     return 0
 
 
