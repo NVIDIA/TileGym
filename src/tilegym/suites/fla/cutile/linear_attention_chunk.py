@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import functools
+from types import SimpleNamespace
 
 import cuda.tile as ct
 import torch
@@ -13,8 +14,12 @@ from tilegym.suites.fla.cutile._host_utils import _segmented_arange
 from tilegym.suites.fla.cutile._host_utils import _sm_split_threshold
 from tilegym.suites.fla.cutile._host_utils import input_guard
 from tilegym.suites.fla.cutile._normalization import StatefulNormalizeFunction
+from tilegym.suites.fla.cutile._tuning import cached_exhaustive_search
+from tilegym.suites.fla.cutile._tuning import launch_hints
+from tilegym.suites.fla.cutile._tuning import prune_occupancy
+from tilegym.suites.fla.cutile._tuning import shape_bucket
 
-RCP_LN2 = 1.4426950216  # 1/ln(2), fla.ops.utils.constant.RCP_LN2
+RCP_LN2 = 1.4426950216  # 1/ln(2)
 
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
@@ -51,19 +56,7 @@ def _next_power_of_2(n: int) -> int:
 
 
 def _cdiv_kernel(a, b):
-    # In-kernel ceil-div over compile-time constants. Plain Python arithmetic on
-    # ConstInt is fine for static loop bounds.
     return (a + b - 1) // b
-
-
-# ===========================================================================
-# CuTile Kernels
-# ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# fla.ops.utils.cumsum -- local / global cumulative sum, scalar (3D) variants.
-# ---------------------------------------------------------------------------
 
 
 @ct.function
@@ -89,8 +82,7 @@ def chunk_local_cumsum_scalar_kernel(
 ):
     """Per-chunk inclusive cumulative sum along time (scalar / no feature dim).
 
-    grid = (NT, B * H). Layout is HEAD_FIRST=False ([B, T, H]) only -- the
-    linear-attn entry never uses head_first.
+    grid = (NT, B * H). Layout [B, T, H].
     """
     i_t = ct.bid(0)
     i_bh = ct.bid(1)
@@ -146,7 +138,7 @@ def chunk_local_cumsum_vector_kernel(
 ):
     """Per-chunk inclusive cumulative sum along time for a vector feature dim S.
 
-    grid = (cdiv(S, BS), NT, B * H). Layout [B, T, H, S] (head_first=False).
+    grid = (cdiv(S, BS), NT, B * H). Layout [B, T, H, S].
     """
     i_s = ct.bid(0)
     i_t = ct.bid(1)
@@ -319,14 +311,6 @@ def chunk_global_cumsum_vector_kernel(
         b_z = b_z + ct.sum(b_s, axis=0)
 
 
-# ---------------------------------------------------------------------------
-# fla.ops.common.chunk_h -- forward state h, backward state-gradient dh.
-# Layout: k,v are [B, T, H, K]/[B, T, H, V]; h is [B, NS, H, K, V]
-# (STATE_V_FIRST=False). USE_G/GK/GV and GQA paths are not reached by the
-# linear-attn entry, so they are omitted (see module header).
-# ---------------------------------------------------------------------------
-
-
 @ct.kernel
 def chunk_fwd_kernel_h(
     k,  # [B, T, H, K]
@@ -351,8 +335,8 @@ def chunk_fwd_kernel_h(
 ):
     """Forward chunk state recurrence: b_h += k_chunk^T @ v_chunk per chunk.
 
-    grid = (cdiv(K, BK), cdiv(V, BV), N * H). The state written for chunk i_t is
-    the running state BEFORE that chunk's contribution (prefix), matching fla.
+    grid = (cdiv(K, BK), cdiv(V, BV), N * H). The state stored for chunk i_t is
+    the running state before that chunk's contribution.
     """
     i_k = ct.bid(0)
     i_v = ct.bid(1)
@@ -360,8 +344,8 @@ def chunk_fwd_kernel_h(
     i_n = i_nh // H
     i_h = i_nh % H
 
-    # h is [B, NS, H, K, V]: dense -> (i_n, chunk_in_batch); varlen (B==1) ->
-    # (0, split_offsets[i_n] + chunk). BS == BT here so chunk_in_batch == i_t.
+    # h is [B, NS, H, K, V]: dense indexes (i_n, i_t); varlen (B == 1) indexes
+    # (0, split_offsets[i_n] + i_t).
     if IS_VARLEN:
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
@@ -380,7 +364,6 @@ def chunk_fwd_kernel_h(
 
     b_h = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
-        # h0 : [B, H, K, V]; load [BK, BV] block at tile (i_n, i_h, i_k, i_v).
         b_h0 = ct.load(h0, index=(i_n, i_h, i_k, i_v), shape=(1, 1, BK, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
             (BK, BV)
         )
@@ -389,7 +372,6 @@ def chunk_fwd_kernel_h(
     for i_t in range(NT):
         t_local = i_t * BT + ct.arange(BT, dtype=ct.int32)
         m_t = t_local < Tloc
-        # Store the running prefix state for this chunk (h: [B, NS, H, K, V]).
         o_chunk = boh + i_t
         ct.store(
             h,
@@ -397,10 +379,8 @@ def chunk_fwd_kernel_h(
             tile=ct.astype(b_h, h.dtype).reshape((1, 1, 1, BK, BV)),
         )
 
-        # b_k : [BK, BT]  (transposed),  b_v : [BT, BV]
-        # Batch block index is h_b (== i_n for dense, 0 for varlen/B==1). The
-        # slice on axis=1 only windows T, so the batch dim must be selected here
-        # rather than hardcoded to 0 (otherwise every batch reads batch 0's k/v).
+        # b_k : [BT, BK], b_v : [BT, BV]. The time slice only windows axis 1, so
+        # the batch index h_b must be selected here.
         b_k = ct.load(
             k_seg, index=(h_b, i_t, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
         ).reshape((BT, BK))
@@ -464,7 +444,7 @@ def chunk_bwd_kernel_dh(
     i_n = i_nh // H
     i_h = i_nh % H
 
-    # dh is [B, NS, H, K, V]: dense -> (i_n, chunk); varlen (B==1) -> (0, boh+chunk).
+    # dh is [B, NS, H, K, V]: dense indexes (i_n, i_t); varlen (B == 1) indexes (0, boh + i_t).
     if IS_VARLEN:
         bos = ct.gather(cu_seqlens, (i_n,), check_bounds=True, padding_value=0).item()
         eos = ct.gather(cu_seqlens, (i_n + 1,), check_bounds=True, padding_value=0).item()
@@ -523,13 +503,6 @@ def chunk_bwd_kernel_dh(
             index=(i_n, i_h, i_k, i_v),
             tile=ct.astype(b_dh, dh0.dtype).reshape((1, 1, BK, BV)),
         )
-
-
-# ---------------------------------------------------------------------------
-# fla.ops.common.chunk_o -- forward output o, backward dq/dk, backward dv.
-# Layout [B, T, H, *]; h is [B, NS, H, K, V]. HV == H, state_v_first=False,
-# USE_G=False for the linear-attn entry.
-# ---------------------------------------------------------------------------
 
 
 @ct.kernel(occupancy=2, num_worker_warps=4)
@@ -752,7 +725,6 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < Tloc
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
 
-    # no-gate branch
     b_ds = ct.where(m_A, b_ds, ct.zeros((BT, BT), dtype=ct.float32))
     b_dsk = ct.astype(b_ds, b_k.dtype)
     dsa = ct.astype(b_dsk, ct.tfloat32) if b_dsk.dtype == ct.float32 else b_dsk
@@ -899,9 +871,25 @@ def _normalization_product_kernel(Q, KC, P, SCALE: ct.Constant[float], BLOCK: Co
     ct.store(P, index=(block,), tile=product)
 
 
-# ===========================================================================
-# Host wrappers
-# ===========================================================================
+@ct.function
+def _normalization_backward_stages(dd, q, kc, scale):
+    """Return (ds, dq, dk), keeping the bf16 rounding after each eager-backward product."""
+    ds = ct.astype(ct.astype(dd, ct.float32) * scale, dd.dtype)
+    dq = ct.astype(ct.astype(ds, ct.float32) * ct.astype(kc, ct.float32), q.dtype)
+    dk = ct.astype(ct.astype(ds, ct.float32) * ct.astype(q, ct.float32), q.dtype)
+    return ds, dq, dk
+
+
+@ct.kernel
+def _normalization_backward_products_kernel(DD, Q, KC, DQ, DK, SCALE: ct.Constant[float], K: ConstInt, BLOCK: ConstInt):
+    """Fused normalization-backward dq = ds * k_cum and dk = ds * q over flat BLOCK chunks."""
+    idx = ct.bid(0) * BLOCK + ct.arange(BLOCK, dtype=ct.int32)
+    q = ct.gather(Q, (idx,), check_bounds=True, padding_value=0)
+    kc = ct.gather(KC, (idx,), check_bounds=True, padding_value=0)
+    dd = ct.gather(DD, (idx // K,), check_bounds=True, padding_value=0)
+    _, dq, dk = _normalization_backward_stages(dd, q, kc, ct.full((), SCALE, dtype=ct.float32))
+    ct.scatter(DQ, (idx,), dq, check_bounds=True)
+    ct.scatter(DK, (idx,), dk, check_bounds=True)
 
 
 @functools.lru_cache(maxsize=None)
@@ -917,11 +905,6 @@ def _dummy_int2(device):
 @functools.lru_cache(maxsize=None)
 def _dummy_state(device, dtype):
     return torch.zeros(1, 1, 1, 1, device=device, dtype=dtype)
-
-
-# ---------------------------------------------------------------------------
-# Cumsum wrappers (fla.ops.utils.cumsum)
-# ---------------------------------------------------------------------------
 
 
 def chunk_local_cumsum_scalar(
@@ -1162,19 +1145,18 @@ def chunk_local_cumsum(
         raise ValueError(f"Unsupported input shape {g.shape}")
 
 
-# ---------------------------------------------------------------------------
-# chunk_h wrappers (fla.ops.common.chunk_h)
-# ---------------------------------------------------------------------------
-
-
 def _tile_kv(K, V):
     BK = min(max(_next_power_of_2(K), 16), 128)
     BV = min(max(_next_power_of_2(V), 16), 128)
     return BK, BV
 
 
+def _is_sm12x(device):
+    return torch.cuda.get_device_capability(device)[0] == 12
+
+
 def _state_tile_kv(K, V, groups, device):
-    """Split independent state tiles when the wider grid fits within one SM wave."""
+    """Return the (BK, BV) state tile, halved when the split grid still fits the SM count."""
     BK, BV = _tile_kv(K, V)
     split_k, split_v = max(16, BK // 2), max(16, BV // 2)
     blocks = _cdiv(K, BK) * _cdiv(V, BV) * groups
@@ -1184,6 +1166,16 @@ def _state_tile_kv(K, V, groups, device):
     except Exception:
         return BK, BV
     return (split_k, split_v) if blocks < split_blocks <= sm_count else (BK, BV)
+
+
+BKV_LIST_H = (32, 64)
+
+
+def _state_tile_configs(K, V, base):
+    """State-kernel launch candidates: the heuristic tile first, then the BKV_LIST_H tiles."""
+    kp, vp = max(16, _next_power_of_2(K)), max(16, _next_power_of_2(V))
+    tiles = [base] + [(bk, bv) for bk in BKV_LIST_H for bv in BKV_LIST_H if bk <= kp and bv <= vp]
+    return tuple(dict.fromkeys(tiles))
 
 
 def chunk_fwd_h(
@@ -1218,6 +1210,8 @@ def chunk_fwd_h(
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
 
     BK, BV = _state_tile_kv(K, V, N * H, k.device)
+    if state_fp32_dot and _is_sm12x(k.device):
+        BK = min(BK, 64)
 
     if (
         k.dtype == v.dtype == torch.bfloat16
@@ -1241,12 +1235,8 @@ def chunk_fwd_h(
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_int(k.device)
     so_arg = split_offsets.to(torch.int32) if is_varlen else _dummy_int(k.device)
 
-    grid = (_cdiv(K, BK), _cdiv(V, BV), N * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_fwd_kernel_h,
-        (
+    def _args(bk, bv):
+        return (
             k,
             v,
             h,
@@ -1259,15 +1249,51 @@ def chunk_fwd_h(
             K,
             V,
             BT,
-            BK,
-            BV,
+            bk,
+            bv,
             use_h0,
             store_ht,
             is_varlen,
             bool(k.dtype is torch.float32),  # USE_IEEE_DOT
             bool(state_fp32_dot),  # STATE_FP32
-        ),
-    )
+        )
+
+    def _grid(bk, bv):
+        return (_cdiv(K, bk), _cdiv(V, bv), N * H)
+
+    if state_fp32_dot:
+        ct.launch(torch.cuda.current_stream(), _grid(BK, BV), chunk_fwd_kernel_h, _args(BK, BV))
+    else:
+        cache_key = (
+            "chunk_fwd_kernel_h",
+            shape_bucket(N),
+            shape_bucket(T),
+            H,
+            K,
+            V,
+            BT,
+            use_h0,
+            store_ht,
+            is_varlen,
+            str(k.dtype),
+            str(h.dtype),
+        )
+        stream = torch.cuda.current_stream()
+        configs = [
+            SimpleNamespace(BK=bk, BV=bv, hints=h)
+            for bk, bv in _state_tile_configs(K, V, (BK, BV))
+            for h in launch_hints()
+        ]
+        cfg, kernel = cached_exhaustive_search(
+            prune_occupancy(configs, lambda c: _grid(c.BK, c.BV)),
+            stream,
+            lambda c: _grid(c.BK, c.BV),
+            chunk_fwd_kernel_h,
+            lambda c: _args(c.BK, c.BV),
+            lambda c: c.hints,
+            cache_key=cache_key,
+        )
+        ct.launch(stream, _grid(cfg.BK, cfg.BV), kernel, _args(cfg.BK, cfg.BV))
     return h, ht
 
 
@@ -1317,12 +1343,8 @@ def chunk_bwd_dh(
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_int(k.device)
     so_arg = split_offsets.to(torch.int32) if is_varlen else _dummy_int(k.device)
 
-    grid = (_cdiv(K, BK), _cdiv(V, BV), N * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_bwd_kernel_dh,
-        (
+    def _args(bk, bv):
+        return (
             q,
             do,
             dh,
@@ -1336,30 +1358,59 @@ def chunk_bwd_dh(
             K,
             V,
             BT,
-            BK,
-            BV,
+            bk,
+            bv,
             store_dh0,
             use_dht,
             is_varlen,
-        ),
+        )
+
+    def _grid(bk, bv):
+        return (_cdiv(K, bk), _cdiv(V, bv), N * H)
+
+    cache_key = (
+        "chunk_bwd_kernel_dh",
+        shape_bucket(N),
+        shape_bucket(T),
+        H,
+        K,
+        V,
+        BT,
+        store_dh0,
+        use_dht,
+        is_varlen,
+        str(q.dtype),
+        str(dh.dtype),
     )
+    stream = torch.cuda.current_stream()
+    configs = [
+        SimpleNamespace(BK=bk, BV=bv, hints=h) for bk, bv in _state_tile_configs(K, V, (BK, BV)) for h in launch_hints()
+    ]
+    cfg, kernel = cached_exhaustive_search(
+        prune_occupancy(configs, lambda c: _grid(c.BK, c.BV)),
+        stream,
+        lambda c: _grid(c.BK, c.BV),
+        chunk_bwd_kernel_dh,
+        lambda c: _args(c.BK, c.BV),
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, _grid(cfg.BK, cfg.BV), kernel, _args(cfg.BK, cfg.BV))
     return dh, dh0
 
 
-# ---------------------------------------------------------------------------
-# chunk_o wrappers (fla.ops.common.chunk_o)
-# ---------------------------------------------------------------------------
-
-
-# Cache the occupancy-4 `replace_hints` variant of chunk_fwd_kernel_o (its JIT
-# cache lives on the hinted-kernel object, so reuse one instance per process).
+# The JIT cache lives on the hinted-kernel object, so reuse one instance per process.
 @functools.lru_cache(maxsize=None)
 def _o_kernel_occ4():
     return chunk_fwd_kernel_o.replace_hints(occupancy=4)
 
 
+@functools.lru_cache(maxsize=None)
+def _o_kernel_sm12x_fp32_state():
+    return chunk_fwd_kernel_o.replace_hints(occupancy=1, num_worker_warps=8)
+
+
 def _o_kernel_for_tile(BK, BV):
-    # Larger tiles retain the default occupancy to limit register spills.
     if BK == 64 and BV == 64:
         return _o_kernel_occ4()
     return chunk_fwd_kernel_o
@@ -1394,6 +1445,10 @@ def chunk_fwd_o(
     o = torch.empty_like(v, dtype=out_dtype) if out_dtype is not None else torch.empty_like(v)
 
     BK, BV = _tile_kv(K, V)
+    kernel = _o_kernel_for_tile(BK, BV)
+    if state_fp32_dot and _is_sm12x(q.device):
+        BK, BV = min(BK, 64), min(BV, 128 if V > 128 else 64)
+        kernel = _o_kernel_sm12x_fp32_state()
     is_varlen = cu_seqlens is not None
     cu_arg = cu_seqlens.to(torch.int32) if is_varlen else _dummy_int(q.device)
     ci_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_int2(q.device)
@@ -1402,7 +1457,7 @@ def chunk_fwd_o(
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        _o_kernel_for_tile(BK, BV),
+        kernel,
         (
             q,
             k,
@@ -1458,29 +1513,31 @@ def chunk_bwd_dv(
     ci_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_int2(q.device)
 
     grid = (_cdiv(V, BV), NT, B * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_bwd_kernel_dv,
-        (
-            q,
-            k,
-            do,
-            dv,
-            dh,
-            cu_arg,
-            ci_arg,
-            float(scale),
-            T,
-            H,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            is_varlen,
-        ),
+    args = (q, k, do, dv, dh, cu_arg, ci_arg, float(scale), T, H, K, V, BT, BK, BV, is_varlen)
+    cache_key = (
+        "chunk_bwd_kernel_dv",
+        shape_bucket(B * NT),
+        H,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        is_varlen,
+        str(q.dtype),
+        str(dh.dtype),
     )
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_bwd_kernel_dv,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, grid, kernel, args)
     return dv
 
 
@@ -1522,38 +1579,32 @@ def chunk_bwd_dqkwg(
     ci_arg = chunk_indices.to(torch.int32) if is_varlen else _dummy_int2(q.device)
 
     grid = (_cdiv(K, BK), NT, B * H)
-    ct.launch(
-        torch.cuda.current_stream(),
-        grid,
-        chunk_bwd_kernel_dqkwg,
-        (
-            q,
-            k,
-            v,
-            h,
-            do,
-            dh,
-            dq,
-            dk,
-            cu_arg,
-            ci_arg,
-            float(scale),
-            T,
-            H,
-            K,
-            V,
-            BT,
-            BK,
-            BV,
-            is_varlen,
-        ),
+    args = (q, k, v, h, do, dh, dq, dk, cu_arg, ci_arg, float(scale), T, H, K, V, BT, BK, BV, is_varlen)
+    cache_key = (
+        "chunk_bwd_kernel_dqkwg",
+        shape_bucket(B * NT),
+        H,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        is_varlen,
+        str(q.dtype),
+        str(h.dtype),
     )
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_bwd_kernel_dqkwg,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, grid, kernel, args)
     return dq, dk, None, None
-
-
-# ===========================================================================
-# fla.ops.simple_gla.chunk -- forward/backward orchestration (pure PyTorch)
-# ===========================================================================
 
 
 def chunk_simple_gla_fwd(
@@ -1812,11 +1863,6 @@ def chunk_simple_gla(
     return o, final_state
 
 
-# ===========================================================================
-# fla.ops.linear_attn.utils -- running normalization (pure PyTorch)
-# ===========================================================================
-
-
 def _normalization_product_or_eager(o, q, k_cum, scale, cu_seqlens, z_init, reverse):
     if (
         q.dtype == k_cum.dtype == o.dtype == torch.bfloat16
@@ -1882,6 +1928,35 @@ def _normalization_divide_or_eager(o, s, cu_seqlens, z_init, reverse):
     return o / denom, denom
 
 
+def _normalization_backward_products_or_eager(ddenom, q, k_cum, scale, cu_seqlens, has_z_init):
+    """Return the normalization-backward (dq, dk) products.
+
+    Inputs outside the fused-kernel guard use the eager PyTorch expressions.
+    """
+    if (
+        q.dtype == k_cum.dtype == ddenom.dtype == torch.bfloat16
+        and q.shape == k_cum.shape
+        and q.ndim == 4
+        and q.shape[-1] > 0
+        and ddenom.shape == q.shape[:-1] + (1,)
+        and 0 < q.numel() <= 2147483647
+        and all(t.is_contiguous() and t.data_ptr() % 16 == 0 for t in (q, k_cum, ddenom))
+        and cu_seqlens is None
+        and not has_z_init
+        and torch.cuda.get_device_capability(q.device)[0] == 10
+    ):
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(q)
+        ct.launch(
+            torch.cuda.current_stream(),
+            (_cdiv(q.numel(), 1024),),
+            _normalization_backward_products_kernel,
+            (ddenom.view(-1), q.view(-1), k_cum.view(-1), dq.view(-1), dk.view(-1), float(scale), q.shape[-1], 1024),
+        )
+        return dq, dk
+    return ddenom * scale * k_cum, ddenom * scale * q
+
+
 def normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens):
     """Apply running normalization Z_t = sum_{s<=t} k_s (or sum_{s>=t} for reverse)."""
     return StatefulNormalizeFunction.apply(
@@ -1895,12 +1970,8 @@ def normalize_with_z_state(o, q, k, scale, z_init, reverse, cu_seqlens):
         chunk_global_cumsum,
         _normalization_product_or_eager,
         _normalization_divide_or_eager,
+        _normalization_backward_products_or_eager,
     )
-
-
-# ===========================================================================
-# fla.ops.linear_attn.chunk (entry)
-# ===========================================================================
 
 
 @register_impl("fla.linear_attention_chunk", backend="cutile")
@@ -1915,8 +1986,7 @@ def chunk_linear_attn(
     normalize: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""Chunked linear attention. Behavior identical to
-    ``fla.ops.linear_attn.chunk.chunk_linear_attn`` (cuTile backend)."""
+    """Chunked linear attention."""
     if normalize and isinstance(initial_state, tuple):
         kv_init, z_init = initial_state
     else:

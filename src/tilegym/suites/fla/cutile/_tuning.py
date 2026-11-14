@@ -4,26 +4,23 @@
 
 import functools
 import logging
-from types import SimpleNamespace
 
 import torch
 
 from tilegym.autotune import is_autotune_disabled
 from tilegym.suites.fla.cutile._host_utils import device_cache_key
 
-STATE_HINT_PAIRS = ((1, 4), (2, 4), (4, 4), (1, 8), (2, 8))
-OUTPUT_HINT_PAIRS = ((4, 4), (2, 4), (1, 4), (4, 8), (1, 8))
-
 logger = logging.getLogger(__name__)
-_cache = {}
 
 
-def hint_configs(occupancies, warps=(4, 8)):
-    return [
-        SimpleNamespace(occupancy=o, num_worker_warps=w)
-        for o in dict.fromkeys(occupancies)
-        for w in dict.fromkeys(warps)
-    ]
+def shape_bucket(n):
+    """Power-of-two regime bucket for sequence/batch extents in tuning keys.
+
+    Tile and launch-hint choices are valid for any extent, so equivalent
+    workloads share one search instead of re-tuning every raw length.
+    """
+    n = max(int(n), 1)
+    return 1 << (n - 1).bit_length()
 
 
 def output_tile_configs(K, V):
@@ -64,51 +61,74 @@ def _runtime():
     return ct, exhaustive_search
 
 
-def tune_launch(kernel, stream, grid_fn, args_fn, configs, cache_key, *, timeout=60, config_key=None):
-    """Cache successful searches; build lazy candidates only on a miss.
+def _freeze(value):
+    """Hashable identity for candidate fields (``hints`` dicts included)."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    return value
 
-    Lazy candidates require a complete immutable config_key. Eager candidates
-    derive their identity from candidate values. Failures use the first
-    candidate's grid/arguments without caching a fallback.
+
+def launch_hints(*, occupancy=(1, 2, 4), num_worker_warps=(4, 8)):
+    """Launch-hint candidates: every occupancy x num_worker_warps pair, as ``replace_hints`` kwargs.
+
+    Occupancy-major order, so the first entry (lowest occupancy, fewest warps) is
+    the one used when autotune is disabled or the search fails.
     """
-    lazy = callable(configs)
-    if lazy and config_key is None:
-        raise ValueError("Lazy launch configurations require config_key")
-    if not lazy and not configs:
+    return tuple(dict(occupancy=o, num_worker_warps=w) for o in occupancy for w in num_worker_warps)
+
+
+def prune_occupancy(configs, grid_fn, num_sms=None):
+    """Drop candidates whose occupancy hint cannot take effect for their grid.
+
+    An occupancy of ``o`` only lets an SM hold ``o`` CTAs at once if the grid has
+    more than ``(o - 1) * num_sms`` CTAs; with fewer CTAs it can only lower the
+    per-thread register budget, never raise concurrency. Candidates without a
+    ``hints["occupancy"]`` (or with occupancy 1) are always kept.
+    """
+    if num_sms is None:
+        num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    kept = []
+    for cfg in configs:
+        occupancy = getattr(cfg, "hints", {}).get("occupancy", 1)
+        ctas = 1
+        for extent in grid_fn(cfg):
+            ctas *= extent
+        if occupancy <= 1 or ctas > (occupancy - 1) * num_sms:
+            kept.append(cfg)
+    return kept
+
+
+_search_cache = {}
+
+
+def cached_exhaustive_search(search_space, stream, grid_fn, kernel, args_fn, hints_fn=None, *, cache_key, timeout=60):
+    """``cuda.tile.tune.exhaustive_search`` with a per-device result cache.
+
+    Same arguments as ``exhaustive_search`` plus ``cache_key``. Returns
+    ``(config, kernel)``: the best candidate and ``kernel`` with its hints
+    applied (``replace_hints(**hints_fn(config))``). The caller launches it with
+    ``ct.launch(stream, grid_fn(config), kernel, args_fn(config))``.
+
+    When autotune is disabled, or the search fails, returns the first candidate
+    with the unmodified kernel; failures are not cached so a later call retries.
+    """
+    search_space = list(search_space)
+    if not search_space:
         raise ValueError("At least one launch configuration is required")
-    ct, search = _runtime()
-    disabled = is_autotune_disabled()
-    if not disabled:
-        if config_key is None:
-            config_key = tuple(tuple(sorted(vars(c).items())) for c in configs)
-        key = (kernel, device_cache_key(), cache_key, config_key)
-        chosen = _cache.get(key)
-        if chosen is not None:
-            tuned, cfg = chosen
-            ct.launch(stream, grid_fn(cfg), tuned, args_fn(cfg))
-            return
-    candidates = configs() if lazy else configs
-    if not candidates:
-        raise ValueError("At least one launch configuration is required")
-    if disabled:
-        ct.launch(stream, grid_fn(candidates[0]), kernel, args_fn(candidates[0]))
-        return
-    try:
-        _ensure_cuda_context()
-        with ct.compiler_timeout(timeout):
-            result = search(
-                candidates,
-                stream,
-                grid_fn,
-                kernel,
-                args_fn,
-                lambda c: {"occupancy": c.occupancy, "num_worker_warps": c.num_worker_warps},
-            )
+    if is_autotune_disabled():
+        return search_space[0], kernel
+    space_id = tuple(_freeze(vars(c)) for c in search_space)
+    key = (kernel, device_cache_key(), cache_key, space_id)
+    entry = _search_cache.get(key)
+    if entry is None:
+        ct, search = _runtime()
+        try:
+            _ensure_cuda_context()
+            with ct.compiler_timeout(timeout):
+                result = search(search_space, stream, grid_fn, kernel, args_fn, hints_fn, quiet=True)
+        except Exception:
+            logger.warning("FLA launch tuning failed; using the first configuration for this call", exc_info=True)
+            return search_space[0], kernel
         best = result.best.config
-        tuned = kernel.replace_hints(occupancy=best.occupancy, num_worker_warps=best.num_worker_warps)
-    except Exception:
-        logger.warning("FLA launch tuning failed; using the base kernel for this call", exc_info=True)
-        ct.launch(stream, grid_fn(candidates[0]), kernel, args_fn(candidates[0]))
-        return
-    _cache[key] = (tuned, best)
-    ct.launch(stream, grid_fn(best), tuned, args_fn(best))
+        entry = _search_cache[key] = (best, kernel.replace_hints(**hints_fn(best)) if hints_fn else kernel)
+    return entry

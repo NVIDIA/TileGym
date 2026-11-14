@@ -24,38 +24,10 @@ except ImportError:
     ) from None
 
 
-def _apply_cutile_launch_timeout_override():
-    """Raise cuda.tile's autotune launch-timeout budget when requested via env.
-
-    cuda-tile's exhaustive_search() benchmarks each candidate config in a
-    watchdog subprocess whose wall-clock budget starts at
-    _MAX_DYNAMIC_LAUNCH_TIMEOUT_SEC (hardcoded 5.0s upstream, no env knob).
-    On heavily loaded CI nodes (many pytest-xdist workers sharing one GPU),
-    subprocess CUDA-context init + JIT compile + launch can exceed 5s for
-    perfectly valid configs, so every config dies with TileLaunchTimeoutError
-    and exhaustive_search raises "No valid config found in search space".
-
-    CUTILE_MAX_LAUNCH_TIMEOUT_SEC=<float> patches the module constant before
-    any autotune runs. Runs in every xdist worker (conftest is imported per
-    worker). No-op when the env var is unset or cuda.tile is unavailable.
-    """
-    timeout_override = os.getenv("CUTILE_MAX_LAUNCH_TIMEOUT_SEC")
-    if not timeout_override:
-        return
-    try:
-        from cuda.tile.tune import _tune as _cutile_tune
-    except ImportError:
-        return
-    if hasattr(_cutile_tune, "_MAX_DYNAMIC_LAUNCH_TIMEOUT_SEC"):
-        _cutile_tune._MAX_DYNAMIC_LAUNCH_TIMEOUT_SEC = float(timeout_override)
-
-
 def pytest_configure(config):
     """Register custom markers"""
     if config.getoption("--run-full"):
         os.environ["RUN_FULL_TEST"] = "1"
-
-    _apply_cutile_launch_timeout_override()
 
     config.addinivalue_line("markers", "interpreter: indicate whether interpreter supports the test")
     config.addinivalue_line("markers", "slow: indicate whether the test is in slow CI pipeline")
@@ -119,8 +91,22 @@ def framework(request):
     return request.config.getoption("--framework")
 
 
+def _drop_inapplicable_cudagraph_markers(items):
+    """disable_cudagraph(backends=[...]) applies only to items whose backend parameter is listed."""
+    for item in items:
+        marker = item.get_closest_marker("disable_cudagraph")
+        backends = marker.kwargs.get("backends") if marker else None
+        if backends is None:
+            continue
+        callspec = getattr(item, "callspec", None)
+        if callspec is not None and callspec.params.get("backend") in backends:
+            continue
+        item.own_markers = [mark for mark in item.own_markers if mark.name != "disable_cudagraph"]
+
+
 def pytest_collection_modifyitems(config, items):
     """Filter test items based on various parameters"""
+    _drop_inapplicable_cudagraph_markers(items)
 
     def try_get_option(config, option_name):
         try:

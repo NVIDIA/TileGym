@@ -31,13 +31,21 @@ def _requested_submodules(config) -> list[str]:
 
 def pytest_generate_tests(metafunc):
     if {"workload_record", "definition_path", "solution_path"}.issubset(metafunc.fixturenames):
+        from tests.kernel_inventory.kernel_runtime_utils import _kernel_submodule_root
         from tests.kernel_inventory.kernel_runtime_utils import workload_runtime_cases_for_submodule
 
         submodules = _requested_submodules(metafunc.config)
         if not submodules:
             cases = workload_runtime_cases_for_submodule(None)
         else:
-            cases = []
+            # Different spellings (``fla`` vs ``src/tilegym/suites/fla``) can name
+            # the same directory; select each directory once.
+            roots = []
             for submodule in submodules:
-                cases.extend(workload_runtime_cases_for_submodule(submodule))
+                root = _kernel_submodule_root(submodule).resolve()
+                if root not in roots:
+                    roots.append(root)
+            cases = []
+            for root in roots:
+                cases.extend(workload_runtime_cases_for_submodule(root))
         metafunc.parametrize(("workload_record", "definition_path", "solution_path"), cases)

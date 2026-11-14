@@ -14,14 +14,40 @@ from contextlib import nullcontext
 
 import torch
 
-GRAPH_PROTOCOL = "cuda-graph-cold-span-v4"
-EAGER_PROTOCOL = "cuda-eager-cold-span-v2"
+GRAPH_PROTOCOL = "cuda-graph-cold-span-v5"
+EAGER_PROTOCOL = "cuda-eager-cold-span-v3"
 FLUSH_BYTES = 256_000_000
 GRAPH_REPEATS = 8
+
+
+def _pacing_ms(name, default, zero_ok=False):
+    """Returns the millisecond value of environment variable name, or default when unset.
+
+    The value must be positive, or zero as well when zero_ok, which disables the feature.
+    """
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        ms = float(value)
+    except ValueError:
+        ms = math.nan
+    if not math.isfinite(ms) or ms < 0 or (ms == 0 and not zero_ok):
+        kind = "a non-negative" if zero_ok else "a positive"
+        raise ValueError(f"{name} must be {kind} number of milliseconds, got {value!r}")
+    return ms
+
+
 # Power capping lowers clocks after about 40 ms of continuous load on B200, and a
-# saturated GPU needs about 100 ms idle to recover.
-POWER_BURST_MS = 30.0
-POWER_REST_MS = 100.0
+# saturated GPU needs about 100 ms idle to recover. GPUs with a shorter uncapped
+# window take a shorter burst from the environment.
+POWER_BURST_MS = _pacing_ms("TILEGYM_POWER_BURST_MS", 30.0)
+POWER_REST_MS = _pacing_ms("TILEGYM_POWER_REST_MS", 100.0)
+# After a rest the clock takes a few milliseconds of work to settle, so the
+# samples covering that much work are run but not recorded; 0 disables it.
+POWER_SETTLE_MS = _pacing_ms("TILEGYM_POWER_SETTLE_MS", 2.0, zero_ok=True)
+# Only work long enough to draw power moves the clock; shorter replays skip settling.
+POWER_SETTLE_MIN_REPLAY_MS = 0.2
 
 TELEMETRY_ENV = "TILEGYM_SAMPLE_TELEMETRY"
 TELEMETRY_MAX_READS = 64
@@ -252,12 +278,28 @@ class _PowerPacer:
         self.rests = 0
 
     def admit(self, duration_ms):
-        if self.busy_ms and self.busy_ms + duration_ms > POWER_BURST_MS:
+        rested = bool(self.busy_ms) and self.busy_ms + duration_ms > POWER_BURST_MS
+        if rested:
             torch.cuda.synchronize()
             time.sleep(POWER_REST_MS / 1000)
             self.busy_ms = 0.0
             self.rests += 1
         self.busy_ms += duration_ms
+        return rested
+
+    def settle_count(self, sample_ms, replay_ms):
+        """Number of unrecorded samples run after each rest before a timed sample.
+
+        Only power-dense replays move the clock, and the settle samples plus the
+        timed one must fit the burst, so short replays and samples longer than
+        half a burst settle with none and the count never exceeds the burst
+        budget. Settle time counts whole samples, preparation included, which
+        bounds the count for short kernels.
+        """
+        if POWER_SETTLE_MS <= 0 or replay_ms < POWER_SETTLE_MIN_REPLAY_MS or 2 * sample_ms > POWER_BURST_MS:
+            return 0
+        sample_ms = max(sample_ms, replay_ms)
+        return min(math.ceil(POWER_SETTLE_MS / sample_ms), math.floor(POWER_BURST_MS / sample_ms) - 1)
 
 
 class _CapturedCall:
@@ -333,35 +375,80 @@ class _CapturedCall:
 
     def profile_samples(self, count, calls=None, telemetry=True, pacer=None, sample_ms=0.0, replay_ms=None):
         calls = [self] if calls is None else calls
-        telemetry = _DeviceTelemetry(enabled=telemetry)
-        stride = _telemetry_stride(count)
         # Gate on the replay alone: sample_ms also holds the preparation, which does
         # not overlap the read.
         replay_ms = sample_ms if replay_ms is None else replay_ms
-        per_sample = telemetry.handle is not None and replay_ms >= TELEMETRY_MIN_SAMPLE_MS
-        readings = []
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
-        ) as prof:
-            # Boundary counters bracket the sample loop alone, so the limiter fractions
-            # describe the timed work and its rests, not profiler start-up or parsing.
-            counters_start = telemetry.counters()
-            for index in range(count):
-                call = calls[index % len(calls)]
-                if pacer is not None:
-                    pacer.admit(sample_ms)
-                with call.input_context():
-                    call.prepare()
-                    torch.cuda.synchronize()
-                    with torch.profiler.record_function("tilegym.graph.sample"):
+        samples, self.settle_samples = _profile_schedule(
+            calls,
+            [index % len(calls) for index in range(count)],
+            [sample_ms] * len(calls),
+            [replay_ms] * len(calls),
+            telemetry=telemetry,
+            pacer=pacer,
+        )
+        return samples
+
+
+def _profile_schedule(calls, schedule, sample_ms, replay_ms, telemetry=True, pacer=None, settle_switches=False):
+    """Time one replay of calls[i] for every i in schedule, in that order, in one profiler session.
+
+    sample_ms and replay_ms hold each call's estimated sample and replay durations.
+    With settle_switches, a call that follows a different call in the schedule
+    first runs its settle samples, as it does after a rest: the work that ran
+    just before a sample moves its clock the way a rest does.
+    Returns the samples in schedule order and the number of settle samples run.
+    """
+    telemetry = _DeviceTelemetry(enabled=telemetry)
+    count = len(schedule)
+    stride = _telemetry_stride(count)
+    per_sample = [telemetry.handle is not None and ms >= TELEMETRY_MIN_SAMPLE_MS for ms in replay_ms]
+    readings = []
+    settle_samples = 0
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    ) as prof:
+        # Boundary counters bracket the sample loop alone, so the limiter fractions
+        # describe the timed work and its rests, not profiler start-up or parsing.
+        counters_start = telemetry.counters()
+        settle_counts = [
+            pacer.settle_count(sample, replay) if pacer is not None else 0
+            for sample, replay in zip(sample_ms, replay_ms)
+        ]
+        for index, which in enumerate(schedule):
+            call = calls[which]
+            switched = settle_switches and index > 0 and schedule[index - 1] != which
+            # A switch admits its settle samples together with the timed one, so a
+            # rest falls before them, not between them and the timed sample.
+            admitted_ms = sample_ms[which] * (1 + settle_counts[which] if switched else 1)
+            rested = pacer is not None and pacer.admit(admitted_ms)
+            if rested or switched:
+                # The settle samples fit the burst (settle_count guarantees it),
+                # so they only charge the pacer and cannot be cut by a rest.
+                for _ in range(settle_counts[which]):
+                    with call.input_context():
+                        call.prepare()
+                        torch.cuda.synchronize()
                         call.graph.replay()
-                        if per_sample and index % stride == 0:
-                            readings.append((index, telemetry.read()))
                         torch.cuda.current_stream().synchronize()
-            counters_end = telemetry.counters()
-        samples = _profile_graph_samples(prof.profiler.kineto_results.events(), count, len(calls))
-        block = _telemetry_block(telemetry, counters_start, counters_end) if telemetry.handle else None
-        return _attach_telemetry(samples, readings, telemetry.status, block)
+                    if not switched:
+                        pacer.busy_ms += sample_ms[which]
+                settle_samples += settle_counts[which]
+            with call.input_context():
+                call.prepare()
+                torch.cuda.synchronize()
+                with torch.profiler.record_function("tilegym.graph.sample"):
+                    call.graph.replay()
+                    if per_sample[which] and index % stride == 0:
+                        readings.append((index, telemetry.read()))
+                    torch.cuda.current_stream().synchronize()
+        counters_end = telemetry.counters()
+    samples = _profile_samples(
+        prof.profiler.kineto_results.events(), count, "tilegym.graph.sample", _GRAPH_LAUNCHES.__contains__, "CUDA Graph"
+    )
+    for sample, which in zip(samples, schedule):
+        sample["graph_index"] = which
+    block = _telemetry_block(telemetry, counters_start, counters_end) if telemetry.handle else None
+    return _attach_telemetry(samples, readings, telemetry.status, block), settle_samples
 
 
 _GRAPH_LAUNCHES = ("cudaGraphLaunch", "cudaGraphLaunch_ptsz", "cuGraphLaunch", "cuGraphLaunch_ptsz")
@@ -413,13 +500,6 @@ def _profile_samples(events, count, scope_name, is_launch, kind):
                 "activities": [{"name": name, "duration_us": (end - start) / 1000} for start, end, name in selected],
             }
         )
-    return samples
-
-
-def _profile_graph_samples(events, count, graph_count):
-    samples = _profile_samples(events, count, "tilegym.graph.sample", _GRAPH_LAUNCHES.__contains__, "CUDA Graph")
-    for index, sample in enumerate(samples):
-        sample["graph_index"] = index % graph_count
     return samples
 
 
@@ -613,6 +693,7 @@ def benchmark_cuda_graph(
                 "graph_mean_std_ms": graph_std,
                 "graph_mean_rel_std": 100 * graph_std / mean if mean else 0,
                 "power_rests": pacer.rests - initial_rests,
+                "settle_samples": call.settle_samples,
             }
         )
         return result
@@ -631,12 +712,15 @@ def benchmark_eager(
     setup_fn=None,
     kernel_filter=None,
     collect_kernel_times=False,
+    telemetry=True,
+    pacer=None,
 ):
     """Measure cold-cache device spans of direct launches, for work that cannot be captured.
 
     Samples follow benchmark_cuda_graph: setup and the cache flush run before
     each sample, a sample spans its first to last GPU activity, including the
-    host-staged copies its launches issue, and work is paced the same way.
+    host-staged copies its launches issue, and work is paced the same way,
+    with the same optional shared pacer and telemetry switch.
     """
     _check_budget(warmup, rep, min_rep, initial_rep, max_rep)
     dtype = torch.int32 if fast_flush else torch.int8
@@ -662,7 +746,8 @@ def benchmark_eager(
         end.synchronize()
         return start.elapsed_time(end), begin.elapsed_time(start)
 
-    pacer = _PowerPacer()
+    pacer = pacer if pacer is not None else _PowerPacer()
+    initial_rests = pacer.rests
     pacer.admit(sample()[0])
     calibration_ms, prepare_ms = 0.0, []
     for calibration_count in range(1, initial_rep + 1):
@@ -681,7 +766,7 @@ def benchmark_eager(
         fn()
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    telemetry = _DeviceTelemetry()
+    telemetry = _DeviceTelemetry(enabled=telemetry)
     stride = _telemetry_stride(n_repeat)
     per_sample = telemetry.handle is not None and estimate >= TELEMETRY_MIN_SAMPLE_MS
     readings = []
@@ -689,8 +774,16 @@ def benchmark_eager(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     ) as prof:
         counters_start = telemetry.counters()
+        settle_count = pacer.settle_count(sample_ms, estimate)
+        settle_samples = 0
         for index in range(n_repeat):
-            pacer.admit(sample_ms)
+            if pacer.admit(sample_ms):
+                for _ in range(settle_count):
+                    prepare()
+                    fn()
+                    torch.cuda.synchronize()
+                    pacer.busy_ms += sample_ms
+                settle_samples += settle_count
             prepare()
             torch.cuda.synchronize()
             with torch.profiler.record_function("tilegym.eager.sample"):
@@ -710,11 +803,13 @@ def benchmark_eager(
     block = _telemetry_block(telemetry, counters_start, counters_end) if telemetry.handle else None
     _attach_telemetry(profiled, readings, telemetry.status, block)
     result = _summarize(profiled, kernel_filter, EAGER_PROTOCOL, collect_kernel_times, "eager")[0]
-    result["power_rests"] = pacer.rests
+    result["power_rests"] = pacer.rests - initial_rests
+    result["settle_samples"] = settle_samples
     return result
 
 
-def autotune_cutile_cuda_graph(stream, grid, kernel, args):
+def autotune_cutile_cuda_graph(stream, grid, kernel, args, flush_l2=None):
+    # cuda.tile >= 1.7 passes flush_l2; the captured-graph span protocol owns cache handling.
     import cuda.tile as ct
 
     # Upstream owns warmup; each callback must launch once on its prepared inputs.

@@ -36,11 +36,12 @@ from tests.kernel_inventory.kernel_runtime_utils import installed_reference_modu
 from tests.kernel_inventory.kernel_runtime_utils import materialize_workload_inputs
 from tests.kernel_inventory.kernel_runtime_utils import run_definition_solution_workload_runtime
 from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
+from tilegym.kernel_inventory.schema import ToleranceSpec
 from tilegym.kernel_inventory.schema import Workload
 from tilegym.kernel_inventory.workloads import WorkloadRecord
 
 
-def _workload_record(tmp_path, *, inputs=None, axes=None):
+def _workload_record(tmp_path, *, inputs=None, axes=None, eval_mode="full"):
     return WorkloadRecord(
         path=tmp_path / "workload.jsonl",
         line_number=1,
@@ -56,7 +57,7 @@ def _workload_record(tmp_path, *, inputs=None, axes=None):
                     "max_error_cap": None,
                     "allow_negative_inf": False,
                 },
-                "eval_mode": "full",
+                "eval_mode": eval_mode,
             }
         ),
     )
@@ -126,6 +127,34 @@ def test_runtime_case_id_disambiguates_shared_definition_variant_solutions(tmp_p
     assert flat_id != variant_id
     assert "::variant=" not in flat_id
     assert "::variant=op__sm120" in variant_id
+
+
+def test_runtime_cases_skip_rows_the_local_runtime_cannot_materialize(tmp_path, monkeypatch):
+    from tests.kernel_inventory import kernel_runtime_utils
+
+    plain = _workload_record(tmp_path, axes={"N": 4}, inputs={"x": {"type": "random"}})
+    dynamic = _workload_record(
+        tmp_path, axes={"N": {"min": 4, "max": 8}}, inputs={"x": {"type": "random"}}, eval_mode="correctness_only"
+    )
+    custom = _workload_record(tmp_path, axes={"N": 4}, inputs={"x": {"type": "custom"}})
+    monkeypatch.setattr(
+        kernel_runtime_utils, "iter_inventory_workload_paths", lambda root: [tmp_path / "workload.jsonl"]
+    )
+    monkeypatch.setattr(
+        kernel_runtime_utils, "definition_solution_paths_for_workload", lambda path: [("op.json", "solution.json")]
+    )
+    monkeypatch.setattr(kernel_runtime_utils, "load_workload_jsonl", lambda path: [plain, dynamic, custom])
+    monkeypatch.setattr(kernel_runtime_utils, "_runtime_case_id", lambda record, *paths: str(id(record)))
+
+    cases = kernel_runtime_utils.workload_runtime_cases_for_submodule(None)
+
+    skip_reasons = [[mark.kwargs["reason"] for mark in case.marks if mark.name == "skip"] for case in cases]
+    assert [case.values[0] for case in cases] == [plain, dynamic, custom]
+    assert skip_reasons == [
+        [],
+        ["local runtime does not sample dynamic axes"],
+        ["local runtime does not call custom_inputs_entrypoint"],
+    ]
 
 
 def test_host_arch_xfail_yields_to_target_hardware_skip(tmp_path, monkeypatch):
@@ -618,8 +647,8 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         lambda *_: nullcontext(),
     )
     monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._load_reference",
-        lambda *_: order.append("reference") or (lambda value: value),
+        "tests.kernel_inventory.kernel_runtime_utils._load_reference_namespace",
+        lambda *_: order.append("reference") or {"run": lambda value: value},
     )
     monkeypatch.setattr(
         "tests.kernel_inventory.kernel_runtime_utils._assert_matching_entry_signatures",
@@ -921,6 +950,78 @@ def test_raw_triton_launch_uses_definition_outputs_and_bound_arguments(monkeypat
     assert launches == [((1,), 4)]
 
 
+_PRESET_OUTPUT_ERROR = r"benchmark_only cannot verify that raw-launch outputs \['output'\] are written"
+
+
+@pytest.mark.parametrize(
+    ("binding", "written", "error"),
+    [
+        pytest.param({"initialize": "empty"}, 4, None, id="empty-written"),
+        pytest.param(
+            {"initialize": "empty"}, 0, "raw-launch Solution left output output unwritten", id="empty-unwritten"
+        ),
+        pytest.param(
+            {"initialize": "empty"},
+            1,
+            r"left output output unwritten \(3 of 4 elements\)",
+            id="empty-partially-written",
+        ),
+        pytest.param({"initialize": "zeros"}, 4, _PRESET_OUTPUT_ERROR, id="zeros-rejected"),
+        pytest.param({"initialize": "ones"}, 4, _PRESET_OUTPUT_ERROR, id="ones-rejected"),
+        pytest.param({"initialize_from": "input"}, 4, _PRESET_OUTPUT_ERROR, id="initialize-from-rejected"),
+    ],
+)
+def test_raw_launch_requires_written_empty_outputs_when_not_compared(monkeypatch, binding, written, error):
+    torch = pytest.importorskip("torch")
+    definition = {
+        "name": "raw_copy",
+        "axes": {"N": {"type": "var"}},
+        "inputs": {"input": {"shape": ["N"], "dtype": "float32"}},
+        "outputs": {"output": {"shape": ["N"], "dtype": "float32"}},
+    }
+    solution = {
+        "spec": {"language": "triton", "entry_point": "unused.py::copy_kernel"},
+        "launch": {
+            "grid": [1],
+            "arguments": [
+                {"parameter": "input", "kind": "input", "name": "input"},
+                {"parameter": "output", "kind": "output", "name": "output", **binding},
+            ],
+        },
+    }
+    monkeypatch.setattr(
+        "tests.kernel_inventory.kernel_runtime_utils.inspect_raw_entry_signature",
+        lambda *_: types.SimpleNamespace(parameters=()),
+    )
+    launches = []
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(**kwargs):
+                launches.append(grid)
+                kwargs["output"][:written].copy_(kwargs["input"][:written])
+
+            return launch
+
+    def launch():
+        return _launch_raw_solution(
+            definition,
+            solution,
+            FakeKernel(),
+            {"input": torch.arange(4, dtype=torch.float32)},
+            {"N": 4},
+            torch,
+            require_written=True,
+        )
+
+    if error is None:
+        launch()
+    else:
+        with pytest.raises(AssertionError, match=error):
+            launch()
+    assert launches == ([] if error == _PRESET_OUTPUT_ERROR else [(1,)])
+
+
 def test_raw_triton_launch_can_seed_mutated_output_from_definition_input(monkeypatch):
     torch = pytest.importorskip("torch")
     definition = {
@@ -1062,6 +1163,10 @@ def test_runtime_rejects_undeclared_solution_input_mutation(tmp_path):
         )
 
 
+def _tolerance(*, atol=0.02, rtol=0.02, matched_ratio=1.0):
+    return ToleranceSpec(max_atol=atol, max_rtol=rtol, required_matched_ratio=matched_ratio)
+
+
 def test_runtime_return_comparison_uses_explicit_workload_tolerance():
     torch = pytest.importorskip("torch")
     actual = torch.tensor([1.01], dtype=torch.float32)
@@ -1076,10 +1181,9 @@ def test_runtime_return_comparison_uses_explicit_workload_tolerance():
         {"N": 1},
         torch,
         "loose-row",
-        rtol=0.0,
-        atol=0.02,
+        tolerance=_tolerance(rtol=0.0, atol=0.02),
     )
-    with pytest.raises(AssertionError, match="strict-row output output mismatch"):
+    with pytest.raises(AssertionError, match="strict-row: outputs rejected: output"):
         _assert_return_contract(
             actual,
             expected,
@@ -1088,8 +1192,7 @@ def test_runtime_return_comparison_uses_explicit_workload_tolerance():
             {"N": 1},
             torch,
             "strict-row",
-            rtol=0.0,
-            atol=0.001,
+            tolerance=_tolerance(rtol=0.0, atol=0.001),
         )
 
 
@@ -1116,7 +1219,7 @@ def test_runtime_matched_ratio_relaxes_integer_destination_mutation():
         out[0] += 100
         return ids
 
-    tolerance = types.SimpleNamespace(max_rtol=0.02, max_atol=0.02, required_matched_ratio=0.98)
+    tolerance = _tolerance(matched_ratio=0.98)
 
     # One mismatched element among 50: 49/50 = 0.98, exactly at the threshold -
     # the inplace mutation comparison must relax for integer destinations.
@@ -1157,110 +1260,59 @@ def test_runtime_matched_ratio_relaxes_integer_destination_mutation():
         )
 
 
-def test_runtime_matched_ratio_does_not_relax_floating_outputs():
+def test_runtime_matched_ratio_applies_to_floating_outputs():
     torch = pytest.importorskip("torch")
     output_specs = {"centroids": {"shape": ["N"], "dtype": "float32"}}
+    expected = torch.ones(50, dtype=torch.float32)
 
-    # A floating output keeps the full assert_close tolerance even on a 0.98 row.
+    actual = expected.clone()
+    actual[0] = 2.0  # 49/50 = 0.98 matched, exactly at the threshold
     _assert_return_contract(
-        torch.tensor([1.0, 1.005], dtype=torch.float32),
-        torch.tensor([1.0, 1.0], dtype=torch.float32),
+        actual,
+        expected,
         "centroids",
         output_specs,
-        {"N": 2},
+        {"N": 50},
         torch,
         "float-row",
-        rtol=0.02,
-        atol=0.02,
-        matched_ratio=0.98,
+        tolerance=_tolerance(matched_ratio=0.98),
     )
-    with pytest.raises(AssertionError, match="output centroids mismatch"):
+    with pytest.raises(AssertionError, match="strict-row: outputs rejected: centroids"):
         _assert_return_contract(
-            torch.tensor([1.0, 2.0], dtype=torch.float32),
-            torch.tensor([1.0, 1.0], dtype=torch.float32),
+            actual, expected, "centroids", output_specs, {"N": 50}, torch, "strict-row", tolerance=_tolerance()
+        )
+    actual[1] = 2.0  # 48/50 = 0.96 matched, below the threshold
+    with pytest.raises(AssertionError, match="float-row: outputs rejected: centroids"):
+        _assert_return_contract(
+            actual,
+            expected,
             "centroids",
             output_specs,
-            {"N": 2},
+            {"N": 50},
             torch,
             "float-row",
-            rtol=0.02,
-            atol=0.02,
-            matched_ratio=0.98,
+            tolerance=_tolerance(matched_ratio=0.98),
         )
 
 
-def test_runtime_scalar_outputs_compare_strictly():
+def test_runtime_scalar_outputs_use_output_comparison():
     torch = pytest.importorskip("torch")
     output_specs = {"n_iters": {"shape": None, "dtype": "int32"}}
 
-    # Python scalar vs Python scalar: strict equality, matched-ratio knob ignored.
-    _assert_return_contract(
-        3,
-        3,
-        "n_iters",
-        output_specs,
-        {},
-        torch,
-        "scalar-row",
-        rtol=0.02,
-        atol=0.02,
-        matched_ratio=0.98,
-    )
-    with pytest.raises(AssertionError, match="scalar mismatch"):
-        _assert_return_contract(
-            2,
-            3,
-            "n_iters",
-            output_specs,
-            {},
-            torch,
-            "scalar-row",
-            rtol=0.02,
-            atol=0.02,
-            matched_ratio=0.98,
-        )
+    _assert_return_contract(3, 3, "n_iters", output_specs, {}, torch, "scalar-row")
+    with pytest.raises(AssertionError, match="outputs rejected: n_iters"):
+        _assert_return_contract(2, 3, "n_iters", output_specs, {}, torch, "scalar-row")
 
     # 0-d tensors are accepted and cross-compare with Python scalars.
-    _assert_return_contract(
-        torch.tensor(3, dtype=torch.int32),
-        3,
-        "n_iters",
-        output_specs,
-        {},
-        torch,
-        "scalar-row",
-        matched_ratio=0.98,
-    )
+    _assert_return_contract(torch.tensor(3, dtype=torch.int32), 3, "n_iters", output_specs, {}, torch, "scalar-row")
     with pytest.raises(AssertionError, match="must be an integer scalar"):
-        _assert_return_contract(
-            1.5,
-            1.5,
-            "n_iters",
-            output_specs,
-            {},
-            torch,
-            "scalar-row",
-        )
+        _assert_return_contract(1.5, 1.5, "n_iters", output_specs, {}, torch, "scalar-row")
     with pytest.raises(AssertionError, match="must be 0-dimensional"):
         _assert_return_contract(
-            torch.tensor([3], dtype=torch.int32),
-            3,
-            "n_iters",
-            output_specs,
-            {},
-            torch,
-            "scalar-row",
+            torch.tensor([3], dtype=torch.int32), 3, "n_iters", output_specs, {}, torch, "scalar-row"
         )
     with pytest.raises(AssertionError, match="has dtype"):
-        _assert_return_contract(
-            torch.tensor(3, dtype=torch.int64),
-            3,
-            "n_iters",
-            output_specs,
-            {},
-            torch,
-            "scalar-row",
-        )
+        _assert_return_contract(torch.tensor(3, dtype=torch.int64), 3, "n_iters", output_specs, {}, torch, "scalar-row")
 
 
 def test_runtime_matched_ratio_relaxes_integer_output_comparison():
@@ -1271,20 +1323,11 @@ def test_runtime_matched_ratio_relaxes_integer_output_comparison():
     actual = expected.clone()
     actual[0] += 100  # one mismatched element: 49/50 = 0.98, exactly at the threshold
     _assert_return_contract(
-        actual,
-        expected,
-        "ids",
-        output_specs,
-        {"N": 50},
-        torch,
-        "relaxed-row",
-        rtol=0.02,
-        atol=0.02,
-        matched_ratio=0.98,
+        actual, expected, "ids", output_specs, {"N": 50}, torch, "relaxed-row", tolerance=_tolerance(matched_ratio=0.98)
     )
 
     actual[1] += 100  # second mismatch: 48/50 = 0.96, below the threshold
-    with pytest.raises(AssertionError, match="matched ratio"):
+    with pytest.raises(AssertionError, match="relaxed-row: outputs rejected: ids"):
         _assert_return_contract(
             actual,
             expected,
@@ -1293,23 +1336,11 @@ def test_runtime_matched_ratio_relaxes_integer_output_comparison():
             {"N": 50},
             torch,
             "relaxed-row",
-            rtol=0.02,
-            atol=0.02,
-            matched_ratio=0.98,
+            tolerance=_tolerance(matched_ratio=0.98),
         )
-
-    with pytest.raises(AssertionError, match="strict-row output ids mismatch"):
+    with pytest.raises(AssertionError, match="strict-row: outputs rejected: ids"):
         _assert_return_contract(
-            actual,
-            expected,
-            "ids",
-            output_specs,
-            {"N": 50},
-            torch,
-            "strict-row",
-            rtol=0.02,
-            atol=0.02,
-            matched_ratio=1.0,
+            actual, expected, "ids", output_specs, {"N": 50}, torch, "strict-row", tolerance=_tolerance()
         )
 
 

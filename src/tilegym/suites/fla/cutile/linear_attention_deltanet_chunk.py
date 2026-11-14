@@ -11,10 +11,11 @@ import torch.nn.functional as F
 
 from tilegym.suites.fla.cutile._host_utils import _segmented_arange
 from tilegym.suites.fla.cutile._host_utils import input_guard
-from tilegym.suites.fla.cutile._tuning import OUTPUT_HINT_PAIRS
-from tilegym.suites.fla.cutile._tuning import hint_configs
+from tilegym.suites.fla.cutile._tuning import cached_exhaustive_search
+from tilegym.suites.fla.cutile._tuning import launch_hints
 from tilegym.suites.fla.cutile._tuning import output_tile_configs
-from tilegym.suites.fla.cutile._tuning import tune_launch
+from tilegym.suites.fla.cutile._tuning import prune_occupancy
+from tilegym.suites.fla.cutile._tuning import shape_bucket
 
 ConstInt = ct.Constant[int]
 ConstBool = ct.Constant[bool]
@@ -22,39 +23,7 @@ ConstBool = ct.Constant[bool]
 RCP_LN2 = 1.4426950216  # 1/ln(2)
 
 
-def _autotuned_launch(kernel, cache_key, grid, args, occ_choices=(1, 2, 4), timeout=30):
-    choices = tuple(occ_choices)
-    tune_launch(
-        kernel,
-        torch.cuda.current_stream(),
-        lambda c: grid,
-        lambda c: args,
-        lambda: hint_configs(choices),
-        cache_key,
-        timeout=timeout,
-        config_key=("hints", choices, (4, 8)),
-    )
-
-
 _fwd_o_tile_configs = output_tile_configs
-
-
-def _autotuned_launch_o(kernel, cache_key, tile_choices, grid_fn, args_fn, timeout=60):
-    choices = tuple(tile_choices)
-    tune_launch(
-        kernel,
-        torch.cuda.current_stream(),
-        lambda c: grid_fn(c.BK, c.BV),
-        lambda c: args_fn(c.BK, c.BV),
-        lambda: [
-            SimpleNamespace(occupancy=o, num_worker_warps=w, BK=bk, BV=bv)
-            for bk, bv in choices
-            for o, w in OUTPUT_HINT_PAIRS
-        ],
-        cache_key,
-        timeout=timeout,
-        config_key=(("BK", "BV"), choices, OUTPUT_HINT_PAIRS),
-    )
 
 
 def _check_pytorch_version(version_s: str = "2.4") -> bool:
@@ -107,11 +76,6 @@ def _ck(a, b):
     return (a + b - 1) // b
 
 
-# ===========================================================================
-# fla.modules.l2norm
-# ===========================================================================
-
-
 @ct.kernel
 def l2norm_fwd_kernel(
     x,  # [T, D]
@@ -126,9 +90,6 @@ def l2norm_fwd_kernel(
     cols = ct.arange(BD, dtype=ct.int32)
     rows = ct.arange(BT, dtype=ct.int32)
     col_mask = cols < D
-    # Gather a [BT, BD] tile of rows starting at i_t*BT. ct.gather/scatter index
-    # a multi-dim Array with a per-axis index tuple (Arrays have no .reshape),
-    # so pass (row, col) indices broadcast to [BT, BD] rather than flat indices.
     row_idx = i_t * BT + rows
     idx2d = (row_idx[:, None], cols[None, :])
     mask = (row_idx[:, None] < x.shape[0]) & col_mask[None, :]
@@ -206,17 +167,12 @@ def l2norm_bwd(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float
     return dx.reshape(y_shape_og)
 
 
-# ===========================================================================
-# fla.ops.common.chunk_scaled_dot_kkt
-# ===========================================================================
-
-
 @ct.kernel
 def chunk_scaled_dot_kkt_fwd_kernel(
-    k,  # [BT_total, H, K]
-    g,  # [BT_total, HV]  (dummy when not USE_G)
-    beta,  # [BT_total, HV]
-    A,  # [BT_total, HV, BT]
+    k,  # [B, T, H, K]
+    g,  # [B, T, HV]  (dummy when not USE_G)
+    beta,  # [B, T, HV]
+    A,  # [B, T, HV, BT]
     cu_seqlens,  # [num_seq+1] int  (dummy when not IS_VARLEN)
     chunk_indices,  # [NT, 2] int   (dummy when not IS_VARLEN)
     T,
@@ -239,35 +195,38 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         i_tt = i_t
     seqlen = eos - bos
 
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    A_seg = A.slice(axis=0, start=bos, stop=eos)
-    beta_seg = beta.slice(axis=0, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    A_seg = A.slice(axis=1, start=bos, stop=eos)
+    beta_seg = beta.slice(axis=1, start=bos, stop=eos)
 
     o_t = i_tt * BT + ct.arange(BT, dtype=ct.int32)
     m_t = o_t < seqlen
 
     b_b = ct.astype(
-        ct.load(beta_seg, index=(i_tt, i_h), shape=(BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)), ct.float32
+        ct.load(beta_seg, index=(i_row, i_tt, i_h), shape=(1, BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)),
+        ct.float32,
     )
 
     b_A = ct.zeros((BT, BT), dtype=ct.float32)
     for i_k in range(_ck(K, BK)):
-        b_k = ct.load(k_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
+        b_k = ct.load(
+            k_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
         b_A = ct.mma(b_k, ct.transpose(b_k), b_A)
 
     if USE_G:
-        g_seg = g.slice(axis=0, start=bos, stop=eos)
+        g_seg = g.slice(axis=1, start=bos, stop=eos)
         b_g = ct.astype(
-            ct.load(g_seg, index=(i_tt, i_h), shape=(BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)),
+            ct.load(g_seg, index=(i_row, i_tt, i_h), shape=(1, BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)),
             ct.float32,
         )
         b_g_diff = b_g[:, None] - b_g[None, :]
@@ -276,7 +235,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t[None, :])
     b_A = ct.where(m_A, b_A, ct.zeros((BT, BT), dtype=ct.float32))
-    ct.store(A_seg, index=(i_tt, i_h, 0), tile=ct.astype(b_A, A.dtype).reshape((BT, 1, BT)))
+    ct.store(A_seg, index=(i_row, i_tt, i_h, 0), tile=ct.astype(b_A, A.dtype).reshape((1, BT, 1, BT)))
 
 
 def chunk_scaled_dot_kkt_fwd(
@@ -299,11 +258,10 @@ def chunk_scaled_dot_kkt_fwd(
     NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, HV, BT, device=k.device, dtype=output_dtype)
 
-    BT_total = B * T
-    k3 = k.reshape(BT_total, H, K)
-    beta2 = beta.reshape(BT_total, HV)
-    A3 = A.reshape(BT_total, HV, BT)
-    g2 = g.reshape(BT_total, HV) if USE_G else torch.empty((1, 1), device=k.device, dtype=k.dtype)
+    k3 = k.reshape(B, T, H, K)
+    beta2 = beta.reshape(B, T, HV)
+    A3 = A.reshape(B, T, HV, BT)
+    g2 = g.reshape(B, T, HV) if USE_G else torch.empty((1, 1, 1), device=k.device, dtype=k.dtype)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -315,8 +273,8 @@ def chunk_scaled_dot_kkt_fwd(
     args = (k3, g2, beta2, A3, cs, ci, T, H, HV, K, BT, BK, HV // H, USE_G, IS_VARLEN)
     cache_key = (
         "chunk_scaled_dot_kkt_fwd_kernel",
-        B,
-        T,
+        shape_bucket(B),
+        shape_bucket(T),
         H,
         HV,
         K,
@@ -325,16 +283,26 @@ def chunk_scaled_dot_kkt_fwd(
         USE_G,
         IS_VARLEN,
         str(k.dtype),
-        str(k.device),
     )
-    _autotuned_launch(chunk_scaled_dot_kkt_fwd_kernel, cache_key, grid, args)
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_scaled_dot_kkt_fwd_kernel,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     return A
 
 
 @ct.kernel
 def solve_tril_kernel(
-    A,  # [BT_total, H, BT]
-    Ai,  # [BT_total, H, BT]  (output, pre-zeroed)
+    A,  # [B, T, H, BT]
+    Ai,  # [B, T, H, BT]  (output, pre-zeroed)
     cu_seqlens,  # [num_seq+1] int (dummy when not IS_VARLEN)
     chunk_indices,  # [NT, 2] int   (dummy when not IS_VARLEN)
     T,
@@ -352,17 +320,21 @@ def solve_tril_kernel(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         i_tt = i_t
 
-    A_seg = A.slice(axis=0, start=bos, stop=eos)
-    Ai_seg = Ai.slice(axis=0, start=bos, stop=eos)
+    A_seg = A.slice(axis=1, start=bos, stop=eos)
+    Ai_seg = Ai.slice(axis=1, start=bos, stop=eos)
 
     b_full = ct.astype(
-        ct.load(A_seg, index=(i_tt, i_h, 0), shape=(BT, 1, BT), padding_mode=ct.PaddingMode.ZERO).reshape((BT, BT)),
+        ct.load(A_seg, index=(i_row, i_tt, i_h, 0), shape=(1, BT, 1, BT), padding_mode=ct.PaddingMode.ZERO).reshape(
+            (BT, BT)
+        ),
         ct.float32,
     )
 
@@ -371,14 +343,12 @@ def solve_tril_kernel(
         Ainv = _invert_16_skip1(_get_block16(b_full, 0, 0))
     elif NB == 2:
         Ainv = _invert_32(b_full, 0, 0, mm)
-    else:  # NB == 4 (BT=64, the DeltaNet fwd hot path)
-        # Two 32x32 diagonal blocks of the 64x64 tile (tile-space 16x16 quads).
+    else:  # NB == 4
         b_Ai00 = _invert_32(b_full, 0, 0, mm)  # rows/cols 0:32 (32-tile (0,0))
         b_Ai11 = _invert_32(b_full, 1, 1, mm)  # rows/cols 32:64 (32-tile (1,1))
         # Off-diagonal 32x32 sub-block A10 = b_full[32:64, 0:32].
         b_A10 = _get_block32(b_full, 1, 0)
-        # Merge: Ai10 = -Ai11 @ A10 @ Ai00 (two 32x32 fp32/ieee matmuls). Keep
-        # the fp32 result so it cats with the fp32 diag blocks.
+        # Ai10 = -Ai11 @ A10 @ Ai00 in IEEE fp32.
         b_Ai10 = ct.astype(
             -ct.matmul(
                 ct.astype(ct.matmul(ct.astype(b_Ai11, mm), ct.astype(b_A10, mm)), mm),
@@ -389,7 +359,7 @@ def solve_tril_kernel(
         z32 = ct.zeros((32, 32), dtype=ct.float32)
         Ainv = ct.cat((ct.cat((b_Ai00, z32), 1), ct.cat((b_Ai10, b_Ai11), 1)), 0)
 
-    ct.store(Ai_seg, index=(i_tt, i_h, 0), tile=ct.astype(Ainv, Ai.dtype).reshape((BT, 1, BT)))
+    ct.store(Ai_seg, index=(i_row, i_tt, i_h, 0), tile=ct.astype(Ainv, Ai.dtype).reshape((1, BT, 1, BT)))
 
 
 def _get_block16(mat, ib, jb):
@@ -403,13 +373,11 @@ def _get_block32(mat, ib, jb):
 
 
 def _invert_16_skip1(b_blk):
-    """Inverse of (I + strict_lower(b_blk)) for a 16x16 fp32 tile.
+    """Inverse of (I + b_blk) for a strictly lower-triangular 16x16 fp32 tile.
 
-    Column-reduction forward substitution (mirrors GDN
-    ``_solve_kkt_16_block_full_skip1``): ``b_Ai`` starts as
-    ``-strict_lower(b_blk)`` (the upper triangle of ``b_blk`` is structurally
-    zero in this solve, so an unconditional negate is exact) and each row
-    i = 1..15 is corrected by the already-solved rows above it. Each row uses ct.sum reductions over the resident 16-wide tile.
+    Forward substitution: ``b_Ai`` starts as ``-b_blk`` (exact only because the
+    diagonal and upper triangle of ``b_blk`` are zero) and each row i = 1..15 is
+    corrected by the already-solved rows above it.
     """
     o = ct.arange(16, dtype=ct.int32)
     m_I = o[:, None] == o[None, :]
@@ -434,7 +402,6 @@ def _invert_32(b_full, ib, jb, dtype):
     b11 = _get_block16(b_full, 2 * ib + 1, 2 * jb + 1)
     b_Ai00 = _invert_16_skip1(b00)
     b_Ai11 = _invert_16_skip1(b11)
-    # Keep the fp32 result so it cats with the fp32 blocks.
     b_Ai10 = ct.astype(
         -ct.matmul(
             ct.astype(ct.matmul(ct.astype(b_Ai11, dtype), ct.astype(b10, dtype)), dtype),
@@ -463,9 +430,8 @@ def solve_tril(
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
 
-    BT_total = B * T
-    A3 = A.reshape(BT_total, H, BT)
-    Ai3 = Ai.reshape(BT_total, H, BT)
+    A3 = A.reshape(B, T, H, BT)
+    Ai3 = Ai.reshape(B, T, H, BT)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -475,24 +441,30 @@ def solve_tril(
 
     grid = (NT, B * H, 1)
     args = (A3, Ai3, cs, ci, T, H, BT, BT // 16, IS_VARLEN)
-    cache_key = ("solve_tril_kernel", B, T, H, BT, IS_VARLEN, str(A.dtype), str(A.device))
-    _autotuned_launch(solve_tril_kernel, cache_key, grid, args)
+    cache_key = ("solve_tril_kernel", shape_bucket(B), shape_bucket(T), H, BT, IS_VARLEN, str(A.dtype))
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        solve_tril_kernel,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     return Ai
-
-
-# ===========================================================================
-# fla.ops.delta_rule.wy_fast
-# ===========================================================================
 
 
 @ct.kernel
 def recompute_w_u_fwd_kernel(
-    k,  # [BT_total, H, K]
-    v,  # [BT_total, H, V]
-    beta,  # [BT_total, H]
-    w,  # [BT_total, H, K]
-    u,  # [BT_total, H, V]
-    A,  # [BT_total, H, BT]
+    k,  # [B, T, H, K]
+    v,  # [B, T, H, V]
+    beta,  # [B, T, H]
+    w,  # [B, T, H, K]
+    u,  # [B, T, H, V]
+    A,  # [B, T, H, BT]
     cu_seqlens,  # dummy when not IS_VARLEN
     chunk_indices,  # dummy when not IS_VARLEN
     T,
@@ -513,41 +485,46 @@ def recompute_w_u_fwd_kernel(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         i_tt = i_t
 
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    v_seg = v.slice(axis=0, start=bos, stop=eos)
-    w_seg = w.slice(axis=0, start=bos, stop=eos)
-    u_seg = u.slice(axis=0, start=bos, stop=eos)
-    A_seg = A.slice(axis=0, start=bos, stop=eos)
-    beta_seg = beta.slice(axis=0, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    v_seg = v.slice(axis=1, start=bos, stop=eos)
+    w_seg = w.slice(axis=1, start=bos, stop=eos)
+    u_seg = u.slice(axis=1, start=bos, stop=eos)
+    A_seg = A.slice(axis=1, start=bos, stop=eos)
+    beta_seg = beta.slice(axis=1, start=bos, stop=eos)
 
     b_b = ct.astype(
-        ct.load(beta_seg, index=(i_tt, i_h), shape=(BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)), ct.float32
+        ct.load(beta_seg, index=(i_row, i_tt, i_h), shape=(1, BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)),
+        ct.float32,
     )
-    b_A = ct.load(A_seg, index=(i_tt, i_h, 0), shape=(BT, 1, BT), padding_mode=ct.PaddingMode.ZERO).reshape((BT, BT))
+    b_A = ct.load(A_seg, index=(i_row, i_tt, i_h, 0), shape=(1, BT, 1, BT), padding_mode=ct.PaddingMode.ZERO).reshape(
+        (BT, BT)
+    )
 
     for i_v in range(_ck(V, BV)):
-        b_v = ct.load(v_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BV)
-        )
+        b_v = ct.load(
+            v_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BV))
         b_vb = ct.astype(ct.astype(b_v, ct.float32) * b_b[:, None], b_v.dtype)
         acc = ct.zeros((BT, BV), dtype=ct.float32)
         b_u = ct.mma(ct.astype(b_A, b_vb.dtype), b_vb, acc)
-        ct.store(u_seg, index=(i_tt, i_h, i_v), tile=ct.astype(b_u, u.dtype).reshape((BT, 1, BV)))
+        ct.store(u_seg, index=(i_row, i_tt, i_h, i_v), tile=ct.astype(b_u, u.dtype).reshape((1, BT, 1, BV)))
 
     for i_k in range(_ck(K, BK)):
-        b_k = ct.load(k_seg, index=(i_tt, i_h, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
+        b_k = ct.load(
+            k_seg, index=(i_row, i_tt, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
         b_kb = ct.astype(ct.astype(b_k, ct.float32) * b_b[:, None], b_k.dtype)
         acc = ct.zeros((BT, BK), dtype=ct.float32)
         b_w = ct.mma(ct.astype(b_A, b_kb.dtype), b_kb, acc)
-        ct.store(w_seg, index=(i_tt, i_h, i_k), tile=ct.astype(b_w, w.dtype).reshape((BT, 1, BK)))
+        ct.store(w_seg, index=(i_row, i_tt, i_h, i_k), tile=ct.astype(b_w, w.dtype).reshape((1, BT, 1, BK)))
 
 
 def recompute_w_u_fwd(
@@ -570,13 +547,12 @@ def recompute_w_u_fwd(
     u = torch.empty_like(v)
     w = torch.empty_like(k)
 
-    BT_total = B * T
-    k3 = k.reshape(BT_total, H, K)
-    v3 = v.reshape(BT_total, H, V)
-    beta2 = beta.reshape(BT_total, H)
-    w3 = w.reshape(BT_total, H, K)
-    u3 = u.reshape(BT_total, H, V)
-    A3 = A.reshape(BT_total, H, BT)
+    k3 = k.reshape(B, T, H, K)
+    v3 = v.reshape(B, T, H, V)
+    beta2 = beta.reshape(B, T, H)
+    w3 = w.reshape(B, T, H, K)
+    u3 = u.reshape(B, T, H, V)
+    A3 = A.reshape(B, T, H, BT)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -586,22 +562,45 @@ def recompute_w_u_fwd(
 
     grid = (NT, B * H, 1)
     args = (k3, v3, beta2, w3, u3, A3, cs, ci, T, H, K, V, BT, BK, BV, IS_VARLEN)
-    cache_key = ("recompute_w_u_fwd_kernel", B, T, H, K, V, BT, BK, BV, IS_VARLEN, str(k.dtype), str(k.device))
-    _autotuned_launch(recompute_w_u_fwd_kernel, cache_key, grid, args)
+    cache_key = (
+        "recompute_w_u_fwd_kernel",
+        shape_bucket(B),
+        shape_bucket(T),
+        H,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        IS_VARLEN,
+        str(k.dtype),
+    )
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        recompute_w_u_fwd_kernel,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     return w, u
 
 
 @ct.kernel
 def prepare_wy_repr_bwd_kernel(
-    k,  # [BT_total, H, K]
-    v,  # [BT_total, H, V]
-    beta,  # [BT_total, H]
-    A,  # [BT_total, H, BT]
-    dw,  # [BT_total, H, K]
-    du,  # [BT_total, H, V]
-    dk,  # [BT_total, H, K]  (output)
-    dv,  # [BT_total, H, V]  (output)
-    dbeta,  # [BT_total, H]  (output)
+    k,  # [B, T, H, K]
+    v,  # [B, T, H, V]
+    beta,  # [B, T, H]
+    A,  # [B, T, H, BT]
+    dw,  # [B, T, H, K]
+    du,  # [B, T, H, V]
+    dk,  # [B, T, H, K]  (output)
+    dv,  # [B, T, H, V]  (output)
+    dbeta,  # [B, T, H]  (output)
     cu_seqlens,
     chunk_indices,
     T,
@@ -622,41 +621,46 @@ def prepare_wy_repr_bwd_kernel(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         i_tt = i_t
     seqlen = eos - bos
 
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    v_seg = v.slice(axis=0, start=bos, stop=eos)
-    A_seg = A.slice(axis=0, start=bos, stop=eos)
-    dw_seg = dw.slice(axis=0, start=bos, stop=eos)
-    du_seg = du.slice(axis=0, start=bos, stop=eos)
-    dk_seg = dk.slice(axis=0, start=bos, stop=eos)
-    dv_seg = dv.slice(axis=0, start=bos, stop=eos)
-    beta_seg = beta.slice(axis=0, start=bos, stop=eos)
-    dbeta_seg = dbeta.slice(axis=0, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    v_seg = v.slice(axis=1, start=bos, stop=eos)
+    A_seg = A.slice(axis=1, start=bos, stop=eos)
+    dw_seg = dw.slice(axis=1, start=bos, stop=eos)
+    du_seg = du.slice(axis=1, start=bos, stop=eos)
+    dk_seg = dk.slice(axis=1, start=bos, stop=eos)
+    dv_seg = dv.slice(axis=1, start=bos, stop=eos)
+    beta_seg = beta.slice(axis=1, start=bos, stop=eos)
+    dbeta_seg = dbeta.slice(axis=1, start=bos, stop=eos)
 
     storage_dtype = k.dtype
     b_b = ct.astype(
-        ct.load(beta_seg, index=(i_tt, i_h), shape=(BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)), ct.float32
+        ct.load(beta_seg, index=(i_row, i_tt, i_h), shape=(1, BT, 1), padding_mode=ct.PaddingMode.ZERO).reshape((BT,)),
+        ct.float32,
     )
     b_A = ct.transpose(
-        ct.load(A_seg, index=(i_tt, i_h, 0), shape=(BT, 1, BT), padding_mode=ct.PaddingMode.ZERO).reshape((BT, BT))
+        ct.load(A_seg, index=(i_row, i_tt, i_h, 0), shape=(1, BT, 1, BT), padding_mode=ct.PaddingMode.ZERO).reshape(
+            (BT, BT)
+        )
     )
 
     b_dbeta = ct.zeros((BT,), dtype=ct.float32)
     b_dA = ct.zeros((BT, BT), dtype=ct.float32)
 
     for i_v in ct.static_iter(range(_ck(V, BV))):
-        b_v = ct.load(v_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BV)
-        )
-        b_du = ct.load(du_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BV)
-        )
+        b_v = ct.load(
+            v_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BV))
+        b_du = ct.load(
+            du_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BV))
         b_vf = ct.astype(b_v, ct.float32)
         b_v_beta = ct.astype(b_vf * b_b[:, None], b_v.dtype)
         b_dA = ct.mma(b_du, ct.transpose(b_v_beta), b_dA)
@@ -664,15 +668,15 @@ def prepare_wy_repr_bwd_kernel(
         b_dv_beta = ct.mma(ct.astype(b_A, b_du.dtype), b_du, acc_dv)
         b_dv = b_dv_beta * b_b[:, None]
         b_dbeta = b_dbeta + ct.sum(b_dv_beta * b_vf, axis=1)
-        ct.store(dv_seg, index=(i_tt, i_h, i_v), tile=ct.astype(b_dv, dv.dtype).reshape((BT, 1, BV)))
+        ct.store(dv_seg, index=(i_row, i_tt, i_h, i_v), tile=ct.astype(b_dv, dv.dtype).reshape((1, BT, 1, BV)))
 
     for i_k in ct.static_iter(range(_ck(K, BK))):
-        b_k = ct.load(k_seg, index=(i_tt, i_h, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
-        b_dw = ct.load(dw_seg, index=(i_tt, i_h, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
+        b_k = ct.load(
+            k_seg, index=(i_row, i_tt, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
+        b_dw = ct.load(
+            dw_seg, index=(i_row, i_tt, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
         b_kf = ct.astype(b_k, ct.float32)
         b_k_beta = ct.astype(b_kf * b_b[:, None], b_k.dtype)
         b_dA = ct.mma(b_dw, ct.transpose(b_k_beta), b_dA)
@@ -680,7 +684,7 @@ def prepare_wy_repr_bwd_kernel(
         b_dk_beta = ct.mma(ct.astype(b_A, b_dw.dtype), b_dw, acc_dk)
         b_dk = b_dk_beta * b_b[:, None]
         b_dbeta = b_dbeta + ct.sum(b_dk_beta * b_kf, axis=1)
-        ct.store(dk_seg, index=(i_tt, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((BT, 1, BK)))
+        ct.store(dk_seg, index=(i_row, i_tt, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((1, BT, 1, BK)))
 
     o_t = ct.arange(BT, dtype=ct.int32)
     tri = o_t[:, None] > o_t[None, :]
@@ -692,13 +696,13 @@ def prepare_wy_repr_bwd_kernel(
     b_dA = ct.astype(ct.where(tri, -b_dA, ct.zeros((BT, BT), dtype=ct.float32)), storage_dtype)
 
     for i_k in ct.static_iter(range(_ck(K, BK))):
-        b_k = ct.load(k_seg, index=(i_tt, i_h, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
+        b_k = ct.load(
+            k_seg, index=(i_row, i_tt, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
         b_dk_prev = ct.astype(
-            ct.load(dk_seg, index=(i_tt, i_h, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BK)
-            ),
+            ct.load(
+                dk_seg, index=(i_row, i_tt, i_h, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BK)),
             ct.float32,
         )
         b_k_beta = ct.astype(ct.astype(b_k, ct.float32) * b_b[:, None], b_k.dtype)
@@ -709,9 +713,9 @@ def prepare_wy_repr_bwd_kernel(
         acc_dk2 = ct.zeros((BT, BK), dtype=ct.float32)
         b_dk = b_dk_prev + ct.mma(ct.transpose(b_dA), b_k_beta, acc_dk2)
         b_dk = b_dk + b_dk_beta * b_b[:, None]
-        ct.store(dk_seg, index=(i_tt, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((BT, 1, BK)))
+        ct.store(dk_seg, index=(i_row, i_tt, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((1, BT, 1, BK)))
 
-    ct.store(dbeta_seg, index=(i_tt, i_h), tile=ct.astype(b_dbeta, dbeta.dtype).reshape((BT, 1)))
+    ct.store(dbeta_seg, index=(i_row, i_tt, i_h), tile=ct.astype(b_dbeta, dbeta.dtype).reshape((1, BT, 1)))
 
 
 def prepare_wy_repr_bwd(
@@ -737,16 +741,15 @@ def prepare_wy_repr_bwd(
     dv = torch.empty_like(v)
     dbeta = torch.empty_like(beta)
 
-    BT_total = B * T
-    k3 = k.reshape(BT_total, H, K)
-    v3 = v.reshape(BT_total, H, V)
-    beta2 = beta.reshape(BT_total, H)
-    A3 = A.reshape(BT_total, H, BT)
-    dw3 = dw.reshape(BT_total, H, K)
-    du3 = du.reshape(BT_total, H, V)
-    dk3 = dk.reshape(BT_total, H, K)
-    dv3 = dv.reshape(BT_total, H, V)
-    db2 = dbeta.reshape(BT_total, H)
+    k3 = k.reshape(B, T, H, K)
+    v3 = v.reshape(B, T, H, V)
+    beta2 = beta.reshape(B, T, H)
+    A3 = A.reshape(B, T, H, BT)
+    dw3 = dw.reshape(B, T, H, K)
+    du3 = du.reshape(B, T, H, V)
+    dk3 = dk.reshape(B, T, H, K)
+    dv3 = dv.reshape(B, T, H, V)
+    db2 = dbeta.reshape(B, T, H)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -758,8 +761,8 @@ def prepare_wy_repr_bwd(
     args = (k3, v3, beta2, A3, dw3, du3, dk3, dv3, db2, cs, ci, T, H, K, V, BT, BK, BV, IS_VARLEN)
     cache_key = (
         "prepare_wy_repr_bwd_kernel",
-        B,
-        T,
+        shape_bucket(B),
+        shape_bucket(T),
         H,
         K,
         V,
@@ -768,9 +771,19 @@ def prepare_wy_repr_bwd(
         BV,
         IS_VARLEN,
         str(k.dtype),
-        str(k.device),
     )
-    _autotuned_launch(prepare_wy_repr_bwd_kernel, cache_key, grid, args)
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        prepare_wy_repr_bwd_kernel,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     return dk, dv, dbeta
 
 
@@ -791,13 +804,13 @@ def prepare_wy_repr_fwd(
 
 @ct.kernel
 def chunk_gated_delta_rule_fwd_kernel_h(
-    k,  # [BT_total, H, K]
-    v,  # [BT_total, HV, V]   (= u)
-    w,  # [BT_total, HV, K]
-    v_new,  # [BT_total, HV, V] (output)
-    h,  # [B*NT, HV, K, V]  (output)
-    h0,  # [N, HV, K, V]     (dummy when not USE_INITIAL_STATE)
-    ht,  # [N, HV, K, V]     (dummy when not STORE_FINAL_STATE)
+    k,  # [B, T, H, K]
+    v,  # [B, T, HV, V]   (= u)
+    w,  # [B, T, HV, K]
+    v_new,  # [B, T, HV, V] (output)
+    h,  # [B*NT, HV, K_pad, V_pad] (output); K_pad = BK, V_pad = cdiv(V, BV) * BV
+    h0,  # [N, HV, K_pad, V_pad] (dummy when not USE_INITIAL_STATE)
+    ht,  # [N, HV, K_pad, V_pad] (dummy when not STORE_FINAL_STATE)
     cu_seqlens,
     chunk_offsets,  # [N] int  (dummy when not IS_VARLEN)
     T,
@@ -807,7 +820,7 @@ def chunk_gated_delta_rule_fwd_kernel_h(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general over K)
+    BK: ConstInt,  # next_pow2(K)
     HVH: ConstInt,  # HV // H
     NT_FIXED: ConstInt,  # NT for the fixed-length case (static loop upper bound)
     USE_INITIAL_STATE: ConstBool,
@@ -823,24 +836,25 @@ def chunk_gated_delta_rule_fwd_kernel_h(
 
     if IS_VARLEN:
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
         boh = ct.load(chunk_offsets, index=(i_n,), shape=()).astype(ct.int32)
         seqlen = eos - bos
     else:
-        bos = i_n * T
+        bos = 0
+        i_row = i_n
         eos = bos + T
         seqlen = T
         boh = i_n * NT_FIXED
     NT = _ck_rt(seqlen, BT)
 
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    v_seg = v.slice(axis=0, start=bos, stop=eos)
-    w_seg = w.slice(axis=0, start=bos, stop=eos)
-    vnew_seg = v_new.slice(axis=0, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    v_seg = v.slice(axis=1, start=bos, stop=eos)
+    w_seg = w.slice(axis=1, start=bos, stop=eos)
+    vnew_seg = v_new.slice(axis=1, start=bos, stop=eos)
 
-    # Running KV state carried as a SINGLE full-width (BK, BV) tile (BK =
-    # next_pow2(K)), general for ANY K (no 64-wide sub-block unroll / K<=256 cap).
-    # h0 is [N, HV, BK, V]; rows [K:BK] are zero-padded on load and stay 0.
+    # The state is one (BK, BV) tile with BK = next_pow2(K); rows [K:BK] load as
+    # zero and stay zero.
     b_h1 = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_INITIAL_STATE:
         b_h1 = ct.astype(
@@ -853,28 +867,29 @@ def chunk_gated_delta_rule_fwd_kernel_h(
     # Static loop upper bound NT_FIXED; runtime `if i_t < NT` skips the varlen tail.
     for i_t in range(NT_FIXED):
         if i_t < NT:
-            # store current state h[i_t] (single full-width [BK, BV] tile; the
-            # block-indexed store masks rows [K:BK] for non-pow2 K)
             ct.store(h, index=(boh + i_t, i_h, 0, i_v), tile=ct.astype(b_h1, h.dtype).reshape((1, 1, BK, BV)))
 
-            # v_new = v - w @ h        (single full-width w[BT,BK] @ h[BK,BV] MMA;
-            # padded w columns / h rows [K:BK] are zero -> contribute 0)
+            # v_new = v - w @ h; the zero-padded w columns and h rows [K:BK] contribute 0.
             acc = ct.zeros((BT, BV), dtype=ct.float32)
-            b_w1 = ct.load(w_seg, index=(i_t, i_h, 0), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BK)
-            )
+            b_w1 = ct.load(
+                w_seg, index=(i_row, i_t, i_h, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BK))
             b_wh = ct.mma(b_w1, ct.astype(b_h1, b_w1.dtype), acc)
 
-            b_v = ct.load(v_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BV)
-            )
+            b_v = ct.load(
+                v_seg, index=(i_row, i_t, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BV))
             b_v = ct.astype(b_v, ct.float32) - b_wh
             b_v_store = ct.astype(b_v, k.dtype)
             if SAVE_NEW_VALUE:
-                ct.store(vnew_seg, index=(i_t, i_h, i_v), tile=ct.astype(b_v_store, v_new.dtype).reshape((BT, 1, BV)))
-            b_k1 = ct.load(k_seg, index=(i_t, i_kvh, 0), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BK)
-            )
+                ct.store(
+                    vnew_seg,
+                    index=(i_row, i_t, i_h, i_v),
+                    tile=ct.astype(b_v_store, v_new.dtype).reshape((1, BT, 1, BV)),
+                )
+            b_k1 = ct.load(
+                k_seg, index=(i_row, i_t, i_kvh, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BK))
             acc_h1 = ct.zeros((BK, BV), dtype=ct.float32)
             b_h1 = b_h1 + ct.mma(ct.transpose(b_k1), b_v_store, acc_h1)
 
@@ -915,31 +930,27 @@ def chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BV = min(max(_next_power_of_2(V), 16), 64)
-    # Full-width state/K tile: general for ANY K (no 64-wide sub-block unroll).
     BK = _next_power_of_2(K)
-    # Pad K and V dimensions to tile-aligned sizes so the kernel's fixed-size
-    # (BK, BV) loads/stores never exceed buffer bounds (ct.store has no
-    # padding_mode, unlike ct.load).
-    K_pad = BK  # e.g. K=32 -> 32, K=48 -> 64, K=96 -> 128, K=192 -> 256, K=320 -> 512
-    V_pad = BV * _cdiv(V, BV)  # e.g. V=48, BV=64 -> 64; V=64, BV=64 -> 64
+    # Pad K and V to tile-aligned sizes: ct.store has no padding mode, so the
+    # fixed-size (BK, BV) stores must stay in bounds.
+    K_pad = BK
+    V_pad = BV * _cdiv(V, BV)
 
     h = k.new_empty(B * NT, HV, K_pad, V_pad)
     final_state = k.new_zeros(N, HV, K_pad, V_pad, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
-    BT_total = B * T
-    k3 = k.reshape(BT_total, H, K)
-    u3 = u.reshape(BT_total, HV, V)
-    w3 = w.reshape(BT_total, HV, K)
+    k3 = k.reshape(B, T, H, K)
+    u3 = u.reshape(B, T, HV, V)
+    w3 = w.reshape(B, T, HV, K)
     USE_INIT = initial_state is not None
     if USE_INIT:
-        # Pad initial_state from [N, HV, K, V] to [N, HV, K_pad, V_pad]
         h0 = k.new_zeros(N, HV, K_pad, V_pad, dtype=torch.float32)
         h0[:, :, :K, :V] = initial_state
     else:
         h0 = torch.empty((1, 1, K_pad, BV), device=k.device, dtype=k.dtype)
     ht = final_state if output_final_state else torch.empty((1, 1, K_pad, BV), device=k.device, dtype=torch.float32)
-    vnew3 = v_new.reshape(BT_total, HV, V) if save_new_value else torch.empty((1, 1, 1), device=k.device, dtype=k.dtype)
+    vnew3 = v_new.reshape(B, T, HV, V) if save_new_value else torch.empty((1, 1, 1, 1), device=k.device, dtype=k.dtype)
     if IS_VARLEN:
         co = chunk_offsets.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -975,8 +986,8 @@ def chunk_gated_delta_rule_fwd_h(
     )
     cache_key = (
         "chunk_gated_delta_rule_fwd_kernel_h",
-        N,
-        T,
+        shape_bucket(N),
+        shape_bucket(T),
         H,
         HV,
         K,
@@ -989,9 +1000,19 @@ def chunk_gated_delta_rule_fwd_h(
         bool(save_new_value),
         IS_VARLEN,
         str(k.dtype),
-        str(k.device),
     )
-    _autotuned_launch(chunk_gated_delta_rule_fwd_kernel_h, cache_key, grid, args)
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_gated_delta_rule_fwd_kernel_h,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     # Slice padded buffers back to the logical [K, V] shape for downstream consumers.
     h = h[:, :, :K, :V].contiguous()
     if final_state is not None:
@@ -1001,15 +1022,15 @@ def chunk_gated_delta_rule_fwd_h(
 
 @ct.kernel
 def chunk_gated_delta_rule_bwd_kernel_dhu(
-    q,  # [BT_total, H, K]
-    k,  # [BT_total, H, K]
-    w,  # [BT_total, HV, K]
-    dht,  # [N, HV, K, V] (dummy when not USE_FINAL_STATE_GRADIENT)
-    dh0,  # [N, HV, K, V] (dummy when not USE_INITIAL_STATE)
-    do,  # [BT_total, HV, V]
-    dh,  # [B*NT, HV, K, V] (output)
-    dv,  # [BT_total, HV, V]
-    dv2,  # [BT_total, HV, V] (output)
+    q,  # [B, T, H, K]
+    k,  # [B, T, H, K]
+    w,  # [B, T, HV, K]
+    dht,  # [N, HV, K_pad, V_pad] (dummy when not USE_FINAL_STATE_GRADIENT)
+    dh0,  # [N, HV, K_pad, V_pad] (dummy when not USE_INITIAL_STATE)
+    do,  # [B, T, HV, V]
+    dh,  # [B*NT, HV, K_pad, V_pad] (output)
+    dv,  # [B, T, HV, V]
+    dv2,  # [B, T, HV, V] (output)
     cu_seqlens,
     chunk_offsets,
     scale: float,
@@ -1020,7 +1041,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
     V: ConstInt,
     BT: ConstInt,
     BV: ConstInt,
-    BK: ConstInt,  # next_pow2(K) -- full-width state/K tile (general over K)
+    BK: ConstInt,  # next_pow2(K)
     HVH: ConstInt,
     NT_FIXED: ConstInt,
     USE_INITIAL_STATE: ConstBool,
@@ -1035,26 +1056,27 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
 
     if IS_VARLEN:
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
         boh = ct.load(chunk_offsets, index=(i_n,), shape=()).astype(ct.int32)
         seqlen = eos - bos
     else:
-        bos = i_n * T
+        bos = 0
+        i_row = i_n
         eos = bos + T
         seqlen = T
         boh = i_n * NT_FIXED
     NT = _ck_rt(seqlen, BT)
 
-    q_seg = q.slice(axis=0, start=bos, stop=eos)
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    w_seg = w.slice(axis=0, start=bos, stop=eos)
-    do_seg = do.slice(axis=0, start=bos, stop=eos)
-    dv_seg = dv.slice(axis=0, start=bos, stop=eos)
-    dv2_seg = dv2.slice(axis=0, start=bos, stop=eos)
+    q_seg = q.slice(axis=1, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    w_seg = w.slice(axis=1, start=bos, stop=eos)
+    do_seg = do.slice(axis=1, start=bos, stop=eos)
+    dv_seg = dv.slice(axis=1, start=bos, stop=eos)
+    dv2_seg = dv2.slice(axis=1, start=bos, stop=eos)
 
-    # State gradient carried as a SINGLE full-width (BK, BV) tile (BK =
-    # next_pow2(K)), general for ANY K (no 64-wide sub-block unroll / K<=256 cap).
-    # dht is [N, HV, BK, V]; rows [K:BK] are zero-padded on load and stay 0.
+    # The state gradient is one (BK, BV) tile with BK = next_pow2(K); rows
+    # [K:BK] load as zero and stay zero.
     b_dh1 = ct.zeros((BK, BV), dtype=ct.float32)
     if USE_FINAL_STATE_GRADIENT:
         b_dh1 = b_dh1 + ct.astype(
@@ -1069,31 +1091,32 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
         if i_t < NT:
             ct.store(dh, index=(boh + i_t, i_h, 0, i_v), tile=ct.astype(b_dh1, dh.dtype).reshape((1, 1, BK, BV)))
 
-            # b_dv = k @ dh           (single full-width k[BT,BK] @ dh[BK,BV] MMA;
-            # padded k columns / dh rows [K:BK] are zero -> contribute 0)
+            # b_dv = k @ dh; the zero-padded k columns and dh rows [K:BK] contribute 0.
             acc = ct.zeros((BT, BV), dtype=ct.float32)
-            b_k1 = ct.load(k_seg, index=(i_t, i_kvh, 0), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BK)
-            )
+            b_k1 = ct.load(
+                k_seg, index=(i_row, i_t, i_kvh, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BK))
             b_dv = ct.mma(b_k1, ct.astype(b_dh1, b_k1.dtype), acc)
 
-            b_do = ct.load(do_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BV)
-            )
+            b_do = ct.load(
+                do_seg, index=(i_row, i_t, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BV))
             b_dv = b_dv + ct.astype(
-                ct.load(dv_seg, index=(i_t, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-                    (BT, BV)
-                ),
+                ct.load(
+                    dv_seg, index=(i_row, i_t, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+                ).reshape((BT, BV)),
                 ct.float32,
             )
             b_dv_store = ct.astype(b_dv, k.dtype)
-            ct.store(dv2_seg, index=(i_t, i_h, i_v), tile=ct.astype(b_dv_store, dv2.dtype).reshape((BT, 1, BV)))
-            b_q1 = ct.load(q_seg, index=(i_t, i_kvh, 0), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BK)
+            ct.store(
+                dv2_seg, index=(i_row, i_t, i_h, i_v), tile=ct.astype(b_dv_store, dv2.dtype).reshape((1, BT, 1, BV))
             )
-            b_w1 = ct.load(w_seg, index=(i_t, i_h, 0), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BK)
-            )
+            b_q1 = ct.load(
+                q_seg, index=(i_row, i_t, i_kvh, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BK))
+            b_w1 = ct.load(
+                w_seg, index=(i_row, i_t, i_h, 0), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BK))
             b_qdo = ct.mma(ct.transpose(b_q1), b_do, ct.zeros((BK, BV), dtype=ct.float32))
             b_wdv = ct.mma(ct.transpose(b_w1), b_dv_store, ct.zeros((BK, BV), dtype=ct.float32))
             b_dh1 = b_dh1 + b_qdo * scale - b_wdv
@@ -1130,22 +1153,20 @@ def chunk_gated_delta_rule_bwd_dhu(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BV = min(max(_next_power_of_2(V), 16), 128)
-    # Full-width state/K tile: general for ANY K (same as fwd kernel).
     BK = _next_power_of_2(K)
-    # Pad K and V dimensions to tile-aligned sizes (same as fwd kernel).
+    # Pad K and V to tile-aligned sizes so the fixed-size (BK, BV) stores stay in bounds.
     K_pad = BK
     V_pad = BV * _cdiv(V, BV)
 
     dh = q.new_empty(B * NT, HV, K_pad, V_pad)
     dv2 = torch.empty_like(dv)
 
-    BT_total = B * T
-    q3 = q.reshape(BT_total, H, K)
-    k3 = k.reshape(BT_total, H, K)
-    w3 = w.reshape(BT_total, HV, K)
-    do3 = do.reshape(BT_total, HV, V)
-    dv3 = dv.reshape(BT_total, HV, V)
-    dv2_3 = dv2.reshape(BT_total, HV, V)
+    q3 = q.reshape(B, T, H, K)
+    k3 = k.reshape(B, T, H, K)
+    w3 = w.reshape(B, T, HV, K)
+    do3 = do.reshape(B, T, HV, V)
+    dv3 = dv.reshape(B, T, HV, V)
+    dv2_3 = dv2.reshape(B, T, HV, V)
     USE_INIT = h0 is not None
     USE_DHT = dht is not None
     if USE_INIT:
@@ -1153,7 +1174,6 @@ def chunk_gated_delta_rule_bwd_dhu(
     else:
         dh0_padded = torch.empty((1, 1, K_pad, BV), device=q.device, dtype=torch.float32)
     if USE_DHT:
-        # Pad dht from [N, HV, K, V] to [N, HV, K_pad, V_pad]
         dht_padded = q.new_zeros(N, HV, K_pad, V_pad, dtype=dht.dtype)
         dht_padded[:, :, :K, :V] = dht
     else:
@@ -1195,8 +1215,8 @@ def chunk_gated_delta_rule_bwd_dhu(
     )
     cache_key = (
         "chunk_gated_delta_rule_bwd_kernel_dhu",
-        B,
-        T,
+        shape_bucket(B),
+        shape_bucket(T),
         H,
         HV,
         K,
@@ -1208,30 +1228,32 @@ def chunk_gated_delta_rule_bwd_dhu(
         USE_DHT,
         IS_VARLEN,
         str(q.dtype),
-        str(q.device),
     )
-    _autotuned_launch(chunk_gated_delta_rule_bwd_kernel_dhu, cache_key, grid, args)
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_gated_delta_rule_bwd_kernel_dhu,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     # Slice padded buffers back to logical [K, V] shape.
     dh = dh[:, :, :K, :V].contiguous()
     dh0 = dh0_padded[:, :, :K, :V].contiguous() if USE_INIT else None
     return dh, dh0, dv2
 
 
-# ===========================================================================
-# fla.ops.common.chunk_o
-# ===========================================================================
-#
-# DeltaNet path uses g=g_gamma=None and STATE_V_FIRST=False, so the gated
-# branches collapse. h is [B*NT, HV, K, V].
-
-
 @ct.kernel
 def chunk_fwd_kernel_o(
-    q,  # [BT_total, H, K]
-    k,  # [BT_total, H, K]
-    v,  # [BT_total, HV, V]
+    q,  # [B, T, H, K]
+    k,  # [B, T, H, K]
+    v,  # [B, T, HV, V]
     h,  # [B*NT, HV, K, V]
-    o,  # [BT_total, HV, V] (output)
+    o,  # [B, T, HV, V] (output)
     cu_seqlens,
     chunk_indices,
     scale: float,
@@ -1258,34 +1280,35 @@ def chunk_fwd_kernel_o(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
         seqlen = eos - bos
         NT = _ck_rt(seqlen, BT)
         # Chunks are stored consecutively across sequences.
         h_row = i_t
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         seqlen = T
         NT = _ck_rt(seqlen, BT)
         i_tt = i_t
         h_row = i_b * NT_FIXED + i_t
 
-    q_seg = q.slice(axis=0, start=bos, stop=eos)
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    v_seg = v.slice(axis=0, start=bos, stop=eos)
-    o_seg = o.slice(axis=0, start=bos, stop=eos)
+    q_seg = q.slice(axis=1, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    v_seg = v.slice(axis=1, start=bos, stop=eos)
+    o_seg = o.slice(axis=1, start=bos, stop=eos)
 
     b_o = ct.zeros((BT, BV), dtype=ct.float32)
     b_A = ct.zeros((BT, BT), dtype=ct.float32)
     for i_k in range(_ck(K, BK)):
         b_q = ct.load(
-            q_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO, latency=3
+            q_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO, latency=3
         ).reshape((BT, BK))
         b_k = ct.load(
-            k_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO, latency=3
+            k_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO, latency=3
         ).reshape((BT, BK))
-        # b_h block: [BK, BV] from h[h_row, i_h, i_k*BK:(i_k+1)*BK, i_v*BV:...]
         b_h = ct.load(
             h, index=(h_row, i_h, i_k, i_v), shape=(1, 1, BK, BV), padding_mode=ct.PaddingMode.ZERO, latency=3
         ).reshape((BK, BV))
@@ -1299,11 +1322,13 @@ def chunk_fwd_kernel_o(
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
     b_A = ct.where(m_A, b_A, ct.zeros((BT, BT), dtype=ct.float32))
 
-    b_v = ct.load(v_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape((BT, BV))
+    b_v = ct.load(v_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
+        (BT, BV)
+    )
     acc_av = ct.zeros((BT, BV), dtype=ct.float32)
     b_av = ct.mma(ct.astype(b_A, b_v.dtype), b_v, acc_av)
     b_o = b_o * scale + b_av * scale
-    ct.store(o_seg, index=(i_tt, i_h, i_v), tile=ct.astype(b_o, o.dtype).reshape((BT, 1, BV)))
+    ct.store(o_seg, index=(i_row, i_tt, i_h, i_v), tile=ct.astype(b_o, o.dtype).reshape((1, BT, 1, BV)))
 
 
 def chunk_fwd_o(
@@ -1330,11 +1355,10 @@ def chunk_fwd_o(
         scale = k.shape[-1] ** -0.5
 
     o = torch.empty_like(v)
-    BT_total = B * T
-    q3 = q.reshape(BT_total, H, K)
-    k3 = k.reshape(BT_total, H, K)
-    v3 = v.reshape(BT_total, HV, V)
-    o3 = o.reshape(BT_total, HV, V)
+    q3 = q.reshape(B, T, H, K)
+    k3 = k.reshape(B, T, H, K)
+    v3 = v.reshape(B, T, HV, V)
+    o3 = o.reshape(B, T, HV, V)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -1344,8 +1368,6 @@ def chunk_fwd_o(
 
     NT_fixed = _cdiv(T, BT) if cu_seqlens is None else NT
 
-    # The first candidate is the padded baseline; the remaining candidates
-    # cover square and asymmetric tiles.
     tile_choices = _fwd_o_tile_configs(K, V)
 
     def _grid(bk, bv):
@@ -1354,17 +1376,28 @@ def chunk_fwd_o(
     def _args(bk, bv):
         return (q3, k3, v3, h, o3, cs, ci, float(scale), T, H, HV, K, V, BT, bk, bv, HV // H, NT_fixed, IS_VARLEN)
 
-    cache_key = ("chunk_fwd_kernel_o", B, NT, H, HV, K, V, BT, IS_VARLEN, str(q.dtype), str(q.device))
-    _autotuned_launch_o(chunk_fwd_kernel_o, cache_key, tile_choices, _grid, _args)
+    cache_key = ("chunk_fwd_kernel_o", shape_bucket(B), shape_bucket(NT), H, HV, K, V, BT, IS_VARLEN, str(q.dtype))
+    stream = torch.cuda.current_stream()
+    configs = [SimpleNamespace(BK=bk, BV=bv, hints=h) for bk, bv in tile_choices for h in launch_hints()]
+    cfg, kernel = cached_exhaustive_search(
+        prune_occupancy(configs, lambda c: _grid(c.BK, c.BV)),
+        stream,
+        lambda c: _grid(c.BK, c.BV),
+        chunk_fwd_kernel_o,
+        lambda c: _args(c.BK, c.BV),
+        lambda c: c.hints,
+        cache_key=cache_key,
+    )
+    ct.launch(stream, _grid(cfg.BK, cfg.BV), kernel, _args(cfg.BK, cfg.BV))
     return o
 
 
 @ct.kernel
 def chunk_bwd_kernel_dv_local(
-    q,  # [BT_total, H, K]
-    k,  # [BT_total, H, K]
-    do,  # [BT_total, HV, V]
-    dv,  # [BT_total, HV, V] (output)
+    q,  # [B, T, H, K]
+    k,  # [B, T, H, K]
+    do,  # [B, T, HV, V]
+    dv,  # [B, T, HV, V] (output)
     cu_seqlens,
     chunk_indices,
     scale: float,
@@ -1389,27 +1422,29 @@ def chunk_bwd_kernel_dv_local(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         i_tt = i_t
     seqlen = eos - bos
 
-    q_seg = q.slice(axis=0, start=bos, stop=eos)
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    do_seg = do.slice(axis=0, start=bos, stop=eos)
-    dv_seg = dv.slice(axis=0, start=bos, stop=eos)
+    q_seg = q.slice(axis=1, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    do_seg = do.slice(axis=1, start=bos, stop=eos)
+    dv_seg = dv.slice(axis=1, start=bos, stop=eos)
 
-    # recompute path (A=None, g=None): b_A = sum_k (k @ q^T) * scale
+    # b_A = sum_k (k @ q^T) * scale
     b_A = ct.zeros((BT, BT), dtype=ct.float32)
     for i_k in range(_ck(K, BK)):
-        b_q = ct.load(q_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
-        b_k = ct.load(k_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BK)
-        )
+        b_q = ct.load(
+            q_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
+        b_k = ct.load(
+            k_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BK))
         acc = b_A
         b_A = ct.mma(b_k, ct.transpose(b_q), acc)
     b_A = b_A * scale
@@ -1420,12 +1455,12 @@ def chunk_bwd_kernel_dv_local(
     b_A = ct.astype(ct.where(m_A, b_A, ct.zeros((BT, BT), dtype=ct.float32)), do.dtype)
 
     for i_v in range(_ck(V, BV)):
-        b_do = ct.load(do_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BV)
-        )
+        b_do = ct.load(
+            do_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BV))
         acc = ct.zeros((BT, BV), dtype=ct.float32)
         b_dv = ct.mma(b_A, b_do, acc)
-        ct.store(dv_seg, index=(i_tt, i_h, i_v), tile=ct.astype(b_dv, dv.dtype).reshape((BT, 1, BV)))
+        ct.store(dv_seg, index=(i_row, i_tt, i_h, i_v), tile=ct.astype(b_dv, dv.dtype).reshape((1, BT, 1, BV)))
 
 
 def chunk_bwd_dv_local(
@@ -1451,11 +1486,10 @@ def chunk_bwd_dv_local(
     NT = _cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dv = torch.empty_like(do)
-    BT_total = B * T
-    q3 = q.reshape(BT_total, H, K)
-    k3 = k.reshape(BT_total, H, K)
-    do3 = do.reshape(BT_total, HV, V)
-    dv3 = dv.reshape(BT_total, HV, V)
+    q3 = q.reshape(B, T, H, K)
+    k3 = k.reshape(B, T, H, K)
+    do3 = do.reshape(B, T, HV, V)
+    dv3 = dv.reshape(B, T, HV, V)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -1467,8 +1501,8 @@ def chunk_bwd_dv_local(
     args = (q3, k3, do3, dv3, cs, ci, float(scale), T, H, HV, K, V, BT, BK, BV, HV // H, IS_VARLEN)
     cache_key = (
         "chunk_bwd_kernel_dv_local",
-        B,
-        T,
+        shape_bucket(B),
+        shape_bucket(T),
         H,
         HV,
         K,
@@ -1478,24 +1512,34 @@ def chunk_bwd_dv_local(
         BV,
         IS_VARLEN,
         str(q.dtype),
-        str(q.device),
     )
-    _autotuned_launch(chunk_bwd_kernel_dv_local, cache_key, grid, args)
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_bwd_kernel_dv_local,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
     return dv
 
 
 @ct.kernel
 def chunk_bwd_kernel_dqkwg(
-    q,  # [BT_total, H, K]
-    k,  # [BT_total, H, K]
-    v,  # [BT_total, HV, V]
+    q,  # [B, T, H, K]
+    k,  # [B, T, H, K]
+    v,  # [B, T, HV, V]
     h,  # [B*NT, HV, K, V]
-    do,  # [BT_total, HV, V]
+    do,  # [B, T, HV, V]
     dh,  # [B*NT, HV, K, V]
-    dq,  # [BT_total, HV, K] (output)
-    dk,  # [BT_total, HV, K] (output)
-    dw,  # [BT_total, HV, K] (output)
-    dv,  # [BT_total, HV, V]
+    dq,  # [B, T, HV, K] (output)
+    dk,  # [B, T, HV, K] (output)
+    dw,  # [B, T, HV, K] (output)
+    dv,  # [B, T, HV, V]
     cu_seqlens,
     chunk_indices,
     scale: float,
@@ -1523,24 +1567,26 @@ def chunk_bwd_kernel_dqkwg(
         i_n = ct.load(chunk_indices, index=(i_t, 0), shape=()).astype(ct.int32)
         i_tt = ct.load(chunk_indices, index=(i_t, 1), shape=()).astype(ct.int32)
         bos = ct.load(cu_seqlens, index=(i_n,), shape=()).astype(ct.int32)
+        i_row = 0
         eos = ct.load(cu_seqlens, index=(i_n + 1,), shape=()).astype(ct.int32)
         seqlen = eos - bos
         h_row = i_t
     else:
-        bos = i_b * T
+        bos = 0
+        i_row = i_b
         eos = bos + T
         seqlen = T
         i_tt = i_t
         h_row = i_b * NT_FIXED + i_t
 
-    q_seg = q.slice(axis=0, start=bos, stop=eos)
-    k_seg = k.slice(axis=0, start=bos, stop=eos)
-    v_seg = v.slice(axis=0, start=bos, stop=eos)
-    do_seg = do.slice(axis=0, start=bos, stop=eos)
-    dv_seg = dv.slice(axis=0, start=bos, stop=eos)
-    dq_seg = dq.slice(axis=0, start=bos, stop=eos)
-    dk_seg = dk.slice(axis=0, start=bos, stop=eos)
-    dw_seg = dw.slice(axis=0, start=bos, stop=eos)
+    q_seg = q.slice(axis=1, start=bos, stop=eos)
+    k_seg = k.slice(axis=1, start=bos, stop=eos)
+    v_seg = v.slice(axis=1, start=bos, stop=eos)
+    do_seg = do.slice(axis=1, start=bos, stop=eos)
+    dv_seg = dv.slice(axis=1, start=bos, stop=eos)
+    dq_seg = dq.slice(axis=1, start=bos, stop=eos)
+    dk_seg = dk.slice(axis=1, start=bos, stop=eos)
+    dw_seg = dw.slice(axis=1, start=bos, stop=eos)
 
     b_dq = ct.zeros((BT, BK), dtype=ct.float32)
     b_dk = ct.zeros((BT, BK), dtype=ct.float32)
@@ -1548,13 +1594,13 @@ def chunk_bwd_kernel_dqkwg(
     b_dw = ct.zeros((BT, BK), dtype=ct.float32)
 
     for i_v in ct.static_iter(range(_ck(V, BV))):
-        b_v = ct.load(v_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BV)
-        )
-        b_do = ct.load(do_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-            (BT, BV)
-        )
-        # h/dh blocks [BV, BK] (non state_v_first: stored [K, V], load (i_k, i_v) -> [BK, BV], transpose)
+        b_v = ct.load(
+            v_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BV))
+        b_do = ct.load(
+            do_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+        ).reshape((BT, BV))
+        # h/dh are stored [K, V]: load [BK, BV] and transpose to [BV, BK].
         b_h = ct.transpose(
             ct.load(h, index=(h_row, i_h, i_k, i_v), shape=(1, 1, BK, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
                 (BK, BV)
@@ -1572,27 +1618,27 @@ def chunk_bwd_kernel_dqkwg(
         acc_dk = b_dk
         b_dk = ct.mma(b_v, ct.astype(b_dh, b_v.dtype), acc_dk)
         if USE_DW:
-            b_dv = ct.load(dv_seg, index=(i_tt, i_h, i_v), shape=(BT, 1, BV), padding_mode=ct.PaddingMode.ZERO).reshape(
-                (BT, BV)
-            )
+            b_dv = ct.load(
+                dv_seg, index=(i_row, i_tt, i_h, i_v), shape=(1, BT, 1, BV), padding_mode=ct.PaddingMode.ZERO
+            ).reshape((BT, BV))
             acc_dw = b_dw
             b_dw = ct.mma(ct.astype(b_dv, b_v.dtype), ct.astype(b_h, b_v.dtype), acc_dw)
 
     if USE_DW:
-        ct.store(dw_seg, index=(i_tt, i_h, i_k), tile=ct.astype(-b_dw, dw.dtype).reshape((BT, 1, BK)))
+        ct.store(dw_seg, index=(i_row, i_tt, i_h, i_k), tile=ct.astype(-b_dw, dw.dtype).reshape((1, BT, 1, BK)))
 
-    b_q = ct.load(q_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-        (BT, BK)
-    )
-    b_k = ct.load(k_seg, index=(i_tt, i_kvh, i_k), shape=(BT, 1, BK), padding_mode=ct.PaddingMode.ZERO).reshape(
-        (BT, BK)
-    )
+    b_q = ct.load(
+        q_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+    ).reshape((BT, BK))
+    b_k = ct.load(
+        k_seg, index=(i_row, i_tt, i_kvh, i_k), shape=(1, BT, 1, BK), padding_mode=ct.PaddingMode.ZERO
+    ).reshape((BT, BK))
 
     o_t = i_tt * BT + ct.arange(BT, dtype=ct.int32)
     m_t = o_t < seqlen
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :])
 
-    # g=None / g_gamma=None branch:
+    # No-gate math:
     #   b_ds = tril_incl(b_ds)
     #   b_dq += b_ds @ b_k          ;  b_dq *= scale
     #   b_dk += (b_ds^T @ b_q) * scale   (only the new term is scaled)
@@ -1603,8 +1649,8 @@ def chunk_bwd_kernel_dqkwg(
     b_dk = b_dk + ct.mma(ct.transpose(b_ds), b_q, acc_dk) * scale
     b_dq = b_dq * scale
 
-    ct.store(dq_seg, index=(i_tt, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((BT, 1, BK)))
-    ct.store(dk_seg, index=(i_tt, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((BT, 1, BK)))
+    ct.store(dq_seg, index=(i_row, i_tt, i_h, i_k), tile=ct.astype(b_dq, dq.dtype).reshape((1, BT, 1, BK)))
+    ct.store(dk_seg, index=(i_row, i_tt, i_h, i_k), tile=ct.astype(b_dk, dk.dtype).reshape((1, BT, 1, BK)))
 
 
 def chunk_bwd_dqkwg(
@@ -1640,15 +1686,14 @@ def chunk_bwd_dqkwg(
     dw = torch.empty_like(w) if w is not None else None
     USE_DW = (w is not None) and (dv is not None)
 
-    BT_total = B * T
-    q3 = q.reshape(BT_total, H, K)
-    k3 = k.reshape(BT_total, H, K)
-    v3 = v.reshape(BT_total, HV, V)
-    do3 = do.reshape(BT_total, HV, V)
-    dq3 = dq.reshape(BT_total, HV, K)
-    dk3 = dk.reshape(BT_total, HV, K)
-    dw3 = dw.reshape(BT_total, HV, K) if dw is not None else torch.empty((1, 1, 1), device=q.device, dtype=q.dtype)
-    dv3 = dv.reshape(BT_total, HV, V) if dv is not None else torch.empty((1, 1, 1), device=q.device, dtype=q.dtype)
+    q3 = q.reshape(B, T, H, K)
+    k3 = k.reshape(B, T, H, K)
+    v3 = v.reshape(B, T, HV, V)
+    do3 = do.reshape(B, T, HV, V)
+    dq3 = dq.reshape(B, T, HV, K)
+    dk3 = dk.reshape(B, T, HV, K)
+    dw3 = dw.reshape(B, T, HV, K) if dw is not None else torch.empty((1, 1, 1, 1), device=q.device, dtype=q.dtype)
+    dv3 = dv.reshape(B, T, HV, V) if dv is not None else torch.empty((1, 1, 1, 1), device=q.device, dtype=q.dtype)
     if IS_VARLEN:
         ci = chunk_indices.to(torch.int32)
         cs = cu_seqlens.to(torch.int32)
@@ -1687,8 +1732,8 @@ def chunk_bwd_dqkwg(
     )
     cache_key = (
         "chunk_bwd_kernel_dqkwg",
-        B,
-        T,
+        shape_bucket(B),
+        shape_bucket(T),
         H,
         HV,
         K,
@@ -1699,19 +1744,24 @@ def chunk_bwd_dqkwg(
         USE_DW,
         IS_VARLEN,
         str(q.dtype),
-        str(q.device),
     )
-    _autotuned_launch(chunk_bwd_kernel_dqkwg, cache_key, grid, args)
+    stream = torch.cuda.current_stream()
+    _, kernel = cached_exhaustive_search(
+        [SimpleNamespace(hints=h) for h in launch_hints()],
+        stream,
+        lambda c: grid,
+        chunk_bwd_kernel_dqkwg,
+        lambda c: args,
+        lambda c: c.hints,
+        cache_key=cache_key,
+        timeout=30,
+    )
+    ct.launch(stream, grid, kernel, args)
 
     if H != HV:
         dq = dq.view(B, T, H, HV // H, K).sum(3)
         dk = dk.view(B, T, H, HV // H, K).sum(3)
     return dq, dk, dw, None
-
-
-# ===========================================================================
-# fla.ops.delta_rule.chunk (entry)
-# ===========================================================================
 
 
 def chunk_delta_rule_fwd(
@@ -1725,7 +1775,7 @@ def chunk_delta_rule_fwd(
     cu_seqlens=None,
     chunk_indices=None,
 ):
-    # obtain WY representation. u is actually the new v.
+    # WY representation; u is the updated v.
     w, u, A = prepare_wy_repr_fwd(k=k, v=v, beta=beta, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -1879,8 +1929,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
 
 
 def ct_astype_torch(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Host-side tensor dtype cast (torch). cuTile `ct.astype` only applies to
-    in-kernel tiles; on the host we use the regular torch cast."""
+    """Cast a host tensor to ``dtype``; returns ``x`` itself when the dtype already matches."""
     return x if x.dtype == dtype else x.to(dtype)
 
 
@@ -1898,8 +1947,7 @@ def chunk_delta_rule(
     cu_seqlens_cpu: torch.Tensor | None = None,
     **kwargs,
 ):
-    r"""Chunked DeltaNet. Behavior identical to
-    ``fla.ops.delta_rule.chunk.chunk_delta_rule``.
+    r"""Chunked DeltaNet.
 
     Args:
         q, k: queries/keys of shape ``[B, T, H, K]``.
@@ -1913,7 +1961,7 @@ def chunk_delta_rule(
         cu_seqlens_cpu: CPU copy of ``cu_seqlens`` to avoid device sync.
 
     Returns:
-        ``(o, final_state)`` mirroring fla's shapes/semantics.
+        ``(o, final_state)``.
     """
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkDeltaRuleFunction does not support float32. Please use bfloat16."
