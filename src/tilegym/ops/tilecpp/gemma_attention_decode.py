@@ -116,6 +116,8 @@ class _GemmaAttentionDecode(torch.autograd.Function):
             BLOCK_SIZE = max(BLOCK_N, _next_power_of_2(_cdiv(seq_len, NUM_KV_SPLITS)))
             NUM_KV_SPLITS = _cdiv(seq_len, BLOCK_SIZE)
         else:
+            if kv_len_per_split % BLOCK_N != 0:
+                raise ValueError(f"kv_len_per_split must be a multiple of {BLOCK_N}, got {kv_len_per_split}")
             NUM_KV_SPLITS = _cdiv(seq_len, kv_len_per_split)
             BLOCK_SIZE = kv_len_per_split
 

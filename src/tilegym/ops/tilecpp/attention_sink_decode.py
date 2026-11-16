@@ -125,6 +125,8 @@ class _AttentionSinkDecode(torch.autograd.Function):
             BLOCK_SIZE = max(BLOCK_N, _next_power_of_2(_cdiv(n_kv_ctx, NUM_KV_SPLITS)))
             NUM_KV_SPLITS = _cdiv(n_kv_ctx, BLOCK_SIZE)
         else:
+            if kv_len_per_split % BLOCK_N != 0:
+                raise ValueError(f"kv_len_per_split must be a multiple of {BLOCK_N}, got {kv_len_per_split}")
             NUM_KV_SPLITS = _cdiv(n_kv_ctx, kv_len_per_split)
             BLOCK_SIZE = kv_len_per_split
         assert BLOCK_SIZE == _next_power_of_2(BLOCK_SIZE)

@@ -80,8 +80,17 @@ __tile_global__ void gemma_attention_decode_kernel(
         ct::tensor_span{V_ptr, ct::extents{B, H_KV, S_KV, HEAD_DIM}},
         ct::shape<1, 1, BLOCK_N, HEAD_DIM>{});
 
+    // Unmasked view load/store is undefined for a partially out-of-bounds tile.
+    constexpr bool EVEN_QG = (Q_PER_KV == QUERY_GROUP_BLOCK_SIZE);
+    constexpr bool EVEN_N  = (S_KV % BLOCK_N == 0);
+
     // Load Q -> [HEAD_DIM, QUERY_GROUP_BLOCK_SIZE] in native T for tensor-core MMA.
-    Q_4D_Tile q_4d = Q_view.load(batch_id, head_id, 0, 0);
+    Q_4D_Tile q_4d;
+    if constexpr (EVEN_QG) {
+        q_4d = Q_view.load(batch_id, head_id, 0, 0);
+    } else {
+        q_4d = Q_view.load_masked(batch_id, head_id, 0, 0);
+    }
     auto q_2d   = ct::reshape(q_4d, ct::shape<QUERY_GROUP_BLOCK_SIZE, HEAD_DIM>{});
     auto q_nat  = ct::transpose(q_2d);  // [HEAD_DIM, QUERY_GROUP_BLOCK_SIZE]
 
@@ -104,7 +113,12 @@ __tile_global__ void gemma_attention_decode_kernel(
         int kv_block = start_block + block_idx;
         int curr_n   = kv_block * BLOCK_N;
 
-        T_4D_Tile k_4d = K_view.load(batch_id, head_id, kv_block, 0);
+        T_4D_Tile k_4d;
+        if constexpr (EVEN_N) {
+            k_4d = K_view.load(batch_id, head_id, kv_block, 0);
+        } else {
+            k_4d = K_view.load_masked(batch_id, head_id, kv_block, 0);
+        }
         auto k = ct::reshape(k_4d, ct::shape<BLOCK_N, HEAD_DIM>{});
 
         // qk = K @ Q  ->  (BLOCK_N, QUERY_GROUP_BLOCK_SIZE) in fp32.
@@ -158,7 +172,12 @@ __tile_global__ void gemma_attention_decode_kernel(
         l_i = l_i * alpha_2d + p;
         acc = acc * alpha_2d;
 
-        T_4D_Tile v_4d = V_view.load(batch_id, head_id, kv_block, 0);
+        T_4D_Tile v_4d;
+        if constexpr (EVEN_N) {
+            v_4d = V_view.load(batch_id, head_id, kv_block, 0);
+        } else {
+            v_4d = V_view.load_masked(batch_id, head_id, kv_block, 0);
+        }
         auto v_2d = ct::reshape(v_4d, ct::shape<BLOCK_N, HEAD_DIM>{});
         auto v_t  = ct::transpose(v_2d);
 
@@ -185,11 +204,17 @@ __tile_global__ void gemma_attention_decode_kernel(
         ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM>{});
     auto acc_out_5d = ct::reshape(acc_out_T,
                                     ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM>{});
-    Out_view.store(acc_out_5d, batch_id, head_id, 0, split_id, 0);
 
     auto LSE_view = ct::partition_view(
         ct::tensor_span{LSE_ptr, ct::extents{B, H_KV, Q_PER_KV, NUM_KV_SPLITS}},
         ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
     auto lse_4d = ct::reshape(lse, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
-    LSE_view.store(lse_4d, batch_id, head_id, 0, split_id);
+
+    if constexpr (EVEN_QG) {
+        Out_view.store(acc_out_5d, batch_id, head_id, 0, split_id, 0);
+        LSE_view.store(lse_4d, batch_id, head_id, 0, split_id);
+    } else {
+        Out_view.store_masked(acc_out_5d, batch_id, head_id, 0, split_id, 0);
+        LSE_view.store_masked(lse_4d, batch_id, head_id, 0, split_id);
+    }
 }
