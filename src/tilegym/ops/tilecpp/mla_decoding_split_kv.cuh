@@ -189,8 +189,14 @@ __tile_global__ void naive_absorb_mla_transpose(
     auto Out_span = ct::tensor_span{Att_Out_ptr, ct::extents<uint32_t, B, NUM_HEADS, NUM_KV_SPLITS, TILE_D>{}};
     auto Out_view = ct::partition_view(Out_span, ct::shape<1, TILE_H, 1, TILE_D>{});
     auto acc_out_4d = ct::reshape(acc_out_T, ct::shape<1, TILE_H, 1, TILE_D>{});
-    [[ using cutile : hint(0, latency=2) ]]
-    Out_view.store(acc_out_4d, batch_idx, pid_x, tile_idx, 0);
+    // Unmasked view store is undefined for a partially out-of-bounds tile.
+    if constexpr (NUM_HEADS % TILE_H == 0) {
+        [[ using cutile : hint(0, latency=2) ]]
+        Out_view.store(acc_out_4d, batch_idx, pid_x, tile_idx, 0);
+    } else {
+        [[ using cutile : hint(0, latency=2) ]]
+        Out_view.store_masked(acc_out_4d, batch_idx, pid_x, tile_idx, 0);
+    }
 
     // Store log sum exp for this tile with latency hint
     auto idx_head = pid_x * TILE_H + ct::iota<i32_H>();

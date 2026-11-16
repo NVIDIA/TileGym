@@ -76,7 +76,15 @@ __tile_global__ void attention_sink_decode_kernel(
         ct::tensor_span{V_ptr, ct::extents{B, H_KV, S_KV, HEAD_DIM}},
         ct::shape<1, 1, BLOCK_N, HEAD_DIM>{});
 
-    Q_4D_Tile q_4d = Q_view.load(batch_id, head_id, 0, 0);
+    // Unmasked view load/store is undefined for a partially out-of-bounds tile.
+    constexpr bool EVEN_QG = (NUM_Q_HEAD_PER_KV == QUERY_GROUP_BLOCK_SIZE);
+
+    Q_4D_Tile q_4d;
+    if constexpr (EVEN_QG) {
+        q_4d = Q_view.load(batch_id, head_id, 0, 0);
+    } else {
+        q_4d = Q_view.load_masked(batch_id, head_id, 0, 0);
+    }
     auto q_2d  = ct::reshape(q_4d, ct::shape<QUERY_GROUP_BLOCK_SIZE, HEAD_DIM>{});
     auto q_nat = ct::transpose(q_2d);  // [HEAD_DIM, QUERY_GROUP_BLOCK_SIZE]
 
@@ -112,14 +120,14 @@ __tile_global__ void attention_sink_decode_kernel(
     auto acc = ct::zeros<f32_DxQG>();
 
     auto offs_n = ct::iota<i32_N>();
-    int num_blocks = (KV_LEN_PER_SPLIT + BLOCK_N - 1) / BLOCK_N;
+    // Keep this loop counted: a `break` here crashes some tileiras versions on sm_90 and sm_120.
+    int num_blocks = (end_idx - start_idx + BLOCK_N - 1) / BLOCK_N;
     int start_block = start_idx / BLOCK_N;
 
     if (end_idx > start_idx) {
         for (auto block_idx : ct::irange(0, num_blocks)) {
             int kv_block = start_block + block_idx;
             int curr_n   = kv_block * BLOCK_N;
-            if (curr_n >= end_idx) break;
 
             T_4D_Tile k_4d = K_view.template load_masked<zero_pad>(batch_id, head_id, kv_block, 0);
             auto k = ct::reshape(k_4d, ct::shape<BLOCK_N, HEAD_DIM>{});
@@ -191,11 +199,20 @@ __tile_global__ void attention_sink_decode_kernel(
         ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM>{});
     auto acc_out_5d = ct::reshape(acc_out_T,
                                     ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1, HEAD_DIM>{});
-    Out_view.store(acc_out_5d, batch_id, head_id, 0, split_id, 0);
 
-    auto LSE_view = ct::partition_view(
-        ct::tensor_span{LSE_ptr, ct::extents{B, H_KV, NUM_Q_HEAD_PER_KV, NUM_KV_SPLITS}},
-        ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
-    auto lse_4d = ct::reshape(lse, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
-    LSE_view.store(lse_4d, batch_id, head_id, 0, split_id);
+    if constexpr (EVEN_QG) {
+        Out_view.store(acc_out_5d, batch_id, head_id, 0, split_id, 0);
+
+        auto LSE_view = ct::partition_view(
+            ct::tensor_span{LSE_ptr, ct::extents{B, H_KV, NUM_Q_HEAD_PER_KV, NUM_KV_SPLITS}},
+            ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
+        auto lse_4d = ct::reshape(lse, ct::shape<1, 1, QUERY_GROUP_BLOCK_SIZE, 1>{});
+        LSE_view.store(lse_4d, batch_id, head_id, 0, split_id);
+    } else {
+        Out_view.store_masked(acc_out_5d, batch_id, head_id, 0, split_id, 0);
+
+        auto query_offsets = ct::iota<ct::tile<int, ct::shape<QUERY_GROUP_BLOCK_SIZE>>>();
+        auto lse_offsets = ((batch_id * H_KV + head_id) * NUM_Q_HEAD_PER_KV + query_offsets) * NUM_KV_SPLITS + split_id;
+        ct::store_masked(LSE_ptr + lse_offsets, lse, query_offsets < NUM_Q_HEAD_PER_KV);
+    }
 }
