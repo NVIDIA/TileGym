@@ -28,6 +28,9 @@ _TMA_FWD_HINT_CANDIDATES = (
     SimpleNamespace(occupancy=8, num_worker_warps=None),
     SimpleNamespace(occupancy=1, num_worker_warps=8),
     SimpleNamespace(occupancy=2, num_worker_warps=8),
+    SimpleNamespace(occupancy=2, num_worker_warps=None, allow_tma_store=False),
+    SimpleNamespace(occupancy=4, num_worker_warps=None, allow_tma_store=False),
+    SimpleNamespace(occupancy=8, num_worker_warps=None, allow_tma_store=False),
 )
 # None keeps the compiler default; worker warps above 8 can hang the gather kernels.
 _GATHER_WORKER_WARP_CANDIDATES = (None, 4, 8)
@@ -246,6 +249,7 @@ def _softmax_kernel_tma(
     N_ROWS: ConstInt,
     N_COLS: ConstInt,
     TILE_SIZE: ConstInt,
+    ALLOW_TMA_STORE: ct.Constant[bool],
 ):
     # Static persistent scheduling: each block processes multiple rows
     pid = ct.bid(0)
@@ -273,7 +277,7 @@ def _softmax_kernel_tma(
 
         # Convert back to original dtype and store
         softmax_output = ct.astype(softmax_output, input.dtype)
-        ct.store(output, index=(row_idx, 0), tile=softmax_output)
+        ct.store(output, index=(row_idx, 0), tile=softmax_output, allow_tma=ALLOW_TMA_STORE)
 
 
 # Chunked softmax kernel for large tensors (3-pass algorithm)
@@ -517,6 +521,10 @@ def _launch_softmax_kernel_tma(
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
     args = (output, input, n_rows, original_n_cols, TILE_SIZE)
+
+    def args_fn(candidate):
+        return args + (getattr(candidate, "allow_tma_store", True),)
+
     candidates = list(_TMA_FWD_HINT_CANDIDATES)
     if is_autotune_disabled():
         cfg = candidates[0]
@@ -529,14 +537,14 @@ def _launch_softmax_kernel_tma(
                 torch.cuda.current_stream(),
                 lambda candidate: (min(NUM_SM * candidate.occupancy, n_rows), 1, 1),
                 _softmax_kernel_tma,
-                lambda _: args,
+                args_fn,
                 _cfg_hints,
             )
             cfg = _softmax_tune_cache[cache_key] = result.best.config
     softmax_kernel_forward = cached_replace_hints(_softmax_kernel_tma, **_cfg_hints(cfg))
     grid = (min(NUM_SM * cfg.occupancy, n_rows), 1, 1)
 
-    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args)
+    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args_fn(cfg))
 
 
 def _launch_softmax_kernel_chunked(
