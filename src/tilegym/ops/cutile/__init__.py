@@ -21,6 +21,7 @@ if is_backend_available("cutile"):
     from . import bmm
     from . import cat
     from . import dropout
+    from . import fft
     from . import flash_decode
     from . import fp8_quantization_matmul
     from . import gemma_attention
@@ -62,6 +63,7 @@ if is_backend_available("cutile"):
     from .experimental.nvfp4_quantize import tile_nvfp4_quantize
     from .experimental.sparse_mla import tile_sparse_mla
     from .experimental.swa_attention import tile_swa_attention
+    from .fft import fft
     from .flash_decode import fmha_decode
     from .fp8_quantization_matmul import w8a8_block_fp8_matmul
     from .mamba2 import mamba2_chunk_backward
@@ -124,6 +126,8 @@ if is_backend_available("cutile"):
         "group_gemm",
         "mhc",
         "linear_gluact_linear",
+        # Non-DL operations
+        "fft",
         "w8a8_block_fp8_matmul",
         "chunk_gated_delta_rule",
         "recurrent_gated_delta_rule",

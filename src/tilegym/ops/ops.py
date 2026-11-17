@@ -1198,6 +1198,46 @@ def linear_gluact_linear(
     raise NotImplementedError(f"linear_gluact_linear is not implemented for this backend: {get_current_backend()}")
 
 
+# ============================================================================
+# Non-DL Operations
+# ============================================================================
+
+
+@dispatch(
+    "fft",
+)
+def fft(
+    x: torch.Tensor,
+    decomp: Tuple[int, int, int],
+    W0: torch.Tensor,
+    W1: torch.Tensor,
+    W2: torch.Tensor,
+    T0: torch.Tensor,
+    T1: torch.Tensor,
+    atom: str,
+    BS: int,
+    occupancy: int,
+    **kwargs: Any,
+):
+    """
+    Fast Fourier Transform operation
+
+    Args:
+        x: Input tensor
+        decomp: Decomposition tuple
+        W0: Weight tensor 0
+        W1: Weight tensor 1
+        W2: Weight tensor 2
+        T0: Transform tensor 0
+        T1: Transform tensor 1
+        atom: Load-path hint; the cuTile backend ignores it
+        BS: Number of batch rows each block processes
+        occupancy: Occupancy value
+        **kwargs: Additional arguments for backend-specific configurations
+    """
+    raise NotImplementedError(f"FFT is not implemented for this backend: {get_current_backend()}")
+
+
 @dispatch(
     "recurrent_gated_delta_rule",
 )
