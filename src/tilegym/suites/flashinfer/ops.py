@@ -158,6 +158,37 @@ def ragged_block_scaled_bmm(
     raise NotImplementedError(f"flashinfer.gemm.ragged_block_scaled_bmm is not implemented for {get_current_backend()}")
 
 
+@dispatch(
+    "flashinfer.gemm.bs_matmul",
+)
+def bs_matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    c_dtype: torch.dtype,
+    config: dict = None,
+):
+    """
+    FlashInfer operation: block scaled matrix multiplication.
+
+    Performs standard matrix multiplication with block scaling, supports persistent scheduling.
+
+    Args:
+        a: Input matrix A [M, K] or [K, M]
+        b: Input matrix B [N, K] or [K, N]
+        a_scale: Scaling factors for A blocks, 5D swizzled layout [1, M // 128, K // VEC_SIZE // 4, 2, 256]
+        b_scale: Scaling factors for B blocks, 5D swizzled layout [1, N // 128, K // VEC_SIZE // 4, 2, 256]
+        c_dtype: Output data type, [float32, float16, float8_e4m3fn]
+        config: Configuration dictionary with M, N, K, VEC_SIZE, DTYPE_A, DTYPE_B, transpose_a, transpose_b,
+            persistent_mode
+
+    Returns:
+        torch.Tensor: Output matrix C [M, N]
+    """
+    raise NotImplementedError(f"flashinfer.gemm.bs_matmul is not implemented for {get_current_backend()}")
+
+
 # ============================================================================
 # RoPE Operations
 # ============================================================================
@@ -456,6 +487,7 @@ __all__ = [
     "masked_bmm",
     "ragged_bmm",
     "ragged_block_scaled_bmm",
+    "bs_matmul",
     # RoPE
     "rope_quantize_fp8",
     # Quantization
