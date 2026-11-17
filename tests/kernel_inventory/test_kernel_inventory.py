@@ -5,44 +5,35 @@
 import ast
 import importlib.util
 import json
+import os
+import subprocess
 import sys
-import types
 from pathlib import Path
 from pathlib import PurePosixPath
 
 import pytest
 
+from tilegym.kernel_inventory import KernelInventoryError
+from tilegym.kernel_inventory import iter_kernel_definition_paths
+from tilegym.kernel_inventory import iter_kernel_python_paths
+from tilegym.kernel_inventory import iter_kernel_solution_paths
+from tilegym.kernel_inventory import iter_solution_paths_for_definition
+from tilegym.kernel_inventory import load_json
+from tilegym.kernel_inventory import materialize_solution_sources
+from tilegym.kernel_inventory import normalize_solution_source_paths
+from tilegym.kernel_inventory import validate_definition
+from tilegym.kernel_inventory import validate_solution
+from tilegym.kernel_inventory import validate_solution_entry_point
+from tilegym.kernel_inventory.generation import make_solution
+from tilegym.kernel_inventory.generation import materialize_solution_for_fib
+from tilegym.kernel_inventory.layout import inventory_coordinate
+from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
+from tilegym.kernel_inventory.return_contract import ReturnContractError
+from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+from tilegym.kernel_inventory.source_contract import SourceContractError
+from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Import inventory modules without running tilegym/__init__.py. The top-level
-# package initializes CUDA/Torch backends, which is unrelated to JSON schema checks.
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory import KernelInventoryError
-    from tilegym.kernel_inventory import iter_kernel_definition_paths
-    from tilegym.kernel_inventory import iter_kernel_python_paths
-    from tilegym.kernel_inventory import iter_kernel_solution_paths
-    from tilegym.kernel_inventory import iter_solution_paths_for_definition
-    from tilegym.kernel_inventory import load_json
-    from tilegym.kernel_inventory import materialize_solution_sources
-    from tilegym.kernel_inventory import normalize_solution_source_paths
-    from tilegym.kernel_inventory import validate_definition
-    from tilegym.kernel_inventory import validate_solution
-    from tilegym.kernel_inventory import validate_solution_entry_point
-    from tilegym.kernel_inventory.generation import make_solution
-    from tilegym.kernel_inventory.generation import materialize_solution_for_fib
-    from tilegym.kernel_inventory.layout import inventory_coordinate
-    from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
-    from tilegym.kernel_inventory.return_contract import ReturnContractError
-    from tilegym.kernel_inventory.return_contract import instrument_reference_returns
-    from tilegym.kernel_inventory.source_contract import SourceContractError
-    from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
 
 
 def _definition():
@@ -640,3 +631,78 @@ def test_all_dedicated_kernel_modules_import():
         assert spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+
+
+def _tilegym_runtime_modules(module_names):
+    runtime_packages = ("tilegym.backend", "tilegym.ops", "tilegym.suites", "tilegym.transformers")
+    return [
+        name
+        for name in module_names
+        if any(name == package or name.startswith(f"{package}.") for package in runtime_packages)
+    ]
+
+
+_IMPORT_WITH_PLACEHOLDER_PACKAGE = """
+import sys
+import types
+
+placeholder = types.ModuleType("tilegym")
+placeholder.__path__ = [sys.argv[1]]
+sys.modules["tilegym"] = placeholder
+import tilegym.kernel_inventory
+
+print("\\n".join(sorted(sys.modules)))
+"""
+
+
+def test_kernel_inventory_import_does_not_load_tilegym_runtime(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-c", _IMPORT_WITH_PLACEHOLDER_PACKAGE, str(REPO_ROOT / "src/tilegym")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "FLASHINFER_WORKSPACE_BASE": str(tmp_path / "flashinfer")},
+    )
+
+    assert _tilegym_runtime_modules(result.stdout.split()) == []
+
+
+_COLLECT_AND_LIST_MODULES = """
+import sys
+from pathlib import Path
+
+import pytest
+
+
+class ListModules:
+    def pytest_collection_finish(self, session):
+        Path(sys.argv[1]).write_text("\\n".join(sorted(sys.modules)))
+
+
+sys.exit(pytest.main(sys.argv[2:], plugins=[ListModules()]))
+"""
+
+
+def test_collecting_kernel_inventory_tests_does_not_load_tilegym_runtime(tmp_path):
+    modules_path = tmp_path / "modules.txt"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _COLLECT_AND_LIST_MODULES,
+            str(modules_path),
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--ignore={REPO_ROOT / 'tests/kernel_inventory/test_kernel_definition_solution_runtime.py'}",
+            str(REPO_ROOT / "tests/kernel_inventory"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT / "modeling/transformers",
+        env={**os.environ, "FLASHINFER_WORKSPACE_BASE": str(tmp_path / "flashinfer")},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _tilegym_runtime_modules(modules_path.read_text().split()) == []

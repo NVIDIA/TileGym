@@ -8,14 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from tests.kernel_inventory.kernel_runtime_utils import _load_custom_comparator
 from tests.kernel_inventory.kernel_runtime_utils import _load_reference_namespace
 from tests.kernel_inventory.kernel_runtime_utils import _run_runtime_branch
 from tilegym.kernel_inventory import _correctness_compat as compat
 from tilegym.kernel_inventory import _workload_schema_compat as workload_compat
-
-torch = pytest.importorskip("torch")
 
 _COMPARATORS = """
 def check_all(ref_outputs, user_outputs, *, atol=0.0):

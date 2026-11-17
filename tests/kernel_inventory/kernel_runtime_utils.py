@@ -22,45 +22,36 @@ os.environ.setdefault("DISABLE_TUNE", "1")
 os.environ.setdefault("TILEGYM_DISABLE_AUTOTUNE", "1")
 os.environ.setdefault("TRITON_CACHE_DIR", "/tmp/tilegym-triton-cache")
 
+import cuda.tile as ct
+import torch
+
+from tilegym.kernel_inventory import WorkloadRecord
+from tilegym.kernel_inventory import load_json
+from tilegym.kernel_inventory import load_workload_jsonl
+from tilegym.kernel_inventory import materialize_workload_inputs
+from tilegym.kernel_inventory import resolve_torch_dtype
+from tilegym.kernel_inventory import validate_definition
+from tilegym.kernel_inventory import validate_solution
+from tilegym.kernel_inventory import validate_solution_entry_point
+from tilegym.kernel_inventory import validate_workload_against_definition
+from tilegym.kernel_inventory.composition import installed_reference_modules
+from tilegym.kernel_inventory.launch import RawKernelLaunch
+from tilegym.kernel_inventory.launch import allocate_definition_outputs
+from tilegym.kernel_inventory.launch import inspect_raw_entry_signature
+from tilegym.kernel_inventory.launch import make_launch_context
+from tilegym.kernel_inventory.launch import materialize_launch_arguments
+from tilegym.kernel_inventory.launch import resolve_grid
+from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
+from tilegym.kernel_inventory.layout import inventory_coordinate
+from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
+from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+from tilegym.kernel_inventory.schema import CustomInput
+from tilegym.kernel_inventory.schema import ToleranceSpec
+from tilegym.kernel_inventory.schema import resolve_tensor_shape
+from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Import inventory modules without running tilegym/__init__.py. Runtime tests
-# import the individual solution modules directly from Solution.spec.entry_point.
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory import WorkloadRecord
-    from tilegym.kernel_inventory import load_json
-    from tilegym.kernel_inventory import load_workload_jsonl
-    from tilegym.kernel_inventory import materialize_workload_inputs
-    from tilegym.kernel_inventory import resolve_torch_dtype
-    from tilegym.kernel_inventory import validate_definition
-    from tilegym.kernel_inventory import validate_solution
-    from tilegym.kernel_inventory import validate_solution_entry_point
-    from tilegym.kernel_inventory import validate_workload_against_definition
-    from tilegym.kernel_inventory.composition import installed_reference_modules
-    from tilegym.kernel_inventory.launch import RawKernelLaunch
-    from tilegym.kernel_inventory.launch import allocate_definition_outputs
-    from tilegym.kernel_inventory.launch import inspect_raw_entry_signature
-    from tilegym.kernel_inventory.launch import make_launch_context
-    from tilegym.kernel_inventory.launch import materialize_launch_arguments
-    from tilegym.kernel_inventory.launch import resolve_grid
-    from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
-    from tilegym.kernel_inventory.layout import inventory_coordinate
-    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
-    from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
-    from tilegym.kernel_inventory.return_contract import instrument_reference_returns
-    from tilegym.kernel_inventory.schema import CustomInput
-    from tilegym.kernel_inventory.schema import ToleranceSpec
-    from tilegym.kernel_inventory.schema import resolve_tensor_shape
-    from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
-
-
 _DEFAULT_TOLERANCE = ToleranceSpec(max_atol=2e-2, max_rtol=2e-2, required_matched_ratio=1.0)
 
 
@@ -230,8 +221,6 @@ def _run_definition_solution_workload_runtime(
     if solution.get("launch") is None:
         _assert_matching_entry_signatures_static(definition, solution, definition_path)
 
-    torch = pytest.importorskip("torch")
-    _require_solution_runtime_dependencies(solution)
     _skip_if_solution_does_not_target_current_triton_backend(solution)
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for kernel inventory runtime checks")
@@ -322,15 +311,6 @@ def _prepare_registered_backend_environment(solution: dict[str, Any], solution_p
     from tilegym.backend.selector import set_backend
 
     set_backend(backend)
-
-
-def _require_solution_runtime_dependencies(solution: dict[str, Any]) -> None:
-    """Gate only dependencies required by the already-validated Solution language."""
-    language = solution["spec"]["language"]
-    if language == "cuda-tile":
-        pytest.importorskip("cuda.tile")
-    elif language == "triton":
-        pytest.importorskip("triton")
 
 
 def _run_runtime_branch(
@@ -632,7 +612,6 @@ def _launch_raw_solution(
         solution_fn[grid](**arguments)
     elif language == "cuda-tile":
         arguments = materialize_launch_arguments(launch, context)
-        ct = pytest.importorskip("cuda.tile")
         grid = resolve_grid(launch.grid, context, REPO_ROOT)
         signature = inspect_raw_entry_signature(solution["spec"]["entry_point"], REPO_ROOT)
         ordered = []

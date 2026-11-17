@@ -3,26 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory.review import ReviewManifestError
-    from tilegym.kernel_inventory.review import load_review_manifest
-    from tilegym.kernel_inventory.review import make_leaf_review_record
-    from tilegym.kernel_inventory.review import validate_leaf_review_manifest
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
+from tilegym.kernel_inventory.review import ReviewManifestError
+from tilegym.kernel_inventory.review import load_review_manifest
+from tilegym.kernel_inventory.review import make_leaf_review_record
+from tilegym.kernel_inventory.review import validate_leaf_review_manifest
 
 
 def _inventory(tmp_path: Path) -> tuple[Path, Path, Path]:

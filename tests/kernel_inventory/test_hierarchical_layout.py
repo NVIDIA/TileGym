@@ -3,30 +3,18 @@
 # SPDX-License-Identifier: MIT
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
-    from tilegym.kernel_inventory.layout import inventory_coordinate
-    from tilegym.kernel_inventory.layout import iter_inventory_json_paths
-    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
-    from tilegym.kernel_inventory.layout import mirrored_definition_path
-    from tilegym.kernel_inventory.layout import mirrored_workload_path
-    from tilegym.kernel_inventory.layout import solution_paths_for_definition
-    from tilegym.kernel_inventory.layout import validate_hierarchical_operation_topology
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
+from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
+from tilegym.kernel_inventory.layout import inventory_coordinate
+from tilegym.kernel_inventory.layout import iter_inventory_json_paths
+from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+from tilegym.kernel_inventory.layout import mirrored_definition_path
+from tilegym.kernel_inventory.layout import mirrored_workload_path
+from tilegym.kernel_inventory.layout import solution_paths_for_definition
+from tilegym.kernel_inventory.layout import validate_hierarchical_operation_topology
 
 
 def _touch(path: Path) -> Path:

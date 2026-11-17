@@ -4,9 +4,7 @@
 
 """FIB-shaped helpers for TileGym kernel inventory generation.
 
-This module is intentionally imported lazily by ``kernel_inventory`` so normal
-TileGym runtime imports do not require FlashInfer-Bench. FIB validates the data
-schema; TileGym owns execution of the checked-in metadata.
+FIB validates the data schema; TileGym owns execution of the checked-in metadata.
 """
 
 from __future__ import annotations
@@ -32,6 +30,7 @@ from tilegym.kernel_inventory._definition_schema_compat import AxisVar
 from tilegym.kernel_inventory._definition_schema_compat import Definition
 from tilegym.kernel_inventory._definition_schema_compat import TensorSpec
 from tilegym.kernel_inventory.composition import _RESERVED_INCLUDE_NAMES
+from tilegym.kernel_inventory.composition import validate_definition_composition
 from tilegym.kernel_inventory.launch import RawKernelLaunch
 from tilegym.kernel_inventory.source_contract import SourceRepository as SourceRepository
 from tilegym.kernel_inventory.source_contract import make_pinned_source_permalink as make_pinned_source_permalink
@@ -359,8 +358,6 @@ def validate_definition_for_path(definition: Definition | dict[str, Any], path: 
     Include targets cannot be resolved by ``make_definition`` alone because
     their meaning depends on the destination inventory hierarchy.
     """
-    from tilegym.kernel_inventory.composition import validate_definition_composition
-
     data = definition_to_tilegym_json(definition) if isinstance(definition, Definition) else definition
     validate_definition_composition(data, path)
 
