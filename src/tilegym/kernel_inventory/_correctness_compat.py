@@ -17,6 +17,7 @@ import traceback
 from collections.abc import Mapping
 from typing import Any
 
+import torch
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
@@ -86,8 +87,6 @@ def _iter_tensor_chunks(actual: Any, expected: Any, max_elements: int = _DEFAULT
 
 
 def _check_tensor_sanity(actual: Any, expected: Any, output_name: str, allow_negative_inf: bool) -> Correctness | None:
-    import torch
-
     has_nonfinite = False
     has_nan = False
     expected_norm_sq = 0.0
@@ -127,8 +126,6 @@ def compute_allclose_error_stats(
     actual: Any, expected: Any, tolerance: Any, output_name: str = "output"
 ) -> Correctness:
     """Return the allclose plus matched-ratio verdict for one output."""
-    import torch
-
     allow_negative_inf = tolerance.allow_negative_inf
     sanity = _check_tensor_sanity(actual, expected, output_name, allow_negative_inf)
     if sanity is not None:
@@ -248,8 +245,6 @@ def poison_output_(tensor: Any) -> Any:
     Floating dtypes get every bit set (NaN), signed integers their minimum,
     unsigned integers their maximum, and bool ``True``.
     """
-    import torch
-
     if tensor.numel() == 0:
         return tensor
     span = 1 + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))

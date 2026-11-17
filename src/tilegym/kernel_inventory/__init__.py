@@ -10,10 +10,6 @@ The metadata files live under an inventory-owning package or suite:
 - ``kernel_solutions/*.json`` for Solution objects.
 - ``kernels/*.py`` for reusable kernel implementations referenced by Solution
   source paths.
-
-Shared schema fields use FlashInfer-Bench validation lazily, while
-TileGym owns runtime invocation, source paths, and entry points. The checked-in
-metadata is not a standalone FlashInfer-Bench runtime bundle.
 """
 
 from __future__ import annotations
@@ -27,6 +23,10 @@ from typing import Iterator
 
 from tilegym.kernel_inventory.composition import DefinitionCompositionError
 from tilegym.kernel_inventory.composition import validate_definition_composition
+from tilegym.kernel_inventory.generation import validate_tilegym_definition_model
+from tilegym.kernel_inventory.generation import validate_tilegym_solution_model
+from tilegym.kernel_inventory.launch import validate_launch_contract
+from tilegym.kernel_inventory.layout import inventory_coordinate
 from tilegym.kernel_inventory.layout import iter_inventory_json_paths
 from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
 from tilegym.kernel_inventory.layout import mirrored_workload_path
@@ -110,15 +110,7 @@ def validate_definition(definition: dict[str, Any], definition_path: str | Path 
     """Validate a kernel Definition with FIB and TileGym checks."""
     _require_mapping(definition, "Definition")
     try:
-        from tilegym.kernel_inventory.generation import validate_tilegym_definition_model
-
         validate_tilegym_definition_model(definition)
-    except ImportError as exc:
-        raise KernelInventoryError(
-            "flashinfer-bench is required to validate kernel Definitions. "
-            "Install the tilegym-hf-bench dev environment with `uv sync --extra dev` "
-            "from modeling/transformers."
-        ) from exc
     except Exception as exc:
         raise KernelInventoryError(f"Definition schema invalid: {exc}") from exc
 
@@ -158,21 +150,11 @@ def validate_solution(
             _resolve_inventory_path(root, entry_file, "Solution entry point path")
 
     try:
-        from tilegym.kernel_inventory.generation import validate_tilegym_solution_model
-
         validate_tilegym_solution_model(solution, repo_root)
-    except ImportError as exc:
-        raise KernelInventoryError(
-            "flashinfer-bench is required to validate kernel Solutions. "
-            "Install the tilegym-hf-bench dev environment with `uv sync --extra dev` "
-            "from modeling/transformers."
-        ) from exc
     except Exception as exc:
         raise KernelInventoryError(f"Solution schema invalid: {exc}") from exc
     if solution.get("launch") is not None and repo_root is not None and definition is not None:
         try:
-            from tilegym.kernel_inventory.launch import validate_launch_contract
-
             validate_launch_contract(solution["launch"], definition, solution["spec"]["entry_point"], repo_root)
         except Exception as exc:
             raise KernelInventoryError(f"Solution launch contract invalid: {exc}") from exc
@@ -196,8 +178,6 @@ def _assert_backend_registration_scope(
     spec = solution.get("spec") or {}
     if not spec.get("requires_backend_registration"):
         return
-    from tilegym.kernel_inventory.layout import inventory_coordinate
-
     try:
         coordinate = inventory_coordinate(solution_path)
     except ValueError as exc:

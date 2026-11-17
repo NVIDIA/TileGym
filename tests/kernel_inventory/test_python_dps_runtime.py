@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from tests.kernel_inventory.kernel_runtime_utils import _assert_matching_entry_signatures
 from tests.kernel_inventory.kernel_runtime_utils import _assert_matching_entry_signatures_static
@@ -21,8 +22,6 @@ from tilegym.kernel_inventory import WorkloadRecord
 from tilegym.kernel_inventory.correctness import poison_output_
 from tilegym.kernel_inventory.schema import Workload
 from tilegym.kernel_inventory.schema import resolve_definition_axes
-
-torch = pytest.importorskip("torch")
 
 _DEFINITION: dict[str, Any] = {
     "name": "dps_op",
