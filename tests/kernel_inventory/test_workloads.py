@@ -7,21 +7,33 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tilegym.kernel_inventory.layout import inventory_coordinate
-from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
-from tilegym.kernel_inventory.layout import mirrored_definition_path
-from tilegym.kernel_inventory.workloads import KernelWorkloadError
-from tilegym.kernel_inventory.workloads import load_workload_jsonl
-from tilegym.kernel_inventory.workloads import materialize_workload_inputs
-from tilegym.kernel_inventory.workloads import validate_workload_against_definition
-from tilegym.kernel_inventory.workloads import validate_workload_catalog
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Import inventory modules without running tilegym/__init__.py (CUDA init) so these
+# checks work on machines without a GPU.
+_original_tilegym = sys.modules.get("tilegym")
+if _original_tilegym is None:
+    tilegym_pkg = types.ModuleType("tilegym")
+    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
+    sys.modules["tilegym"] = tilegym_pkg
+try:
+    from tilegym.kernel_inventory.layout import inventory_coordinate
+    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+    from tilegym.kernel_inventory.layout import mirrored_definition_path
+    from tilegym.kernel_inventory.workloads import KernelWorkloadError
+    from tilegym.kernel_inventory.workloads import load_workload_jsonl
+    from tilegym.kernel_inventory.workloads import materialize_workload_inputs
+    from tilegym.kernel_inventory.workloads import validate_workload_against_definition
+    from tilegym.kernel_inventory.workloads import validate_workload_catalog
+finally:
+    if _original_tilegym is None:
+        sys.modules.pop("tilegym", None)
 _TOLERANCE = {
     "max_atol": 0.02,
     "max_rtol": 0.02,
