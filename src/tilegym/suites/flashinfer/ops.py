@@ -159,6 +159,49 @@ def ragged_block_scaled_bmm(
 
 
 @dispatch(
+    "flashinfer.gemm.ragged_scaled_bmm",
+)
+def ragged_scaled_bmm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+    m_indptr: torch.Tensor,
+    max_m: int,
+    block_scale_type: str = "mxfp8",
+    transpose_a: bool = False,
+    transpose_b: bool = True,
+    static_persistent: Optional[bool] = None,
+):
+    """
+    FlashInfer operation: Ragged batch matrix multiplication with scaling.
+
+    Performs ragged batched matrix multiplication with scaling factors.
+    Only the NT layout (transpose_a=False, transpose_b=True) is supported.
+
+    Args:
+        a: Flattened input matrix A [total_m, K]
+        b: Input matrix B [Q, N, K]
+        a_scale: Scaling factors for A
+        b_scale: Scaling factors for B
+        m_indptr: Segment offsets marking batch boundaries [Q+1]. Every entry
+            must be a multiple of 128.
+        max_m: Maximum M dimension across all batches. It must be at least the
+            longest segment (m_indptr[i + 1] - m_indptr[i]); it sizes the
+            per-batch row-tile loop, so a smaller value can leave the tail of a
+            longer segment unwritten.
+        block_scale_type: Type of block scaling ("nvfp4", "mxfp4" or "mxfp8")
+        transpose_a: Whether to transpose A
+        transpose_b: Whether to transpose B
+        static_persistent: Whether to use static persistent scheduling
+
+    Returns:
+        torch.Tensor: Flattened output matrix C [total_m, N]
+    """
+    raise NotImplementedError(f"flashinfer.gemm.ragged_scaled_bmm is not implemented for {get_current_backend()}")
+
+
+@dispatch(
     "flashinfer.gemm.bs_matmul",
 )
 def bs_matmul(
@@ -487,6 +530,7 @@ __all__ = [
     "masked_bmm",
     "ragged_bmm",
     "ragged_block_scaled_bmm",
+    "ragged_scaled_bmm",
     "bs_matmul",
     # RoPE
     "rope_quantize_fp8",
