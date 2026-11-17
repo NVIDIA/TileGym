@@ -64,7 +64,7 @@ their own namespace (`tilegym.suites.*`) and are tracked in §1.3 instead.
 | Tensor Manipulation | Concatenation | ✅ Available | N/A |
 | Tensor Manipulation | Transpose | ✅ Available | ✅ Available |
 | Pointwise | Squares | 📅 Planned | N/A |
-| Signal Processing | Fast Fourier Transform (FFT) | 🚧 WIP (Internal) | N/A |
+| Signal Processing | Fast Fourier Transform (FFT) | ✅ Available | N/A |
 | Convolution | Convolution | 📅 Planned | 📅 Planned |
 | Loss Functions | Cross Entropy | 📅 Planned | 📅 Planned |
 | Loss Functions | Fused Linear Cross Entropy | 🧪 Experimental | N/A |
