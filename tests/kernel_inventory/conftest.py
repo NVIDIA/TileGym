@@ -2,7 +2,27 @@
 #
 # SPDX-License-Identifier: MIT
 
+import sys
+import types
+from pathlib import Path
+
 import pytest
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_make_collect_report(collector):
+    # Collect these tests under a placeholder tilegym package so their kernel_inventory imports
+    # skip src/tilegym/__init__.py, which loads the op backends. Tests import the real tilegym at run time.
+    if "tilegym" in sys.modules:
+        return (yield)
+    placeholder = types.ModuleType("tilegym")
+    placeholder.__path__ = [str(Path(__file__).resolve().parents[2] / "src/tilegym")]
+    sys.modules["tilegym"] = placeholder
+    try:
+        return (yield)
+    finally:
+        if sys.modules.get("tilegym") is placeholder:
+            del sys.modules["tilegym"]
 
 
 def pytest_addoption(parser):

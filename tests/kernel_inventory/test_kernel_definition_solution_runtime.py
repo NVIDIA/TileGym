@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+import torch
 
 from tests.kernel_inventory.kernel_runtime_utils import _as_outputs
 from tests.kernel_inventory.kernel_runtime_utils import _assert_matching_entry_signatures
@@ -25,7 +26,6 @@ from tests.kernel_inventory.kernel_runtime_utils import _derive_backend_registra
 from tests.kernel_inventory.kernel_runtime_utils import _isolated_solution_modules
 from tests.kernel_inventory.kernel_runtime_utils import _launch_raw_solution
 from tests.kernel_inventory.kernel_runtime_utils import _load_reference
-from tests.kernel_inventory.kernel_runtime_utils import _require_solution_runtime_dependencies
 from tests.kernel_inventory.kernel_runtime_utils import _run_definition_solution_workload_runtime
 from tests.kernel_inventory.kernel_runtime_utils import _run_runtime_branch
 from tests.kernel_inventory.kernel_runtime_utils import _runtime_case_id
@@ -83,23 +83,10 @@ class _FakeTorch:
     cuda = _FakeCuda()
 
 
-class _AvailableFakeCuda(_FakeCuda):
-    @staticmethod
-    def is_available():
-        return True
-
-
-class _AvailableFakeTorch:
-    cuda = _AvailableFakeCuda()
-
-    @staticmethod
-    def device(name):
-        assert name == "cuda"
-        return name
-
-    @staticmethod
-    def manual_seed(seed):
-        assert seed == 2026
+def _pretend_available_sm103(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", _FakeCuda.get_device_capability)
+    monkeypatch.setattr(torch.cuda, "get_device_name", _FakeCuda.get_device_name)
 
 
 def test_runtime_derives_target_label_from_cuda_compute_capability():
@@ -204,11 +191,7 @@ def test_host_arch_xfail_yields_to_target_hardware_skip(tmp_path, monkeypatch):
         "tests.kernel_inventory.kernel_runtime_utils._assert_matching_entry_signatures_static",
         lambda *_: None,
     )
-    monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._require_solution_runtime_dependencies",
-        lambda *_: None,
-    )
-    monkeypatch.setattr(pytest, "importorskip", lambda name: _AvailableFakeTorch)
+    _pretend_available_sm103(monkeypatch)
     # Host matches the xfail tag, but the fake device (SM103) is outside the
     # variant's target_hardware: the hardware skip must fire, not the xfail.
     monkeypatch.setattr("platform.machine", lambda: "aarch64")
@@ -425,7 +408,7 @@ def test_runtime_rejects_reference_and_solution_default_mismatch():
         _assert_matching_entry_signatures(definition, reference, schema, solution)
 
 
-def test_static_signature_mismatch_precedes_backend_dependency_gate(tmp_path, monkeypatch):
+def test_static_signature_mismatch_precedes_triton_compiler_gate(tmp_path, monkeypatch):
     workload_record = _workload_record(tmp_path)
     definition_path = tmp_path / "definition.json"
     solution_path = tmp_path / "solution.json"
@@ -437,7 +420,6 @@ def test_static_signature_mismatch_precedes_backend_dependency_gate(tmp_path, mo
         json.dumps({"spec": {"language": "triton", "entry_point": "solution.py::entry"}}),
         encoding="utf-8",
     )
-    dependency_gate_called = False
     compiler_gate_called = False
     static_signature_checked = False
 
@@ -446,18 +428,10 @@ def test_static_signature_mismatch_precedes_backend_dependency_gate(tmp_path, mo
         static_signature_checked = True
         raise AssertionError("does not match Solution entry point")
 
-    def dependency_gate(_solution):
-        nonlocal dependency_gate_called
-        dependency_gate_called = True
-
     def compiler_gate(_solution):
         nonlocal compiler_gate_called
         compiler_gate_called = True
 
-    monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._require_solution_runtime_dependencies",
-        dependency_gate,
-    )
     monkeypatch.setattr(
         "tests.kernel_inventory.kernel_runtime_utils._skip_if_solution_does_not_target_current_triton_backend",
         compiler_gate,
@@ -479,7 +453,6 @@ def test_static_signature_mismatch_precedes_backend_dependency_gate(tmp_path, mo
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
         _run_definition_solution_workload_runtime(workload_record, definition_path, solution_path)
     assert static_signature_checked
-    assert not dependency_gate_called
     assert not compiler_gate_called
 
 
@@ -560,10 +533,6 @@ def test_triton_compiler_mismatch_skips_before_solution_import(tmp_path, monkeyp
         lambda *_, **__: None,
     )
     monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._require_solution_runtime_dependencies",
-        lambda *_: None,
-    )
-    monkeypatch.setattr(
         "tests.kernel_inventory.kernel_runtime_utils._current_triton_backend",
         lambda: "oait",
     )
@@ -629,15 +598,7 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         "tests.kernel_inventory.kernel_runtime_utils._assert_matching_entry_signatures_static",
         lambda *_: order.append("static-signature"),
     )
-    monkeypatch.setattr(
-        pytest,
-        "importorskip",
-        lambda name: order.append(f"import:{name}") or _AvailableFakeTorch,
-    )
-    monkeypatch.setattr(
-        "tests.kernel_inventory.kernel_runtime_utils._require_solution_runtime_dependencies",
-        lambda *_: order.append("dependency"),
-    )
+    _pretend_available_sm103(monkeypatch)
     monkeypatch.setattr(
         "tests.kernel_inventory.kernel_runtime_utils._skip_if_solution_does_not_target_current_triton_backend",
         lambda *_: order.append("compiler"),
@@ -675,8 +636,6 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         "entry-point",
         "workload",
         "static-signature",
-        "import:torch",
-        "dependency",
         "compiler",
     ]
     assert module_name not in sys.modules
@@ -706,8 +665,6 @@ def test_hardware_gate_precedes_solution_import_but_matching_hardware_executes(t
         "entry-point",
         "workload",
         "static-signature",
-        "import:torch",
-        "dependency",
         "compiler",
         "reference",
         "dynamic-signature",
@@ -722,16 +679,6 @@ def test_static_signature_validation_rejects_actual_ast_mismatch(tmp_path):
     solution = {"spec": {"entry_point": "solution.py::entry"}}
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
         _assert_matching_entry_signatures_static(definition, solution, tmp_path / "definition.json", tmp_path)
-
-
-def test_runtime_dependency_gate_is_language_specific(monkeypatch):
-    requested = []
-    monkeypatch.setattr(pytest, "importorskip", lambda name: requested.append(name))
-    _require_solution_runtime_dependencies({"spec": {"language": "triton"}})
-    assert requested == ["triton"]
-    requested.clear()
-    _require_solution_runtime_dependencies({"spec": {"language": "cuda-tile"}})
-    assert requested == ["cuda.tile"]
 
 
 def test_runtime_calls_required_parameters_positionally_and_optional_parameters_by_keyword():
@@ -855,7 +802,6 @@ def test_public_and_wrapper_workloads_plan_four_adjacent_runtime_cases(tmp_path)
 
 
 def test_runtime_compares_named_nested_returns_and_matching_none_values():
-    torch = pytest.importorskip("torch")
     axes = {"B": 1, "ONE": 1, "H": 2, "K": 4, "V": 3}
     output_specs = {
         "output": {"shape": ["B", "H", "V"], "dtype": "bfloat16"},
@@ -903,7 +849,6 @@ def test_solution_module_isolation_restores_existing_packages():
 
 
 def test_raw_triton_launch_uses_definition_outputs_and_bound_arguments(monkeypatch):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_copy",
         "axes": {"N": {"type": "var"}},
@@ -972,7 +917,6 @@ _PRESET_OUTPUT_ERROR = r"benchmark_only cannot verify that raw-launch outputs \[
     ],
 )
 def test_raw_launch_requires_written_empty_outputs_when_not_compared(monkeypatch, binding, written, error):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_copy",
         "axes": {"N": {"type": "var"}},
@@ -1023,7 +967,6 @@ def test_raw_launch_requires_written_empty_outputs_when_not_compared(monkeypatch
 
 
 def test_raw_triton_launch_can_seed_mutated_output_from_definition_input(monkeypatch):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_inplace_update",
         "axes": {"N": {"type": "var"}},
@@ -1074,7 +1017,6 @@ def test_raw_triton_launch_can_seed_mutated_output_from_definition_input(monkeyp
 
 
 def test_raw_triton_launch_preserves_shaped_seeded_output_through_flatten_view(monkeypatch):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_flattened_inplace_update",
         "axes": {"M": {"type": "var"}, "N": {"type": "var"}},
@@ -1136,7 +1078,6 @@ def test_raw_triton_launch_preserves_shaped_seeded_output_through_flatten_view(m
 
 
 def test_runtime_rejects_undeclared_solution_input_mutation(tmp_path):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "mutation_guard",
         "axes": {"N": {"type": "const", "value": 3}},
@@ -1168,7 +1109,6 @@ def _tolerance(*, atol=0.02, rtol=0.02, matched_ratio=1.0):
 
 
 def test_runtime_return_comparison_uses_explicit_workload_tolerance():
-    torch = pytest.importorskip("torch")
     actual = torch.tensor([1.01], dtype=torch.float32)
     expected = torch.tensor([1.0], dtype=torch.float32)
     output_specs = {"output": {"shape": ["N"], "dtype": "float32"}}
@@ -1197,7 +1137,6 @@ def test_runtime_return_comparison_uses_explicit_workload_tolerance():
 
 
 def test_runtime_matched_ratio_relaxes_integer_destination_mutation():
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "inplace_ids",
         "axes": {"N": {"type": "var"}},
@@ -1261,7 +1200,6 @@ def test_runtime_matched_ratio_relaxes_integer_destination_mutation():
 
 
 def test_runtime_matched_ratio_applies_to_floating_outputs():
-    torch = pytest.importorskip("torch")
     output_specs = {"centroids": {"shape": ["N"], "dtype": "float32"}}
     expected = torch.ones(50, dtype=torch.float32)
 
@@ -1296,7 +1234,6 @@ def test_runtime_matched_ratio_applies_to_floating_outputs():
 
 
 def test_runtime_scalar_outputs_use_output_comparison():
-    torch = pytest.importorskip("torch")
     output_specs = {"n_iters": {"shape": None, "dtype": "int32"}}
 
     _assert_return_contract(3, 3, "n_iters", output_specs, {}, torch, "scalar-row")
@@ -1316,7 +1253,6 @@ def test_runtime_scalar_outputs_use_output_comparison():
 
 
 def test_runtime_matched_ratio_relaxes_integer_output_comparison():
-    torch = pytest.importorskip("torch")
     expected = torch.arange(50, dtype=torch.int32)
     output_specs = {"ids": {"shape": ["N"], "dtype": "int32"}}
 
@@ -1363,7 +1299,6 @@ def test_derive_backend_registration_target_rejects_non_suite_solutions(tmp_path
 
 
 def test_runtime_reseeds_rng_before_each_entry_call(tmp_path):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "draw_op",
         "axes": {"N": {"type": "const", "value": 4}},
@@ -1390,7 +1325,6 @@ def test_runtime_reseeds_rng_before_each_entry_call(tmp_path):
 
 
 def test_runtime_branch_threads_matched_ratio_from_workload(tmp_path):
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "ids_op",
         "axes": {"N": {"type": "const", "value": 50}},
@@ -1434,7 +1368,6 @@ def test_runtime_branch_threads_matched_ratio_from_workload(tmp_path):
 
 
 def test_cpu_composed_wrapper_runtime_canary_executes_each_explicit_boolean_row_once(tmp_path):
-    torch = pytest.importorskip("torch")
     leaf_scale = {
         "name": "leaf_scale",
         "reference": "def run(input, negate):\n    return -input if negate else input\n",

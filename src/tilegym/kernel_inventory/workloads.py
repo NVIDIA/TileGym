@@ -17,6 +17,7 @@ from typing import Iterator
 from uuid import UUID
 
 from pydantic import ValidationError
+from safetensors.torch import load_file
 
 from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
 from tilegym.kernel_inventory.layout import inventory_coordinate
@@ -350,8 +351,6 @@ def _materialize_safetensors_tensor(
     tensor_path = _resolve_safetensors_path(record, raw_path)
 
     try:
-        from safetensors.torch import load_file
-
         values = load_file(tensor_path.as_posix(), device="cpu")
     except (OSError, RuntimeError, ValueError) as exc:
         raise KernelWorkloadError(f"{record.source_label}: unable to load safetensors file {raw_path}: {exc}") from exc

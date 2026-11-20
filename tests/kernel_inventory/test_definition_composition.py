@@ -4,24 +4,12 @@
 
 import json
 import sys
-import types
-from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory.composition import DefinitionCompositionError
-    from tilegym.kernel_inventory.composition import installed_reference_modules
-    from tilegym.kernel_inventory.composition import validate_definition_composition
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
+from tilegym.kernel_inventory.composition import DefinitionCompositionError
+from tilegym.kernel_inventory.composition import installed_reference_modules
+from tilegym.kernel_inventory.composition import validate_definition_composition
 
 
 def _definition(name, reference, include=None):

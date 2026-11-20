@@ -7,21 +7,35 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-from tilegym.kernel_inventory.layout import inventory_coordinate
-from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
-from tilegym.kernel_inventory.layout import mirrored_definition_path
-from tilegym.kernel_inventory.workloads import KernelWorkloadError
-from tilegym.kernel_inventory.workloads import load_workload_jsonl
-from tilegym.kernel_inventory.workloads import materialize_workload_inputs
-from tilegym.kernel_inventory.workloads import validate_workload_against_definition
-from tilegym.kernel_inventory.workloads import validate_workload_catalog
+import torch
+from safetensors.torch import save_file
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Import inventory modules without running tilegym/__init__.py (CUDA init) so these
+# checks work on machines without a GPU.
+_original_tilegym = sys.modules.get("tilegym")
+if _original_tilegym is None:
+    tilegym_pkg = types.ModuleType("tilegym")
+    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
+    sys.modules["tilegym"] = tilegym_pkg
+try:
+    from tilegym.kernel_inventory.layout import inventory_coordinate
+    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+    from tilegym.kernel_inventory.layout import mirrored_definition_path
+    from tilegym.kernel_inventory.workloads import KernelWorkloadError
+    from tilegym.kernel_inventory.workloads import load_workload_jsonl
+    from tilegym.kernel_inventory.workloads import materialize_workload_inputs
+    from tilegym.kernel_inventory.workloads import validate_workload_against_definition
+    from tilegym.kernel_inventory.workloads import validate_workload_catalog
+finally:
+    if _original_tilegym is None:
+        sys.modules.pop("tilegym", None)
 _TOLERANCE = {
     "max_atol": 0.02,
     "max_rtol": 0.02,
@@ -162,7 +176,6 @@ def test_checked_in_correctness_only_policy_still_requires_uuid4(tmp_path):
 
 
 def test_materialize_resolves_definition_expression_axes(tmp_path):
-    torch = pytest.importorskip("torch")
     definition = _definition()
     definition["axes"]["NK"] = {"type": "expr", "expression": "N * K // 2"}
     definition["inputs"]["x"]["shape"] = ["NK"]
@@ -277,7 +290,6 @@ def test_correctness_only_dynamic_axes_reject_safetensors_inputs(tmp_path):
 
 
 def test_materialize_rejects_dynamic_axes_explicitly(tmp_path):
-    torch = pytest.importorskip("torch")
     payload = _payload(axes={"N": {"min": 4, "max": 8}}, eval_mode="correctness_only")
     record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
 
@@ -415,7 +427,6 @@ def test_validate_workload_against_definition_checks_safetensors_asset_path(tmp_
 
 
 def test_materialize_workload_inputs_uses_definition_shape_dtype_and_literals(tmp_path):
-    torch = pytest.importorskip("torch")
     record = load_workload_jsonl(_write_jsonl(tmp_path / "op.jsonl", _payload()))[0]
 
     torch.manual_seed(2026)
@@ -430,11 +441,9 @@ def test_materialize_workload_inputs_uses_definition_shape_dtype_and_literals(tm
 
 
 def test_materialize_workload_inputs_loads_safetensors_relative_to_workload(tmp_path):
-    torch = pytest.importorskip("torch")
-    safetensors = pytest.importorskip("safetensors.torch")
     tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     asset = tmp_path / "input.safetensors"
-    safetensors.save_file({"x": tensor}, asset)
+    save_file({"x": tensor}, asset)
     payload = _payload(
         axes={"N": 2},
         inputs={"x": {"type": "safetensors", "path": "input.safetensors", "tensor_key": "x"}},
@@ -485,7 +494,6 @@ def test_custom_inputs_kwargs_require_custom_inputs(tmp_path):
 
 
 def test_materialize_random_input_with_integer_literal_dimension(tmp_path):
-    torch = pytest.importorskip("torch")
     record = load_workload_jsonl(
         _write_jsonl(tmp_path / "op.jsonl", _payload(axes={"N": 2}, inputs={"x": {"type": "random"}}))
     )[0]
@@ -497,10 +505,8 @@ def test_materialize_random_input_with_integer_literal_dimension(tmp_path):
 
 
 def test_materialize_safetensors_input_with_integer_literal_dimension(tmp_path):
-    torch = pytest.importorskip("torch")
-    safetensors = pytest.importorskip("safetensors.torch")
     tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4)
-    safetensors.save_file({"x": tensor}, tmp_path / "input.safetensors")
+    save_file({"x": tensor}, tmp_path / "input.safetensors")
     payload = _payload(
         axes={"N": 2},
         inputs={"x": {"type": "safetensors", "path": "input.safetensors", "tensor_key": "x"}},
@@ -514,7 +520,6 @@ def test_materialize_safetensors_input_with_integer_literal_dimension(tmp_path):
 
 
 def test_materialize_workload_inputs_rejects_non_basename_safetensors_path(tmp_path):
-    torch = pytest.importorskip("torch")
     payload = _payload(
         axes={"N": 2},
         inputs={"x": {"type": "safetensors", "path": "../escape.safetensors", "tensor_key": "x"}},

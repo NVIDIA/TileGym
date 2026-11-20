@@ -3,35 +3,21 @@
 # SPDX-License-Identifier: MIT
 
 import json
-import sys
-import types
-from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-# Import inventory modules without initializing TileGym CUDA/Torch backends.
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory.generation import SourceRepository
-    from tilegym.kernel_inventory.generation import TileGymDefinition
-    from tilegym.kernel_inventory.generation import axis_var
-    from tilegym.kernel_inventory.generation import definition_to_tilegym_json
-    from tilegym.kernel_inventory.generation import make_definition
-    from tilegym.kernel_inventory.generation import make_pinned_source_permalink
-    from tilegym.kernel_inventory.generation import tensor
-    from tilegym.kernel_inventory.generation import validate_definition_for_path
-    from tilegym.kernel_inventory.generation import validate_tilegym_definition_model
-    from tilegym.kernel_inventory.generation import write_definition_json
-    from tilegym.kernel_inventory.source_contract import is_precise_source_permalink
-    from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
+from tilegym.kernel_inventory.generation import SourceRepository
+from tilegym.kernel_inventory.generation import TileGymDefinition
+from tilegym.kernel_inventory.generation import axis_var
+from tilegym.kernel_inventory.generation import definition_to_tilegym_json
+from tilegym.kernel_inventory.generation import make_definition
+from tilegym.kernel_inventory.generation import make_pinned_source_permalink
+from tilegym.kernel_inventory.generation import tensor
+from tilegym.kernel_inventory.generation import validate_definition_for_path
+from tilegym.kernel_inventory.generation import validate_tilegym_definition_model
+from tilegym.kernel_inventory.generation import write_definition_json
+from tilegym.kernel_inventory.source_contract import is_precise_source_permalink
+from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 REFERENCE = (
