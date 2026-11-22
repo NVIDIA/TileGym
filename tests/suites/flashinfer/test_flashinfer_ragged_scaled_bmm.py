@@ -209,6 +209,8 @@ class Test_FlashInfer_RaggedScaledBMM(common.PyTestCase):
     @pytest.mark.parametrize("trans_b", [True])
     @pytest.mark.parametrize("backend", _backends)
     def test_op(self, num_groups, m, n, k, block_scale_type, trans_a, trans_b, backend):
+        if torch.cuda.get_device_capability() < (10, 0):
+            pytest.skip("mxfp8 ragged_scaled_bmm targets SM100+ GPUs")
         if tilegym.is_backend_available(backend):
             tilegym.set_backend(backend)
         else:
