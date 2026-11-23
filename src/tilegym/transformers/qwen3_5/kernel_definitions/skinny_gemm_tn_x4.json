@@ -109,8 +109,8 @@
     "1 <= M <= 64",
     "K % 8 == 0",
     "N0 % 8 == 0 and N1 % 8 == 0 and N2 % 8 == 0 and N3 % 8 == 0",
-    "a.is_contiguous()",
-    "b0.is_contiguous() and b1.is_contiguous() and b2.is_contiguous() and b3.is_contiguous()"
+    "contiguous(a)",
+    "contiguous(b0) and contiguous(b1) and contiguous(b2) and contiguous(b3)"
   ],
   "tags": [
     "stage:decode",

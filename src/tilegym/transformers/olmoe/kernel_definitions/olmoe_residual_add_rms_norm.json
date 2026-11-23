@@ -11,11 +11,14 @@
   },
   "description": "OLMoE fused residual add and Llama-style RMSNorm returning both sum and normalized output.",
   "inputs": {
-    "eps": {
-      "dtype": "float32",
-      "shape": null
-    },
     "residual": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "x": {
       "dtype": "bfloat16",
       "shape": [
         "N",
@@ -28,12 +31,9 @@
         "D"
       ]
     },
-    "x": {
-      "dtype": "bfloat16",
-      "shape": [
-        "N",
-        "D"
-      ]
+    "eps": {
+      "dtype": "float32",
+      "shape": null
     }
   },
   "name": "olmoe_residual_add_rms_norm",

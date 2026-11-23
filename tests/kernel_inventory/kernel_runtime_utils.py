@@ -1134,20 +1134,16 @@ def _ast_solution_accepts_reference_signature(
     solution_signature: tuple[tuple[str, str, str | None], ...],
     input_names: tuple[str, ...],
 ) -> bool:
-    # Preserve the historical exact-callable path, including deprecated
-    # runtime:unsupported stubs that intentionally expose only ``**kwargs``.
-    if reference_signature == solution_signature:
-        return True
+    reference_positionals = tuple(
+        name for name, kind, _ in reference_signature if kind in {"positional_only", "positional_or_keyword"}
+    )
+    if reference_positionals != input_names:
+        return False
+    if any(kind == "var_positional" for _, kind, _ in reference_signature):
+        return False
     reference_named = {
         name: (kind, default) for name, kind, default in reference_signature if not kind.startswith("var_")
     }
-    if tuple(reference_named) != input_names:
-        # Legacy inventory Definitions are not campaign targets and may preserve a
-        # historical inputs mapping order that differs from an otherwise exact
-        # reference/Solution callable contract.
-        return reference_signature == solution_signature
-    if any(kind.startswith("var_") for _, kind, _ in reference_signature):
-        return False
     solution_named = {
         name: (kind, default) for name, kind, default in solution_signature if not kind.startswith("var_")
     }
@@ -1166,9 +1162,29 @@ def _ast_solution_accepts_reference_signature(
         return False
     for name in input_names:
         if name in solution_named:
-            if solution_named[name] != reference_named[name]:
+            reference_kind, reference_default = reference_named[name]
+            solution_kind, solution_default = solution_named[name]
+            # A defaulted input may stay keyword-only in a pre-existing host entry point.
+            keyword_only_default = (
+                reference_kind == "positional_or_keyword"
+                and solution_kind == "keyword_only"
+                and reference_default is not None
+            )
+            if solution_default != reference_default or (solution_kind != reference_kind and not keyword_only_default):
                 return False
         elif not accepts_kwargs or reference_named[name][0] == "positional_only":
+            return False
+    for name, (kind, default) in reference_named.items():
+        if kind != "keyword_only":
+            continue
+        if name not in solution_named:
+            if not accepts_kwargs:
+                return False
+            continue
+        solution_kind, solution_default = solution_named[name]
+        if solution_kind not in {"positional_or_keyword", "keyword_only"} or solution_default is None:
+            return False
+        if solution_default != default:
             return False
     return all(
         name in input_names or default is not None
@@ -1183,20 +1199,41 @@ def _solution_accepts_reference_signature(
     input_names: tuple[str, ...],
 ) -> bool:
     reference_parameters = reference_signature.parameters
-    if tuple(reference_parameters) != input_names:
-        # Campaign public/leaf Definitions take the exact-order branch; legacy
-        # Legacy inventory pairs retain strict callable parity.
-        return reference_signature == solution_signature
+    positional_kinds = {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+    reference_positionals = tuple(
+        name for name, parameter in reference_parameters.items() if parameter.kind in positional_kinds
+    )
+    if reference_positionals != input_names:
+        return False
     solution_parameters = solution_signature.parameters
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in solution_parameters.values())
-    for name, reference_parameter in reference_parameters.items():
+    for name in input_names:
+        reference_parameter = reference_parameters[name]
         solution_parameter = solution_parameters.get(name)
         if solution_parameter is None:
             if not accepts_kwargs or reference_parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
                 return False
             continue
+        keyword_only_default = (
+            reference_parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            and solution_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            and reference_parameter.default is not inspect.Parameter.empty
+        )
+        if solution_parameter.default != reference_parameter.default or (
+            solution_parameter.kind != reference_parameter.kind and not keyword_only_default
+        ):
+            return False
+    for name, reference_parameter in reference_parameters.items():
+        if reference_parameter.kind is not inspect.Parameter.KEYWORD_ONLY:
+            continue
+        solution_parameter = solution_parameters.get(name)
+        if solution_parameter is None:
+            if not accepts_kwargs:
+                return False
+            continue
         if (
-            solution_parameter.kind != reference_parameter.kind
+            solution_parameter.kind not in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+            or solution_parameter.default is inspect.Parameter.empty
             or solution_parameter.default != reference_parameter.default
         ):
             return False

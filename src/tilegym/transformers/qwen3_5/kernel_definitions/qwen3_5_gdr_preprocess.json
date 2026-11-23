@@ -11,9 +11,10 @@
   },
   "description": "Qwen3.5 gated delta rule preprocessing: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias).",
   "inputs": {
-    "A_log": {
-      "dtype": "float32",
+    "b": {
+      "dtype": "bfloat16",
       "shape": [
+        "N",
         "H"
       ]
     },
@@ -24,10 +25,9 @@
         "H"
       ]
     },
-    "b": {
-      "dtype": "bfloat16",
+    "A_log": {
+      "dtype": "float32",
       "shape": [
-        "N",
         "H"
       ]
     },

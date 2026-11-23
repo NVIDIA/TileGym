@@ -11,18 +11,14 @@
   },
   "description": "Qwen3.5 fused RMSNorm and SiLU gate.",
   "inputs": {
-    "eps": {
-      "dtype": "float32",
-      "shape": null
-    },
-    "gate": {
+    "hidden_states": {
       "dtype": "bfloat16",
       "shape": [
         "N",
         "D"
       ]
     },
-    "hidden_states": {
+    "gate": {
       "dtype": "bfloat16",
       "shape": [
         "N",
@@ -34,6 +30,10 @@
       "shape": [
         "D"
       ]
+    },
+    "eps": {
+      "dtype": "float32",
+      "shape": null
     }
   },
   "name": "qwen3_5_rms_norm_gated_silu",

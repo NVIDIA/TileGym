@@ -341,7 +341,7 @@ def test_runtime_accepts_optional_solution_signature_extensions():
     _assert_matching_entry_signatures(definition, reference, schema, solution)
 
 
-def test_runtime_preserves_exact_legacy_signature_with_noncanonical_input_order():
+def test_runtime_rejects_reference_positionals_out_of_inputs_order():
     def reference(q, scale=None):
         return q
 
@@ -350,7 +350,8 @@ def test_runtime_preserves_exact_legacy_signature_with_noncanonical_input_order(
 
     definition = {"name": "legacy_definition", "inputs": {"scale": {}, "q": {}}}
     schema = {"spec": {"entry_point": "test.py::solution"}}
-    _assert_matching_entry_signatures(definition, reference, schema, solution)
+    with pytest.raises(AssertionError, match="does not match Solution entry point"):
+        _assert_matching_entry_signatures(definition, reference, schema, solution)
 
 
 def test_static_runtime_accepts_exact_kwargs_only_unsupported_stub(tmp_path):
@@ -406,6 +407,87 @@ def test_runtime_rejects_reference_and_solution_default_mismatch():
     schema = {"spec": {"entry_point": "test.py::solution"}}
     with pytest.raises(AssertionError, match="does not match Solution entry point"):
         _assert_matching_entry_signatures(definition, reference, schema, solution)
+
+
+_KEYWORD_ONLY_REFERENCE = "def run(q, scale=None, *, initial_state=None):\n    return q\n"
+
+
+def _check_signatures_both_ways(tmp_path, reference_source, solution_source, inputs):
+    namespace = {}
+    exec(reference_source, namespace)
+    exec(solution_source, namespace)
+    definition = {"name": "wrapper", "inputs": {name: {} for name in inputs}, "reference": reference_source}
+    solution = {"spec": {"entry_point": "solution.py::solution"}}
+    (tmp_path / "solution.py").write_text(solution_source, encoding="utf-8")
+    _assert_matching_entry_signatures(definition, namespace["run"], solution, namespace["solution"])
+    _assert_matching_entry_signatures_static(definition, solution, tmp_path / "definition.json", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "solution_source",
+    [
+        "def solution(q, scale=None, initial_state=None):\n    return q\n",
+        "def solution(q, scale=None, *, initial_state=None):\n    return q\n",
+        "def solution(q, scale=None, **kwargs):\n    return q\n",
+    ],
+    ids=["positional-or-keyword", "keyword-only", "var-keyword"],
+)
+def test_signature_check_accepts_keyword_only_reference_extension(tmp_path, solution_source):
+    _check_signatures_both_ways(tmp_path, _KEYWORD_ONLY_REFERENCE, solution_source, ("q", "scale"))
+
+
+@pytest.mark.parametrize(
+    "solution_source",
+    [
+        "def solution(q, scale=None):\n    return q\n",
+        "def solution(q, scale=None, *, initial_state=0):\n    return q\n",
+        "def solution(q, scale=None, *, initial_state):\n    return q\n",
+    ],
+    ids=["missing", "default-mismatch", "required"],
+)
+def test_signature_check_rejects_unmatched_keyword_only_reference_extension(tmp_path, solution_source):
+    with pytest.raises(AssertionError, match="does not match Solution entry point"):
+        _check_signatures_both_ways(tmp_path, _KEYWORD_ONLY_REFERENCE, solution_source, ("q", "scale"))
+
+
+@pytest.mark.parametrize(
+    ("reference_source", "inputs"),
+    [
+        ("def run(q, scale=None):\n    return q\n", ("scale", "q")),
+        ("def run(q, scale=None, extra=None):\n    return q\n", ("q", "scale")),
+        ("def run(q):\n    return q\n", ("q", "scale")),
+        ("def run(q, *, scale=None):\n    return q\n", ("q", "scale")),
+    ],
+    ids=["order", "extra-positional", "missing-positional", "keyword-only-input"],
+)
+def test_signature_check_requires_reference_positionals_to_equal_inputs(tmp_path, reference_source, inputs):
+    solution_source = "def solution(q, scale=None, extra=None):\n    return q\n"
+    with pytest.raises(AssertionError, match="does not match Solution entry point"):
+        _check_signatures_both_ways(tmp_path, reference_source, solution_source, inputs)
+
+
+def test_signature_check_accepts_keyword_only_solution_parameter_for_defaulted_input(tmp_path):
+    _check_signatures_both_ways(
+        tmp_path,
+        "def run(q, flag=False):\n    return q\n",
+        "def solution(q, *, flag=False):\n    return q\n",
+        ("q", "flag"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("reference_source", "solution_source"),
+    [
+        ("def run(q, flag):\n    return q\n", "def solution(q, *, flag):\n    return q\n"),
+        ("def run(q, flag=False):\n    return q\n", "def solution(q, *, flag=True):\n    return q\n"),
+    ],
+    ids=["required-input", "default-mismatch"],
+)
+def test_signature_check_rejects_keyword_only_solution_parameter_for_other_inputs(
+    tmp_path, reference_source, solution_source
+):
+    with pytest.raises(AssertionError, match="does not match Solution entry point"):
+        _check_signatures_both_ways(tmp_path, reference_source, solution_source, ("q", "flag"))
 
 
 def test_static_signature_mismatch_precedes_triton_compiler_gate(tmp_path, monkeypatch):

@@ -28,6 +28,14 @@
     }
   },
   "inputs": {
+    "hidden_states": {
+      "shape": [
+        "B",
+        "D",
+        "S"
+      ],
+      "dtype": "bfloat16"
+    },
     "conv_state": {
       "shape": [
         "B",
@@ -36,14 +44,6 @@
       ],
       "dtype": "bfloat16",
       "inplace_output": true
-    },
-    "hidden_states": {
-      "shape": [
-        "B",
-        "D",
-        "S"
-      ],
-      "dtype": "bfloat16"
     },
     "weight": {
       "shape": [
@@ -63,7 +63,7 @@
       "dtype": "bfloat16"
     }
   },
-  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L545-L554\nimport torch\nimport torch.nn.functional as F\n\ndef run(hidden_states, conv_state, weight, bias=None, activation=None):\n    _, hidden_size, seq_len = hidden_states.shape\n    state_len = conv_state.shape[-1]\n    hidden_states_new = torch.cat([conv_state, hidden_states], dim=-1).to(weight.dtype)\n    conv_state.copy_(hidden_states_new[:, :, -state_len:])\n    output = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)\n    output = F.silu(output[:, :, -seq_len:])\n    return output.to(hidden_states.dtype)",
+  "reference": "# Source: https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L545-L554\nimport torch\nimport torch.nn.functional as F\n\ndef run(hidden_states, conv_state, weight, *, bias=None, activation=None):\n    _, hidden_size, seq_len = hidden_states.shape\n    state_len = conv_state.shape[-1]\n    hidden_states_new = torch.cat([conv_state, hidden_states], dim=-1).to(weight.dtype)\n    conv_state.copy_(hidden_states_new[:, :, -state_len:])\n    output = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)\n    output = F.silu(output[:, :, -seq_len:])\n    return output.to(hidden_states.dtype)",
   "tags": [
     "model:qwen3.5",
     "stage:decode",

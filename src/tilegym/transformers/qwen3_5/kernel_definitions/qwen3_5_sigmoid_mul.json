@@ -11,14 +11,14 @@
   },
   "description": "Qwen3.5 fused attention output gate: output = x * sigmoid(gate).",
   "inputs": {
-    "gate": {
+    "x": {
       "dtype": "bfloat16",
       "shape": [
         "N",
         "D"
       ]
     },
-    "x": {
+    "gate": {
       "dtype": "bfloat16",
       "shape": [
         "N",

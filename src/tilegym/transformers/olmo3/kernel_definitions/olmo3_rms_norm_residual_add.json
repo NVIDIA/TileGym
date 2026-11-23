@@ -11,9 +11,12 @@
   },
   "description": "OLMo3 fused post-norm RMSNorm and residual add: output = residual + rms_norm(x).",
   "inputs": {
-    "eps": {
-      "dtype": "float32",
-      "shape": null
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
     },
     "residual": {
       "dtype": "bfloat16",
@@ -28,12 +31,9 @@
         "D"
       ]
     },
-    "x": {
-      "dtype": "bfloat16",
-      "shape": [
-        "N",
-        "D"
-      ]
+    "eps": {
+      "dtype": "float32",
+      "shape": null
     }
   },
   "name": "olmo3_rms_norm_residual_add",

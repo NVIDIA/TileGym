@@ -47,8 +47,8 @@
   "reference": "# Source: https://github.com/pytorch/pytorch/blob/d38164a545b4a4e4e0cf73ce67173f70574890b6/torch/nn/functional.py#L2302-L2305\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L432-L435\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L658-L670\n# Source: https://github.com/huggingface/transformers/blob/0dad7b822255a0ae261ec45ae937371e859ffd1a/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L727-L729\nimport torch\nimport torch.nn.functional as F\n\ndef run(a, b):\n    return F.linear(a, b)",
   "constraints": [
     "1 <= M <= 64",
-    "a.is_contiguous()",
-    "b.is_contiguous()",
+    "contiguous(a)",
+    "contiguous(b)",
     "K % 8 == 0",
     "N % 8 == 0"
   ],

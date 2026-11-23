@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from typing import Iterator
 
+from tilegym.kernel_inventory._definition_schema_compat import run_parameter_mismatch
 from tilegym.kernel_inventory.composition import DefinitionCompositionError
 from tilegym.kernel_inventory.composition import validate_definition_composition
 from tilegym.kernel_inventory.generation import validate_tilegym_definition_model
@@ -307,28 +308,16 @@ def _validate_reference_run(reference: str, input_names: list[str]) -> None:
     run_args = run_nodes[0].args
     if run_args.vararg is not None:
         raise KernelInventoryError("Definition.reference run function must not use *args")
-
-    parameters = [*run_args.posonlyargs, *run_args.args, *run_args.kwonlyargs]
-    parameter_names = [parameter.arg for parameter in parameters]
-    unknown_inputs = [name for name in input_names if name not in parameter_names]
-    if run_args.kwarg is not None:
-        unknown_inputs = []
-    if unknown_inputs:
-        raise KernelInventoryError(
-            f"Definition.inputs contains names not accepted by Definition.reference run: {unknown_inputs}"
-        )
-
-    positional_parameters = [*run_args.posonlyargs, *run_args.args]
-    positional_required_count = len(positional_parameters) - len(run_args.defaults)
-    required_names = [parameter.arg for parameter in positional_parameters[:positional_required_count]]
-    required_names.extend(
+    mismatch = run_parameter_mismatch(run_args, input_names)
+    if mismatch is not None:
+        raise KernelInventoryError(f"Definition.reference {mismatch}")
+    required_keyword_only = [
         parameter.arg for parameter, default in zip(run_args.kwonlyargs, run_args.kw_defaults) if default is None
-    )
-    missing_required_inputs = [name for name in required_names if name not in input_names]
-    if missing_required_inputs:
+    ]
+    if required_keyword_only:
         raise KernelInventoryError(
-            "Definition.inputs must include every required Definition.reference run parameter: "
-            f"{missing_required_inputs}"
+            "Definition.reference run keyword-only parameters must have defaults because only "
+            f"Definition.inputs are passed, positionally: {required_keyword_only}"
         )
 
 

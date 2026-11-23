@@ -173,12 +173,49 @@ def _top_level_function(reference: str, name: str) -> ast.FunctionDef | None:
     return next((node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name), None)
 
 
+def run_parameter_mismatch(arguments: ast.arguments, input_names: list[str]) -> str | None:
+    """Describe how the positional ``run()`` parameters differ from the ``inputs`` keys, or return None.
+
+    Only positional-only and ordinary parameters are compared, by count and then by name in order;
+    keyword-only, ``*args`` and ``**kwargs`` parameters are not part of the comparison.
+    """
+    param_names = [a.arg for a in (*arguments.posonlyargs, *arguments.args)]
+    if len(param_names) != len(input_names):
+        return (
+            f"run() has {len(param_names)} parameter(s) {param_names} but "
+            f"definition 'inputs' has {len(input_names)} "
+            f"entr{'y' if len(input_names) == 1 else 'ies'} "
+            f"{input_names}. They must match exactly."
+        )
+    mismatched = [(p, i) for p, i in zip(param_names, input_names) if p != i]
+    if mismatched:
+        return (
+            f"run() parameter names don't match definition 'inputs' keys. "
+            f"Mismatches (run_param → input_key): {mismatched}. "
+            f"run() params: {param_names}, inputs: {input_names}."
+        )
+    return None
+
+
 class Definition(_FibDefinition):
     """FIB Definition plus expression axes and custom input/correctness entrypoints."""
 
     axes: dict[Annotated[str, Field(min_length=1)], AxisSpec]
     custom_inputs_entrypoint: Optional[str] = Field(default=None, min_length=1)
     custom_correctness_entrypoint: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_reference_inputs_match(self) -> "Definition":
+        try:
+            function = _top_level_function(self.reference, "run")
+        except SyntaxError:
+            return self
+        if function is None:
+            return self
+        mismatch = run_parameter_mismatch(function.args, list(self.inputs))
+        if mismatch is not None:
+            raise ValueError(mismatch)
+        return self
 
     @model_validator(mode="after")
     def _verify_custom_inputs_entrypoint(self) -> "Definition":
