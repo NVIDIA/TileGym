@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import ast
+import copy
+import inspect
 import json
 import math
 import os
+from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -288,6 +292,165 @@ def materialize_workload_inputs(
     return axes, materialized
 
 
+def materialize_custom_input_cases(
+    record: WorkloadRecord,
+    definition: dict[str, Any],
+    custom_inputs_fn: Any,
+    *,
+    torch: Any,
+    device: Any,
+    seed: int,
+) -> tuple[dict[str, int], list[tuple[str, dict[str, Any]]]]:
+    """Call ``Definition.custom_inputs_entrypoint`` for one custom-input row and validate every returned case.
+
+    Returns the resolved axes and ``(case_name, inputs)`` pairs. A single input mapping is one case named
+    ``"default"``; a sequence yields one case per item, named by its ``{"name", "inputs"}`` record or ``case_<i>``.
+    """
+    label = record.source_label
+    name = definition.get("custom_inputs_entrypoint")
+    if not name or not callable(custom_inputs_fn):
+        raise KernelWorkloadError(
+            f"{label}: custom_inputs_entrypoint {name!r} is not a callable in Definition.reference"
+        )
+    if _dynamic_axes(record):
+        raise KernelWorkloadError(f"{label}: TileGym runtime materialization does not yet support dynamic axes")
+    try:
+        axes = resolve_definition_axes(definition, {axis: int(value) for axis, value in record.workload.axes.items()})
+    except (TypeError, ValueError) as exc:
+        raise KernelWorkloadError(f"{label}: Definition {definition.get('name')!r} cannot resolve {exc}") from exc
+    scalars = {
+        input_name: descriptor.value
+        for input_name, descriptor in record.workload.inputs.items()
+        if isinstance(descriptor, ScalarInput)
+    }
+    raw_cases = _call_custom_inputs_fn(
+        custom_inputs_fn, {**axes, **scalars}, device, seed, record.workload.custom_inputs_kwargs, torch, label
+    )
+    definition_inputs = _require_mapping(definition.get("inputs"), "Definition.inputs")
+    none_defaults = _reference_none_defaults(definition.get("reference", ""))
+    cases = []
+    for case_name, inputs in _normalize_custom_input_cases(raw_cases, label):
+        case_label = f"{label} custom input case {case_name!r}"
+        missing = sorted(set(definition_inputs) - set(inputs))
+        extra = sorted(set(inputs) - set(definition_inputs))
+        if missing or extra:
+            raise KernelWorkloadError(f"{case_label}: inputs mismatch: missing={missing}, unknown={extra}")
+        materialized = {}
+        for input_name, spec in definition_inputs.items():
+            value = inputs[input_name]
+            input_label = f"{case_label}: input {input_name!r}"
+            if value is None:
+                if input_name not in none_defaults:
+                    raise KernelWorkloadError(
+                        f"{input_label} is None without an explicit None default in Definition.reference.run"
+                    )
+            elif spec.get("shape") is None:
+                _validate_scalar_dtype(value, spec.get("dtype"), input_label)
+            elif not isinstance(value, torch.Tensor):
+                raise KernelWorkloadError(f"{input_label} must be a tensor, got {type(value).__name__}")
+            else:
+                value = value.to(device)
+                expected_shape = _resolved_shape(spec, axes)
+                expected_dtype = resolve_torch_dtype(spec["dtype"], torch)
+                if tuple(value.shape) != expected_shape or value.dtype != expected_dtype:
+                    raise KernelWorkloadError(
+                        f"{input_label} expected shape={expected_shape} dtype={expected_dtype}, "
+                        f"got shape={tuple(value.shape)} dtype={value.dtype}"
+                    )
+            materialized[input_name] = value
+        context = {
+            **axes,
+            **{
+                input_name: value
+                for input_name, value in materialized.items()
+                if value is None or definition_inputs[input_name].get("shape") is None
+            },
+        }
+        _check_constraints(definition, context, case_label)
+        cases.append((case_name, materialized))
+    return axes, cases
+
+
+def _call_custom_inputs_fn(
+    custom_inputs_fn: Any,
+    axes_and_scalars: dict[str, Any],
+    device: Any,
+    seed: int,
+    kwargs: dict[str, Any],
+    torch: Any,
+    label: str,
+) -> Any:
+    """Pass ``seed`` the way the entrypoint declares it; seed the global RNG for legacy two-argument factories."""
+    kwargs = copy.deepcopy(dict(kwargs))
+    parameters = list(inspect.signature(custom_inputs_fn).parameters.values())
+    positional_kinds = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    named_kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    positional = [parameter for parameter in parameters if parameter.kind in positional_kinds]
+    accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    if len(positional) >= 3 and positional[2].kind is inspect.Parameter.POSITIONAL_ONLY:
+        seed_by = "position"
+    elif accepts_var_keyword or any(p.name == "seed" and p.kind in named_kinds for p in parameters):
+        seed_by = "keyword"
+    elif len(positional) >= 3 or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters):
+        seed_by = "position"
+    else:
+        seed_by = None
+
+    if kwargs:
+        reserved = {parameter.name for parameter in positional[:2]}
+        if seed_by == "keyword":
+            reserved.add("seed")
+        elif seed_by == "position" and len(positional) >= 3:
+            reserved.add(positional[2].name)
+        clashing = sorted(set(kwargs) & reserved)
+        if clashing:
+            raise KernelWorkloadError(f"{label}: custom_inputs_kwargs {clashing} clash with entrypoint arguments")
+        unaccepted = sorted(set(kwargs) - {p.name for p in parameters if p.kind in named_kinds})
+        if unaccepted and not accepts_var_keyword:
+            raise KernelWorkloadError(
+                f"{label}: custom_inputs_entrypoint does not accept custom_inputs_kwargs {unaccepted}"
+            )
+
+    if seed_by == "keyword":
+        return custom_inputs_fn(axes_and_scalars, device, seed=seed, **kwargs)
+    if seed_by == "position":
+        return custom_inputs_fn(axes_and_scalars, device, seed, **kwargs)
+    torch.manual_seed(seed)
+    return custom_inputs_fn(axes_and_scalars, device, **kwargs)
+
+
+def _normalize_custom_input_cases(raw_cases: Any, label: str) -> list[tuple[str, dict[str, Any]]]:
+    single = isinstance(raw_cases, Mapping)
+    if single:
+        raw_cases = [raw_cases]
+    elif not isinstance(raw_cases, Sequence) or isinstance(raw_cases, str | bytes | bytearray) or not raw_cases:
+        raise KernelWorkloadError(
+            f"{label}: custom_inputs_entrypoint must return an input mapping or a non-empty sequence of cases, "
+            f"got {type(raw_cases).__name__}"
+        )
+    cases = []
+    for index, raw_case in enumerate(raw_cases):
+        default_name = "default" if single else f"case_{index}"
+        if not isinstance(raw_case, Mapping):
+            raise KernelWorkloadError(
+                f"{label}: custom input case {index} must be a mapping, got {type(raw_case).__name__}"
+            )
+        if isinstance(raw_case.get("inputs"), Mapping) and set(raw_case) <= {"name", "inputs"}:
+            case_name = raw_case.get("name")
+            if case_name is None:
+                case_name = default_name
+            if not isinstance(case_name, str) or not case_name:
+                raise KernelWorkloadError(f"{label}: custom input case {index} has invalid name {case_name!r}")
+            cases.append((case_name, dict(raw_case["inputs"])))
+        else:
+            cases.append((default_name, dict(raw_case)))
+    names = [name for name, _ in cases]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise KernelWorkloadError(f"{label}: duplicate custom input case names {duplicates}")
+    return cases
+
+
 def resolve_torch_dtype(dtype: str, torch: Any) -> Any:
     """Resolve an inventory dtype string to its torch dtype."""
     supported = {
@@ -523,6 +686,11 @@ def _validate_resolvable_constraints(
     context.update(
         {name: None for name, descriptor in record.workload.inputs.items() if isinstance(descriptor, NullInput)}
     )
+    _check_constraints(definition, context, record.source_label)
+
+
+def _check_constraints(definition: dict[str, Any], context: dict[str, Any], label: str) -> None:
+    """Evaluate each constraint whose names are all bound in ``context``; skip the rest."""
     for constraint in definition.get("constraints", []):
         if not isinstance(constraint, str):
             continue
@@ -538,7 +706,7 @@ def _validate_resolvable_constraints(
         except (NameError, TypeError, ValueError):
             continue
         if not holds:
-            raise KernelWorkloadError(f"{record.source_label}: Workload violates Definition constraint: {constraint}")
+            raise KernelWorkloadError(f"{label}: Workload violates Definition constraint: {constraint}")
 
 
 def _dynamic_axes(record: WorkloadRecord) -> dict[str, Any]:

@@ -50,9 +50,12 @@ from tilegym.kernel_inventory.schema import CustomInput
 from tilegym.kernel_inventory.schema import ToleranceSpec
 from tilegym.kernel_inventory.schema import resolve_tensor_shape
 from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
+from tilegym.kernel_inventory.workloads import materialize_custom_input_cases
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_TOLERANCE = ToleranceSpec(max_atol=2e-2, max_rtol=2e-2, required_matched_ratio=1.0)
+# Fixed seed so generated custom inputs are reproducible across runs.
+_CUSTOM_INPUTS_SEED = 200
 
 
 class _CapturedReferenceReturn:
@@ -100,12 +103,8 @@ def workload_runtime_cases_for_submodule(submodule: str | Path | None) -> list[A
 def _unsupported_runtime_row_marks(record: WorkloadRecord) -> tuple[Any, ...]:
     """Skip rows whose inputs the local runtime cannot materialize."""
     if any(not isinstance(value, int) for value in record.workload.axes.values()):
-        reason = "local runtime does not sample dynamic axes"
-    elif any(isinstance(descriptor, CustomInput) for descriptor in record.workload.inputs.values()):
-        reason = "local runtime does not call custom_inputs_entrypoint"
-    else:
-        return ()
-    return (pytest.mark.skip(reason=reason),)
+        return (pytest.mark.skip(reason="local runtime does not sample dynamic axes"),)
+    return ()
 
 
 def _runtime_case_id(record: WorkloadRecord, definition_path: str | Path, solution_path: str | Path) -> str:
@@ -246,37 +245,55 @@ def _run_definition_solution_workload_runtime(
             _prepare_registered_backend_environment(solution, solution_path)
 
         try:
-            device = torch.device("cuda")
-            torch.manual_seed(2026)
-            axes, inputs = materialize_workload_inputs(
-                workload_record,
-                definition,
-                torch=torch,
-                device=device,
+            axes, input_cases = _materialize_runtime_input_cases(
+                workload_record, definition, reference_namespace, torch.device("cuda")
             )
             mutated_inputs = tuple(
                 name for name, spec in definition["inputs"].items() if spec.get("inplace_output") is True
             )
-            _run_runtime_branch(
-                definition,
-                reference_fn,
-                solution,
-                solution_fn,
-                inputs,
-                axes,
-                torch,
-                mutated_inputs,
-                tolerance=workload_record.workload.tolerance,
-                case_label=workload_record.source_label,
-                skip_correctness=workload_record.workload.eval_mode == "benchmark_only",
-                custom_comparator=custom_comparator,
-                custom_correctness_kwargs=workload_record.workload.custom_correctness_kwargs or None,
-            )
+            for case_label, inputs in input_cases:
+                _run_runtime_branch(
+                    definition,
+                    reference_fn,
+                    solution,
+                    solution_fn,
+                    inputs,
+                    axes,
+                    torch,
+                    mutated_inputs,
+                    tolerance=workload_record.workload.tolerance,
+                    case_label=case_label,
+                    skip_correctness=workload_record.workload.eval_mode == "benchmark_only",
+                    custom_comparator=custom_comparator,
+                    custom_correctness_kwargs=workload_record.workload.custom_correctness_kwargs or None,
+                )
         finally:
             if previous_backend is not None:
                 from tilegym.backend.selector import set_backend
 
                 set_backend(previous_backend)
+
+
+def _materialize_runtime_input_cases(
+    workload_record: WorkloadRecord,
+    definition: dict[str, Any],
+    reference_namespace: dict[str, Any],
+    device: Any,
+) -> tuple[dict[str, int], list[tuple[str, dict[str, Any]]]]:
+    """Return resolved axes and labeled input sets; a custom-input row yields one set per generated case."""
+    torch.manual_seed(2026)
+    if not any(isinstance(descriptor, CustomInput) for descriptor in workload_record.workload.inputs.values()):
+        axes, inputs = materialize_workload_inputs(workload_record, definition, torch=torch, device=device)
+        return axes, [(workload_record.source_label, inputs)]
+    axes, cases = materialize_custom_input_cases(
+        workload_record,
+        definition,
+        reference_namespace.get(definition.get("custom_inputs_entrypoint")),
+        torch=torch,
+        device=device,
+        seed=_CUSTOM_INPUTS_SEED,
+    )
+    return axes, [(f"{workload_record.source_label} custom input case {name!r}", inputs) for name, inputs in cases]
 
 
 def _derive_backend_registration_target(solution_path: Path) -> tuple[str, str]:

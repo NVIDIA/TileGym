@@ -116,7 +116,7 @@ def test_runtime_case_id_disambiguates_shared_definition_variant_solutions(tmp_p
     assert "::variant=op__sm120" in variant_id
 
 
-def test_runtime_cases_skip_rows_the_local_runtime_cannot_materialize(tmp_path, monkeypatch):
+def test_runtime_cases_skip_only_dynamic_axis_rows(tmp_path, monkeypatch):
     from tests.kernel_inventory import kernel_runtime_utils
 
     plain = _workload_record(tmp_path, axes={"N": 4}, inputs={"x": {"type": "random"}})
@@ -140,7 +140,7 @@ def test_runtime_cases_skip_rows_the_local_runtime_cannot_materialize(tmp_path, 
     assert skip_reasons == [
         [],
         ["local runtime does not sample dynamic axes"],
-        ["local runtime does not call custom_inputs_entrypoint"],
+        [],
     ]
 
 
@@ -1444,3 +1444,47 @@ def test_cpu_composed_wrapper_runtime_canary_executes_each_explicit_boolean_row_
             )
 
     assert executed == [False, True]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for kernel inventory runtime checks")
+def test_runtime_runs_every_custom_input_case_against_the_solution(tmp_path, monkeypatch):
+    definition = {
+        "name": "scale_op",
+        "axes": {"N": {"type": "var"}},
+        "inputs": {"x": {"shape": ["N"], "dtype": "float32"}, "alpha": {"shape": None, "dtype": "float32"}},
+        "outputs": {"y": {"shape": ["N"], "dtype": "float32"}},
+        "reference": (
+            "import torch\n\n"
+            "def make_inputs(axes_and_scalars, device, seed):\n"
+            "    generator = torch.Generator(device=device).manual_seed(seed)\n"
+            "    x = torch.randn(axes_and_scalars['N'], generator=generator, device=device)\n"
+            "    return [{'name': 'unit', 'inputs': {'x': x, 'alpha': 1.0}}, {'x': x, 'alpha': -2.0}]\n\n"
+            "def run(x, alpha):\n"
+            "    y = x * alpha\n"
+            "    return y\n"
+        ),
+        "custom_inputs_entrypoint": "make_inputs",
+    }
+    definition_path = tmp_path / "definition.json"
+    definition_path.write_text(json.dumps(definition), encoding="utf-8")
+    solution_path = tmp_path / "solution.json"
+    solution_path.write_text(json.dumps({"spec": {"entry_point": "synthetic.py::solution"}}), encoding="utf-8")
+    record = _workload_record(tmp_path, axes={"N": 16}, inputs={"x": {"type": "custom"}, "alpha": {"type": "custom"}})
+    executed = []
+
+    def solution(x, alpha):
+        executed.append((x.device.type, alpha))
+        return x * alpha
+
+    for name in (
+        "validate_definition",
+        "validate_solution",
+        "validate_solution_entry_point",
+        "_assert_matching_entry_signatures_static",
+    ):
+        monkeypatch.setattr(f"tests.kernel_inventory.kernel_runtime_utils.{name}", lambda *_, **__: None)
+    monkeypatch.setattr("tests.kernel_inventory.kernel_runtime_utils._load_solution_entry", lambda _: solution)
+
+    _run_definition_solution_workload_runtime(record, definition_path, solution_path)
+
+    assert executed == [("cuda", 1.0), ("cuda", -2.0)]
