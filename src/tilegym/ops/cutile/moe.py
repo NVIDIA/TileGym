@@ -14,7 +14,11 @@ import torch
 from tilegym.backend import register_impl
 from tilegym.logger import get_logger
 
+from .utils import cached_replace_hints
+
 logger = get_logger(__name__)
+
+_MOE_FIRST_CALL_HINTS_BY_ARCH = {(8, 0): dict(num_worker_warps=8)}
 
 
 @ct.kernel
@@ -153,6 +157,7 @@ def invoke_fused_moe_kernel(
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
     padded_size = 0  # only uses when using fp8
+    num_warps = config.get("num_warps")
     grid = (
         math.ceil(sorted_token_ids.shape[0] / config["TILE_SIZE_M"]) * math.ceil(B.shape[1] / config["TILE_SIZE_N"]),
     )
@@ -175,10 +180,15 @@ def invoke_fused_moe_kernel(
     # TILE_SIZE_N > N silently overwrite the next row.
     C = C.view(-1, C.shape[2])
 
+    kernel = _fused_moe_kernel
+    arch_hints = _MOE_FIRST_CALL_HINTS_BY_ARCH.get(torch.cuda.get_device_capability(A.device))
+    if arch_hints and not mul_routed_weight and num_warps == 8:
+        kernel = cached_replace_hints(kernel, **arch_hints)
+
     ct.launch(
         torch.cuda.current_stream(),
         grid,
-        _fused_moe_kernel,
+        kernel,
         (
             A,
             B,
