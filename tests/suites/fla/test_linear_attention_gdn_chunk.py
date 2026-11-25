@@ -543,6 +543,60 @@ class Test_FLA_LinearAttentionGdnChunk(common.PyTestCase):
         assert rms_ratio(o_out, o_ref) < 2e-2
 
     @pytest.mark.parametrize("backend", _BACKENDS)
+    def test_op_backward_gate_in_kernel(self, backend):
+        """Backward with `use_gate_in_kernel=True`: grads reach g, A_log and dt_bias through softplus."""
+        self._prep(backend)
+        torch.manual_seed(7)
+        B, T, H, K, V = 2, 128, 2, 64, 64
+        scale = K**-0.5
+        q, k, v, beta, _ = make_inputs(B, T, H, K, V)
+        g_raw = torch.rand(B, T, H, device="cuda").to(torch.bfloat16)
+        A_log = torch.randn(H, device="cuda", dtype=torch.float32)
+        dt_bias = torch.randn(H, device="cuda", dtype=torch.float32)
+
+        inputs = (q, k, v, beta, g_raw, A_log, dt_bias)
+        qk, kk, vk, betak, gk, ak, bk = (x.detach().clone().requires_grad_(True) for x in inputs)
+        o_out, _ = chunk_gated_delta_rule(
+            qk,
+            kk,
+            vk,
+            g=gk,
+            beta=betak,
+            scale=scale,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            A_log=ak,
+            dt_bias=bk,
+        )
+        do = torch.randn_like(o_out)
+        o_out.backward(do)
+
+        qr, kr, vr, betar, gr, ar, br = (x.detach().float().clone().requires_grad_(True) for x in inputs)
+        g_step = -torch.exp(ar) * F.softplus(gr + br)
+        o_ref, _ = naive_recurrent_gated_delta_rule(
+            F.normalize(qr, p=2, dim=-1),
+            F.normalize(kr, p=2, dim=-1),
+            vr,
+            betar,
+            g_step,
+            scale=scale,
+            output_final_state=False,
+        )
+        o_ref.backward(do.float())
+
+        for name, got, ref in (
+            ("dq", qk.grad, qr.grad),
+            ("dk", kk.grad, kr.grad),
+            ("dv", vk.grad, vr.grad),
+            ("dg", gk.grad, gr.grad),
+            ("dbeta", betak.grad, betar.grad),
+            ("dA_log", ak.grad, ar.grad),
+            ("ddt_bias", bk.grad, br.grad),
+        ):
+            ratio = rms_ratio(got, ref)
+            assert ratio < 5e-2, f"{name} RMS ratio {ratio:.3e} exceeds 5e-2"
+
+    @pytest.mark.parametrize("backend", _BACKENDS)
     def test_op_forward_default_scale(self, backend):
         """Forward with `scale=None` (kernel defaults to 1/sqrt(K))."""
         self._prep(backend)
