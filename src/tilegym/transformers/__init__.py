@@ -13,3 +13,4 @@ from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_olmoe
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_phi3
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_qwen2
 from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_qwen3
+from tilegym.transformers.monkey_patch import apply_tilegym_kernel_to_qwen3_dense

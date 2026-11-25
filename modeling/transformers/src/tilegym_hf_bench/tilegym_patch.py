@@ -13,6 +13,7 @@ from tilegym.transformers import apply_tilegym_kernel_to_olmoe
 from tilegym.transformers import apply_tilegym_kernel_to_phi3
 from tilegym.transformers import apply_tilegym_kernel_to_qwen2
 from tilegym.transformers import apply_tilegym_kernel_to_qwen3
+from tilegym.transformers import apply_tilegym_kernel_to_qwen3_dense
 
 
 def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
@@ -40,6 +41,10 @@ def apply_tilegym_patch(model_id, use_attn=False, use_cutile=False):
             group_gemm=use_cutile,
             use_cutile=use_cutile,
         )
+    elif "qwen3" in model_name:
+        # Qwen3 dense (model_type "qwen3", e.g. Qwen/Qwen3-8B). Must come after the
+        # Qwen3.5 / Qwen3.8 branch above and before the generic "qwen" (Qwen2) branch.
+        apply_tilegym_kernel_to_qwen3_dense(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     elif "qwen" in model_name:
         apply_tilegym_kernel_to_qwen2(rope=True, rms_norm=True, swiglu=True, attn=use_attn, use_cutile=use_cutile)
     elif "gemma-3" in model_name or "gemma3" in model_name:
