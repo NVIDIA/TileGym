@@ -156,6 +156,47 @@ def apply_tilegym_kernel_to_qwen2(
         ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
 
 
+def apply_tilegym_kernel_to_qwen3_dense(
+    rope: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+    attn: bool = True,
+    model: PreTrainedModel = None,
+    use_cutile: bool = False,
+) -> None:
+    """
+    Apply TileGym kernels to replace original implementation in HuggingFace Qwen3 dense models
+
+    Args:
+        rope (bool): Whether to apply TileGym's rotary position embedding. Default is True.
+        rms_norm (bool): Whether to apply TileGym's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply TileGym's SwiGLU MLP. Default is True.
+        attn (bool): Whether to apply TileGym's attention. Default is True.
+        model (PreTrainedModel): The model instance to apply TileGym kernels to, if the model has already been
+        loaded. Default is None.
+        use_cutile (bool): Whether to apply using cutile. Default is False.
+    """
+    logger.info("--------------------------------")
+    logger.info("apply_tilegym_kernel_to_qwen3_dense")
+    logger.info("--------------------------------")
+    from transformers.models.qwen3 import modeling_qwen3
+
+    if use_cutile:
+        set_backend("cutile")
+
+    if rope:
+        # Same full rotate-half RoPE layout as Qwen2
+        modeling_qwen3.apply_rotary_pos_emb = get_apply_rope_func(model="qwen2")
+    if rms_norm:
+        modeling_qwen3.Qwen3RMSNorm = get_rms_norm_module()
+    if swiglu:
+        modeling_qwen3.Qwen3MLP = get_swiglu_module()
+    if attn:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = get_fmha_interface()
+
+
 def apply_tilegym_kernel_to_qwen3(
     rope: bool = True,
     rms_norm: bool = True,
@@ -682,6 +723,7 @@ MODEL_TYPE_TO_APPLY_TILEGYM_FN = {
     "gpt_oss": apply_tilegym_kernel_to_gpt_oss,
     "mistral": apply_tilegym_kernel_to_mistral,
     "qwen2": apply_tilegym_kernel_to_qwen2,
+    "qwen3": apply_tilegym_kernel_to_qwen3_dense,
     "qwen3_5": apply_tilegym_kernel_to_qwen3,
     "gemma3": apply_tilegym_kernel_to_gemma3,
     "phi3": apply_tilegym_kernel_to_phi3,

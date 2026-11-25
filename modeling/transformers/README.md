@@ -80,6 +80,7 @@ Use one consolidated script for model presets:
 ./scripts/benchmark_hf_model.sh --model-key llama
 ./scripts/benchmark_hf_model.sh --model-key deepseek
 ./scripts/benchmark_hf_model.sh --model-key qwen
+./scripts/benchmark_hf_model.sh --model-key qwen3
 ./scripts/benchmark_hf_model.sh --model-key qwen3_5
 ./scripts/benchmark_hf_model.sh --model-key qwen3_8
 ./scripts/benchmark_hf_model.sh --model-key gemma3
