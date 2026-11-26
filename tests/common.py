@@ -21,6 +21,7 @@ from functools import wraps
 import pytest
 import torch
 
+from tilegym.backend.selector import get_tilecpp_nvcc_version
 from tilegym.benchmark import benchmark_cuda_graph
 from tilegym.benchmark import benchmark_eager
 
@@ -88,6 +89,36 @@ def get_tensor_alignment(tensor):
     address = tensor.data_ptr()
     alignment = (((address - 1) ^ address) + 1) >> 1
     return alignment
+
+
+@functools.cache
+def get_tileiras_version():
+    """Return ``(major, minor, patch)`` of the tileiras that cuTile compiles with, or None if unknown."""
+    try:
+        from cuda.tile._compile import _get_compiler_version_string
+
+        match = re.search(r"V(\d+)\.(\d+)\.(\d+)", _get_compiler_version_string() or "")
+    except Exception:
+        return None
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def skip_if_tileiras_cannot_scan_mma_accumulator(backend):
+    """Skip cuTile on tileiras 13.5, which cannot compile a scan over an MMA accumulator on some GPUs."""
+    if backend != "cutile" or not torch.cuda.is_available():
+        return
+    version = get_tileiras_version()
+    if version and version[:2] == (13, 5) and torch.cuda.get_device_capability()[0] in (8, 9, 12):
+        pytest.skip("Known tileiras 13.5 issue with scans over an MMA accumulator")
+
+
+TILECPP_NVCC_KNOWN_ISSUE = "Known TileCpp issue with nvcc >= 13.5"
+
+
+@functools.cache
+def tilecpp_nvcc_has_known_issue():
+    """True when TileCpp compiles with nvcc >= 13.5, where some TileCpp kernels have a known issue."""
+    return (get_tilecpp_nvcc_version() or (0, 0)) >= (13, 5)
 
 
 # Consumer-Blackwell arches (sm120/sm121) have less device memory than the

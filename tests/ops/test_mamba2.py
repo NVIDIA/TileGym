@@ -726,6 +726,7 @@ class Test_Mamba2_ChunkBackward(common.PyTestCase):
     def test_op(
         self, batch_size, num_tokens, num_groups, num_heads, state_size, head_size, chunk_size, dtype, arch, backend
     ):
+        common.skip_if_tileiras_cannot_scan_mma_accumulator(backend)
         self.setUp()
         try:
             tilegym.set_backend(backend)
@@ -763,6 +764,7 @@ class Test_Mamba2_ChunkBackward(common.PyTestCase):
     @pytest.mark.parametrize("backend", ["cutile"])
     def test_op_grouped_state_gradients(self, chunk_size, arch, backend):
         """Check scan-derived gradients for grouped S128 and multi-chunk inputs."""
+        common.skip_if_tileiras_cannot_scan_mma_accumulator(backend)
         self.setUp()
         try:
             tilegym.set_backend(backend)
@@ -792,6 +794,7 @@ class Test_Mamba2_ChunkBackward(common.PyTestCase):
     @pytest.mark.parametrize("S", [64, 128, 256, 512])
     @pytest.mark.parametrize("framework", ["cutile"])
     def test_perf(self, T, S, arch, framework, record_property):
+        common.skip_if_tileiras_cannot_scan_mma_accumulator(framework)
         self.setUp()
         try:
             tilegym.set_backend(framework)

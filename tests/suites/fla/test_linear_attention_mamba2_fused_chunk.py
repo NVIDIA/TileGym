@@ -156,6 +156,7 @@ class Test_FLA_LinearAttentionMamba2FusedChunk(common.PyTestCase):
         """Dense BF16 chunk routes preserve gradients across chunk boundaries."""
         from tilegym.suites import fla
 
+        common.skip_if_tileiras_cannot_scan_mma_accumulator(backend)
         self._prep(backend)
         torch.manual_seed(123)
         q, k, v, alpha, g = make_inputs(B, T, H, K, V, torch.bfloat16)
@@ -294,6 +295,7 @@ class Test_FLA_LinearAttentionMamba2FusedChunk(common.PyTestCase):
     @pytest.mark.parametrize("B, T, H, K, V", PERF_SHAPES)
     @pytest.mark.parametrize("framework", _BACKENDS)
     def test_perf(self, B, T, H, K, V, framework, record_property):
+        common.skip_if_tileiras_cannot_scan_mma_accumulator(framework)
         self.setUp()
         if not tilegym.is_backend_available(framework):
             pytest.skip(f"Backend {framework} is not available")
