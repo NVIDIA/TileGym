@@ -172,12 +172,18 @@ def _eager_timing_without_cuda_graph(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _graph_cutile_autotune_in_perf_tests(request, monkeypatch):
-    if "test_perf" not in request.node.name or request.node.get_closest_marker("disable_cudagraph"):
+    if "test_perf" not in request.node.name:
         yield
         return
     try:
         from cuda.tile.tune import _tune
     except ImportError:
+        yield
+        return
+    if request.node.get_closest_marker("disable_cudagraph"):
+        from tilegym.benchmark import autotune_cutile_eager
+
+        monkeypatch.setattr(_tune, "_benchmark", autotune_cutile_eager(_tune._benchmark))
         yield
         return
     from tilegym.benchmark import autotune_cutile_cuda_graph
