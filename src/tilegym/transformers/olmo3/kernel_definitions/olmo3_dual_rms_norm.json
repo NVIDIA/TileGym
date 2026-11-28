@@ -11,11 +11,7 @@
   },
   "description": "OLMo3 fused in-place RMSNorm for projected query and key tensors.",
   "inputs": {
-    "eps": {
-      "dtype": "float32",
-      "shape": null
-    },
-    "k": {
+    "q": {
       "dtype": "bfloat16",
       "inplace_output": true,
       "shape": [
@@ -23,13 +19,7 @@
         "D"
       ]
     },
-    "k_weight": {
-      "dtype": "bfloat16",
-      "shape": [
-        "D"
-      ]
-    },
-    "q": {
+    "k": {
       "dtype": "bfloat16",
       "inplace_output": true,
       "shape": [
@@ -42,6 +32,16 @@
       "shape": [
         "D"
       ]
+    },
+    "k_weight": {
+      "dtype": "bfloat16",
+      "shape": [
+        "D"
+      ]
+    },
+    "eps": {
+      "dtype": "float32",
+      "shape": null
     }
   },
   "name": "olmo3_dual_rms_norm",

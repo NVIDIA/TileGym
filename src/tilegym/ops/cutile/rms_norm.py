@@ -186,6 +186,12 @@ def _rms_norm_kernel_static_persistent(
         )
 
 
+_rms_norm_kernel_static_persistent_w8 = _rms_norm_kernel_static_persistent.replace_hints(num_worker_warps=8)
+_rms_norm_kernel_static_persistent_w8_occ2 = _rms_norm_kernel_static_persistent.replace_hints(
+    num_worker_warps=8, occupancy=2
+)
+
+
 @experimental_kernel
 @ct.kernel
 def _rms_bwd_kernel(dx, dy, x, weight, Rstd, dw, TILE_M: ct.Constant[int], TILE_N: ct.Constant[int]):
@@ -380,24 +386,36 @@ class _RMSNorm(torch.autograd.Function):
             def ceil_div(a, b):
                 return (a + b - 1) // b
 
-            TILE_SIZE_M = 4  # Default value, could be made configurable
             TILE_SIZE_N = next_power_of_2(N)
 
-            # Other block sizes are more optimal when other dimension is too large/too small
-            if TILE_SIZE_N <= 1024:
-                TILE_SIZE_M = 16
-            elif TILE_SIZE_N >= 16384:
-                TILE_SIZE_M = 2
+            occupancy = 1
+            if TILE_SIZE_N <= 4096:
+                # Tile heights assume the 8-worker-warp kernel variants; retune both together.
+                tile_elements = 32768 if TILE_SIZE_N <= 2048 else 16384
+                TILE_SIZE_M = min(32, tile_elements // TILE_SIZE_N)
+                sm_107 = TILE_SIZE_N == 4096 and torch.cuda.get_device_capability(x.device) == (10, 7)
+                if sm_107 and N == 4096:
+                    # sm_107 is fastest at exactly this width with the default worker warps and one block per SM.
+                    kernel = _rms_norm_kernel_static_persistent
+                elif TILE_SIZE_N == 4096 and not sm_107:
+                    occupancy = 2
+                    kernel = _rms_norm_kernel_static_persistent_w8_occ2
+                else:
+                    kernel = _rms_norm_kernel_static_persistent_w8
+            else:
+                # These tile heights assume the default worker warps.
+                TILE_SIZE_M = 2 if TILE_SIZE_N >= 16384 else 4
+                kernel = _rms_norm_kernel_static_persistent
 
             grid_size = min(
-                NUM_SMS,
+                NUM_SMS * occupancy,
                 ceil_div(M, TILE_SIZE_M) * ceil_div(N, TILE_SIZE_N),
             )
             grid = (grid_size,)
             ct.launch(
                 torch.cuda.current_stream(),
                 grid,
-                _rms_norm_kernel_static_persistent,
+                kernel,
                 (x_arg, y, weight, rstd, TILE_SIZE_M, TILE_SIZE_N, eps, offset),
             )
         elif mode == "multi_wave_cached":

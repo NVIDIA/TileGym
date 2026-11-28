@@ -7,21 +7,36 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-from tilegym.kernel_inventory.layout import inventory_coordinate
-from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
-from tilegym.kernel_inventory.layout import mirrored_definition_path
-from tilegym.kernel_inventory.workloads import KernelWorkloadError
-from tilegym.kernel_inventory.workloads import load_workload_jsonl
-from tilegym.kernel_inventory.workloads import materialize_workload_inputs
-from tilegym.kernel_inventory.workloads import validate_workload_against_definition
-from tilegym.kernel_inventory.workloads import validate_workload_catalog
+import torch
+from safetensors.torch import save_file
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Import inventory modules without running tilegym/__init__.py (CUDA init) so these
+# checks work on machines without a GPU.
+_original_tilegym = sys.modules.get("tilegym")
+if _original_tilegym is None:
+    tilegym_pkg = types.ModuleType("tilegym")
+    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
+    sys.modules["tilegym"] = tilegym_pkg
+try:
+    from tilegym.kernel_inventory.layout import inventory_coordinate
+    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+    from tilegym.kernel_inventory.layout import mirrored_definition_path
+    from tilegym.kernel_inventory.workloads import KernelWorkloadError
+    from tilegym.kernel_inventory.workloads import load_workload_jsonl
+    from tilegym.kernel_inventory.workloads import materialize_custom_input_cases
+    from tilegym.kernel_inventory.workloads import materialize_workload_inputs
+    from tilegym.kernel_inventory.workloads import validate_workload_against_definition
+    from tilegym.kernel_inventory.workloads import validate_workload_catalog
+finally:
+    if _original_tilegym is None:
+        sys.modules.pop("tilegym", None)
 _TOLERANCE = {
     "max_atol": 0.02,
     "max_rtol": 0.02,
@@ -162,7 +177,6 @@ def test_checked_in_correctness_only_policy_still_requires_uuid4(tmp_path):
 
 
 def test_materialize_resolves_definition_expression_axes(tmp_path):
-    torch = pytest.importorskip("torch")
     definition = _definition()
     definition["axes"]["NK"] = {"type": "expr", "expression": "N * K // 2"}
     definition["inputs"]["x"]["shape"] = ["NK"]
@@ -277,7 +291,6 @@ def test_correctness_only_dynamic_axes_reject_safetensors_inputs(tmp_path):
 
 
 def test_materialize_rejects_dynamic_axes_explicitly(tmp_path):
-    torch = pytest.importorskip("torch")
     payload = _payload(axes={"N": {"min": 4, "max": 8}}, eval_mode="correctness_only")
     record = load_workload_jsonl(_write_jsonl(tmp_path / "dynamic.jsonl", payload))[0]
 
@@ -415,7 +428,6 @@ def test_validate_workload_against_definition_checks_safetensors_asset_path(tmp_
 
 
 def test_materialize_workload_inputs_uses_definition_shape_dtype_and_literals(tmp_path):
-    torch = pytest.importorskip("torch")
     record = load_workload_jsonl(_write_jsonl(tmp_path / "op.jsonl", _payload()))[0]
 
     torch.manual_seed(2026)
@@ -430,11 +442,9 @@ def test_materialize_workload_inputs_uses_definition_shape_dtype_and_literals(tm
 
 
 def test_materialize_workload_inputs_loads_safetensors_relative_to_workload(tmp_path):
-    torch = pytest.importorskip("torch")
-    safetensors = pytest.importorskip("safetensors.torch")
     tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     asset = tmp_path / "input.safetensors"
-    safetensors.save_file({"x": tensor}, asset)
+    save_file({"x": tensor}, asset)
     payload = _payload(
         axes={"N": 2},
         inputs={"x": {"type": "safetensors", "path": "input.safetensors", "tensor_key": "x"}},
@@ -484,8 +494,155 @@ def test_custom_inputs_kwargs_require_custom_inputs(tmp_path):
     validate_workload_against_definition(custom_row, definition, tmp_path / "op.json")
 
 
+def _custom_definition() -> dict[str, Any]:
+    definition = _definition()
+    definition["custom_inputs_entrypoint"] = "make_inputs"
+    definition["constraints"] = ["N >= K", "scale > 0"]
+    return definition
+
+
+def _custom_record(tmp_path: Path, **updates: Any):
+    inputs = {name: {"type": "custom"} for name in _definition()["inputs"]}
+    return load_workload_jsonl(_write_jsonl(tmp_path / "custom.jsonl", _payload(inputs=inputs, **updates)))[0]
+
+
+def _custom_inputs(axes_and_scalars, device, seed, **overrides):
+    generator = torch.Generator(device=device).manual_seed(seed)
+    x = torch.randn(axes_and_scalars["K"], axes_and_scalars["N"], generator=generator, device=device)
+    return {"x": x.t(), "scale": 0.5, "enabled": True, "bias": None} | overrides
+
+
+def _materialize_custom(tmp_path, custom_inputs_fn, *, seed=200, definition=None, **updates):
+    return materialize_custom_input_cases(
+        _custom_record(tmp_path, **updates),
+        definition or _custom_definition(),
+        custom_inputs_fn,
+        torch=torch,
+        device=torch.device("cpu"),
+        seed=seed,
+    )
+
+
+def test_custom_inputs_entrypoint_returns_one_default_case_in_generator_layout(tmp_path):
+    calls = []
+
+    def make_inputs(axes_and_scalars, device, seed):
+        calls.append((axes_and_scalars, device, seed))
+        return _custom_inputs(axes_and_scalars, device, seed)
+
+    definition = _custom_definition()
+    definition["axes"]["NK"] = {"type": "expr", "expression": "N * K"}
+    axes, cases = _materialize_custom(tmp_path, make_inputs, definition=definition)
+
+    assert axes == {"K": 4, "N": 8, "NK": 32}
+    assert calls == [({"K": 4, "N": 8, "NK": 32}, torch.device("cpu"), 200)]
+    [(name, inputs)] = cases
+    assert name == "default"
+    assert inputs["x"].shape == (8, 4) and not inputs["x"].is_contiguous()
+    assert (inputs["scale"], inputs["enabled"], inputs["bias"]) == (0.5, True, None)
+
+
+def test_custom_inputs_are_deterministic_for_a_fixed_seed(tmp_path):
+    [(_, first)] = _materialize_custom(tmp_path, _custom_inputs)[1]
+    [(_, again)] = _materialize_custom(tmp_path, _custom_inputs)[1]
+    [(_, other)] = _materialize_custom(tmp_path, _custom_inputs, seed=201)[1]
+
+    assert torch.equal(first["x"], again["x"])
+    assert not torch.equal(first["x"], other["x"])
+
+
+def test_custom_inputs_cannot_mix_with_other_descriptor_types(tmp_path):
+    inputs = {name: {"type": "custom"} for name in _definition()["inputs"]} | {
+        "scale": {"type": "scalar", "value": 1.0}
+    }
+
+    with pytest.raises(KernelWorkloadError, match="custom"):
+        load_workload_jsonl(_write_jsonl(tmp_path / "mixed.jsonl", _payload(inputs=inputs)))
+
+
+def test_custom_inputs_entrypoint_seed_conventions_and_kwargs(tmp_path):
+    def legacy(axes_and_scalars, device):
+        return _custom_inputs(axes_and_scalars, device, 0) | {"x": torch.randn(8, 4)}
+
+    def keyword_seed(axes_and_scalars, device, *, seed, block):
+        assert block == 2
+        return _custom_inputs(axes_and_scalars, device, seed)
+
+    [(_, legacy_inputs)] = _materialize_custom(tmp_path, legacy)[1]
+    torch.manual_seed(200)
+    assert torch.equal(legacy_inputs["x"], torch.randn(8, 4))
+    [(_, keyword_inputs)] = _materialize_custom(tmp_path, keyword_seed, custom_inputs_kwargs={"block": 2})[1]
+    [(_, positional_inputs)] = _materialize_custom(tmp_path, _custom_inputs)[1]
+    assert torch.equal(keyword_inputs["x"], positional_inputs["x"])
+
+    with pytest.raises(KernelWorkloadError, match=r"custom_inputs_kwargs \['seed'\] clash"):
+        _materialize_custom(tmp_path, keyword_seed, custom_inputs_kwargs={"seed": 1})
+    with pytest.raises(KernelWorkloadError, match=r"does not accept custom_inputs_kwargs \['other'\]"):
+        _materialize_custom(tmp_path, keyword_seed, custom_inputs_kwargs={"block": 2, "other": 1})
+
+
+def test_custom_inputs_entrypoint_case_records(tmp_path):
+    def make_cases(axes_and_scalars, device, seed):
+        inputs = _custom_inputs(axes_and_scalars, device, seed)
+        return [{"name": "stress", "inputs": inputs | {"scale": 2.0}}, {"inputs": inputs}, inputs]
+
+    _, cases = _materialize_custom(tmp_path, make_cases)
+
+    assert [(name, inputs["scale"]) for name, inputs in cases] == [("stress", 2.0), ("case_1", 0.5), ("case_2", 0.5)]
+
+    def duplicate_cases(axes_and_scalars, device, seed):
+        inputs = _custom_inputs(axes_and_scalars, device, seed)
+        return [{"name": "same", "inputs": inputs}, {"name": "same", "inputs": inputs}]
+
+    with pytest.raises(KernelWorkloadError, match=r"duplicate custom input case names \['same'\]"):
+        _materialize_custom(tmp_path, duplicate_cases)
+
+
+@pytest.mark.parametrize(
+    ("custom_inputs_fn", "match"),
+    [
+        (None, "custom_inputs_entrypoint 'make_inputs' is not a callable"),
+        (lambda axes, device, seed: 3, "must return an input mapping or a non-empty sequence"),
+        (lambda axes, device, seed: [], "must return an input mapping or a non-empty sequence"),
+        (lambda axes, device, seed: [3], "custom input case 0 must be a mapping, got int"),
+        (lambda axes, device, seed: [{"name": "", "inputs": {}}], "case 0 has invalid name ''"),
+    ],
+    ids=["missing-entrypoint", "scalar-return", "empty-sequence", "non-mapping-case", "empty-case-name"],
+)
+def test_custom_inputs_entrypoint_rejects_missing_entrypoint_and_invalid_returns(tmp_path, custom_inputs_fn, match):
+    with pytest.raises(KernelWorkloadError, match=match):
+        _materialize_custom(tmp_path, custom_inputs_fn)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"x": torch.zeros(4, 8)}, r"input 'x' expected shape=\(8, 4\) dtype=torch.float32, got shape=\(4, 8\)"),
+        ({"x": torch.zeros(8, 4, dtype=torch.float16)}, r"got shape=\(8, 4\) dtype=torch.float16"),
+        ({"x": 1.0}, "input 'x' must be a tensor, got float"),
+        ({"x": None}, "input 'x' is None without an explicit None default"),
+        ({"enabled": 1}, "input 'enabled' value 1 is incompatible with scalar dtype 'bool'"),
+        ({"scale": -1.0}, "violates Definition constraint: scale > 0"),
+        ({"extra": 1}, r"inputs mismatch: missing=\[\], unknown=\['extra'\]"),
+    ],
+    ids=["shape", "dtype", "non-tensor", "none-without-default", "scalar-dtype", "constraint", "extra-input"],
+)
+def test_custom_inputs_are_validated_against_definition(tmp_path, overrides, match):
+    with pytest.raises(KernelWorkloadError, match=match):
+        _materialize_custom(tmp_path, lambda axes, device, seed: _custom_inputs(axes, device, seed, **overrides))
+
+
+def test_custom_inputs_must_cover_every_definition_input(tmp_path):
+    def missing_bias(axes_and_scalars, device, seed):
+        inputs = _custom_inputs(axes_and_scalars, device, seed)
+        del inputs["bias"]
+        return inputs
+
+    with pytest.raises(KernelWorkloadError, match=r"missing=\['bias'\], unknown=\[\]"):
+        _materialize_custom(tmp_path, missing_bias)
+
+
 def test_materialize_random_input_with_integer_literal_dimension(tmp_path):
-    torch = pytest.importorskip("torch")
     record = load_workload_jsonl(
         _write_jsonl(tmp_path / "op.jsonl", _payload(axes={"N": 2}, inputs={"x": {"type": "random"}}))
     )[0]
@@ -497,10 +654,8 @@ def test_materialize_random_input_with_integer_literal_dimension(tmp_path):
 
 
 def test_materialize_safetensors_input_with_integer_literal_dimension(tmp_path):
-    torch = pytest.importorskip("torch")
-    safetensors = pytest.importorskip("safetensors.torch")
     tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4)
-    safetensors.save_file({"x": tensor}, tmp_path / "input.safetensors")
+    save_file({"x": tensor}, tmp_path / "input.safetensors")
     payload = _payload(
         axes={"N": 2},
         inputs={"x": {"type": "safetensors", "path": "input.safetensors", "tensor_key": "x"}},
@@ -514,7 +669,6 @@ def test_materialize_safetensors_input_with_integer_literal_dimension(tmp_path):
 
 
 def test_materialize_workload_inputs_rejects_non_basename_safetensors_path(tmp_path):
-    torch = pytest.importorskip("torch")
     payload = _payload(
         axes={"N": 2},
         inputs={"x": {"type": "safetensors", "path": "../escape.safetensors", "tensor_key": "x"}},

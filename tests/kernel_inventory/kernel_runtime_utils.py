@@ -22,46 +22,40 @@ os.environ.setdefault("DISABLE_TUNE", "1")
 os.environ.setdefault("TILEGYM_DISABLE_AUTOTUNE", "1")
 os.environ.setdefault("TRITON_CACHE_DIR", "/tmp/tilegym-triton-cache")
 
+import cuda.tile as ct
+import torch
+
+from tilegym.kernel_inventory import WorkloadRecord
+from tilegym.kernel_inventory import load_json
+from tilegym.kernel_inventory import load_workload_jsonl
+from tilegym.kernel_inventory import materialize_workload_inputs
+from tilegym.kernel_inventory import resolve_torch_dtype
+from tilegym.kernel_inventory import validate_definition
+from tilegym.kernel_inventory import validate_solution
+from tilegym.kernel_inventory import validate_solution_entry_point
+from tilegym.kernel_inventory import validate_workload_against_definition
+from tilegym.kernel_inventory.composition import installed_reference_modules
+from tilegym.kernel_inventory.launch import RawKernelLaunch
+from tilegym.kernel_inventory.launch import allocate_definition_outputs
+from tilegym.kernel_inventory.launch import inspect_raw_entry_signature
+from tilegym.kernel_inventory.launch import make_launch_context
+from tilegym.kernel_inventory.launch import materialize_launch_arguments
+from tilegym.kernel_inventory.launch import resolve_grid
+from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
+from tilegym.kernel_inventory.layout import inventory_coordinate
+from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
+from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
+from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+from tilegym.kernel_inventory.schema import CustomInput
+from tilegym.kernel_inventory.schema import ToleranceSpec
+from tilegym.kernel_inventory.schema import resolve_tensor_shape
+from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
+from tilegym.kernel_inventory.workloads import materialize_custom_input_cases
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Import inventory modules without running tilegym/__init__.py. Runtime tests
-# import the individual solution modules directly from Solution.spec.entry_point.
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory import WorkloadRecord
-    from tilegym.kernel_inventory import load_json
-    from tilegym.kernel_inventory import load_workload_jsonl
-    from tilegym.kernel_inventory import materialize_workload_inputs
-    from tilegym.kernel_inventory import resolve_torch_dtype
-    from tilegym.kernel_inventory import validate_definition
-    from tilegym.kernel_inventory import validate_solution
-    from tilegym.kernel_inventory import validate_solution_entry_point
-    from tilegym.kernel_inventory import validate_workload_against_definition
-    from tilegym.kernel_inventory.composition import installed_reference_modules
-    from tilegym.kernel_inventory.launch import RawKernelLaunch
-    from tilegym.kernel_inventory.launch import allocate_definition_outputs
-    from tilegym.kernel_inventory.launch import inspect_raw_entry_signature
-    from tilegym.kernel_inventory.launch import make_launch_context
-    from tilegym.kernel_inventory.launch import materialize_launch_arguments
-    from tilegym.kernel_inventory.launch import resolve_grid
-    from tilegym.kernel_inventory.layout import definition_solution_paths_for_workload
-    from tilegym.kernel_inventory.layout import inventory_coordinate
-    from tilegym.kernel_inventory.layout import iter_inventory_workload_paths
-    from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
-    from tilegym.kernel_inventory.return_contract import instrument_reference_returns
-    from tilegym.kernel_inventory.schema import CustomInput
-    from tilegym.kernel_inventory.schema import ToleranceSpec
-    from tilegym.kernel_inventory.schema import resolve_tensor_shape
-    from tilegym.kernel_inventory.triton_backend import get_available_triton_backend
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
-
-
 _DEFAULT_TOLERANCE = ToleranceSpec(max_atol=2e-2, max_rtol=2e-2, required_matched_ratio=1.0)
+# Fixed seed so generated custom inputs are reproducible across runs.
+_CUSTOM_INPUTS_SEED = 200
 
 
 class _CapturedReferenceReturn:
@@ -109,12 +103,8 @@ def workload_runtime_cases_for_submodule(submodule: str | Path | None) -> list[A
 def _unsupported_runtime_row_marks(record: WorkloadRecord) -> tuple[Any, ...]:
     """Skip rows whose inputs the local runtime cannot materialize."""
     if any(not isinstance(value, int) for value in record.workload.axes.values()):
-        reason = "local runtime does not sample dynamic axes"
-    elif any(isinstance(descriptor, CustomInput) for descriptor in record.workload.inputs.values()):
-        reason = "local runtime does not call custom_inputs_entrypoint"
-    else:
-        return ()
-    return (pytest.mark.skip(reason=reason),)
+        return (pytest.mark.skip(reason="local runtime does not sample dynamic axes"),)
+    return ()
 
 
 def _runtime_case_id(record: WorkloadRecord, definition_path: str | Path, solution_path: str | Path) -> str:
@@ -230,8 +220,6 @@ def _run_definition_solution_workload_runtime(
     if solution.get("launch") is None:
         _assert_matching_entry_signatures_static(definition, solution, definition_path)
 
-    torch = pytest.importorskip("torch")
-    _require_solution_runtime_dependencies(solution)
     _skip_if_solution_does_not_target_current_triton_backend(solution)
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for kernel inventory runtime checks")
@@ -257,37 +245,55 @@ def _run_definition_solution_workload_runtime(
             _prepare_registered_backend_environment(solution, solution_path)
 
         try:
-            device = torch.device("cuda")
-            torch.manual_seed(2026)
-            axes, inputs = materialize_workload_inputs(
-                workload_record,
-                definition,
-                torch=torch,
-                device=device,
+            axes, input_cases = _materialize_runtime_input_cases(
+                workload_record, definition, reference_namespace, torch.device("cuda")
             )
             mutated_inputs = tuple(
                 name for name, spec in definition["inputs"].items() if spec.get("inplace_output") is True
             )
-            _run_runtime_branch(
-                definition,
-                reference_fn,
-                solution,
-                solution_fn,
-                inputs,
-                axes,
-                torch,
-                mutated_inputs,
-                tolerance=workload_record.workload.tolerance,
-                case_label=workload_record.source_label,
-                skip_correctness=workload_record.workload.eval_mode == "benchmark_only",
-                custom_comparator=custom_comparator,
-                custom_correctness_kwargs=workload_record.workload.custom_correctness_kwargs or None,
-            )
+            for case_label, inputs in input_cases:
+                _run_runtime_branch(
+                    definition,
+                    reference_fn,
+                    solution,
+                    solution_fn,
+                    inputs,
+                    axes,
+                    torch,
+                    mutated_inputs,
+                    tolerance=workload_record.workload.tolerance,
+                    case_label=case_label,
+                    skip_correctness=workload_record.workload.eval_mode == "benchmark_only",
+                    custom_comparator=custom_comparator,
+                    custom_correctness_kwargs=workload_record.workload.custom_correctness_kwargs or None,
+                )
         finally:
             if previous_backend is not None:
                 from tilegym.backend.selector import set_backend
 
                 set_backend(previous_backend)
+
+
+def _materialize_runtime_input_cases(
+    workload_record: WorkloadRecord,
+    definition: dict[str, Any],
+    reference_namespace: dict[str, Any],
+    device: Any,
+) -> tuple[dict[str, int], list[tuple[str, dict[str, Any]]]]:
+    """Return resolved axes and labeled input sets; a custom-input row yields one set per generated case."""
+    torch.manual_seed(2026)
+    if not any(isinstance(descriptor, CustomInput) for descriptor in workload_record.workload.inputs.values()):
+        axes, inputs = materialize_workload_inputs(workload_record, definition, torch=torch, device=device)
+        return axes, [(workload_record.source_label, inputs)]
+    axes, cases = materialize_custom_input_cases(
+        workload_record,
+        definition,
+        reference_namespace.get(definition.get("custom_inputs_entrypoint")),
+        torch=torch,
+        device=device,
+        seed=_CUSTOM_INPUTS_SEED,
+    )
+    return axes, [(f"{workload_record.source_label} custom input case {name!r}", inputs) for name, inputs in cases]
 
 
 def _derive_backend_registration_target(solution_path: Path) -> tuple[str, str]:
@@ -322,15 +328,6 @@ def _prepare_registered_backend_environment(solution: dict[str, Any], solution_p
     from tilegym.backend.selector import set_backend
 
     set_backend(backend)
-
-
-def _require_solution_runtime_dependencies(solution: dict[str, Any]) -> None:
-    """Gate only dependencies required by the already-validated Solution language."""
-    language = solution["spec"]["language"]
-    if language == "cuda-tile":
-        pytest.importorskip("cuda.tile")
-    elif language == "triton":
-        pytest.importorskip("triton")
 
 
 def _run_runtime_branch(
@@ -632,7 +629,6 @@ def _launch_raw_solution(
         solution_fn[grid](**arguments)
     elif language == "cuda-tile":
         arguments = materialize_launch_arguments(launch, context)
-        ct = pytest.importorskip("cuda.tile")
         grid = resolve_grid(launch.grid, context, REPO_ROOT)
         signature = inspect_raw_entry_signature(solution["spec"]["entry_point"], REPO_ROOT)
         ordered = []
@@ -1138,20 +1134,16 @@ def _ast_solution_accepts_reference_signature(
     solution_signature: tuple[tuple[str, str, str | None], ...],
     input_names: tuple[str, ...],
 ) -> bool:
-    # Preserve the historical exact-callable path, including deprecated
-    # runtime:unsupported stubs that intentionally expose only ``**kwargs``.
-    if reference_signature == solution_signature:
-        return True
+    reference_positionals = tuple(
+        name for name, kind, _ in reference_signature if kind in {"positional_only", "positional_or_keyword"}
+    )
+    if reference_positionals != input_names:
+        return False
+    if any(kind == "var_positional" for _, kind, _ in reference_signature):
+        return False
     reference_named = {
         name: (kind, default) for name, kind, default in reference_signature if not kind.startswith("var_")
     }
-    if tuple(reference_named) != input_names:
-        # Legacy inventory Definitions are not campaign targets and may preserve a
-        # historical inputs mapping order that differs from an otherwise exact
-        # reference/Solution callable contract.
-        return reference_signature == solution_signature
-    if any(kind.startswith("var_") for _, kind, _ in reference_signature):
-        return False
     solution_named = {
         name: (kind, default) for name, kind, default in solution_signature if not kind.startswith("var_")
     }
@@ -1170,9 +1162,29 @@ def _ast_solution_accepts_reference_signature(
         return False
     for name in input_names:
         if name in solution_named:
-            if solution_named[name] != reference_named[name]:
+            reference_kind, reference_default = reference_named[name]
+            solution_kind, solution_default = solution_named[name]
+            # A defaulted input may stay keyword-only in a pre-existing host entry point.
+            keyword_only_default = (
+                reference_kind == "positional_or_keyword"
+                and solution_kind == "keyword_only"
+                and reference_default is not None
+            )
+            if solution_default != reference_default or (solution_kind != reference_kind and not keyword_only_default):
                 return False
         elif not accepts_kwargs or reference_named[name][0] == "positional_only":
+            return False
+    for name, (kind, default) in reference_named.items():
+        if kind != "keyword_only":
+            continue
+        if name not in solution_named:
+            if not accepts_kwargs:
+                return False
+            continue
+        solution_kind, solution_default = solution_named[name]
+        if solution_kind not in {"positional_or_keyword", "keyword_only"} or solution_default is None:
+            return False
+        if solution_default != default:
             return False
     return all(
         name in input_names or default is not None
@@ -1187,20 +1199,41 @@ def _solution_accepts_reference_signature(
     input_names: tuple[str, ...],
 ) -> bool:
     reference_parameters = reference_signature.parameters
-    if tuple(reference_parameters) != input_names:
-        # Campaign public/leaf Definitions take the exact-order branch; legacy
-        # Legacy inventory pairs retain strict callable parity.
-        return reference_signature == solution_signature
+    positional_kinds = {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+    reference_positionals = tuple(
+        name for name, parameter in reference_parameters.items() if parameter.kind in positional_kinds
+    )
+    if reference_positionals != input_names:
+        return False
     solution_parameters = solution_signature.parameters
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in solution_parameters.values())
-    for name, reference_parameter in reference_parameters.items():
+    for name in input_names:
+        reference_parameter = reference_parameters[name]
         solution_parameter = solution_parameters.get(name)
         if solution_parameter is None:
             if not accepts_kwargs or reference_parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
                 return False
             continue
+        keyword_only_default = (
+            reference_parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            and solution_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            and reference_parameter.default is not inspect.Parameter.empty
+        )
+        if solution_parameter.default != reference_parameter.default or (
+            solution_parameter.kind != reference_parameter.kind and not keyword_only_default
+        ):
+            return False
+    for name, reference_parameter in reference_parameters.items():
+        if reference_parameter.kind is not inspect.Parameter.KEYWORD_ONLY:
+            continue
+        solution_parameter = solution_parameters.get(name)
+        if solution_parameter is None:
+            if not accepts_kwargs:
+                return False
+            continue
         if (
-            solution_parameter.kind != reference_parameter.kind
+            solution_parameter.kind not in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+            or solution_parameter.default is inspect.Parameter.empty
             or solution_parameter.default != reference_parameter.default
         ):
             return False

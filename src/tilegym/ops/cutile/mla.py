@@ -15,6 +15,9 @@ from tilegym.backend import register_impl
 
 # Module-level tune cache: (S_qo, TILE_D, TILE_KPE, H, query_group_size, dtype, device) -> (best_cfg, tuned_kernel)
 _mla_tune_cache: dict = {}
+# Kernels launched with autotune disabled, by hints. A kernel that is dropped after its
+# launch unloads its CUDA library, which aborts the process inside a CUDA graph capture.
+_mla_default_kernel_cache: dict = {}
 
 
 ConstInt = ct.Constant[int]
@@ -180,7 +183,7 @@ class _AttentionFunction(torch.autograd.Function):
         stream = torch.cuda.current_stream()
         cache_key = (S_qo, TILE_D, TILE_KPE, H, query_group_size, q.dtype, str(q.device))
         if cache_key not in _mla_tune_cache:
-            with ct.compiler_timeout(5):
+            with ct.compiler_timeout(15):
                 result = exhaustive_search(
                     list(_configs_fn()),
                     stream,
@@ -235,7 +238,12 @@ def _cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_
 
     if is_autotune_disabled():
         cfg = next(_configs_fn())
-        kernel = _prefill_mla_kernel.replace_hints(num_ctas=cfg.num_ctas, occupancy=cfg.occupancy)
+        hints = (cfg.num_ctas, cfg.occupancy)
+        if hints not in _mla_default_kernel_cache:
+            _mla_default_kernel_cache[hints] = _prefill_mla_kernel.replace_hints(
+                num_ctas=cfg.num_ctas, occupancy=cfg.occupancy
+            )
+        kernel = _mla_default_kernel_cache[hints]
         ct.launch(
             stream,
             (math.ceil(S_qo / cfg.TILE_M), B * H, 1),
@@ -245,7 +253,7 @@ def _cutile_autotune_mla(stream, q, qpe, k, kpe, v, o, sm_scale, H, query_group_
         return
 
     if cache_key not in _mla_tune_cache:
-        with ct.compiler_timeout(5):
+        with ct.compiler_timeout(15):
             result = exhaustive_search(
                 list(_configs_fn()),
                 stream,

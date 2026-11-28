@@ -29,9 +29,13 @@
   ],
   "description": "Qwen3.5 prefill-path depthwise causal conv1d fused with SiLU.",
   "inputs": {
-    "seq_len": {
-      "dtype": "int32",
-      "shape": null
+    "x": {
+      "dtype": "bfloat16",
+      "shape": [
+        "B",
+        "D",
+        "T_padded"
+      ]
     },
     "weight": {
       "dtype": "bfloat16",
@@ -40,13 +44,9 @@
         "K"
       ]
     },
-    "x": {
-      "dtype": "bfloat16",
-      "shape": [
-        "B",
-        "D",
-        "T_padded"
-      ]
+    "seq_len": {
+      "dtype": "int32",
+      "shape": null
     }
   },
   "name": "qwen3_5_causal_conv1d_prefill_silu",

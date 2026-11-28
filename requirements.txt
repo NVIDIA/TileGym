@@ -10,7 +10,7 @@ huggingface_hub
 matplotlib
 pandas
 numpy
-cuda-tile>=1.5.0  # Or use: pip install cuda-tile[tileiras] for bundled tileiras compiler
+cuda-tile>=1.8.1  # Or use: pip install cuda-tile[tileiras] for bundled tileiras compiler
 filelock>=4.2.1  # CVE fix: GHSA-2g95-wg33-c5x2 and related 2026-10 advisories
 pillow>=13.0.0  # CVE fix: GHSA-462x-pgg6-55fp and related 2026-10 advisories
 cuda-bindings>=13.2.0

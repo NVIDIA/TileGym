@@ -54,12 +54,10 @@ def is_cutile_available():
 _TILECPP_MIN_NVCC = (13, 3)
 
 
-def _nvcc_version_supported() -> bool:
-    """Return True iff a usable nvcc with a supported CUDA version is found.
+def get_tilecpp_nvcc_version():
+    """Return ``(major, minor)`` of the nvcc TileCpp compiles with, or None if it cannot be run.
 
     Resolution order: ``$TILECPP_NVCC_PATH`` first, then ``nvcc`` on PATH.
-    The release version reported by ``nvcc --version`` must be at least
-    ``_TILECPP_MIN_NVCC`` (currently 13.3).
     """
     import re
     import shutil
@@ -69,21 +67,27 @@ def _nvcc_version_supported() -> bool:
     if not os.path.isabs(nvcc):
         resolved = shutil.which(nvcc)
         if resolved is None:
-            return False
+            return None
         nvcc = resolved
     elif not os.path.exists(nvcc):
-        return False
+        return None
 
     try:
         result = subprocess.run([nvcc, "--version"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
     if result.returncode != 0:
-        return False
+        return None
     m = re.search(r"release\s+(\d+)\.(\d+)", result.stdout)
     if not m:
-        return False
-    return (int(m.group(1)), int(m.group(2))) >= _TILECPP_MIN_NVCC
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _nvcc_version_supported() -> bool:
+    """Return True iff the nvcc TileCpp uses reports at least ``_TILECPP_MIN_NVCC`` (currently 13.3)."""
+    version = get_tilecpp_nvcc_version()
+    return version is not None and version >= _TILECPP_MIN_NVCC
 
 
 def _check_tilecpp_module_importable():

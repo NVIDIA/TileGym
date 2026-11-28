@@ -14,28 +14,24 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 
+from tilegym.kernel_inventory._definition_schema_compat import AxisConst
+from tilegym.kernel_inventory._definition_schema_compat import AxisExpr
+from tilegym.kernel_inventory._definition_schema_compat import AxisVar
+from tilegym.kernel_inventory._definition_schema_compat import Definition
+from tilegym.kernel_inventory._definition_schema_compat import TensorSpec
 from tilegym.kernel_inventory._definition_schema_compat import resolve_axes_values
-
-USING_CANONICAL_WORKLOAD_SCHEMA = False
-
-if not USING_CANONICAL_WORKLOAD_SCHEMA:
-    from tilegym.kernel_inventory._definition_schema_compat import AxisConst
-    from tilegym.kernel_inventory._definition_schema_compat import AxisExpr
-    from tilegym.kernel_inventory._definition_schema_compat import AxisVar
-    from tilegym.kernel_inventory._definition_schema_compat import Definition
-    from tilegym.kernel_inventory._definition_schema_compat import TensorSpec
-    from tilegym.kernel_inventory._definition_schema_compat import resolve_shape_expression
-    from tilegym.kernel_inventory._workload_schema_compat import CustomInput
-    from tilegym.kernel_inventory._workload_schema_compat import EvalMode
-    from tilegym.kernel_inventory._workload_schema_compat import InputSpec
-    from tilegym.kernel_inventory._workload_schema_compat import NullInput
-    from tilegym.kernel_inventory._workload_schema_compat import RandomInput
-    from tilegym.kernel_inventory._workload_schema_compat import SafetensorsInput
-    from tilegym.kernel_inventory._workload_schema_compat import SafetensorsShard
-    from tilegym.kernel_inventory._workload_schema_compat import ScalarInput
-    from tilegym.kernel_inventory._workload_schema_compat import StringInput
-    from tilegym.kernel_inventory._workload_schema_compat import ToleranceSpec
-    from tilegym.kernel_inventory._workload_schema_compat import Workload
+from tilegym.kernel_inventory._definition_schema_compat import resolve_shape_expression
+from tilegym.kernel_inventory._workload_schema_compat import CustomInput
+from tilegym.kernel_inventory._workload_schema_compat import EvalMode
+from tilegym.kernel_inventory._workload_schema_compat import InputSpec
+from tilegym.kernel_inventory._workload_schema_compat import NullInput
+from tilegym.kernel_inventory._workload_schema_compat import RandomInput
+from tilegym.kernel_inventory._workload_schema_compat import SafetensorsInput
+from tilegym.kernel_inventory._workload_schema_compat import SafetensorsShard
+from tilegym.kernel_inventory._workload_schema_compat import ScalarInput
+from tilegym.kernel_inventory._workload_schema_compat import StringInput
+from tilegym.kernel_inventory._workload_schema_compat import ToleranceSpec
+from tilegym.kernel_inventory._workload_schema_compat import Workload
 
 
 def workload_model_validate(payload: Any) -> Workload:
@@ -90,7 +86,6 @@ def resolve_tensor_shape(shape: Sequence[str] | None, axes: Mapping[str, int]) -
 
 __all__ = [
     "TILEGYM_DEFINITION_EXTENSION_FIELDS",
-    "USING_CANONICAL_WORKLOAD_SCHEMA",
     "AxisConst",
     "AxisExpr",
     "AxisVar",

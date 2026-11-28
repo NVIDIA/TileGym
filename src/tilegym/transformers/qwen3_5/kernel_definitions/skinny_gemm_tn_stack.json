@@ -56,8 +56,8 @@
     "1 <= M <= 64",
     "K % 8 == 0",
     "N % 8 == 0",
-    "a.is_contiguous()",
-    "b.is_contiguous()"
+    "contiguous(a)",
+    "contiguous(b)"
   ],
   "tags": [
     "stage:decode",

@@ -105,9 +105,9 @@ class Test_GroupGemm(common.PyTestCase):
         [
             (num_groups, group_m, group_n, group_k, transpose_b, dtype)
             for num_groups in [1, 4, 16]
-            for group_m in [2048, 8192]
-            for group_n in [2048, 8192]
-            for group_k in [2048, 8192]
+            for group_m in [8192, 2048]
+            for group_n in [8192, 2048]
+            for group_k in [8192, 2048]
             for transpose_b in [True, False]
             for dtype in [torch.float16, torch.float8_e5m2]
         ],

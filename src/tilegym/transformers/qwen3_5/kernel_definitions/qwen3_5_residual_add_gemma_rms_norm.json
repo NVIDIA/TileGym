@@ -11,15 +11,14 @@
   },
   "description": "Qwen3.5 fused residual add and Gemma-style RMSNorm with configurable offset.",
   "inputs": {
-    "eps": {
-      "dtype": "float32",
-      "shape": null
-    },
-    "offset": {
-      "dtype": "float32",
-      "shape": null
-    },
     "residual": {
+      "dtype": "bfloat16",
+      "shape": [
+        "N",
+        "D"
+      ]
+    },
+    "x": {
       "dtype": "bfloat16",
       "shape": [
         "N",
@@ -32,12 +31,13 @@
         "D"
       ]
     },
-    "x": {
-      "dtype": "bfloat16",
-      "shape": [
-        "N",
-        "D"
-      ]
+    "eps": {
+      "dtype": "float32",
+      "shape": null
+    },
+    "offset": {
+      "dtype": "float32",
+      "shape": null
     }
   },
   "name": "qwen3_5_residual_add_gemma_rms_norm",

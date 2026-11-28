@@ -20,9 +20,26 @@ from .utils import next_power_of_2
 ConstInt = ct.Constant[int]
 
 _DEFAULT_TMA_OCCUPANCY = 2
-_TMA_FWD_OCCUPANCY_CANDIDATES = (2, 4, 6, 8)
+# The forward grid is num_sm * occupancy blocks.
+_TMA_FWD_HINT_CANDIDATES = (
+    SimpleNamespace(occupancy=2, num_worker_warps=None),
+    SimpleNamespace(occupancy=4, num_worker_warps=None),
+    SimpleNamespace(occupancy=6, num_worker_warps=None),
+    SimpleNamespace(occupancy=8, num_worker_warps=None),
+    SimpleNamespace(occupancy=1, num_worker_warps=8),
+    SimpleNamespace(occupancy=2, num_worker_warps=8),
+    SimpleNamespace(occupancy=2, num_worker_warps=None, allow_tma_store=False),
+    SimpleNamespace(occupancy=4, num_worker_warps=None, allow_tma_store=False),
+    SimpleNamespace(occupancy=8, num_worker_warps=None, allow_tma_store=False),
+)
 # None keeps the compiler default; worker warps above 8 can hang the gather kernels.
 _GATHER_WORKER_WARP_CANDIDATES = (None, 4, 8)
+_GATHER_FWD_BLOCKS_PER_SM = 4
+# blocks_per_sm=None launches one block per row.
+_GATHER_FWD_HINT_CANDIDATES = tuple(
+    SimpleNamespace(blocks_per_sm=_GATHER_FWD_BLOCKS_PER_SM, occupancy=None, num_worker_warps=w)
+    for w in _GATHER_WORKER_WARP_CANDIDATES
+) + tuple(SimpleNamespace(blocks_per_sm=None, occupancy=o, num_worker_warps=None) for o in (2, 4, 8, 16))
 _BWD_TMA_HINT_CANDIDATES = (
     SimpleNamespace(occupancy=2, num_worker_warps=None),
     SimpleNamespace(occupancy=4, num_worker_warps=None),
@@ -53,10 +70,12 @@ def _softmax_kernel(
     pid = ct.bid(0)
     num_programs = ct.num_blocks(0)
     offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+    # Bounds checks compile out when the row exactly fills the tile.
+    check_bounds = TILE_SIZE != DIM_COLS
 
     for row_idx in range(pid, N_ROWS, num_programs):
         # Load the row tile using index-based access
-        row = ct.gather(input, (row_idx, offsets), check_bounds=True, padding_value=-math.inf)
+        row = ct.gather(input, (row_idx, offsets), check_bounds=check_bounds, padding_value=-math.inf)
         # Convert to float32 for computation
         row = ct.astype(row, ct.float32)
 
@@ -73,7 +92,7 @@ def _softmax_kernel(
         # Final softmax computation
         softmax_output = ct.truediv(numerator, denominator, rounding_mode=RMd.APPROX, flush_to_zero=True)
         softmax_output = ct.astype(softmax_output, input.dtype)
-        ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=True)
+        ct.scatter(output, (row_idx, offsets), softmax_output, check_bounds=check_bounds)
 
 
 @ct.kernel
@@ -230,6 +249,7 @@ def _softmax_kernel_tma(
     N_ROWS: ConstInt,
     N_COLS: ConstInt,
     TILE_SIZE: ConstInt,
+    ALLOW_TMA_STORE: ct.Constant[bool],
 ):
     # Static persistent scheduling: each block processes multiple rows
     pid = ct.bid(0)
@@ -257,7 +277,7 @@ def _softmax_kernel_tma(
 
         # Convert back to original dtype and store
         softmax_output = ct.astype(softmax_output, input.dtype)
-        ct.store(output, index=(row_idx, 0), tile=softmax_output)
+        ct.store(output, index=(row_idx, 0), tile=softmax_output, allow_tma=ALLOW_TMA_STORE)
 
 
 # Chunked softmax kernel for large tensors (3-pass algorithm)
@@ -381,11 +401,14 @@ def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     output = output.contiguous()
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
-    num_programs = min(NUM_SM * 4, n_rows)
-    grid = (num_programs, 1, 1)
     args = (output, input, n_rows, TILE_SIZE, original_n_cols)
 
-    candidates = [SimpleNamespace(num_worker_warps=w) for w in _GATHER_WORKER_WARP_CANDIDATES]
+    def grid_fn(candidate):
+        if candidate.blocks_per_sm is None:
+            return (n_rows, 1, 1)
+        return (min(NUM_SM * candidate.blocks_per_sm, n_rows), 1, 1)
+
+    candidates = list(_GATHER_FWD_HINT_CANDIDATES)
     if is_autotune_disabled():
         cfg = candidates[0]
     else:
@@ -395,7 +418,7 @@ def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
             result = exhaustive_search(
                 candidates,
                 torch.cuda.current_stream(),
-                lambda _: grid,
+                grid_fn,
                 _softmax_kernel,
                 lambda _: args,
                 _cfg_hints,
@@ -404,7 +427,7 @@ def _launch_softmax_kernel(input, output, TILE_SIZE=1024):
     hints = _cfg_hints(cfg)
     softmax_kernel_forward = cached_replace_hints(_softmax_kernel, **hints) if hints else _softmax_kernel
 
-    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args)
+    ct.launch(torch.cuda.current_stream(), grid_fn(cfg), softmax_kernel_forward, args)
 
 
 def _launch_softmax_kernel_multi_wave_full_row_reg_cached_ldg(input, output, TILE_SIZE):
@@ -498,7 +521,11 @@ def _launch_softmax_kernel_tma(
 
     NUM_SM = torch.cuda.get_device_properties(input.device).multi_processor_count
     args = (output, input, n_rows, original_n_cols, TILE_SIZE)
-    candidates = [SimpleNamespace(occupancy=o) for o in _TMA_FWD_OCCUPANCY_CANDIDATES]
+
+    def args_fn(candidate):
+        return args + (getattr(candidate, "allow_tma_store", True),)
+
+    candidates = list(_TMA_FWD_HINT_CANDIDATES)
     if is_autotune_disabled():
         cfg = candidates[0]
     else:
@@ -510,15 +537,14 @@ def _launch_softmax_kernel_tma(
                 torch.cuda.current_stream(),
                 lambda candidate: (min(NUM_SM * candidate.occupancy, n_rows), 1, 1),
                 _softmax_kernel_tma,
-                lambda _: args,
+                args_fn,
                 _cfg_hints,
             )
             cfg = _softmax_tune_cache[cache_key] = result.best.config
-    occupancy = cfg.occupancy
-    softmax_kernel_forward = cached_replace_hints(_softmax_kernel_tma, occupancy=occupancy)
-    grid = (min(NUM_SM * occupancy, n_rows), 1, 1)
+    softmax_kernel_forward = cached_replace_hints(_softmax_kernel_tma, **_cfg_hints(cfg))
+    grid = (min(NUM_SM * cfg.occupancy, n_rows), 1, 1)
 
-    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args)
+    ct.launch(torch.cuda.current_stream(), grid, softmax_kernel_forward, args_fn(cfg))
 
 
 def _launch_softmax_kernel_chunked(

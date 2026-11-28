@@ -242,3 +242,70 @@ def test_definition_validation_ignores_tilegym_extension_fields():
 
     assert definition.custom_correctness_entrypoint == "check"
     assert "include" in TILEGYM_DEFINITION_EXTENSION_FIELDS
+
+
+def _run_signature_definition(signature: str) -> dict[str, Any]:
+    reference = _REFERENCE.replace("def run(x, scale):", f"def run({signature}):")
+    return _definition(reference=reference)
+
+
+# (run() parameters, accepted, error text) against inputs ["x", "scale"].
+_RUN_SIGNATURE_CASES = [
+    pytest.param("x, scale", True, None, id="exact"),
+    pytest.param("x, /, scale", True, None, id="positional-only"),
+    pytest.param("x, scale, *, extra=None", True, None, id="keyword-only-with-default"),
+    pytest.param("x, scale, *, extra", True, None, id="keyword-only-without-default"),
+    pytest.param("x, scale, **kwargs", True, None, id="var-keyword"),
+    pytest.param("x, scale, *args", True, None, id="var-positional"),
+    pytest.param(
+        "x",
+        False,
+        "run() has 1 parameter(s) ['x'] but definition 'inputs' has 2 entries ['x', 'scale']. They must match exactly.",
+        id="count",
+    ),
+    pytest.param(
+        "x, scale, extra=None",
+        False,
+        "run() has 3 parameter(s) ['x', 'scale', 'extra'] but definition 'inputs' has 2 entries ['x', 'scale']. "
+        "They must match exactly.",
+        id="extra-positional-with-default",
+    ),
+    pytest.param(
+        "x, factor",
+        False,
+        "run() parameter names don't match definition 'inputs' keys. Mismatches (run_param → input_key): "
+        "[('factor', 'scale')]. run() params: ['x', 'factor'], inputs: ['x', 'scale'].",
+        id="name",
+    ),
+    pytest.param(
+        "scale, x",
+        False,
+        "run() parameter names don't match definition 'inputs' keys. Mismatches (run_param → input_key): "
+        "[('scale', 'x'), ('x', 'scale')]. run() params: ['scale', 'x'], inputs: ['x', 'scale'].",
+        id="order",
+    ),
+    pytest.param(
+        "x, *, scale=None",
+        False,
+        "run() has 1 parameter(s) ['x'] but definition 'inputs' has 2 entries ['x', 'scale']. They must match exactly.",
+        id="keyword-only-input",
+    ),
+]
+
+
+@pytest.mark.parametrize(("signature", "accepted", "error"), _RUN_SIGNATURE_CASES)
+def test_public_compat_definition_run_signature_matches_inputs(signature, accepted, error):
+    payload = _run_signature_definition(signature)
+    if accepted:
+        compat.Definition.model_validate(payload)
+        return
+    with pytest.raises(ValidationError) as excinfo:
+        compat.Definition.model_validate(payload)
+    assert [item["msg"].removeprefix("Value error, ") for item in excinfo.value.errors()] == [error]
+
+
+def test_public_compat_definition_single_input_count_message():
+    payload = _run_signature_definition("x, scale")
+    payload["inputs"] = {"x": payload["inputs"]["x"]}
+    with pytest.raises(ValidationError, match=r"definition 'inputs' has 1 entry \['x'\]\. They must match exactly"):
+        compat.Definition.model_validate(payload)

@@ -5,44 +5,35 @@
 import ast
 import importlib.util
 import json
+import os
+import subprocess
 import sys
-import types
 from pathlib import Path
 from pathlib import PurePosixPath
 
 import pytest
 
+from tilegym.kernel_inventory import KernelInventoryError
+from tilegym.kernel_inventory import iter_kernel_definition_paths
+from tilegym.kernel_inventory import iter_kernel_python_paths
+from tilegym.kernel_inventory import iter_kernel_solution_paths
+from tilegym.kernel_inventory import iter_solution_paths_for_definition
+from tilegym.kernel_inventory import load_json
+from tilegym.kernel_inventory import materialize_solution_sources
+from tilegym.kernel_inventory import normalize_solution_source_paths
+from tilegym.kernel_inventory import validate_definition
+from tilegym.kernel_inventory import validate_solution
+from tilegym.kernel_inventory import validate_solution_entry_point
+from tilegym.kernel_inventory.generation import make_solution
+from tilegym.kernel_inventory.generation import materialize_solution_for_fib
+from tilegym.kernel_inventory.layout import inventory_coordinate
+from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
+from tilegym.kernel_inventory.return_contract import ReturnContractError
+from tilegym.kernel_inventory.return_contract import instrument_reference_returns
+from tilegym.kernel_inventory.source_contract import SourceContractError
+from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Import inventory modules without running tilegym/__init__.py. The top-level
-# package initializes CUDA/Torch backends, which is unrelated to JSON schema checks.
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory import KernelInventoryError
-    from tilegym.kernel_inventory import iter_kernel_definition_paths
-    from tilegym.kernel_inventory import iter_kernel_python_paths
-    from tilegym.kernel_inventory import iter_kernel_solution_paths
-    from tilegym.kernel_inventory import iter_solution_paths_for_definition
-    from tilegym.kernel_inventory import load_json
-    from tilegym.kernel_inventory import materialize_solution_sources
-    from tilegym.kernel_inventory import normalize_solution_source_paths
-    from tilegym.kernel_inventory import validate_definition
-    from tilegym.kernel_inventory import validate_solution
-    from tilegym.kernel_inventory import validate_solution_entry_point
-    from tilegym.kernel_inventory.generation import make_solution
-    from tilegym.kernel_inventory.generation import materialize_solution_for_fib
-    from tilegym.kernel_inventory.layout import inventory_coordinate
-    from tilegym.kernel_inventory.return_contract import CAPTURE_RETURN_NAME
-    from tilegym.kernel_inventory.return_contract import ReturnContractError
-    from tilegym.kernel_inventory.return_contract import instrument_reference_returns
-    from tilegym.kernel_inventory.source_contract import SourceContractError
-    from tilegym.kernel_inventory.source_contract import validate_reference_source_contract
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
 
 
 def _definition():
@@ -124,10 +115,12 @@ def _assert_definition_reference_contract(path: Path, definition: dict):
 
     run_args = run_nodes[0].args
     assert run_args.vararg is None, f"{path}: Definition.reference run function must not use *args"
-    parameter_names = [arg.arg for arg in (*run_args.posonlyargs, *run_args.args, *run_args.kwonlyargs)]
-    input_names = list(definition["inputs"])
-    assert run_args.kwarg is not None or set(input_names) <= set(parameter_names), (
-        f"{path}: Definition.inputs must be accepted by Definition.reference run"
+    positional_names = [arg.arg for arg in (*run_args.posonlyargs, *run_args.args)]
+    assert positional_names == list(definition["inputs"]), (
+        f"{path}: Definition.reference run positional parameters must equal Definition.inputs in order"
+    )
+    assert None not in run_args.kw_defaults, (
+        f"{path}: Definition.reference run keyword-only parameters must have defaults"
     )
 
 
@@ -162,6 +155,55 @@ def test_validate_definition_rejects_malformed_reference():
     definition["reference"] = "def run(input, weight, eps):\n    return ("
     with pytest.raises(KernelInventoryError, match="valid Python"):
         validate_definition(definition)
+
+
+def _definition_with_run(signature: str) -> dict:
+    definition = _definition()
+    definition["reference"] = definition["reference"].replace("def run(input, weight, eps):", f"def run({signature}):")
+    return definition
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "input, weight, eps",
+        "input, /, weight, eps",
+        "input, weight, eps, *, extra=None",
+        "input, weight, eps, **kwargs",
+    ],
+    ids=["exact", "positional-only", "keyword-only-with-default", "var-keyword"],
+)
+def test_validate_definition_accepts_run_positionals_equal_to_inputs(signature):
+    validate_definition(_definition_with_run(signature))
+
+
+@pytest.mark.parametrize(
+    ("signature", "error"),
+    [
+        ("input, weight", r"run\(\) has 2 parameter\(s\) .* has 3 entries"),
+        ("input, weight, eps, extra=None", r"run\(\) has 4 parameter\(s\) .* has 3 entries"),
+        ("input, weight, epsilon", r"Mismatches \(run_param → input_key\): \[\('epsilon', 'eps'\)\]"),
+        (
+            "weight, input, eps",
+            r"Mismatches \(run_param → input_key\): \[\('weight', 'input'\), \('input', 'weight'\)\]",
+        ),
+        ("input, weight, *, eps=1e-6", r"run\(\) has 2 parameter\(s\) .* has 3 entries"),
+        ("input, weight, eps, *, extra", r"keyword-only parameters must have defaults .*\['extra'\]"),
+        ("input, weight, eps, *args", r"must not use \*args"),
+    ],
+    ids=[
+        "count",
+        "extra-positional-with-default",
+        "name",
+        "order",
+        "keyword-only-input",
+        "keyword-only-required",
+        "var-positional",
+    ],
+)
+def test_validate_definition_rejects_run_positionals_not_equal_to_inputs(signature, error):
+    with pytest.raises(KernelInventoryError, match=error):
+        validate_definition(_definition_with_run(signature))
 
 
 def test_validate_definition_rejects_run_prefix_only():
@@ -210,11 +252,11 @@ def test_validate_definition_requires_inputs_for_required_run_args():
         "def run(input, weight, eps, required):\n"
         "    return input * weight"
     )
-    with pytest.raises(KernelInventoryError, match="must include every required"):
+    with pytest.raises(KernelInventoryError, match=r"run\(\) has 4 parameter\(s\)"):
         validate_definition(definition)
 
 
-def test_validate_definition_accepts_optional_run_args_omitted_from_inputs():
+def test_validate_definition_rejects_optional_positional_run_args_omitted_from_inputs():
     definition = _definition()
     definition["reference"] = (
         "# Source: https://github.com/huggingface/transformers/blob/"
@@ -223,7 +265,8 @@ def test_validate_definition_accepts_optional_run_args_omitted_from_inputs():
         "def run(input, weight, eps, optional=None, **kwargs):\n"
         "    return input * weight"
     )
-    validate_definition(definition)
+    with pytest.raises(KernelInventoryError, match=r"run\(\) has 4 parameter\(s\)"):
+        validate_definition(definition)
 
 
 def test_reference_return_contract_tracks_conditional_nested_ssa_names():
@@ -640,3 +683,78 @@ def test_all_dedicated_kernel_modules_import():
         assert spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+
+
+def _tilegym_runtime_modules(module_names):
+    runtime_packages = ("tilegym.backend", "tilegym.ops", "tilegym.suites", "tilegym.transformers")
+    return [
+        name
+        for name in module_names
+        if any(name == package or name.startswith(f"{package}.") for package in runtime_packages)
+    ]
+
+
+_IMPORT_WITH_PLACEHOLDER_PACKAGE = """
+import sys
+import types
+
+placeholder = types.ModuleType("tilegym")
+placeholder.__path__ = [sys.argv[1]]
+sys.modules["tilegym"] = placeholder
+import tilegym.kernel_inventory
+
+print("\\n".join(sorted(sys.modules)))
+"""
+
+
+def test_kernel_inventory_import_does_not_load_tilegym_runtime(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-c", _IMPORT_WITH_PLACEHOLDER_PACKAGE, str(REPO_ROOT / "src/tilegym")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "FLASHINFER_WORKSPACE_BASE": str(tmp_path / "flashinfer")},
+    )
+
+    assert _tilegym_runtime_modules(result.stdout.split()) == []
+
+
+_COLLECT_AND_LIST_MODULES = """
+import sys
+from pathlib import Path
+
+import pytest
+
+
+class ListModules:
+    def pytest_collection_finish(self, session):
+        Path(sys.argv[1]).write_text("\\n".join(sorted(sys.modules)))
+
+
+sys.exit(pytest.main(sys.argv[2:], plugins=[ListModules()]))
+"""
+
+
+def test_collecting_kernel_inventory_tests_does_not_load_tilegym_runtime(tmp_path):
+    modules_path = tmp_path / "modules.txt"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _COLLECT_AND_LIST_MODULES,
+            str(modules_path),
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--ignore={REPO_ROOT / 'tests/kernel_inventory/test_kernel_definition_solution_runtime.py'}",
+            str(REPO_ROOT / "tests/kernel_inventory"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT / "modeling/transformers",
+        env={**os.environ, "FLASHINFER_WORKSPACE_BASE": str(tmp_path / "flashinfer")},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _tilegym_runtime_modules(modules_path.read_text().split()) == []

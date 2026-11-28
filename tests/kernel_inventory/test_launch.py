@@ -2,35 +2,26 @@
 #
 # SPDX-License-Identifier: MIT
 
-import sys
-import types
 from pathlib import Path
 
 import pytest
+import torch
 from pydantic import ValidationError
 
+from tilegym.kernel_inventory.generation import make_solution
+from tilegym.kernel_inventory.generation import solution_to_tilegym_json
+from tilegym.kernel_inventory.generation import validate_tilegym_solution_model
+from tilegym.kernel_inventory.launch import LaunchArgumentBinding
+from tilegym.kernel_inventory.launch import LaunchContractError
+from tilegym.kernel_inventory.launch import RawKernelLaunch
+from tilegym.kernel_inventory.launch import allocate_definition_outputs
+from tilegym.kernel_inventory.launch import inspect_grid_callable
+from tilegym.kernel_inventory.launch import make_launch_context
+from tilegym.kernel_inventory.launch import materialize_launch
+from tilegym.kernel_inventory.launch import resolve_grid
+from tilegym.kernel_inventory.launch import validate_launch_contract
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_original_tilegym = sys.modules.get("tilegym")
-if _original_tilegym is None:
-    tilegym_pkg = types.ModuleType("tilegym")
-    tilegym_pkg.__path__ = [str(REPO_ROOT / "src/tilegym")]
-    sys.modules["tilegym"] = tilegym_pkg
-try:
-    from tilegym.kernel_inventory.generation import make_solution
-    from tilegym.kernel_inventory.generation import solution_to_tilegym_json
-    from tilegym.kernel_inventory.generation import validate_tilegym_solution_model
-    from tilegym.kernel_inventory.launch import LaunchArgumentBinding
-    from tilegym.kernel_inventory.launch import LaunchContractError
-    from tilegym.kernel_inventory.launch import RawKernelLaunch
-    from tilegym.kernel_inventory.launch import allocate_definition_outputs
-    from tilegym.kernel_inventory.launch import inspect_grid_callable
-    from tilegym.kernel_inventory.launch import make_launch_context
-    from tilegym.kernel_inventory.launch import materialize_launch
-    from tilegym.kernel_inventory.launch import resolve_grid
-    from tilegym.kernel_inventory.launch import validate_launch_contract
-finally:
-    if _original_tilegym is None:
-        sys.modules.pop("tilegym", None)
 
 
 class FakeTensor:
@@ -712,7 +703,6 @@ def test_definition_drives_output_allocation_and_launch_materialization(tmp_path
 
 
 def test_flatten_view_is_invocation_only_and_shares_tensor_storage():
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_shaped_copy",
         "axes": {"M": {"type": "const", "value": 2}, "N": {"type": "const", "value": 3}},
@@ -743,7 +733,6 @@ def test_flatten_view_is_invocation_only_and_shares_tensor_storage():
 
 
 def test_flatten_view_rejects_noncontiguous_tensors_instead_of_copying():
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_noncontiguous",
         "axes": {"M": {"type": "const", "value": 3}, "N": {"type": "const", "value": 2}},
@@ -762,7 +751,6 @@ def test_flatten_view_rejects_noncontiguous_tensors_instead_of_copying():
 
 
 def test_flatten_view_rejects_noncontiguous_rank_one_tensor():
-    torch = pytest.importorskip("torch")
     definition = {
         "name": "raw_strided_vector",
         "axes": {"N": {"type": "const", "value": 4}},

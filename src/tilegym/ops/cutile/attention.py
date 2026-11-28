@@ -129,8 +129,7 @@ def fmha_kernel_impl(
             # Causal mask
             if CAUSAL:
                 mask = mask & (offs_m >= offs_n)  # [TILE_M, TILE_N]
-            mask = ct.where(mask, 0.0, -math.inf)  # [TILE_M, TILE_N]
-            qk += mask
+            qk = ct.where(mask, qk, -math.inf)
 
         # Moving qk_scale multiplication after reduce_max is to improve performance.
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
@@ -317,8 +316,7 @@ def _fmha_fwd_kernel_with_lse(
                 mask = mask & (offs_n < k_seqlen)
             if CAUSAL:
                 mask = mask & (offs_m >= offs_n)
-            mask = ct.where(mask, 0.0, -math.inf)
-            qk += mask
+            qk = ct.where(mask, qk, -math.inf)
 
         m_ij = max(m_i, ct.max(qk, axis=-1, keepdims=True) * qk_scale)
         qk = qk * qk_scale - m_ij

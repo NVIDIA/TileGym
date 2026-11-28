@@ -271,20 +271,38 @@ def iteration_counts(estimate_ms, warmup, rep, min_rep, max_rep):
 
 
 class _PowerPacer:
-    """Rests the GPU before continuous work would outlast POWER_BURST_MS."""
+    """Rests the GPU before continuous work would outlast POWER_BURST_MS.
 
-    def __init__(self):
+    With count_idle, for samples launched one at a time with host work between
+    them: the time since the last admission that its work did not fill is idle,
+    and pays for work at the rate a rest does, POWER_REST_MS of idle for
+    POWER_BURST_MS of work.
+    """
+
+    def __init__(self, count_idle=False):
         self.busy_ms = 0.0
         self.rests = 0
+        self.count_idle = count_idle
+        self.admitted = None
+        self.work_ms = 0.0
+
+    def charge(self, duration_ms):
+        self.busy_ms += duration_ms
+        self.work_ms += duration_ms
 
     def admit(self, duration_ms):
+        if self.count_idle and self.admitted is not None:
+            idle_ms = (time.perf_counter() - self.admitted) * 1000 - self.work_ms
+            self.busy_ms = max(0.0, self.busy_ms - max(0.0, idle_ms) * POWER_BURST_MS / POWER_REST_MS)
         rested = bool(self.busy_ms) and self.busy_ms + duration_ms > POWER_BURST_MS
         if rested:
             torch.cuda.synchronize()
             time.sleep(POWER_REST_MS / 1000)
             self.busy_ms = 0.0
             self.rests += 1
-        self.busy_ms += duration_ms
+        self.admitted = time.perf_counter()
+        self.work_ms = 0.0
+        self.charge(duration_ms)
         return rested
 
     def settle_count(self, sample_ms, replay_ms):
@@ -431,7 +449,7 @@ def _profile_schedule(calls, schedule, sample_ms, replay_ms, telemetry=True, pac
                         call.graph.replay()
                         torch.cuda.current_stream().synchronize()
                     if not switched:
-                        pacer.busy_ms += sample_ms[which]
+                        pacer.charge(sample_ms[which])
                 settle_samples += settle_counts[which]
             with call.input_context():
                 call.prepare()
@@ -782,7 +800,7 @@ def benchmark_eager(
                     prepare()
                     fn()
                     torch.cuda.synchronize()
-                    pacer.busy_ms += sample_ms
+                    pacer.charge(sample_ms)
                 settle_samples += settle_count
             prepare()
             torch.cuda.synchronize()
@@ -808,13 +826,56 @@ def benchmark_eager(
     return result
 
 
+_CUTILE_PACER = _PowerPacer(count_idle=True)
+_cutile_replay_ms = 0.0
+_cutile_prepare_ms = None
+
+
 def autotune_cutile_cuda_graph(stream, grid, kernel, args, flush_l2=None):
     # cuda.tile >= 1.7 passes flush_l2; the captured-graph span protocol owns cache handling.
+    global _cutile_replay_ms, _cutile_prepare_ms
     import cuda.tile as ct
 
-    # Upstream owns warmup; each callback must launch once on its prepared inputs.
+    # Upstream owns warmup and the number of samples; each callback must launch once
+    # on its prepared inputs. It samples a candidate in batches, so the previous
+    # sample estimates this one for the pacer.
     with torch.cuda.stream(stream):
         with _CapturedCall(
             lambda: ct.launch(torch.cuda.current_stream(), grid, kernel, args), None, None, True, warmup=False
         ) as call:
-            return call.profile_samples(1, telemetry=False)[0]["span_ms"] * 1000
+            if _cutile_prepare_ms is None:
+                # The preparation is the same cache flush for every sample.
+                _cutile_prepare_ms = call.sample()[1]
+            samples = call.profile_samples(
+                1,
+                telemetry=False,
+                pacer=_CUTILE_PACER,
+                sample_ms=_cutile_replay_ms + _cutile_prepare_ms,
+                replay_ms=_cutile_replay_ms,
+            )
+            replay_ms = samples[0]["span_ms"]
+            # The pacer was charged the estimate, for this sample and for each settle
+            # sample: charge what they took, or the excess would count as idle.
+            _CUTILE_PACER.charge((1 + call.settle_samples) * (replay_ms - _cutile_replay_ms))
+    _cutile_replay_ms = replay_ms
+    return _cutile_replay_ms * 1000
+
+
+def autotune_cutile_eager(benchmark):
+    """cuda.tile's own timing of a launch that cannot be captured, paced like the captured ones."""
+
+    def paced(stream, grid, kernel, args, *flush_l2):
+        global _cutile_replay_ms
+        settle_count = 0
+        if _CUTILE_PACER.admit(_cutile_replay_ms):
+            settle_count = _CUTILE_PACER.settle_count(_cutile_replay_ms, _cutile_replay_ms)
+            for _ in range(settle_count):
+                benchmark(stream, grid, kernel, args, *flush_l2)
+                _CUTILE_PACER.charge(_cutile_replay_ms)
+        elapsed_us = benchmark(stream, grid, kernel, args, *flush_l2)
+        # As in autotune_cutile_cuda_graph: charge what the launches took, not the estimate.
+        _CUTILE_PACER.charge((1 + settle_count) * (elapsed_us / 1000 - _cutile_replay_ms))
+        _cutile_replay_ms = elapsed_us / 1000
+        return elapsed_us
+
+    return paced

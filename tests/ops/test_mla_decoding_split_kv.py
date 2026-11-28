@@ -67,6 +67,8 @@ class Test_MLADecodingSplitKV(common.PyTestCase):
             tilegym.set_backend(backend)
         else:
             pytest.skip(f"Backend {backend} is not available")
+        if backend == "tilecpp" and num_heads % 16 and common.tilecpp_nvcc_has_known_issue():
+            pytest.skip(common.TILECPP_NVCC_KNOWN_ISSUE)
         self.setUp()
 
         # Skip test if CUDA is not available

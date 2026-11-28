@@ -5,17 +5,14 @@
 from __future__ import annotations
 
 import copy
-import os
-import subprocess
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from tilegym.kernel_inventory import _definition_schema_compat as definition_compat
 from tilegym.kernel_inventory import _workload_schema_compat as compat
-from tilegym.kernel_inventory.schema import USING_CANONICAL_WORKLOAD_SCHEMA
+from tilegym.kernel_inventory import schema
 from tilegym.kernel_inventory.schema import workload_model_dump
 from tilegym.kernel_inventory.schema import workload_model_validate
 
@@ -152,11 +149,12 @@ def test_public_compat_workload_rejects_invalid_contract(payload):
         compat.Workload.model_validate(payload)
 
 
-def test_schema_adapter_uses_fallback_when_canonical_dependency_is_absent():
-    if USING_CANONICAL_WORKLOAD_SCHEMA:
-        pytest.skip("reference schema package is installed")
+def test_schema_adapter_exports_build_workload_and_definition_models():
+    expected_workload = compat.Workload
+    expected_definition = definition_compat.Definition
 
+    assert schema.Workload is expected_workload
+    assert schema.Definition is expected_definition
     workload = workload_model_validate(_BASE_WORKLOAD)
-
-    assert isinstance(workload, compat.Workload)
+    assert isinstance(workload, expected_workload)
     assert workload_model_dump(workload)["eval_mode"] == "full"

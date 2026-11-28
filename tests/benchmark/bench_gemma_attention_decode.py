@@ -11,11 +11,19 @@ import triton.testing
 import tilegym
 from tilegym.backend import is_backend_available
 from tilegym.backend import register_impl
+from tilegym.backend.selector import get_tilecpp_nvcc_version
+
+# Known TileCpp issue with nvcc >= 13.5.
+_TILECPP_NVCC_KNOWN_ISSUE = (get_tilecpp_nvcc_version() or (0, 0)) >= (13, 5)
 
 # Available backends for benchmarking
 ALL_BACKENDS = [
     ("cutile", "CuTile", ("orange", "-")) if is_backend_available("cutile") else None,
-    ("tilecpp", "TileCpp", ("purple", "-")) if is_backend_available("tilecpp") else None,
+    (
+        ("tilecpp", "TileCpp", ("purple", "-"))
+        if is_backend_available("tilecpp") and not _TILECPP_NVCC_KNOWN_ISSUE
+        else None
+    ),
     ("torch", "PyTorch", ("green", "-")),
 ]
 
